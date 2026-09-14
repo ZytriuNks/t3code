@@ -55,32 +55,60 @@ export function presentConnectionState(
   }
 }
 
-export function connectionStatusText(connection: EnvironmentConnectionPresentation): string {
+export interface ConnectionStatusCopy {
+  readonly available: string;
+  readonly offline: string;
+  readonly connecting: string;
+  readonly reconnecting: string;
+  readonly reconnectingWithReason: (reason: string) => string;
+  readonly connected: string;
+  readonly connectionFailed: string;
+  readonly connectionFailedWithReason: (reason: string) => string;
+  readonly reconnectingTitle: string;
+}
+
+export const DEFAULT_CONNECTION_STATUS_COPY: ConnectionStatusCopy = {
+  available: "Available",
+  offline: "Offline",
+  connecting: "Connecting...",
+  reconnecting: "Reconnecting...",
+  reconnectingWithReason: (reason) => `Failed to connect. Reconnecting... Reason: ${reason}`,
+  connected: "Connected",
+  connectionFailed: "Connection failed",
+  connectionFailedWithReason: (reason) => `Connection failed. Reason: ${reason}`,
+  reconnectingTitle: "Failed to connect. Reconnecting...",
+};
+
+export function connectionStatusText(
+  connection: EnvironmentConnectionPresentation,
+  copy: ConnectionStatusCopy = DEFAULT_CONNECTION_STATUS_COPY,
+): string {
   switch (connection.phase) {
     case "available":
-      return "Available";
+      return copy.available;
     case "offline":
-      return "Offline";
+      return copy.offline;
     case "connecting":
-      return "Connecting...";
+      return copy.connecting;
     case "reconnecting":
-      return connection.error
-        ? `Failed to connect. Reconnecting... Reason: ${connection.error}`
-        : "Reconnecting...";
+      return connection.error ? copy.reconnectingWithReason(connection.error) : copy.reconnecting;
     case "connected":
-      return "Connected";
+      return copy.connected;
     case "error":
       return connection.error
-        ? `Connection failed. Reason: ${connection.error}`
-        : "Connection failed";
+        ? copy.connectionFailedWithReason(connection.error)
+        : copy.connectionFailed;
   }
 }
 
-export function connectionStatusTitle(connection: EnvironmentConnectionPresentation): string {
+export function connectionStatusTitle(
+  connection: EnvironmentConnectionPresentation,
+  copy: ConnectionStatusCopy = DEFAULT_CONNECTION_STATUS_COPY,
+): string {
   if (connection.phase === "reconnecting" && connection.error) {
-    return "Failed to connect. Reconnecting...";
+    return copy.reconnectingTitle;
   }
-  return connectionStatusText({ ...connection, error: null });
+  return connectionStatusText({ ...connection, error: null }, copy);
 }
 
 export function presentEnvironmentConnection(

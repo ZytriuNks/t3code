@@ -75,6 +75,7 @@ import {
   replaceTextRange,
 } from "../../composer-logic";
 import { DISCONNECTED_COMPOSER_PLACEHOLDER } from "../../composerPlaceholder";
+import { useI18n } from "../../i18n/I18nProvider";
 import {
   deriveComposerSendState,
   getAntigravitySendBlockReason,
@@ -1430,6 +1431,7 @@ export interface ChatComposerProps {
 // --------------------------------------------------------------------------
 
 export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps) {
+  const { t } = useI18n();
   const {
     composerDraftTarget,
     environmentId,
@@ -6672,12 +6674,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                           : showPlanFollowUpPrompt && activeProposedPlan
                             ? "Add feedback to refine the plan, or leave this blank to implement it"
                             : projectSelectionRequired
-                              ? "Choose a project above to start a thread"
+                              ? t("composer.placeholder.chooseProject")
                               : showProviderUnavailable
-                                ? "Enable a provider in Settings to send a message"
+                                ? t("composer.placeholder.enableProvider")
                                 : phase === "disconnected"
                                   ? DISCONNECTED_COMPOSER_PLACEHOLDER
-                                  : "Ask anything, @tag files/folders, $use skills, or / for commands"
+                                  : t("composer.placeholder.default")
                     }
                     disabled={
                       isConnecting ||

@@ -164,6 +164,24 @@ describe("ClaudeSettings auto-compaction", () => {
   });
 });
 
+describe("ClientSettings language", () => {
+  it("follows the system when existing settings omit the preference", () => {
+    expect(decodeClientSettings({}).language).toBe("system");
+    expect(decodeClientSettingsPatch({})).not.toHaveProperty("language");
+  });
+
+  it.each(["system", "en", "zh-CN"])("round-trips the %s preference", (language) => {
+    const settings = decodeClientSettings({ language });
+    expect(encodeClientSettings(settings).language).toBe(language);
+    expect(decodeClientSettingsPatch({ language }).language).toBe(language);
+  });
+
+  it.each(["zh", "zh-TW", "auto", null])("rejects unsupported language %s", (language) => {
+    expect(() => decodeClientSettings({ language })).toThrow();
+    expect(() => decodeClientSettingsPatch({ language })).toThrow();
+  });
+});
+
 describe("ClientSettings notifications", () => {
   it("requires opt-in when existing settings omit notification preferences", () => {
     expect(decodeClientSettings({}).notificationMode).toBe("off");
