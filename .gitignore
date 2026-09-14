@@ -44,3 +44,8 @@ node_modules/
 
 # pnpm content-addressable store; never belongs in the repo.
 .pnpm-store/
+
+# 本地模型路由 / 协作协议文件（仅本地使用，不上传）
+AGENTS*.md
+# T3 Code 原版 AGENTS 规则，以 AGENTS-T3.md 名字入库
+!AGENTS-T3.md
