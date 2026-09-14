@@ -114,6 +114,18 @@ describe("clientPersistenceStorage", () => {
     expect(settings).not.toHaveProperty("diffWordWrap");
   });
 
+  it("keeps the language across reloads and defaults it to the system", async () => {
+    const testWindow = getTestWindow();
+    const { readBrowserClientSettings, writeBrowserClientSettings } =
+      await import("./clientPersistenceStorage");
+
+    testWindow.localStorage.setItem("t3code:client-settings:v1", JSON.stringify({}));
+    expect(readBrowserClientSettings()?.language).toBe("system");
+
+    writeBrowserClientSettings({ ...DEFAULT_CLIENT_SETTINGS, language: "zh-CN" });
+    expect(readBrowserClientSettings()?.language).toBe("zh-CN");
+  });
+
   it("keeps the default diff file state across reloads and defaults it to expanded", async () => {
     const testWindow = getTestWindow();
     const { readBrowserClientSettings, writeBrowserClientSettings } =

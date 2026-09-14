@@ -30,6 +30,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 
 import { isDesktopLocalConnectionTarget } from "../../connection/desktopLocal";
 import { isElectron } from "../../env";
+import { useConnectionStatusCopy } from "../../i18n/I18nProvider";
 import { usePrimarySessionState } from "../../environments/primary";
 import {
   useEnvironmentSettings,
@@ -227,6 +228,7 @@ function EnvironmentUnavailablePlaceholder({
   readonly access: Exclude<ProviderEnvironmentAccess, { kind: "editable" | "read-only" }>;
   readonly deviceTabs?: ReactNode;
 }) {
+  const connectionStatusCopy = useConnectionStatusCopy();
   const isLoading = access.kind === "loading";
   const title = isLoading
     ? "Loading provider settings"
@@ -239,7 +241,7 @@ function EnvironmentUnavailablePlaceholder({
     ? access.reason === "permissions"
       ? "Checking what this session is allowed to change."
       : `Waiting for ${environment.label}'s configuration.`
-    : connectionStatusTitle(environment.connection);
+    : connectionStatusTitle(environment.connection, connectionStatusCopy);
   const error = isLoading ? null : environment.connection.error;
   // No spinner: this state can persist indefinitely for a wedged device, and a
   // continuously repainting animation would run the whole time.
@@ -281,6 +283,7 @@ export function ProviderSettingsPanel(target: ProviderSettingsTarget) {
 }
 
 function ProviderSettingsPanelContent(target: ProviderSettingsTarget) {
+  const connectionStatusCopy = useConnectionStatusCopy();
   const { environments, isReady } = useEnvironments();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const searchTargetId = useSettingsSearchTargetId();
@@ -350,7 +353,7 @@ function ProviderSettingsPanelContent(target: ProviderSettingsTarget) {
           {options.map((environment) => {
             const machine = resolveEnvironmentMachineKind(environment.serverConfig);
             const detail = providerEnvironmentDetail(environment);
-            const statusText = connectionStatusTitle(environment.connection);
+            const statusText = connectionStatusTitle(environment.connection, connectionStatusCopy);
             return (
               <Tooltip key={environment.environmentId}>
                 <TooltipTrigger

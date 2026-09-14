@@ -1,5 +1,7 @@
 import { type TimestampFormat } from "@t3tools/contracts/settings";
 
+import type { AppLanguage } from "./i18n/locale";
+
 function getTimestampFormatOptions(
   timestampFormat: TimestampFormat,
   includeSeconds: boolean,
@@ -53,20 +55,26 @@ function readHostSystemLocale(): string | null {
 
 const timestampLocale = resolveTimestampLocale(readHostSystemLocale());
 
+function localeForLanguage(language: AppLanguage | undefined): string | undefined {
+  return language === "zh-CN" ? "zh-CN" : timestampLocale;
+}
+
 const timestampFormatterCache = new Map<string, Intl.DateTimeFormat>();
 
 function getTimestampFormatter(
   timestampFormat: TimestampFormat,
   includeSeconds: boolean,
+  language?: AppLanguage,
 ): Intl.DateTimeFormat {
-  const cacheKey = `${timestampFormat}:${includeSeconds ? "seconds" : "minutes"}`;
+  const locale = localeForLanguage(language);
+  const cacheKey = `${locale ?? "runtime"}:${timestampFormat}:${includeSeconds ? "seconds" : "minutes"}`;
   const cachedFormatter = timestampFormatterCache.get(cacheKey);
   if (cachedFormatter) {
     return cachedFormatter;
   }
 
   const formatter = new Intl.DateTimeFormat(
-    timestampLocale,
+    locale,
     getTimestampFormatOptions(timestampFormat, includeSeconds),
   );
   timestampFormatterCache.set(cacheKey, formatter);
@@ -78,9 +86,6 @@ export function parseTimestampDate(isoDate: string): Date | null {
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
-// Deliberately not the host locale: the tooltip's ordinal suffix and
-// day-before-month order below are English, so a localized month alone would
-// read "4th Juni 2026". Localizing the whole label is a separate change.
 const monthNameFormatter = new Intl.DateTimeFormat("en-US", { month: "long" });
 
 function ordinalSuffix(day: number): string {
@@ -105,31 +110,53 @@ function ordinalSuffix(day: number): string {
 export function formatChatTimestampTooltip(
   isoDate: string,
   timestampFormat: TimestampFormat,
+  language?: AppLanguage,
 ): string {
   const date = parseTimestampDate(isoDate);
   if (!date) return "";
-  const time = formatShortTimestamp(isoDate, timestampFormat);
+  const time = formatShortTimestamp(isoDate, timestampFormat, language);
   const day = date.getDate();
-  const month = monthNameFormatter.format(date);
+  const month = date.getMonth() + 1;
   const year = date.getFullYear();
-  return `${time}, ${day}${ordinalSuffix(day)} ${month} ${year}`;
+  if (language === "zh-CN") {
+    return `${time}，${year}年${month}月${day}日`;
+  }
+  return `${time}, ${day}${ordinalSuffix(day)} ${monthNameFormatter.format(date)} ${year}`;
 }
 
-export function formatShortTimestamp(isoDate: string, timestampFormat: TimestampFormat): string {
+export function formatShortTimestamp(
+  isoDate: string,
+  timestampFormat: TimestampFormat,
+  language?: AppLanguage,
+): string {
   const date = parseTimestampDate(isoDate);
   if (!date) return "";
-  return getTimestampFormatter(timestampFormat, false).format(date);
+  return getTimestampFormatter(timestampFormat, false, language).format(date);
 }
 
-const numericDateFormatter = new Intl.DateTimeFormat(timestampLocale, {
-  month: "numeric",
-  day: "numeric",
-});
-const numericDateWithYearFormatter = new Intl.DateTimeFormat(timestampLocale, {
-  month: "numeric",
-  day: "numeric",
-  year: "numeric",
-});
+const numericDateFormatterCache = new Map<string, Intl.DateTimeFormat>();
+
+function getNumericDateFormatter(
+  includeYear: boolean,
+  language?: AppLanguage,
+): Intl.DateTimeFormat {
+  const locale = localeForLanguage(language);
+  const cacheKey = `${locale ?? "runtime"}:${includeYear ? "year" : "month-day"}`;
+  const cachedFormatter = numericDateFormatterCache.get(cacheKey);
+  if (cachedFormatter) return cachedFormatter;
+
+  const formatter = new Intl.DateTimeFormat(locale, {
+    month: "numeric",
+    day: "numeric",
+    ...(includeYear ? { year: "numeric" as const } : {}),
+  });
+  numericDateFormatterCache.set(cacheKey, formatter);
+  return formatter;
+}
+
+function formatNumericDate(date: Date, includeYear: boolean, language?: AppLanguage): string {
+  return getNumericDateFormatter(includeYear, language).format(date);
+}
 
 /**
  * Chat timestamp that adds the date once the message is no longer from today:
@@ -141,10 +168,11 @@ export function formatDayAwareTimestamp(
   isoDate: string,
   timestampFormat: TimestampFormat,
   nowMs: number = Date.now(),
+  language?: AppLanguage,
 ): string {
   const date = parseTimestampDate(isoDate);
   if (!date) return "";
-  const time = getTimestampFormatter(timestampFormat, false).format(date);
+  const time = getTimestampFormatter(timestampFormat, false, language).format(date);
 
   const now = new Date(nowMs);
   const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
@@ -153,10 +181,8 @@ export function formatDayAwareTimestamp(
   const dayDiff = Math.round((startOfToday - startOfMessageDay) / 86_400_000);
 
   if (dayDiff <= 0) return time;
-  if (dayDiff === 1) return `yesterday at ${time}`;
-  const dateFormatter =
-    date.getFullYear() === now.getFullYear() ? numericDateFormatter : numericDateWithYearFormatter;
-  return `${dateFormatter.format(date)} ${time}`;
+  if (dayDiff === 1) return language === "zh-CN" ? `昨天 ${time}` : `yesterday at ${time}`;
+  return `${formatNumericDate(date, date.getFullYear() !== now.getFullYear(), language)} ${time}`;
 }
 
 /**
@@ -180,9 +206,7 @@ export function formatUpcomingTimestamp(
 
   if (dayDiff <= 0) return time;
   if (dayDiff === 1) return `tomorrow at ${time}`;
-  const dateFormatter =
-    date.getFullYear() === now.getFullYear() ? numericDateFormatter : numericDateWithYearFormatter;
-  return `${dateFormatter.format(date)} ${time}`;
+  return `${formatNumericDate(date, date.getFullYear() !== now.getFullYear())} ${time}`;
 }
 
 /**
@@ -228,37 +252,80 @@ export function getRelativeTimeState(isoDate: string | null): RelativeTimeState 
  * Relative elapsed duration since an ISO instant, without an "ago" suffix.
  * Useful for labels like "Connected for 3m".
  */
-export function formatElapsedDurationLabel(isoDate: string, nowMs: number = Date.now()): string {
+export function formatElapsedDurationLabel(
+  isoDate: string,
+  nowMs: number = Date.now(),
+  language?: AppLanguage,
+): string {
   const date = parseTimestampDate(isoDate);
   if (!date) return "";
   const diffMs = nowMs - date.getTime();
-  if (diffMs <= 0) return "just now";
+  const justNow = language === "zh-CN" ? "刚刚" : "just now";
+  if (diffMs <= 0) return justNow;
 
   const seconds = Math.floor(diffMs / 1000);
-  if (seconds < 5) return "just now";
-  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 5) return justNow;
+  if (seconds < 60) return language === "zh-CN" ? `${seconds} 秒` : `${seconds}s`;
 
   const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m`;
+  if (minutes < 60) return language === "zh-CN" ? `${minutes} 分钟` : `${minutes}m`;
 
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h`;
+  if (hours < 24) return language === "zh-CN" ? `${hours} 小时` : `${hours}h`;
 
   const days = Math.floor(hours / 24);
-  return `${days}d`;
+  return language === "zh-CN" ? `${days} 天` : `${days}d`;
 }
 
 /**
  * Countdown for a future instant (e.g. link expiry): "Expires in 4m 12s", with second precision under one hour.
  * Pass `nowMs` when a parent tick drives re-renders so the diff matches that snapshot.
  */
-export function formatExpiresInLabel(isoDate: string, nowMs: number = Date.now()): string {
+export function formatExpiresInLabel(
+  isoDate: string,
+  nowMs: number = Date.now(),
+  language?: AppLanguage,
+): string {
   const date = parseTimestampDate(isoDate);
   if (!date) return "";
   const diffMs = date.getTime() - nowMs;
-  if (diffMs <= 0) return "Expired";
+  if (diffMs <= 0) return language === "zh-CN" ? "已过期" : "Expired";
 
   const totalSeconds = Math.floor(diffMs / 1000);
+  if (language === "zh-CN") {
+    if (totalSeconds < 5) return "即将过期";
+    if (totalSeconds < 60) return `${totalSeconds} 秒后过期`;
+
+    if (totalSeconds < 3600) {
+      const minutes = Math.floor(totalSeconds / 60);
+      const seconds = totalSeconds % 60;
+      return seconds === 0 ? `${minutes} 分后过期` : `${minutes} 分 ${seconds} 秒后过期`;
+    }
+
+    if (totalSeconds < 86_400) {
+      const hours = Math.floor(totalSeconds / 3600);
+      const rem = totalSeconds % 3600;
+      const minutes = Math.floor(rem / 60);
+      const seconds = rem % 60;
+      const parts = [`${hours} 小时`];
+      if (minutes > 0) parts.push(`${minutes} 分`);
+      if (seconds > 0) parts.push(`${seconds} 秒`);
+      return `${parts.join(" ")}后过期`;
+    }
+
+    const days = Math.floor(totalSeconds / 86_400);
+    const remAfterDays = totalSeconds % 86_400;
+    const hours = Math.floor(remAfterDays / 3600);
+    const rem = remAfterDays % 3600;
+    const minutes = Math.floor(rem / 60);
+    const seconds = rem % 60;
+    const parts = [`${days} 天`];
+    if (hours > 0) parts.push(`${hours} 小时`);
+    if (minutes > 0) parts.push(`${minutes} 分`);
+    if (seconds > 0) parts.push(`${seconds} 秒`);
+    return `${parts.join(" ")}后过期`;
+  }
+
   if (totalSeconds < 5) return "Expires in a moment";
   if (totalSeconds < 60) return `Expires in ${totalSeconds}s`;
 
