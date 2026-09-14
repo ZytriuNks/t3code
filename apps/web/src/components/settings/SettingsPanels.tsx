@@ -23,6 +23,7 @@ import {
   DEFAULT_UNIFIED_SETTINGS,
   type DiffLayout,
   type EnvironmentIdentificationMode,
+  type LanguagePreference,
   MAX_APPEARANCE_CONTRAST,
   MAX_CODE_FONT_SIZE,
   MAX_GLASS_OPACITY,
@@ -170,6 +171,7 @@ import {
 import { searchableSetting } from "./settingsSearch";
 import { ProjectFavicon } from "../ProjectFavicon";
 import { PanelAnimationsPreview } from "./PanelAnimationsPreview";
+import { useI18n } from "../../i18n/I18nProvider";
 
 const ENVIRONMENT_IDENTIFICATION_LABELS: Record<EnvironmentIdentificationMode, string> = {
   artwork: "Artwork",
@@ -537,6 +539,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       DEFAULT_UNIFIED_SETTINGS.environmentIdentificationMode
         ? ["Environment identification"]
         : []),
+      ...(settings.language !== DEFAULT_UNIFIED_SETTINGS.language ? ["Language"] : []),
       ...(settings.timestampFormat !== DEFAULT_UNIFIED_SETTINGS.timestampFormat
         ? ["Time format"]
         : []),
@@ -663,6 +666,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.sidebarProjectGroupingMode,
       settings.sidebarThreadPreviewCount,
       settings.showSkillsInSlashMenu,
+      settings.language,
       settings.timestampFormat,
       settings.notificationMode,
       settings.inAppNotificationsEnabled,
@@ -738,6 +742,7 @@ export function useSettingsRestore(onRestored?: () => void) {
     updateSettings({
       appearanceContrast: DEFAULT_UNIFIED_SETTINGS.appearanceContrast,
       diffColorScheme: DEFAULT_UNIFIED_SETTINGS.diffColorScheme,
+      language: DEFAULT_UNIFIED_SETTINGS.language,
       timestampFormat: DEFAULT_UNIFIED_SETTINGS.timestampFormat,
       notificationMode: DEFAULT_UNIFIED_SETTINGS.notificationMode,
       inAppNotificationsEnabled: DEFAULT_UNIFIED_SETTINGS.inAppNotificationsEnabled,
@@ -2083,6 +2088,7 @@ function LegacyFeaturesSection() {
 export function GeneralSettingsPanel() {
   const settings = useScopedSettings();
   const updateSettings = useUpdateScopedSettings();
+  const { t } = useI18n();
   const navigate = useNavigate();
   const { scope, environment, connectedEnvironments } = useSettingsScope();
   // The representative environment supplies the provider list for pickers;
@@ -2094,6 +2100,11 @@ export function GeneralSettingsPanel() {
   const hasServerTargets = connectedEnvironments.length > 0;
   const [backgroundActivityDialogOpen, setBackgroundActivityDialogOpen] = useState(false);
   const [tokenStreamingWarningOpen, setTokenStreamingWarningOpen] = useState(false);
+  const languageLabels: Record<LanguagePreference, string> = {
+    system: t("settings.language.system"),
+    en: t("settings.language.english"),
+    "zh-CN": t("settings.language.simplifiedChinese"),
+  };
   const mixedResponseStreamingMode = useScopedSettingsMixed(["responseStreamingMode"]);
   const lastEnabledProjectGroupingMode = useRef<SidebarProjectGroupingMode>(
     readLastEnabledProjectGroupingMode(),
@@ -2295,6 +2306,48 @@ export function GeneralSettingsPanel() {
               onCheckedChange={(checked) => updateSettings({ inAppNotificationsEnabled: checked })}
               aria-label="In-app notifications"
             />
+          }
+        />
+        <SettingsRow
+          id={searchableSetting("language").id}
+          title={t("settings.language.title")}
+          description={t("settings.language.description")}
+          resetAction={
+            settings.language !== DEFAULT_UNIFIED_SETTINGS.language ? (
+              <SettingResetButton
+                label="language"
+                onClick={() => updateSettings({ language: DEFAULT_UNIFIED_SETTINGS.language })}
+              />
+            ) : null
+          }
+          control={
+            <Select
+              value={settings.language}
+              onValueChange={(value) => {
+                if (value === "system" || value === "en" || value === "zh-CN") {
+                  updateSettings({ language: value });
+                }
+              }}
+            >
+              <SelectTrigger
+                size="sm"
+                className="w-full sm:w-40"
+                aria-label={t("settings.language.title")}
+              >
+                <SelectValue>{languageLabels[settings.language]}</SelectValue>
+              </SelectTrigger>
+              <SelectPopup align="end" alignItemWithTrigger={false}>
+                <SelectItem hideIndicator value="system">
+                  {languageLabels.system}
+                </SelectItem>
+                <SelectItem hideIndicator value="en">
+                  {languageLabels.en}
+                </SelectItem>
+                <SelectItem hideIndicator value="zh-CN">
+                  {languageLabels["zh-CN"]}
+                </SelectItem>
+              </SelectPopup>
+            </Select>
           }
         />
         <SettingsRow

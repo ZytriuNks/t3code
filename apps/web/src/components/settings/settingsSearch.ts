@@ -250,6 +250,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["notification toast popup completion input approval failure"],
   },
   {
+    id: "language",
+    title: "Language",
+    to: "/settings/general",
+    searchTerms: ["locale system english simplified chinese 中文 简体中文 语言"],
+  },
+  {
     id: "time-format",
     title: "Time format",
     to: "/settings/general",

@@ -158,6 +158,20 @@ describe("formatDayAwareTimestamp", () => {
     vi.unstubAllGlobals();
   });
 
+  it("formats Simplified Chinese day and expiry labels", () => {
+    const yesterday = new Date(2026, 7, 13, 23, 30).toISOString();
+    const justPastMidnight = new Date(2026, 7, 14, 0, 30).getTime();
+
+    expect(formatDayAwareTimestamp(yesterday, "24-hour", justPastMidnight, "zh-CN")).toBe(
+      `昨天 ${formatShortTimestamp(yesterday, "24-hour", "zh-CN")}`,
+    );
+    const nowMs = new Date("2026-04-07T12:00:00.000Z").getTime();
+    expect(formatElapsedDurationLabel("2026-04-07T11:45:00.000Z", nowMs, "zh-CN")).toBe("15 分钟");
+    expect(formatExpiresInLabel("2026-04-07T12:04:12.000Z", nowMs, "zh-CN")).toBe(
+      "4 分 12 秒后过期",
+    );
+  });
+
   it("returns an empty string for invalid input", () => {
     expect(formatDayAwareTimestamp("not-a-date", "12-hour", now)).toBe("");
   });

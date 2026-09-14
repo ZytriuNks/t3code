@@ -74,6 +74,7 @@ import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { useOpenPanelPullRequestUrl } from "../hooks/useOpenPanelPullRequestUrl";
 import { writeTextToClipboard } from "../hooks/useCopyToClipboard";
 import { useClientSettings } from "../hooks/useSettings";
+import { useConnectionStatusCopy } from "../i18n/I18nProvider";
 import { useTheme } from "../hooks/useTheme";
 import { readLocalApi } from "../localApi";
 import { desktopLocalBackendId } from "../connection/desktopLocal";
@@ -619,6 +620,7 @@ function OpenCommandPaletteDialog(props: {
   readonly openOverlayMode: (mode: SearchOverlayMode) => void;
   readonly clearOpenIntent: () => void;
 }) {
+  const connectionStatusCopy = useConnectionStatusCopy();
   const navigate = useNavigate();
   const pathname = useLocation({ select: (location) => location.pathname });
   const { clearOpenIntent, openIntent, openOverlayMode, setOpen } = props;
@@ -877,7 +879,7 @@ function OpenCommandPaletteDialog(props: {
         isPrimary,
         machine: resolveEnvironmentMachineKind(environment.serverConfig),
         isConnected: canCreateProjectInEnvironment(environment.connection.phase),
-        status: connectionStatusText(environment.connection),
+        status: connectionStatusText(environment.connection, connectionStatusCopy),
       };
     });
 
@@ -889,7 +891,7 @@ function OpenCommandPaletteDialog(props: {
     });
 
     return options;
-  }, [environments]);
+  }, [connectionStatusCopy, environments]);
   const defaultAddProjectEnvironmentId =
     addProjectEnvironmentOptions.find((option) => option.isConnected)?.environmentId ?? null;
   const wslAddProjectEnvironmentOption = useMemo(

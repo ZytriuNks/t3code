@@ -238,6 +238,8 @@ import { cn } from "~/lib/utils";
 import { useUiStateStore } from "~/uiStateStore";
 import { type TimestampFormat } from "@t3tools/contracts/settings";
 import { formatChatTimestampTooltip, formatDayAwareTimestamp } from "../../timestampFormat";
+import type { AppLanguage } from "../../i18n/locale";
+import { useI18n } from "../../i18n/I18nProvider";
 
 import { SkillInlineText } from "./SkillInlineText";
 import { deriveAgentSpawnSummary } from "./agentSpawnSummary";
@@ -259,6 +261,7 @@ interface TimelineRowSharedState {
   citationRequest: AssistantCitationTarget | null;
   listRef: React.RefObject<LegendListRef | null>;
   timestampFormat: TimestampFormat;
+  language: AppLanguage;
   routeThreadKey: string;
   threadRef: ScopedThreadRef | null;
   markdownCwd: string | undefined;
@@ -498,6 +501,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   onSteerQueuedMessage = NOOP_QUEUED_MESSAGE_ACTION,
   onRemoveQueuedMessage = NOOP_QUEUED_MESSAGE_ACTION,
 }: MessagesTimelineProps) {
+  const { language } = useI18n();
   const [expandedTurnIds, setExpandedTurnIds] = useState<ReadonlySet<TurnId>>(new Set());
   const [expandedWorkGroupIds, setExpandedWorkGroupIds] = useState<ReadonlySet<string>>(new Set());
   // Preserve member disclosure state across virtualization.
@@ -913,6 +917,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       citationRequest: readyCitationRequest,
       listRef,
       timestampFormat,
+      language,
       routeThreadKey,
       // Keep Markdown callbacks memoized during unrelated activity updates.
       threadRef: citationThreadRef,
@@ -946,6 +951,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       readyCitationRequest,
       listRef,
       timestampFormat,
+      language,
       routeThreadKey,
       citationThreadRef,
       markdownCwd,
@@ -1940,10 +1946,15 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
         <div className="flex shrink-0 items-center gap-2">
           <Tooltip>
             <TooltipTrigger render={<p className="text-muted-foreground text-xs tabular-nums" />}>
-              {formatDayAwareTimestamp(row.message.createdAt, ctx.timestampFormat)}
+              {formatDayAwareTimestamp(
+                row.message.createdAt,
+                ctx.timestampFormat,
+                undefined,
+                ctx.language,
+              )}
             </TooltipTrigger>
             <TooltipPopup>
-              {formatChatTimestampTooltip(row.message.createdAt, ctx.timestampFormat)}
+              {formatChatTimestampTooltip(row.message.createdAt, ctx.timestampFormat, ctx.language)}
             </TooltipPopup>
           </Tooltip>
           <div className="flex items-center gap-0.5">
@@ -2146,10 +2157,15 @@ function AssistantMessageMeta({
       {!message.streaming && (
         <Tooltip>
           <TooltipTrigger render={<p className="text-muted-foreground text-xs tabular-nums" />}>
-            {formatDayAwareTimestamp(message.updatedAt, ctx.timestampFormat)}
+            {formatDayAwareTimestamp(
+              message.updatedAt,
+              ctx.timestampFormat,
+              undefined,
+              ctx.language,
+            )}
           </TooltipTrigger>
           <TooltipPopup>
-            {formatChatTimestampTooltip(message.updatedAt, ctx.timestampFormat)}
+            {formatChatTimestampTooltip(message.updatedAt, ctx.timestampFormat, ctx.language)}
           </TooltipPopup>
         </Tooltip>
       )}

@@ -7,6 +7,7 @@ import { Button } from "../ui/button";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
 import { Spinner } from "../ui/spinner";
 import { composerFloatingLayerProps } from "./composerEventScope";
+import { useI18n } from "../../i18n/I18nProvider";
 
 interface PendingActionState {
   questionIndex: number;
@@ -77,6 +78,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
     ? { onPointerDown: preventPointerFocus }
     : undefined;
   const environmentIdentificationMode = useEnvironmentIdentificationMode();
+  const { t } = useI18n();
   const isSendDisabled = sendDisabledReason !== null;
   const stageBackdropVariant = useSidebarStageBackdropVariant(
     environmentIdentificationMode === "artwork",
@@ -95,7 +97,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
       )}
       {...pointerFocusProps}
       onClick={onInterrupt}
-      aria-label="Stop generation"
+      aria-label={t("composer.stopGeneration")}
     >
       <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true">
         <rect x="2" y="2" width="8" height="8" rx="1.5" />
@@ -234,18 +236,18 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
       }
       aria-label={
         isEnvironmentUnavailable
-          ? "Environment disconnected"
+          ? t("composer.environmentDisconnected")
           : sendDisabledReason
             ? sendDisabledReason
             : isConnecting
-              ? "Connecting"
+              ? t("composer.connecting")
               : isPreparingWorktree
-                ? "Preparing worktree"
+                ? t("composer.preparingWorktree")
                 : isSendBusy
-                  ? "Sending"
+                  ? t("composer.sending")
                   : isRunning
-                    ? "Queue message"
-                    : "Send message"
+                    ? t("composer.queueMessage")
+                    : t("composer.sendMessage")
       }
     >
       {stageBackdropVariant ? (
