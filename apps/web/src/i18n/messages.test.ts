@@ -39,6 +39,23 @@ describe("translation messages", () => {
     ]);
   });
 
+  it("translates settings header and scope copy without changing dynamic names", () => {
+    expect(Object.entries(ZH_CN_MESSAGES)).toContainEqual([
+      "settings.header.restoreDeviceDefaults",
+      "恢复设备默认值",
+    ]);
+    expect(Object.entries(ZH_CN_MESSAGES)).toContainEqual([
+      "settings.scope.allEnvironments",
+      "全部环境",
+    ]);
+    expect(
+      Reflect.get(ZH_CN_MESSAGES, "settings.scope.reconnectEnvironment")?.replace(
+        "{environment}",
+        "Dev Box",
+      ),
+    ).toBe("请重新连接 Dev Box 后再更改其设置。");
+  });
+
   it("interpolates values without changing unknown user content", () => {
     expect(
       translate("zh-CN", "connection.reconnectingWithReason", {
