@@ -42,14 +42,15 @@ import { scrollToSettingsTarget } from "./settingsLayout";
 import {
   searchSettings,
   isSettingsOverviewVisible,
+  settingsSearchItemTitle,
   SETTINGS_SECTION_LABELS,
+  SETTINGS_SECTION_MESSAGE_KEYS,
   type SettingsPath,
   type SettingsSearchItem,
 } from "./settingsSearch";
 import { useAvailableSettingsSearchItems } from "./useAvailableSettingsSearchItems";
 import { validateSettingsScopeSearch } from "./settingsScope";
 import { useI18n } from "../../i18n/I18nProvider";
-import type { MessageKey } from "../../i18n/messages";
 
 const SnapShotIcon = createLucideIcon("snap-shot", [
   [
@@ -99,19 +100,6 @@ const SETTINGS_NAV_ITEMS: ReadonlyArray<{
   icon: SETTINGS_SECTION_ICONS[to],
 }));
 
-const SETTINGS_SECTION_MESSAGE_KEYS: Readonly<Record<SettingsPath, MessageKey>> = {
-  "/settings/projects": "settings.section.project",
-  "/settings/general": "settings.section.general",
-  "/settings/appearance": "settings.section.appearance",
-  "/settings/keybindings": "settings.section.keybindings",
-  "/settings/snap-shot": "settings.section.snapshots",
-  "/settings/providers": "settings.section.providers",
-  "/settings/integrations": "settings.section.integrations",
-  "/settings/source-control": "settings.section.sourceControl",
-  "/settings/connections": "settings.section.connections",
-  "/settings/archived": "settings.section.archive",
-};
-
 function SettingsSectionIcon({ to }: { to: SettingsPath }) {
   const Icon = SETTINGS_SECTION_ICONS[to];
   return <Icon className="mt-0.5 size-3.5 shrink-0 text-sidebar-muted-foreground/60" />;
@@ -131,7 +119,10 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
   const [query, setQuery] = useState("");
   const [activeResultIndex, setActiveResultIndex] = useState(0);
   const searchableItems = useAvailableSettingsSearchItems();
-  const results = useMemo(() => searchSettings(query, searchableItems), [query, searchableItems]);
+  const results = useMemo(
+    () => searchSettings(query, searchableItems, t),
+    [query, searchableItems, t],
+  );
   const isSearching = query.trim().length > 0;
   const hasResults = results.length > 0;
 
@@ -324,7 +315,7 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
                     <SettingsSectionIcon to={item.to} />
                     <span className="min-w-0 flex-1">
                       <span className="block truncate text-sm font-medium text-sidebar-foreground">
-                        {item.title}
+                        {settingsSearchItemTitle(item, t)}
                       </span>
                       <span className="block truncate text-[11px] text-sidebar-muted-foreground/75">
                         {t(SETTINGS_SECTION_MESSAGE_KEYS[item.to])}

@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from "vite-plus/test";
+import type { MessageKey, MessageValues } from "../../i18n/messages";
+import { translate } from "../../i18n/messages";
 import { EnvironmentId } from "@t3tools/contracts";
 
 import {
@@ -44,7 +46,39 @@ const ITEMS: ReadonlyArray<SettingsSearchItem> = [
   },
 ];
 
+const zh = (key: MessageKey, values?: MessageValues) => translate("zh-CN", key, values);
+
 describe("searchSettings", () => {
+  it("gives every catalog item stable typed message keys", () => {
+    for (const item of SETTINGS_SEARCH_ITEMS) {
+      expect(Object.entries(item)).toContainEqual([
+        "titleKey",
+        `settings.search.item.${item.id}.title`,
+      ]);
+      expect(Object.entries(item)).toContainEqual([
+        "localizedSearchTermsKey",
+        `settings.search.item.${item.id}.keywords`,
+      ]);
+    }
+  });
+
+  it.each([
+    ["默认模型", "default-model"],
+    ["新线程 推理强度", "default-model"],
+    ["主题", "theme"],
+    ["远程 配对", "network-access"],
+    ["提供商", "providers"],
+  ])("finds %s in Simplified Chinese", (query, id) => {
+    expect(searchSettings(query, SETTINGS_SEARCH_ITEMS, zh).some((item) => item.id === id)).toBe(
+      true,
+    );
+  });
+
+  it("keeps English and Chinese queries on the same stable target", () => {
+    expect(searchSettings("default model", SETTINGS_SEARCH_ITEMS, zh)[0]?.id).toBe("default-model");
+    expect(searchSettings("默认模型", SETTINGS_SEARCH_ITEMS, zh)[0]?.id).toBe("default-model");
+  });
+
   it("matches titles, sections, and remembered setting details", () => {
     expect(searchSettings("word", ITEMS).map((item) => item.id)).toEqual(["word-wrap"]);
     expect(searchSettings("network", ITEMS).map((item) => item.id)).toEqual(["network-access"]);

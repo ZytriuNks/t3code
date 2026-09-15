@@ -2,6 +2,7 @@ import { isElectron } from "~/env";
 import { isMacPlatform, isWindowsPlatform, normalizeSearchText } from "~/lib/utils";
 import type { EnvironmentId } from "@t3tools/contracts";
 import type { EnvironmentConnectionPhase } from "@t3tools/client-runtime/connection";
+import type { MessageKey, MessageValues } from "../../i18n/messages";
 import {
   validateSettingsScopeSearch,
   type ResolvedSettingsScope,
@@ -33,9 +34,30 @@ export type SettingsSearchScope =
   | "checkout"
   | "connections";
 
+type SearchItemIdFromKey<K> = K extends `settings.search.item.${infer Id}.title` ? Id : never;
+type SearchItemKeywordIdFromKey<K> = K extends `settings.search.item.${infer Id}.keywords`
+  ? Id
+  : never;
+type SettingsSearchItemMessageId = Extract<
+  SearchItemIdFromKey<MessageKey>,
+  SearchItemKeywordIdFromKey<MessageKey>
+>;
+
+export type SettingsSearchItemTitleKey = Extract<
+  MessageKey,
+  `settings.search.item.${string}.title`
+>;
+export type SettingsSearchItemKeywordsKey = Extract<
+  MessageKey,
+  `settings.search.item.${string}.keywords`
+>;
+export type SettingsTranslator = (key: MessageKey, values?: MessageValues) => string;
+
 export interface SettingsSearchItem {
   readonly id: string;
   readonly title: string;
+  readonly titleKey?: SettingsSearchItemTitleKey;
+  readonly localizedSearchTermsKey?: SettingsSearchItemKeywordsKey;
   readonly to: SettingsPath;
   readonly targetId?: string;
   /** Descriptions, option labels, and aliases people may remember instead of the title. */
@@ -55,6 +77,27 @@ export interface SettingsSearchItem {
   readonly localEnvironmentOnly?: boolean;
   readonly wslAvailableOnly?: boolean;
   readonly requiresThreadAutoSettlement?: boolean;
+}
+
+type SettingsSearchItemDefinition = Omit<
+  SettingsSearchItem,
+  "id" | "titleKey" | "localizedSearchTermsKey"
+> & {
+  readonly id: SettingsSearchItemMessageId;
+};
+
+function withSettingsSearchMessageKeys<const Item extends SettingsSearchItemDefinition>(
+  item: Item,
+): Item & {
+  readonly titleKey: SettingsSearchItemTitleKey;
+  readonly localizedSearchTermsKey: SettingsSearchItemKeywordsKey;
+} {
+  return {
+    ...item,
+    titleKey: `settings.search.item.${item.id}.title` as SettingsSearchItemTitleKey,
+    localizedSearchTermsKey:
+      `settings.search.item.${item.id}.keywords` as SettingsSearchItemKeywordsKey,
+  };
 }
 
 export interface SettingsSearchAvailability {
@@ -84,12 +127,25 @@ export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
   "/settings/archived": "Archive",
 };
 
+export const SETTINGS_SECTION_MESSAGE_KEYS: Readonly<Record<SettingsPath, MessageKey>> = {
+  "/settings/projects": "settings.section.project",
+  "/settings/general": "settings.section.general",
+  "/settings/appearance": "settings.section.appearance",
+  "/settings/keybindings": "settings.section.keybindings",
+  "/settings/snap-shot": "settings.section.snapshots",
+  "/settings/providers": "settings.section.providers",
+  "/settings/integrations": "settings.section.integrations",
+  "/settings/source-control": "settings.section.sourceControl",
+  "/settings/connections": "settings.section.connections",
+  "/settings/archived": "settings.section.archive",
+};
+
 /**
  * Searchable settings and stable destinations, in result order. Rows with a
  * dedicated anchor render their id and title via `searchableSetting`; items
  * that may not be mounted point at their nearest stable section instead.
  */
-export const SETTINGS_SEARCH_ITEMS = [
+const SETTINGS_SEARCH_ITEM_DEFINITIONS = [
   {
     id: "project-defaults",
     title: "Project defaults and overrides",
@@ -724,9 +780,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/archived",
     searchTerms: ["restore reopen deleted history projects"],
   },
-] as const satisfies ReadonlyArray<SettingsSearchItem>;
+] as const satisfies ReadonlyArray<SettingsSearchItemDefinition>;
 
-export type SettingsSearchItemId = (typeof SETTINGS_SEARCH_ITEMS)[number]["id"];
+export const SETTINGS_SEARCH_ITEMS = SETTINGS_SEARCH_ITEM_DEFINITIONS.map(
+  withSettingsSearchMessageKeys,
+);
+
+export type SettingsSearchItemId = (typeof SETTINGS_SEARCH_ITEM_DEFINITIONS)[number]["id"];
 
 const SEARCH_ITEMS_BY_ID = new Map(SETTINGS_SEARCH_ITEMS.map((item) => [item.id, item] as const));
 
@@ -745,15 +805,19 @@ const SETTINGS_CATEGORY_SCOPES: Readonly<Record<SettingsPath, SettingsSearchScop
   "/settings/archived": "project-defaults",
 };
 
+export function settingsSearchItemTitle(item: SettingsSearchItem, t?: SettingsTranslator): string {
+  return t && item.titleKey ? t(item.titleKey) : item.title;
+}
+
 /** Search keeps the selected target. A missing row can explain its owning scope instead. */
-export function getSettingsSearchTargetScope(targetId: string) {
+export function getSettingsSearchTargetScope(targetId: string, t?: SettingsTranslator) {
   const items: readonly SettingsSearchItem[] = SETTINGS_SEARCH_ITEMS;
   const item =
     items.find((candidate) => candidate.id === targetId) ??
     items.find((candidate) => candidate.targetId === targetId);
   return item
     ? {
-        title: item.title,
+        title: settingsSearchItemTitle(item, t),
         scope: item.scope ?? SETTINGS_CATEGORY_SCOPES[item.to],
         ...(item.requiresThreadAutoSettlement ? { requiresThreadAutoSettlement: true } : {}),
       }
@@ -840,12 +904,15 @@ export function isSettingsOverviewVisible(search: SettingsScopeSearch): boolean 
  * spread (or pick from) this instead of restating the strings, so the catalog
  * and the rendered settings cannot drift apart.
  */
-export function searchableSetting(id: SettingsSearchItemId): {
+export function searchableSetting(
+  id: SettingsSearchItemId,
+  t?: SettingsTranslator,
+): {
   readonly id: string;
   readonly title: string;
 } {
-  const { id: anchorId, title } = SEARCH_ITEMS_BY_ID.get(id)!;
-  return { id: anchorId, title };
+  const item = SEARCH_ITEMS_BY_ID.get(id)!;
+  return { id: item.id, title: settingsSearchItemTitle(item, t) };
 }
 
 export function filterAvailableSettingsSearchItems(
@@ -867,6 +934,7 @@ export function filterAvailableSettingsSearchItems(
 export function searchSettings(
   query: string,
   items: ReadonlyArray<SettingsSearchItem> = SETTINGS_SEARCH_ITEMS,
+  t?: SettingsTranslator,
 ): ReadonlyArray<SettingsSearchItem> {
   const normalizedQuery = normalizeSearchText(query);
   if (normalizedQuery.length === 0) return [];
@@ -879,27 +947,35 @@ export function searchSettings(
       if (item.macOnly && !isMacPlatform(platform)) return [];
       if (item.windowsOnly && !isWindowsPlatform(platform)) return [];
 
-      const title = normalizeSearchText(item.title);
+      const englishTitle = normalizeSearchText(item.title);
+      const localizedTitle = normalizeSearchText(settingsSearchItemTitle(item, t));
+      const titles = [...new Set([englishTitle, localizedTitle])];
       const fields = [
-        title,
+        ...titles,
         normalizeSearchText(SETTINGS_SECTION_LABELS[item.to]),
         ...(item.searchTerms ?? []).map(normalizeSearchText),
+        ...(t ? [normalizeSearchText(t(SETTINGS_SECTION_MESSAGE_KEYS[item.to]))] : []),
+        ...(t && item.localizedSearchTermsKey
+          ? [normalizeSearchText(t(item.localizedSearchTermsKey))]
+          : []),
       ];
       if (!queryTokens.every((token) => fields.some((field) => field.includes(token)))) return [];
 
       const exactPhraseField = fields.findIndex((field) => field.includes(normalizedQuery));
-      const rank =
-        title === normalizedQuery
-          ? 5
-          : title.startsWith(normalizedQuery)
-            ? 4
-            : title.includes(normalizedQuery)
-              ? 3
-              : queryTokens.every((token) => title.includes(token))
-                ? 2
-                : exactPhraseField >= 0
-                  ? 1
-                  : 0;
+      const titleRank = Math.max(
+        ...titles.map((title) =>
+          title === normalizedQuery
+            ? 5
+            : title.startsWith(normalizedQuery)
+              ? 4
+              : title.includes(normalizedQuery)
+                ? 3
+                : queryTokens.every((token) => title.includes(token))
+                  ? 2
+                  : 0,
+        ),
+      );
+      const rank = titleRank > 0 ? titleRank : exactPhraseField >= 0 ? 1 : 0;
       return [{ item, index, rank }];
     })
     .toSorted((left, right) => right.rank - left.rank || left.index - right.index)

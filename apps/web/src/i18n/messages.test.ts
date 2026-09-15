@@ -20,6 +20,25 @@ describe("translation messages", () => {
     ]);
   });
 
+  it("translates settings search item titles and keywords", () => {
+    expect(Object.entries(ZH_CN_MESSAGES)).toContainEqual([
+      "settings.search.item.default-model.title",
+      "默认模型",
+    ]);
+    expect(Object.entries(ZH_CN_MESSAGES)).toContainEqual([
+      "settings.search.item.default-model.keywords",
+      expect.stringContaining("新线程"),
+    ]);
+    expect(Object.entries(ZH_CN_MESSAGES)).toContainEqual([
+      "settings.search.item.wsl-backend.title",
+      "WSL 后端",
+    ]);
+    expect(Object.entries(ZH_CN_MESSAGES)).toContainEqual([
+      "settings.search.item.t3-connect.title",
+      "T3 Connect",
+    ]);
+  });
+
   it("interpolates values without changing unknown user content", () => {
     expect(
       translate("zh-CN", "connection.reconnectingWithReason", {
