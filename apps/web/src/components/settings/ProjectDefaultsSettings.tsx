@@ -8,6 +8,7 @@ import { createModelSelection } from "@t3tools/shared/model";
 import { useNavigate } from "@tanstack/react-router";
 
 import { useT3ProjectFileState } from "../../hooks/useT3ProjectFileScripts";
+import { useI18n } from "../../i18n/I18nProvider";
 import { getCustomModelOptionsByInstance } from "../../modelSelection";
 import {
   applyProviderInstanceSettings,
@@ -47,7 +48,31 @@ import {
  * project or checkout scope; the scoped hooks route the write.
  */
 export function ProjectDefaultsSettings({ category }: { category: ProjectSettingsCategory }) {
+  const { t } = useI18n();
   const { scope, target, targets, connectedEnvironments } = useSettingsScope();
+  // Only the general page is localized; the source-control and integrations
+  // pages keep their English rows until their own pass.
+  const generalSectionTitle: string =
+    category === "general" ? t("settings.general.newThreads.title") : "";
+  const text = {
+    modelTitle: t("settings.general.defaultModel.title"),
+    modelProjectDescription: t("settings.general.defaultModel.projectDescription"),
+    modelDescription: t("settings.general.defaultModel.description"),
+    modelResetLabel: t("settings.general.defaultModel.resetLabel"),
+    modelAutomatic: t("settings.general.defaultModel.automatic"),
+    modelUnavailable: t("settings.general.defaultModel.unavailable"),
+    permissionsProjectDescription: t("settings.general.permissions.projectDescription"),
+    permissionsDescription: t("settings.general.permissions.description"),
+    permissionsAriaLabel: t("settings.general.permissions.ariaLabel"),
+    permissionsResetLabel: t("settings.general.permissions.resetLabel"),
+    workspaceTitle: t("settings.general.workspace.title"),
+    workspaceProjectDescription: t("settings.general.workspace.projectDescription"),
+    workspaceDescription: t("settings.general.workspace.description"),
+    workspaceAriaLabel: t("settings.general.workspace.ariaLabel"),
+    workspaceResetLabel: t("settings.general.workspace.resetLabel"),
+    workspaceUnavailable: t("settings.general.workspace.unavailable"),
+    mixed: t("settings.general.mixed"),
+  };
   const settings = useScopedSettings();
   const updateSettings = useUpdateScopedSettings();
   const navigate = useNavigate();
@@ -143,7 +168,7 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
       }
       title={
         category === "general"
-          ? "New threads"
+          ? generalSectionTitle
           : category === "integrations"
             ? "Browser"
             : "Repositories"
@@ -156,22 +181,18 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
             settingKeys={["defaultModelSelection"]}
             mixed={mixedModel}
             id="default-model"
-            title="Model"
-            description={
-              isProjectScope
-                ? "Model for new threads in this project."
-                : "Default model for new threads. Projects can override it."
-            }
+            title={text.modelTitle}
+            description={isProjectScope ? text.modelProjectDescription : text.modelDescription}
             status={
               unavailable || mixedModel || modelSource === "project"
                 ? undefined
                 : settings.defaultModelSelection === null
-                  ? "Automatic"
+                  ? text.modelAutomatic
                   : undefined
             }
             resetAction={
               settings.defaultModelSelection !== null ? (
-                <SettingResetButton label="default model" onClick={() => setModel(null)} />
+                <SettingResetButton label={text.modelResetLabel} onClick={() => setModel(null)} />
               ) : null
             }
             control={
@@ -185,7 +206,7 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
                     modelOptionsByInstance={modelOptions}
                     triggerVariant="outline"
                     triggerClassName={SETTINGS_PICKER_TRIGGER_CLASSNAME}
-                    {...(mixedModel ? { triggerLabel: "Mixed" } : {})}
+                    {...(mixedModel ? { triggerLabel: text.mixed } : {})}
                     getModelDisabledReason={modelDisabledReason}
                     onOpenProviderSetup={(instanceId) => {
                       if (representative)
@@ -219,7 +240,7 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
                   ) : null}
                 </div>
               ) : (
-                <span className="text-sm text-muted-foreground">No providers available</span>
+                <span className="text-sm text-muted-foreground">{text.modelUnavailable}</span>
               )
             }
           />
@@ -227,16 +248,14 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
             serverScoped
             settingKeys={["defaultRuntimeMode"]}
             mixed={mixedPermissions}
-            {...searchableSetting("default-permissions")}
+            {...searchableSetting("default-permissions", t)}
             description={
-              isProjectScope
-                ? "Permissions for new threads in this project."
-                : "Default permissions for new threads. Projects can override them."
+              isProjectScope ? text.permissionsProjectDescription : text.permissionsDescription
             }
             resetAction={
               settings.defaultRuntimeMode !== DEFAULT_SERVER_SETTINGS.defaultRuntimeMode ? (
                 <SettingResetButton
-                  label="default permissions"
+                  label={text.permissionsResetLabel}
                   onClick={() =>
                     updateSettings({
                       defaultRuntimeMode: DEFAULT_SERVER_SETTINGS.defaultRuntimeMode,
@@ -252,13 +271,13 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
                   if (value) updateSettings({ defaultRuntimeMode: value });
                 }}
               >
-                <SelectTrigger size="sm" aria-label="Default permissions">
+                <SelectTrigger size="sm" aria-label={text.permissionsAriaLabel}>
                   {!mixedPermissions && (
                     <PermissionIcon className="size-3.5 shrink-0 text-muted-foreground" />
                   )}
                   <SelectValue>
                     {mixedPermissions
-                      ? "Mixed"
+                      ? text.mixed
                       : runtimeModeConfig[settings.defaultRuntimeMode].label}
                   </SelectValue>
                 </SelectTrigger>
@@ -288,20 +307,22 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
             serverScoped
             settingKeys={["defaultThreadEnvMode"]}
             mixed={mixedWorkspace}
-            id={searchableSetting("new-threads").id}
-            title="Workspace"
+            id={searchableSetting("new-threads", t).id}
+            title={text.workspaceTitle}
             description={
-              isProjectScope
-                ? "Where new threads in this project start. A t3.json preference applies when the project has no override."
-                : "Where new threads start, unless overridden by the project or t3.json."
+              isProjectScope ? text.workspaceProjectDescription : text.workspaceDescription
             }
             status={
-              inheritedEnvModeLabel ? `Repository default: ${inheritedEnvModeLabel}` : undefined
+              inheritedEnvModeLabel
+                ? t("settings.general.workspace.repositoryDefault", {
+                    label: inheritedEnvModeLabel,
+                  })
+                : undefined
             }
             resetAction={
               settings.defaultThreadEnvMode !== DEFAULT_SERVER_SETTINGS.defaultThreadEnvMode ? (
                 <SettingResetButton
-                  label="default workspace"
+                  label={text.workspaceResetLabel}
                   onClick={() =>
                     updateSettings({
                       defaultThreadEnvMode: DEFAULT_SERVER_SETTINGS.defaultThreadEnvMode,
@@ -318,14 +339,14 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
                     updateSettings({ defaultThreadEnvMode: value });
                 }}
               >
-                <SelectTrigger size="sm" aria-label="Default workspace">
+                <SelectTrigger size="sm" aria-label={text.workspaceAriaLabel}>
                   <SelectValue>
                     {(value: string | null) =>
                       value === "local" || value === "worktree"
                         ? resolveEnvModeLabel(value)
                         : unavailable
-                          ? "Unavailable"
-                          : "Mixed"
+                          ? text.workspaceUnavailable
+                          : text.mixed
                     }
                   </SelectValue>
                 </SelectTrigger>

@@ -56,6 +56,28 @@ describe("translation messages", () => {
     ).toBe("请重新连接 Dev Box 后再更改其设置。");
   });
 
+  it("translates the settings row copy and general page copy", () => {
+    expect(translate("zh-CN", "settings.row.copy.defaultTooltip")).toBe("重置为默认值");
+    expect(translate("zh-CN", "settings.row.copy.inheritedLabel", { label: "默认模型" })).toBe(
+      "将默认模型重置为继承值",
+    );
+    expect(translate("zh-CN", "settings.row.copy.builtInDefault")).toBe("内置默认值");
+    expect(translate("zh-CN", "settings.general.section.organization")).toBe("组织");
+    expect(translate("zh-CN", "settings.general.notifications.mode.notifications")).toBe("仅通知");
+    expect(translate("zh-CN", "settings.general.streaming.token")).toBe("逐 Token 显示（旧版）");
+    expect(
+      translate("zh-CN", "settings.general.backgroundActivity.sharedPolicySummary", {
+        profile: "均衡",
+      }),
+    ).toBe("共享策略：均衡。");
+  });
+
+  it("keeps brand and product names in the general page copy", () => {
+    expect(translate("zh-CN", "settings.general.version.title")).toBe("版本");
+    expect(translate("zh-CN", "settings.general.version.nightly")).toBe("Nightly");
+    expect(translate("zh-CN", "settings.general.workspace.title")).toBe("工作区");
+  });
+
   it("interpolates values without changing unknown user content", () => {
     expect(
       translate("zh-CN", "connection.reconnectingWithReason", {
