@@ -82,6 +82,7 @@ import {
 import { collectInlineContextIds } from "~/lib/composerContextReferences";
 import { cn, isMacPlatform } from "~/lib/utils";
 import { basenameOfPath } from "~/pierre-icons";
+import { translate } from "~/i18n/messages";
 import {
   COMPOSER_INLINE_CHIP_DECORATOR_CLASS_NAME,
   COMPOSER_INLINE_CHIP_ICON_CLASS_NAME,
@@ -153,12 +154,13 @@ type SerializedComposerSkillNode = Spread<
 
 function ComposerMentionDecorator(props: { path: string }) {
   const actions = use(ComposerContextActionsContext);
+  const accessibleCopy = use(ComposerAccessibleCopyContext);
   const theme = resolvedThemeFromDocument();
   const chip = (
     <button
       type="button"
       onClick={() => actions.openMention(props.path)}
-      aria-label={`Preview ${props.path}`}
+      aria-label={accessibleCopy.mentionPreview(props.path)}
       className={`${FILE_TAG_CHIP_CLASS_NAME} cursor-pointer focus-visible:outline-2`}
       contentEditable={false}
       spellCheck={false}
@@ -271,16 +273,44 @@ function skillMetadataByName(
 
 const ComposerSkillsContext = createContext<ReadonlyArray<ServerProviderSkill>>([]);
 
+/**
+ * Spoken framing for the composer's inline chips. Hosts that localize the
+ * composer pass their own copy; everything else keeps the English dictionary's
+ * strings, which are the ones this copy used to be spelled with.
+ */
+export interface ComposerAccessibleCopy {
+  readonly mentionPreview: (path: string) => string;
+  readonly skillLabel: (skillLabel: string) => string;
+  readonly accessibleLabelSuffix: string;
+  readonly skillNoDescription: string;
+  readonly skillViewInstructions: string;
+}
+
+const defaultComposerAccessibleCopy: ComposerAccessibleCopy = {
+  accessibleLabelSuffix: translate("en", "composer.accessible.showDetailsSuffix"),
+  mentionPreview: (path) => translate("en", "composer.accessible.mentionPreview", { path }),
+  skillLabel: (skillLabel) =>
+    translate("en", "composer.accessible.skillLabel", { skill: skillLabel }),
+  skillNoDescription: translate("en", "composer.accessible.skillNoDescription"),
+  skillViewInstructions: translate("en", "composer.accessible.skillViewInstructions"),
+};
+
+const ComposerAccessibleCopyContext = createContext<ComposerAccessibleCopy>(
+  defaultComposerAccessibleCopy,
+);
+
 function ComposerSkillDecorator(props: {
   skillName: string;
   skillLabel: string;
   skillDescription: string | null;
 }) {
   const actions = use(ComposerContextActionsContext);
+  const accessibleCopy = use(ComposerAccessibleCopyContext);
   const skill = use(ComposerSkillsContext).find((candidate) => candidate.name === props.skillName);
   return (
     <ContextChipPopover
-      accessibleLabel={`Skill ${props.skillLabel}`}
+      accessibleLabel={accessibleCopy.skillLabel(props.skillLabel)}
+      accessibleLabelSuffix={accessibleCopy.accessibleLabelSuffix}
       triggerClassName={COMPOSER_INLINE_SKILL_CHIP_CLASS_NAME}
       chip={
         <>
@@ -295,14 +325,10 @@ function ComposerSkillDecorator(props: {
     >
       <div className="space-y-3 p-2 text-sm">
         <p className="font-medium">{props.skillLabel}</p>
-        <p>
-          {skill?.description ??
-            props.skillDescription ??
-            "No description is available for this skill."}
-        </p>
+        <p>{skill?.description ?? props.skillDescription ?? accessibleCopy.skillNoDescription}</p>
         {skill?.path ? (
           <Button variant="outline" size="sm" onClick={() => actions.openMention(skill.path)}>
-            View instructions
+            {accessibleCopy.skillViewInstructions}
           </Button>
         ) : null}
       </div>
@@ -869,6 +895,8 @@ interface ComposerPromptEditorProps {
     | ((fragment: ComposerContextClipboardFragment) => ReadonlyMap<string, string>)
     | undefined;
   skills: ReadonlyArray<ServerProviderSkill>;
+  /** Localized framing for the inline chips; defaults to the English copy. */
+  accessibleCopy?: ComposerAccessibleCopy;
   disabled: boolean;
   placeholder: string;
   containerClassName?: string;
@@ -2069,6 +2097,7 @@ export function ComposerPromptEditor({
   buildContextClipboardFragment,
   importContextFragment,
   skills,
+  accessibleCopy,
   disabled,
   placeholder,
   containerClassName,
@@ -2107,31 +2136,33 @@ export function ComposerPromptEditor({
   );
 
   return (
-    <ComposerSkillsContext value={skills}>
-      <LexicalComposer key={COMPOSER_EDITOR_HMR_KEY} initialConfig={initialConfig}>
-        <ComposerPromptEditorInner
-          value={value}
-          cursor={cursor}
-          contextRecords={contextRecords}
-          buildContextClipboardFragment={buildContextClipboardFragment}
-          importContextFragment={importContextFragment}
-          skills={skills}
-          disabled={disabled}
-          placeholder={placeholder}
-          {...(containerClassName ? { containerClassName } : {})}
-          onChange={onChange}
-          {...(onVisibleSelectionChange ? { onVisibleSelectionChange } : {})}
-          onPaste={onPaste}
-          {...(onCitationSubmitAndSend ? { onCitationSubmitAndSend } : {})}
-          editorRef={editorRef}
-          {...(onCommandKeyDown ? { onCommandKeyDown } : {})}
-          {...(onPageScrollKeyDown ? { onPageScrollKeyDown } : {})}
-          {...(onPageScrollKeyUp ? { onPageScrollKeyUp } : {})}
-          {...(onPageScrollRelease ? { onPageScrollRelease } : {})}
-          {...(className ? { className } : {})}
-          {...(placeholderClassName ? { placeholderClassName } : {})}
-        />
-      </LexicalComposer>
-    </ComposerSkillsContext>
+    <ComposerAccessibleCopyContext value={accessibleCopy ?? defaultComposerAccessibleCopy}>
+      <ComposerSkillsContext value={skills}>
+        <LexicalComposer key={COMPOSER_EDITOR_HMR_KEY} initialConfig={initialConfig}>
+          <ComposerPromptEditorInner
+            value={value}
+            cursor={cursor}
+            contextRecords={contextRecords}
+            buildContextClipboardFragment={buildContextClipboardFragment}
+            importContextFragment={importContextFragment}
+            skills={skills}
+            disabled={disabled}
+            placeholder={placeholder}
+            {...(containerClassName ? { containerClassName } : {})}
+            onChange={onChange}
+            {...(onVisibleSelectionChange ? { onVisibleSelectionChange } : {})}
+            onPaste={onPaste}
+            {...(onCitationSubmitAndSend ? { onCitationSubmitAndSend } : {})}
+            editorRef={editorRef}
+            {...(onCommandKeyDown ? { onCommandKeyDown } : {})}
+            {...(onPageScrollKeyDown ? { onPageScrollKeyDown } : {})}
+            {...(onPageScrollKeyUp ? { onPageScrollKeyUp } : {})}
+            {...(onPageScrollRelease ? { onPageScrollRelease } : {})}
+            {...(className ? { className } : {})}
+            {...(placeholderClassName ? { placeholderClassName } : {})}
+          />
+        </LexicalComposer>
+      </ComposerSkillsContext>
+    </ComposerAccessibleCopyContext>
   );
 }

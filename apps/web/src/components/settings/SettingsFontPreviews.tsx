@@ -1,6 +1,10 @@
 import { preloadPatchFile } from "@pierre/diffs/ssr";
-import { useCallback, useEffect, useRef, useState } from "react";
-import { ComposerPromptEditor, type ComposerPromptEditorHandle } from "../ComposerPromptEditor";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  ComposerPromptEditor,
+  type ComposerAccessibleCopy,
+  type ComposerPromptEditorHandle,
+} from "../ComposerPromptEditor";
 import { EMPTY_COMPOSER_CONTEXT_RECORDS } from "../composerContextPresentation";
 import { terminalThemeFromApp } from "../ThreadTerminalDrawer";
 import { useTheme } from "../../hooks/useTheme";
@@ -37,6 +41,18 @@ export function PromptFontPreview() {
     setPrompt(nextValue);
     setCursor(nextCursor);
   }, []);
+  // The chips inside the preview name themselves for screen readers; the
+  // paths and skill names they frame stay exactly as the app spells them.
+  const accessibleCopy = useMemo<ComposerAccessibleCopy>(
+    () => ({
+      accessibleLabelSuffix: t("composer.accessible.showDetailsSuffix"),
+      mentionPreview: (path) => t("composer.accessible.mentionPreview", { path }),
+      skillLabel: (skillLabel) => t("composer.accessible.skillLabel", { skill: skillLabel }),
+      skillNoDescription: t("composer.accessible.skillNoDescription"),
+      skillViewInstructions: t("composer.accessible.skillViewInstructions"),
+    }),
+    [t],
+  );
   return (
     <div className="mt-1 mb-2 rounded-lg border border-border bg-background px-3 py-2">
       <ComposerPromptEditor
@@ -45,6 +61,7 @@ export function PromptFontPreview() {
         cursor={cursor}
         contextRecords={EMPTY_COMPOSER_CONTEXT_RECORDS}
         skills={EMPTY_SKILLS}
+        accessibleCopy={accessibleCopy}
         disabled={false}
         placeholder={t("settings.appearance.promptFont.previewPlaceholder")}
         className="max-h-40 min-h-12"
@@ -244,6 +261,10 @@ export function TerminalFontPreview({ family, size }: { family: string; size: nu
       // Tab keeps walking the settings page instead of feeding the echo loop.
       beforeKey: (event) => event.key !== "Tab",
       onLinkActivate: noop,
+      // The surface names its own elements at create time, so these follow the
+      // language the preview mounted with.
+      inputAriaLabel: t("terminal.accessible.input"),
+      scrollbackAriaLabel: t("terminal.accessible.scrollback"),
     }).then((surface) => {
       if (cancelled) {
         surface.dispose();

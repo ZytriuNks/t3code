@@ -63,9 +63,15 @@ describe("GhosttyTerminalSurface visibility", () => {
       width = 300;
       height = 150;
       value = "";
+      private readonly attributes = new Map<string, string>();
       private readonly captures = new Set<number>();
 
-      setAttribute() {}
+      setAttribute(name: string, value: string) {
+        this.attributes.set(name, String(value));
+      }
+      getAttribute(name: string) {
+        return this.attributes.get(name) ?? null;
+      }
       append(...children: TerminalTestElement[]) {
         for (const child of children) child.parentElement = this;
       }
@@ -452,6 +458,25 @@ describe("GhosttyTerminalSurface visibility", () => {
       expect(harness.renderedSnapshot.rowData[0]?.text).toContain("ready");
     },
   );
+
+  describe("accessible names", () => {
+    it("keeps the English labels for hosts that do not localize", async () => {
+      const surface = await createHarness().create();
+
+      expect(surface.input.getAttribute("aria-label")).toBe("Terminal input");
+      expect(surface.scrollbar.getAttribute("aria-label")).toBe("Terminal scrollback");
+    });
+
+    it("names the input and the scrollback with the host's own labels", async () => {
+      const surface = await createHarness().create({
+        inputAriaLabel: "终端输入",
+        scrollbackAriaLabel: "终端回滚区",
+      });
+
+      expect(surface.input.getAttribute("aria-label")).toBe("终端输入");
+      expect(surface.scrollbar.getAttribute("aria-label")).toBe("终端回滚区");
+    });
+  });
 });
 
 const cell = (text: string): GhosttyCell => ({

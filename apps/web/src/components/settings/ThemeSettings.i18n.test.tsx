@@ -17,6 +17,13 @@ const ghostty = vi.hoisted(() => ({
     write: vi.fn(),
   },
 }));
+// The previews hand their copy to real renderers that need a browser, so the
+// renderers are replaced by stand-ins that keep the props they receive.
+const composerPreview = vi.hoisted(() => ({
+  props: undefined as
+    | { readonly accessibleCopy?: ComposerAccessibleCopy; readonly value?: string }
+    | undefined,
+}));
 
 vi.mock("../../hooks/useSettings", () => ({
   useClientSettings: <T,>(selector?: (settings: { language: "system" | "en" | "zh-CN" }) => T) =>
@@ -38,7 +45,12 @@ vi.mock("../../hooks/useTheme", () => ({
   readThemeHalvesRaw: () => ({}),
   useTheme: () => ({ theme: "dark", resolvedTheme: "dark" }),
 }));
-vi.mock("../ComposerPromptEditor", () => ({ ComposerPromptEditor: () => null }));
+vi.mock("../ComposerPromptEditor", () => ({
+  ComposerPromptEditor: (props: { readonly accessibleCopy?: ComposerAccessibleCopy }) => {
+    composerPreview.props = props;
+    return null;
+  },
+}));
 vi.mock("@pierre/diffs/ssr", () => ({ preloadPatchFile: async () => [] }));
 
 // The theme workflow reads published palettes and the Open VSX registry; both
@@ -218,6 +230,7 @@ vi.mock("../ui/toggle-group", () => ({
 
 import { I18nProvider } from "../../i18n/I18nProvider";
 import { translate } from "../../i18n/messages";
+import type { ComposerAccessibleCopy } from "../ComposerPromptEditor";
 import {
   getCustomThemes,
   installCustomTheme,
@@ -228,7 +241,7 @@ import {
 } from "../../themePalette";
 import { FontFamilyPicker } from "./FontFamilyPicker";
 import { PanelAnimationsPreview } from "./PanelAnimationsPreview";
-import { TerminalFontPreview } from "./SettingsFontPreviews";
+import { TerminalFontPreview, PromptFontPreview } from "./SettingsFontPreviews";
 import { ThemeEditorPanel } from "./ThemeEditorPanel";
 import { ThemeLibrary } from "./ThemeSettings";
 import { ThemeSearchSection } from "./ThemeSearchSection";
@@ -354,6 +367,7 @@ beforeEach(() => {
   themeState.toast.mockReset();
   ghostty.create.mockReset().mockResolvedValue(ghostty.surface);
   ghostty.surface.write.mockReset();
+  composerPreview.props = undefined;
 });
 
 afterEach(async () => {
@@ -402,6 +416,69 @@ describe("appearance settings localization", () => {
     });
 
     expect(accessibleNames()).toEqual(["Terminal font preview"]);
+  });
+
+  it("frames the prompt preview's chips in the current language and keeps paths and skill names verbatim", async () => {
+    await act(async () => {
+      renderer = renderLocalized(<PromptFontPreview />);
+    });
+
+    // The preview still shows the real prompt text, chip for chip.
+    expect(composerPreview.props?.value).toContain("apps/web/src/terminal/ghostty/surface.test.ts");
+    const copy = composerPreview.props?.accessibleCopy;
+    expect(copy).toBeDefined();
+    expect(copy!.mentionPreview("apps/web/src/terminal/ghostty/surface.test.ts")).toBe(
+      "预览 apps/web/src/terminal/ghostty/surface.test.ts",
+    );
+    expect(copy!.mentionPreview("apps/web/src/components/settings/SettingsPanels.tsx")).toBe(
+      "预览 apps/web/src/components/settings/SettingsPanels.tsx",
+    );
+    expect(`${copy!.skillLabel("Frontend Design")}${copy!.accessibleLabelSuffix}`).toBe(
+      "技能 Frontend Design。显示详情",
+    );
+    expect(copy!.skillNoDescription).toBe("此技能暂无描述。");
+    expect(copy!.skillViewInstructions).toBe("查看说明");
+
+    languageState.current = "en";
+    await act(async () => {
+      renderer!.update(localized(<PromptFontPreview />));
+    });
+
+    const english = composerPreview.props!.accessibleCopy!;
+    expect(english.mentionPreview("apps/web/src/terminal/ghostty/surface.test.ts")).toBe(
+      "Preview apps/web/src/terminal/ghostty/surface.test.ts",
+    );
+    expect(`${english.skillLabel("Frontend Design")}${english.accessibleLabelSuffix}`).toBe(
+      "Skill Frontend Design. Show details",
+    );
+  });
+
+  it("labels the terminal preview surface's input and scrollback in the current language", async () => {
+    await act(async () => {
+      renderer = renderLocalized(<TerminalFontPreview family="Menlo" size={12} />);
+    });
+
+    expect(ghostty.create).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        inputAriaLabel: "终端输入",
+        scrollbackAriaLabel: "终端回滚区",
+      }),
+    );
+
+    languageState.current = "en";
+    await act(async () => {
+      renderer!.unmount();
+      renderer = renderLocalized(<TerminalFontPreview family="Menlo" size={12} />);
+    });
+
+    expect(ghostty.create).toHaveBeenLastCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        inputAriaLabel: "Terminal input",
+        scrollbackAriaLabel: "Terminal scrollback",
+      }),
+    );
   });
 
   it("keeps the font picker copy in the current language and its family names verbatim", async () => {

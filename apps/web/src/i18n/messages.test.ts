@@ -342,6 +342,43 @@ describe("translation messages", () => {
     ).toBe("界面字体（字体族）");
   });
 
+  it("translates the composer and terminal accessible copy and keeps dynamic values verbatim", () => {
+    // Every caller that does not pass its own copy keeps these exact strings.
+    expect(Reflect.get(EN_MESSAGES, "composer.accessible.mentionPreview")).toBe("Preview {path}");
+    expect(Reflect.get(EN_MESSAGES, "composer.accessible.skillLabel")).toBe("Skill {skill}");
+    expect(Reflect.get(EN_MESSAGES, "composer.accessible.showDetailsSuffix")).toBe(
+      ". Show details",
+    );
+    expect(Reflect.get(EN_MESSAGES, "composer.accessible.skillNoDescription")).toBe(
+      "No description is available for this skill.",
+    );
+    expect(Reflect.get(EN_MESSAGES, "composer.accessible.skillViewInstructions")).toBe(
+      "View instructions",
+    );
+    expect(Reflect.get(EN_MESSAGES, "terminal.accessible.input")).toBe("Terminal input");
+    expect(Reflect.get(EN_MESSAGES, "terminal.accessible.scrollback")).toBe("Terminal scrollback");
+
+    // The path and the skill's own name stay exactly as the app spells them.
+    expect(
+      translate("zh-CN", "composer.accessible.mentionPreview", {
+        path: "apps/web/src/terminal/ghostty/surface.test.ts",
+      }),
+    ).toBe("预览 apps/web/src/terminal/ghostty/surface.test.ts");
+    expect(
+      translate("zh-CN", "composer.accessible.mentionPreview", {
+        path: "apps/web/src/components/settings/SettingsPanels.tsx",
+      }),
+    ).toBe("预览 apps/web/src/components/settings/SettingsPanels.tsx");
+    expect(translate("zh-CN", "composer.accessible.skillLabel", { skill: "Frontend Design" })).toBe(
+      "技能 Frontend Design",
+    );
+    expect(translate("zh-CN", "composer.accessible.showDetailsSuffix")).toBe("。显示详情");
+    expect(translate("zh-CN", "composer.accessible.skillNoDescription")).toBe("此技能暂无描述。");
+    expect(translate("zh-CN", "composer.accessible.skillViewInstructions")).toBe("查看说明");
+    expect(translate("zh-CN", "terminal.accessible.input")).toBe("终端输入");
+    expect(translate("zh-CN", "terminal.accessible.scrollback")).toBe("终端回滚区");
+  });
+
   it("interpolates values without changing unknown user content", () => {
     expect(
       translate("zh-CN", "connection.reconnectingWithReason", {

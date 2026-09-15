@@ -1046,6 +1046,13 @@ export const EN_MESSAGES = {
     "Ask anything, @tag files/folders, $use skills, or / for commands",
   "composer.placeholder.chooseProject": "Choose a project above to start a thread",
   "composer.placeholder.enableProvider": "Enable a provider in Settings to send a message",
+  "composer.accessible.mentionPreview": "Preview {path}",
+  "composer.accessible.skillLabel": "Skill {skill}",
+  "composer.accessible.showDetailsSuffix": ". Show details",
+  "composer.accessible.skillNoDescription": "No description is available for this skill.",
+  "composer.accessible.skillViewInstructions": "View instructions",
+  "terminal.accessible.input": "Terminal input",
+  "terminal.accessible.scrollback": "Terminal scrollback",
 } as const;
 
 export type MessageKey = keyof typeof EN_MESSAGES;
@@ -2006,6 +2013,13 @@ export const ZH_CN_MESSAGES = {
     "输入问题，使用 @ 标记文件/文件夹，使用 $ 调用技能，或输入 / 查看命令",
   "composer.placeholder.chooseProject": "请先在上方选择项目以开始线程",
   "composer.placeholder.enableProvider": "请在设置中启用提供商后再发送消息",
+  "composer.accessible.mentionPreview": "预览 {path}",
+  "composer.accessible.skillLabel": "技能 {skill}",
+  "composer.accessible.showDetailsSuffix": "。显示详情",
+  "composer.accessible.skillNoDescription": "此技能暂无描述。",
+  "composer.accessible.skillViewInstructions": "查看说明",
+  "terminal.accessible.input": "终端输入",
+  "terminal.accessible.scrollback": "终端回滚区",
 } as const satisfies Record<MessageKey, string>;
 
 const MESSAGES: Record<AppLanguage, Record<MessageKey, string>> = {

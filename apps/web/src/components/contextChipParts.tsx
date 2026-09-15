@@ -73,6 +73,11 @@ export function ContextChipShell({
 export function ContextChipPopover(props: {
   copyMarkdown?: string;
   accessibleLabel: string;
+  /**
+   * Spoken hint that the chip opens a details popover. The separator belongs
+   * to the suffix so each language punctuates it the way it writes.
+   */
+  accessibleLabelSuffix?: string;
   chip: ReactNode;
   children: ReactNode;
   triggerClassName?: string;
@@ -90,7 +95,7 @@ export function ContextChipPopover(props: {
               CONTEXT_INLINE_CHIP_FOCUS_CLASS_NAME,
               props.triggerClassName,
             )}
-            aria-label={`${props.accessibleLabel}. Show details`}
+            aria-label={`${props.accessibleLabel}${props.accessibleLabelSuffix ?? ". Show details"}`}
             data-markdown-copy={props.copyMarkdown}
           />
         }
