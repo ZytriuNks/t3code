@@ -30,6 +30,12 @@ interface InheritanceLayer {
  * popover renders exactly as it did before.
  */
 export interface SettingInheritanceCopy {
+  /**
+   * Labels a stored string setting value before the chain renders it. Pages
+   * that translate an enum setting provide a mapping; the identity default
+   * keeps the stored value, so single-language pages render as before.
+   */
+  readonly settingValueLabel?: (key: keyof ServerSettings, value: string) => string;
   readonly layerProject: string;
   readonly layerEnvironment: string;
   readonly layerDefault: string;
@@ -54,6 +60,7 @@ export interface SettingInheritanceCopy {
 }
 
 export const SETTING_INHERITANCE_COPY_DEFAULTS: SettingInheritanceCopy = {
+  settingValueLabel: (_key, value) => value,
   layerProject: "Project",
   layerEnvironment: "Environment",
   layerDefault: "Default",
@@ -114,7 +121,8 @@ function formatValue(
         value as keyof typeof PULL_REQUEST_MERGE_METHOD_LABELS
       ];
     }
-    return value === "" ? copy.empty : value;
+    if (value === "") return copy.empty;
+    return copy.settingValueLabel?.(key, value) ?? value;
   }
   if (Array.isArray(value)) return copy.itemCount(value.length);
   if (typeof value === "object") {

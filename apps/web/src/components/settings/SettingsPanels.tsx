@@ -10,6 +10,7 @@ import {
   ProviderDriverKind,
   type ProviderInstanceId,
   type ScopedThreadRef,
+  type ServerSettings,
   type SidebarProjectGroupingMode,
 } from "@t3tools/contracts";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
@@ -237,6 +238,40 @@ const BACKGROUND_ACTIVITY_PROFILE_DESCRIPTION_KEYS: Record<BackgroundActivityPro
 
 const ADVANCED_BACKGROUND_ACTIVITY_DESCRIPTION_KEY: MessageKey =
   "settings.general.backgroundActivity.advancedDescription";
+
+/**
+ * The permissions and streaming pickers label their options with their own
+ * friendly copy; the inheritance popover shows the stored value, so General
+ * maps the two project-scoped enums onto labels of its own. The English
+ * dictionary keeps those labels identical to the stored enum, and every other
+ * setting key keeps the raw stored string.
+ */
+const INHERITED_RUNTIME_MODE_LABEL_KEYS: Readonly<Record<string, MessageKey>> = {
+  "approval-required": "settings.row.copy.settingValue.runtimeMode.approvalRequired",
+  "auto-accept-edits": "settings.row.copy.settingValue.runtimeMode.autoAcceptEdits",
+  auto: "settings.row.copy.settingValue.runtimeMode.auto",
+  "full-access": "settings.row.copy.settingValue.runtimeMode.fullAccess",
+};
+
+const INHERITED_RESPONSE_STREAMING_MODE_LABEL_KEYS: Readonly<Record<string, MessageKey>> = {
+  turn: "settings.row.copy.settingValue.streamingMode.turn",
+  paragraph: "settings.row.copy.settingValue.streamingMode.paragraph",
+  token: "settings.row.copy.settingValue.streamingMode.token",
+};
+
+function inheritedSettingValueLabel(
+  key: keyof ServerSettings,
+  value: string,
+  t: (key: MessageKey) => string,
+): string {
+  const messageKey =
+    key === "defaultRuntimeMode"
+      ? INHERITED_RUNTIME_MODE_LABEL_KEYS[value]
+      : key === "responseStreamingMode"
+        ? INHERITED_RESPONSE_STREAMING_MODE_LABEL_KEYS[value]
+        : undefined;
+  return messageKey === undefined ? value : t(messageKey);
+}
 
 const DEFAULT_DRIVER_KIND = ProviderDriverKind.make("codex");
 const BACKGROUND_ACTIVITY_BOOLEAN_OVERRIDES: ReadonlyArray<{
@@ -2293,6 +2328,7 @@ export function GeneralSettingsPanel() {
     <SettingsPageContainer>
       <SettingsRowCopyProvider
         copy={{
+          settingValueLabel: (key, value) => inheritedSettingValueLabel(key, value, t),
           resetToInheritedTooltip: t("settings.row.copy.inheritedTooltip"),
           resetToDefaultTooltip: t("settings.row.copy.defaultTooltip"),
           resetToInheritedLabel: (label) => t("settings.row.copy.inheritedLabel", { label }),

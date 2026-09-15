@@ -108,6 +108,51 @@ describe("translation messages", () => {
     ).toBe("内置默认值。查看此值的来源");
   });
 
+  it("labels the inherited runtime and streaming enums raw in English and friendly in Chinese", () => {
+    expect(
+      Reflect.get(EN_MESSAGES, "settings.row.copy.settingValue.runtimeMode.approvalRequired"),
+    ).toBe("approval-required");
+    expect(
+      Reflect.get(EN_MESSAGES, "settings.row.copy.settingValue.runtimeMode.autoAcceptEdits"),
+    ).toBe("auto-accept-edits");
+    expect(Reflect.get(EN_MESSAGES, "settings.row.copy.settingValue.runtimeMode.auto")).toBe(
+      "auto",
+    );
+    expect(Reflect.get(EN_MESSAGES, "settings.row.copy.settingValue.runtimeMode.fullAccess")).toBe(
+      "full-access",
+    );
+    expect(Reflect.get(EN_MESSAGES, "settings.row.copy.settingValue.streamingMode.turn")).toBe(
+      "turn",
+    );
+    expect(Reflect.get(EN_MESSAGES, "settings.row.copy.settingValue.streamingMode.paragraph")).toBe(
+      "paragraph",
+    );
+    expect(Reflect.get(EN_MESSAGES, "settings.row.copy.settingValue.streamingMode.token")).toBe(
+      "token",
+    );
+    expect(
+      Reflect.get(ZH_CN_MESSAGES, "settings.row.copy.settingValue.runtimeMode.approvalRequired"),
+    ).toBe(Reflect.get(ZH_CN_MESSAGES, "settings.general.permissions.mode.supervised"));
+    expect(
+      Reflect.get(ZH_CN_MESSAGES, "settings.row.copy.settingValue.runtimeMode.autoAcceptEdits"),
+    ).toBe("自动接受编辑");
+    expect(Reflect.get(ZH_CN_MESSAGES, "settings.row.copy.settingValue.runtimeMode.auto")).toBe(
+      Reflect.get(ZH_CN_MESSAGES, "settings.general.permissions.mode.auto"),
+    );
+    expect(
+      Reflect.get(ZH_CN_MESSAGES, "settings.row.copy.settingValue.runtimeMode.fullAccess"),
+    ).toBe("完全访问");
+    expect(Reflect.get(ZH_CN_MESSAGES, "settings.row.copy.settingValue.streamingMode.turn")).toBe(
+      "等待完整响应",
+    );
+    expect(
+      Reflect.get(ZH_CN_MESSAGES, "settings.row.copy.settingValue.streamingMode.paragraph"),
+    ).toBe("显示已完成的段落");
+    expect(Reflect.get(ZH_CN_MESSAGES, "settings.row.copy.settingValue.streamingMode.token")).toBe(
+      Reflect.get(ZH_CN_MESSAGES, "settings.general.streaming.token"),
+    );
+  });
+
   it("translates the desktop update tooltips and keeps versions interpolated", () => {
     expect(Reflect.get(EN_MESSAGES, "settings.general.version.tooltip.upToDate")).toBe(
       "Up to date",
