@@ -167,6 +167,7 @@ import {
   SettingResetButton,
   SettingsPageContainer,
   SettingsRow,
+  type SettingsRowCopy,
   SettingsRowCopyProvider,
   SettingsSection,
   useSettingsSearchTarget,
@@ -178,10 +179,10 @@ import { PanelAnimationsPreview } from "./PanelAnimationsPreview";
 import { useI18n } from "../../i18n/I18nProvider";
 import type { MessageKey } from "../../i18n/messages";
 
-const ENVIRONMENT_IDENTIFICATION_LABELS: Record<EnvironmentIdentificationMode, string> = {
-  artwork: "Artwork",
-  pill: "Version pill",
-  none: "None",
+const ENVIRONMENT_IDENTIFICATION_LABEL_KEYS: Record<EnvironmentIdentificationMode, MessageKey> = {
+  artwork: "settings.appearance.environmentIdentification.option.artwork",
+  pill: "settings.appearance.environmentIdentification.option.versionPill",
+  none: "settings.appearance.environmentIdentification.option.none",
 };
 
 const RESPONSE_STREAMING_MODE_LABEL_KEYS: Record<ResponseStreamingMode, MessageKey> = {
@@ -1359,7 +1360,85 @@ function BackgroundActivityAdvancedDialog({
   );
 }
 
+/**
+ * The words the settings rows share. A panel that translates itself mounts
+ * this on `SettingsRowCopyProvider`, so the reset affordances, tooltips, and
+ * inheritance summaries follow the app language; panels that do not keep the
+ * English defaults.
+ */
+function useSettingsPanelCopy(): SettingsRowCopy {
+  const { t } = useI18n();
+  return useMemo(
+    () => ({
+      settingValueLabel: (key, value) => inheritedSettingValueLabel(key, value, t),
+      resetToInheritedTooltip: t("settings.row.copy.inheritedTooltip"),
+      resetToDefaultTooltip: t("settings.row.copy.defaultTooltip"),
+      resetToInheritedLabel: (label) => t("settings.row.copy.inheritedLabel", { label }),
+      resetToDefaultLabel: (label) => t("settings.row.copy.defaultLabel", { label }),
+      overrideFallbackLabel: t("settings.row.copy.overrideFallbackLabel"),
+      reconnectSelectedEnvironment: t("settings.row.copy.reconnectSelectedEnvironment"),
+      selectEnvironment: t("settings.row.copy.selectEnvironment"),
+      mixedAcrossEnvironments: t("settings.row.copy.mixedAcrossEnvironments"),
+      overriddenForProject: t("settings.row.copy.overriddenForProject"),
+      inheritedFrom: (source) => t("settings.row.copy.inheritedFrom", { source }),
+      setOnEnvironment: t("settings.row.copy.setOnEnvironment"),
+      builtInDefault: t("settings.row.copy.builtInDefault"),
+      layerProject: t("settings.row.copy.layerProject"),
+      layerEnvironment: t("settings.row.copy.layerEnvironment"),
+      layerDefault: t("settings.row.copy.layerDefault"),
+      inherits: t("settings.row.copy.inherits"),
+      on: t("settings.row.copy.on"),
+      off: t("settings.row.copy.off"),
+      dayCount: (count) =>
+        t(count === 1 ? "settings.row.copy.dayCountOne" : "settings.row.copy.dayCountOther", {
+          count,
+        }),
+      lastSelected: t("settings.row.copy.lastSelected"),
+      never: t("settings.row.copy.never"),
+      automatic: t("settings.row.copy.automatic"),
+      textGenerationModel: t("settings.row.copy.textGenerationModel"),
+      notSet: t("settings.row.copy.notSet"),
+      empty: t("settings.row.copy.empty"),
+      itemCount: (count) =>
+        t(count === 1 ? "settings.row.copy.itemCountOne" : "settings.row.copy.itemCountOther", {
+          count,
+        }),
+      custom: t("settings.row.copy.custom"),
+      envModeLocal: t("settings.general.workspace.mode.local"),
+      envModeWorktree: t("settings.general.workspace.mode.worktree"),
+      overriddenBy: t("settings.row.copy.overriddenBy"),
+      resetOverride: (count) =>
+        t(
+          count === 1
+            ? "settings.row.copy.resetOverrideOne"
+            : "settings.row.copy.resetOverrideOther",
+        ),
+      projectOverrideSummary: (summary, count) =>
+        t(
+          count === 1
+            ? "settings.row.copy.projectOverrideSummaryOne"
+            : "settings.row.copy.projectOverrideSummaryOther",
+          { summary, count },
+        ),
+      showSourceLabel: (summary) => t("settings.row.copy.showSourceLabel", { summary }),
+    }),
+    [t],
+  );
+}
+
 export function AppearanceSettingsPanel() {
+  const copy = useSettingsPanelCopy();
+  return (
+    <SettingsPageContainer>
+      <SettingsRowCopyProvider copy={copy}>
+        <AppearanceSettingsRows />
+      </SettingsRowCopyProvider>
+    </SettingsPageContainer>
+  );
+}
+
+function AppearanceSettingsRows() {
+  const { t } = useI18n();
   const {
     appearanceMode,
     refreshTheme,
@@ -1399,8 +1478,13 @@ export function AppearanceSettingsPanel() {
   } as CSSProperties;
 
   return (
-    <SettingsPageContainer>
-      <SettingsSection id="appearance" title="Colors & themes" variant="plain" hideTitle>
+    <>
+      <SettingsSection
+        id="appearance"
+        title={t("settings.appearance.colorsAndThemes.title")}
+        variant="plain"
+        hideTitle
+      >
         <div id={searchableSetting("theme").id}>
           <ThemeLibrary
             appearanceMode={appearanceMode}
@@ -1418,14 +1502,14 @@ export function AppearanceSettingsPanel() {
         </div>
       </SettingsSection>
 
-      <SettingsSection id="appearance-interface" title="Interface">
+      <SettingsSection id="appearance-interface" title={t("settings.appearance.interface.title")}>
         <SettingsRow
-          {...searchableSetting("setting-appearance-contrast")}
-          description="Adjust the contrast of colors and borders across the interface."
+          {...searchableSetting("setting-appearance-contrast", t)}
+          description={t("settings.appearance.contrast.description")}
           resetAction={
             settings.appearanceContrast !== DEFAULT_UNIFIED_SETTINGS.appearanceContrast ? (
               <SettingResetButton
-                label="contrast"
+                label={t("settings.appearance.contrast.resetLabel")}
                 onClick={() =>
                   updateSettings({
                     appearanceContrast: DEFAULT_UNIFIED_SETTINGS.appearanceContrast,
@@ -1443,7 +1527,7 @@ export function AppearanceSettingsPanel() {
                 {settings.appearanceContrast}%
               </output>
               <input
-                aria-label="Contrast"
+                aria-label={searchableSetting("setting-appearance-contrast", t).title}
                 className="settings-slider min-w-0 flex-1"
                 id="appearance-contrast"
                 max={MAX_APPEARANCE_CONTRAST}
@@ -1468,12 +1552,12 @@ export function AppearanceSettingsPanel() {
         />
 
         <SettingsRow
-          {...searchableSetting("setting-glass-opacity")}
-          description="Higher values make menus, dialogs, and the composer more solid."
+          {...searchableSetting("setting-glass-opacity", t)}
+          description={t("settings.appearance.glassOpacity.description")}
           resetAction={
             settings.glassOpacity !== DEFAULT_UNIFIED_SETTINGS.glassOpacity ? (
               <SettingResetButton
-                label="glass opacity"
+                label={t("settings.appearance.glassOpacity.resetLabel")}
                 onClick={() =>
                   updateSettings({ glassOpacity: DEFAULT_UNIFIED_SETTINGS.glassOpacity })
                 }
@@ -1489,7 +1573,7 @@ export function AppearanceSettingsPanel() {
                 {settings.glassOpacity}%
               </output>
               <input
-                aria-label="Glass opacity"
+                aria-label={searchableSetting("setting-glass-opacity", t).title}
                 className="settings-slider min-w-0 flex-1"
                 id="glass-opacity"
                 max={MAX_GLASS_OPACITY}
@@ -1515,12 +1599,12 @@ export function AppearanceSettingsPanel() {
 
         {showEnvironmentIdentification ? (
           <SettingsRow
-            {...searchableSetting("environment-identification")}
-            description="Choose how Dev and Nightly environments are identified."
+            {...searchableSetting("environment-identification", t)}
+            description={t("settings.appearance.environmentIdentification.description")}
             resetAction={
               settings.environmentIdentificationMode !== DEFAULT_ENVIRONMENT_IDENTIFICATION_MODE ? (
                 <SettingResetButton
-                  label="environment identification"
+                  label={t("settings.appearance.environmentIdentification.resetLabel")}
                   onClick={() =>
                     updateSettings({
                       environmentIdentificationMode: DEFAULT_ENVIRONMENT_IDENTIFICATION_MODE,
@@ -1541,30 +1625,34 @@ export function AppearanceSettingsPanel() {
                 <SelectTrigger
                   size="sm"
                   className="w-full sm:w-40"
-                  aria-label="Environment identification"
+                  aria-label={searchableSetting("environment-identification", t).title}
                 >
                   <SelectValue>
-                    {ENVIRONMENT_IDENTIFICATION_LABELS[settings.environmentIdentificationMode]}
+                    {t(
+                      ENVIRONMENT_IDENTIFICATION_LABEL_KEYS[settings.environmentIdentificationMode],
+                    )}
                   </SelectValue>
                 </SelectTrigger>
                 <SelectPopup align="end" alignItemWithTrigger={false}>
-                  {Object.entries(ENVIRONMENT_IDENTIFICATION_LABELS).map(([value, label]) => (
-                    <SelectItem hideIndicator key={value} value={value}>
-                      {label}
-                    </SelectItem>
-                  ))}
+                  {Object.entries(ENVIRONMENT_IDENTIFICATION_LABEL_KEYS).map(
+                    ([value, labelKey]) => (
+                      <SelectItem hideIndicator key={value} value={value}>
+                        {t(labelKey)}
+                      </SelectItem>
+                    ),
+                  )}
                 </SelectPopup>
               </Select>
             }
           />
         ) : null}
         <SettingsRow
-          {...searchableSetting("diff-color-scheme")}
-          description="Choose colors for additions and deletions, including change counts."
+          {...searchableSetting("diff-color-scheme", t)}
+          description={t("settings.appearance.diffColors.description")}
           resetAction={
             settings.diffColorScheme !== DEFAULT_UNIFIED_SETTINGS.diffColorScheme ? (
               <SettingResetButton
-                label="diff colors"
+                label={t("settings.appearance.diffColors.resetLabel")}
                 onClick={() =>
                   updateSettings({ diffColorScheme: DEFAULT_UNIFIED_SETTINGS.diffColorScheme })
                 }
@@ -1580,7 +1668,11 @@ export function AppearanceSettingsPanel() {
                     updateSettings({ diffColorScheme: value });
                 }}
               >
-                <SelectTrigger size="sm" className="w-full min-w-0" aria-label="Diff colors">
+                <SelectTrigger
+                  size="sm"
+                  className="w-full min-w-0"
+                  aria-label={searchableSetting("diff-color-scheme", t).title}
+                >
                   <span
                     aria-hidden="true"
                     className={
@@ -1593,12 +1685,18 @@ export function AppearanceSettingsPanel() {
                     <span className="size-2 rounded-full bg-[var(--diff-addition)]" />
                   </span>
                   <SelectValue>
-                    {settings.diffColorScheme === "blue-orange" ? "Blue & orange" : "Red & green"}
+                    {settings.diffColorScheme === "blue-orange"
+                      ? t("settings.appearance.diffColors.option.blueOrange")
+                      : t("settings.appearance.diffColors.option.redGreen")}
                   </SelectValue>
                 </SelectTrigger>
                 <SelectPopup align="end" alignItemWithTrigger={false}>
-                  <SelectItem value="red-green">Red & green (default)</SelectItem>
-                  <SelectItem value="blue-orange">Blue & orange</SelectItem>
+                  <SelectItem value="red-green">
+                    {t("settings.appearance.diffColors.option.redGreenDefault")}
+                  </SelectItem>
+                  <SelectItem value="blue-orange">
+                    {t("settings.appearance.diffColors.option.blueOrange")}
+                  </SelectItem>
                 </SelectPopup>
               </Select>
             </div>
@@ -1606,10 +1704,10 @@ export function AppearanceSettingsPanel() {
         />
       </SettingsSection>
 
-      <SettingsSection id="motion" title="Motion">
+      <SettingsSection id="motion" title={t("settings.appearance.motion.title")}>
         <SettingsRow
-          {...searchableSetting("panel-animations")}
-          description="Set how fast panels open and close."
+          {...searchableSetting("panel-animations", t)}
+          description={t("settings.appearance.panelAnimations.description")}
           control={
             <div className="grid w-full grid-cols-[5rem_minmax(0,1fr)] items-center gap-3 sm:w-auto sm:grid-cols-[7rem_13rem] sm:gap-4">
               <PanelAnimationsPreview durationMs={settings.panelAnimationDurationMs} />
@@ -1621,7 +1719,7 @@ export function AppearanceSettingsPanel() {
                   {settings.panelAnimationDurationMs} ms
                 </output>
                 <input
-                  aria-label="Panel animation duration"
+                  aria-label={t("settings.appearance.panelAnimations.durationAriaLabel")}
                   className="settings-slider min-w-0 flex-1"
                   id="panel-animation-duration"
                   max={MAX_PANEL_ANIMATION_DURATION_MS}
@@ -1648,7 +1746,7 @@ export function AppearanceSettingsPanel() {
             settings.panelAnimationDurationMs !==
             DEFAULT_UNIFIED_SETTINGS.panelAnimationDurationMs ? (
               <SettingResetButton
-                label="panel animations"
+                label={t("settings.appearance.panelAnimations.resetLabel")}
                 onClick={() =>
                   updateSettings({
                     panelAnimationDurationMs: DEFAULT_UNIFIED_SETTINGS.panelAnimationDurationMs,
@@ -1661,21 +1759,26 @@ export function AppearanceSettingsPanel() {
       </SettingsSection>
 
       <TypographySection />
-    </SettingsPageContainer>
+    </>
   );
 }
 
 function useFontDefaultFamilies() {
+  const { t } = useI18n();
   const settings = useScopedSettings();
   // An unset preference shows the font it resolves to on this machine; the
   // default stacks are the platform's own faces, so the name is probed, not
   // hardcoded.
   const defaults = useMemo(
     () => ({
-      sans: resolveDefaultFamilyLabel(DEFAULT_SANS_FONT_STACK) ?? "System default",
-      code: resolveDefaultFamilyLabel(DEFAULT_CODE_FONT_STACK) ?? "System monospace",
+      sans:
+        resolveDefaultFamilyLabel(DEFAULT_SANS_FONT_STACK) ??
+        t("settings.appearance.typography.systemDefault"),
+      code:
+        resolveDefaultFamilyLabel(DEFAULT_CODE_FONT_STACK) ??
+        t("settings.appearance.typography.systemMonospace"),
     }),
-    [],
+    [t],
   );
   return {
     sans: defaults.sans,
@@ -1686,13 +1789,14 @@ function useFontDefaultFamilies() {
 }
 
 function InterfaceFontRow({ preview }: { preview?: ReactNode }) {
+  const { t } = useI18n();
   const settings = useScopedSettings();
   const updateSettings = useUpdateScopedSettings();
   const defaults = useFontDefaultFamilies();
   return (
     <FontFamilySettingsRow
-      {...searchableSetting("interface-font")}
-      description="Everything outside code blocks and the terminal."
+      {...searchableSetting("interface-font", t)}
+      description={t("settings.appearance.interfaceFont.description")}
       defaultFamily={defaults.sans}
       defaultValue={DEFAULT_UNIFIED_SETTINGS.fontFamilySans}
       value={settings.fontFamilySans}
@@ -1704,7 +1808,7 @@ function InterfaceFontRow({ preview }: { preview?: ReactNode }) {
         })
       }
       size={{
-        label: "Interface font size",
+        label: t("settings.appearance.interfaceFont.sizeLabel"),
         min: MIN_INTERFACE_FONT_SIZE,
         max: MAX_INTERFACE_FONT_SIZE,
         value: settings.fontSizeInterface,
@@ -1717,13 +1821,14 @@ function InterfaceFontRow({ preview }: { preview?: ReactNode }) {
 }
 
 function PromptFontRow() {
+  const { t } = useI18n();
   const settings = useScopedSettings();
   const updateSettings = useUpdateScopedSettings();
   const defaults = useFontDefaultFamilies();
   return (
     <FontFamilySettingsRow
-      {...searchableSetting("prompt-font")}
-      description="Only the box you write prompts in. Mono works well here."
+      {...searchableSetting("prompt-font", t)}
+      description={t("settings.appearance.promptFont.description")}
       defaultFamily={defaults.interfaceFamily}
       defaultValue={DEFAULT_UNIFIED_SETTINGS.fontFamilyComposer}
       value={settings.fontFamilyComposer}
@@ -1735,7 +1840,7 @@ function PromptFontRow() {
         })
       }
       size={{
-        label: "Prompt font size",
+        label: t("settings.appearance.promptFont.sizeLabel"),
         min: MIN_PROMPT_FONT_SIZE,
         max: MAX_PROMPT_FONT_SIZE,
         value: settings.fontSizePrompt,
@@ -1749,21 +1854,22 @@ function PromptFontRow() {
 
 function CodeFontRow({
   title,
-  description = "Code blocks, diffs, and file previews.",
+  description,
   preview,
 }: {
   title?: string;
   description?: string;
   preview?: ReactNode;
 }) {
+  const { t } = useI18n();
   const settings = useScopedSettings();
   const updateSettings = useUpdateScopedSettings();
   const defaults = useFontDefaultFamilies();
   return (
     <FontFamilySettingsRow
-      {...searchableSetting("code-font")}
+      {...searchableSetting("code-font", t)}
       {...(title !== undefined ? { title } : {})}
-      description={description}
+      description={description ?? t("settings.appearance.codeFont.description")}
       defaultFamily={defaults.code}
       defaultValue={DEFAULT_UNIFIED_SETTINGS.fontFamilyCode}
       value={settings.fontFamilyCode}
@@ -1776,7 +1882,7 @@ function CodeFontRow({
       }
       requireMonospace
       size={{
-        label: "Code font size",
+        label: t("settings.appearance.codeFont.sizeLabel"),
         min: MIN_CODE_FONT_SIZE,
         max: MAX_CODE_FONT_SIZE,
         value: settings.fontSizeCode,
@@ -1789,13 +1895,14 @@ function CodeFontRow({
 }
 
 function TerminalFontRow() {
+  const { t } = useI18n();
   const settings = useScopedSettings();
   const updateSettings = useUpdateScopedSettings();
   const defaults = useFontDefaultFamilies();
   return (
     <FontFamilySettingsRow
-      {...searchableSetting("terminal-font")}
-      description="Terminal output, independent from code blocks and diffs."
+      {...searchableSetting("terminal-font", t)}
+      description={t("settings.appearance.terminalFont.description")}
       defaultFamily={defaults.code}
       defaultValue={DEFAULT_UNIFIED_SETTINGS.fontFamilyTerminal}
       value={settings.fontFamilyTerminal}
@@ -1808,7 +1915,7 @@ function TerminalFontRow() {
       }
       requireMonospace
       size={{
-        label: "Terminal font size",
+        label: t("settings.appearance.terminalFont.sizeLabel"),
         min: MIN_TERMINAL_FONT_SIZE,
         max: MAX_TERMINAL_FONT_SIZE,
         value: settings.fontSizeTerminal,
@@ -1830,17 +1937,18 @@ function TerminalFontRow() {
 }
 
 function FontSmoothingRow() {
+  const { t } = useI18n();
   const settings = useScopedSettings();
   const updateSettings = useUpdateScopedSettings();
   if (!isMacPlatform(navigator.platform)) return null;
   return (
     <SettingsRow
-      {...searchableSetting("font-smoothing")}
-      description="Use thinner grayscale text smoothing instead of the macOS default."
+      {...searchableSetting("font-smoothing", t)}
+      description={t("settings.appearance.fontSmoothing.description")}
       resetAction={
         settings.fontSmoothing !== DEFAULT_UNIFIED_SETTINGS.fontSmoothing ? (
           <SettingResetButton
-            label="font smoothing"
+            label={t("settings.appearance.fontSmoothing.resetLabel")}
             onClick={() =>
               updateSettings({ fontSmoothing: DEFAULT_UNIFIED_SETTINGS.fontSmoothing })
             }
@@ -1851,7 +1959,7 @@ function FontSmoothingRow() {
         <Switch
           checked={settings.fontSmoothing}
           onCheckedChange={(checked) => updateSettings({ fontSmoothing: Boolean(checked) })}
-          aria-label="Font smoothing"
+          aria-label={searchableSetting("font-smoothing", t).title}
         />
       }
     />
@@ -1859,16 +1967,17 @@ function FontSmoothingRow() {
 }
 
 function WordWrapRow() {
+  const { t } = useI18n();
   const settings = useScopedSettings();
   const updateSettings = useUpdateScopedSettings();
   return (
     <SettingsRow
-      {...searchableSetting("word-wrap")}
-      description="Wrap long lines in code blocks, tables, diffs, and file previews by default."
+      {...searchableSetting("word-wrap", t)}
+      description={t("settings.appearance.wordWrap.description")}
       resetAction={
         settings.wordWrap !== DEFAULT_UNIFIED_SETTINGS.wordWrap ? (
           <SettingResetButton
-            label="word wrapping"
+            label={t("settings.appearance.wordWrap.resetLabel")}
             onClick={() => updateSettings({ wordWrap: DEFAULT_UNIFIED_SETTINGS.wordWrap })}
           />
         ) : null
@@ -1877,7 +1986,7 @@ function WordWrapRow() {
         <Switch
           checked={settings.wordWrap}
           onCheckedChange={(checked) => updateSettings({ wordWrap: Boolean(checked) })}
-          aria-label="Wrap code, tables, diffs, and file previews by default"
+          aria-label={t("settings.appearance.wordWrap.ariaLabel")}
         />
       }
     />
@@ -1902,13 +2011,14 @@ function FontSettingsGroup() {
  * under each row show every surface the choice reaches.
  */
 function SimpleFontRows() {
+  const { t } = useI18n();
   const settings = useScopedSettings();
   return (
     <>
       <InterfaceFontRow preview={<PromptFontPreview />} />
       <CodeFontRow
-        title="Monospace font"
-        description="Code blocks, diffs, file previews, and the terminal."
+        title={t("settings.appearance.monospaceFont.title")}
+        description={t("settings.appearance.monospaceFont.description")}
         preview={
           <>
             <CodeFontPreview />
@@ -1949,6 +2059,7 @@ const ADVANCED_TYPOGRAPHY_TARGET_IDS: ReadonlySet<string> = new Set([
  * target exists to scroll to.
  */
 function TypographySection() {
+  const { t } = useI18n();
   const [advanced, setAdvanced] = useLocalStorage(
     TYPOGRAPHY_ADVANCED_STORAGE_KEY,
     false,
@@ -1968,14 +2079,14 @@ function TypographySection() {
   return (
     <SettingsSection
       id="typography"
-      title="Typography"
+      title={t("settings.appearance.typography.title")}
       headerAction={
         <label className="flex cursor-pointer items-center gap-2 text-xs font-medium text-muted-foreground">
-          Advanced
+          {t("settings.appearance.typography.advanced")}
           <Switch
             checked={advanced}
             onCheckedChange={(checked) => setAdvanced(Boolean(checked))}
-            aria-label="Show advanced typography settings"
+            aria-label={t("settings.appearance.typography.advancedAriaLabel")}
           />
         </label>
       }
@@ -2020,6 +2131,7 @@ function FontFamilySettingsRow({
     onChange: (v: number) => void;
   };
 }) {
+  const { t } = useI18n();
   const trimmed = value.trim();
   // The fallback input edits a draft; the preference only commits once typing
   // pauses and the text probes as an available font (or is an explicit
@@ -2087,7 +2199,7 @@ function FontFamilySettingsRow({
   const familyControl =
     fontEnumeration.status === "granted" ? (
       <FontFamilyPicker
-        ariaLabel={`${title} family`}
+        ariaLabel={t("settings.appearance.fontFamily.familyAriaLabel", { title })}
         defaultFamily={defaultFamily}
         selectedFamily={trimmed}
         requireMonospace={requireMonospace}
@@ -2097,7 +2209,7 @@ function FontFamilySettingsRow({
     ) : (
       <Input
         size="sm"
-        aria-label={`${title} family`}
+        aria-label={t("settings.appearance.fontFamily.familyAriaLabel", { title })}
         aria-invalid={draftPending || undefined}
         autoCapitalize="off"
         autoComplete="off"
@@ -2323,64 +2435,10 @@ function LegacyFeaturesSection() {
 }
 
 export function GeneralSettingsPanel() {
-  const { t } = useI18n();
+  const copy = useSettingsPanelCopy();
   return (
     <SettingsPageContainer>
-      <SettingsRowCopyProvider
-        copy={{
-          settingValueLabel: (key, value) => inheritedSettingValueLabel(key, value, t),
-          resetToInheritedTooltip: t("settings.row.copy.inheritedTooltip"),
-          resetToDefaultTooltip: t("settings.row.copy.defaultTooltip"),
-          resetToInheritedLabel: (label) => t("settings.row.copy.inheritedLabel", { label }),
-          resetToDefaultLabel: (label) => t("settings.row.copy.defaultLabel", { label }),
-          overrideFallbackLabel: t("settings.row.copy.overrideFallbackLabel"),
-          reconnectSelectedEnvironment: t("settings.row.copy.reconnectSelectedEnvironment"),
-          selectEnvironment: t("settings.row.copy.selectEnvironment"),
-          mixedAcrossEnvironments: t("settings.row.copy.mixedAcrossEnvironments"),
-          overriddenForProject: t("settings.row.copy.overriddenForProject"),
-          inheritedFrom: (source) => t("settings.row.copy.inheritedFrom", { source }),
-          setOnEnvironment: t("settings.row.copy.setOnEnvironment"),
-          builtInDefault: t("settings.row.copy.builtInDefault"),
-          layerProject: t("settings.row.copy.layerProject"),
-          layerEnvironment: t("settings.row.copy.layerEnvironment"),
-          layerDefault: t("settings.row.copy.layerDefault"),
-          inherits: t("settings.row.copy.inherits"),
-          on: t("settings.row.copy.on"),
-          off: t("settings.row.copy.off"),
-          dayCount: (count) =>
-            t(count === 1 ? "settings.row.copy.dayCountOne" : "settings.row.copy.dayCountOther", {
-              count,
-            }),
-          lastSelected: t("settings.row.copy.lastSelected"),
-          never: t("settings.row.copy.never"),
-          automatic: t("settings.row.copy.automatic"),
-          textGenerationModel: t("settings.row.copy.textGenerationModel"),
-          notSet: t("settings.row.copy.notSet"),
-          empty: t("settings.row.copy.empty"),
-          itemCount: (count) =>
-            t(count === 1 ? "settings.row.copy.itemCountOne" : "settings.row.copy.itemCountOther", {
-              count,
-            }),
-          custom: t("settings.row.copy.custom"),
-          envModeLocal: t("settings.general.workspace.mode.local"),
-          envModeWorktree: t("settings.general.workspace.mode.worktree"),
-          overriddenBy: t("settings.row.copy.overriddenBy"),
-          resetOverride: (count) =>
-            t(
-              count === 1
-                ? "settings.row.copy.resetOverrideOne"
-                : "settings.row.copy.resetOverrideOther",
-            ),
-          projectOverrideSummary: (summary, count) =>
-            t(
-              count === 1
-                ? "settings.row.copy.projectOverrideSummaryOne"
-                : "settings.row.copy.projectOverrideSummaryOther",
-              { summary, count },
-            ),
-          showSourceLabel: (summary) => t("settings.row.copy.showSourceLabel", { summary }),
-        }}
-      >
+      <SettingsRowCopyProvider copy={copy}>
         <GeneralSettingsRows />
       </SettingsRowCopyProvider>
     </SettingsPageContainer>

@@ -273,6 +273,75 @@ describe("translation messages", () => {
     expect(Reflect.get(ZH_CN_MESSAGES, "settings.general.legacy.title")).toBe("旧版功能");
   });
 
+  it("translates the appearance copy and keeps the English words verbatim", () => {
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.colorsAndThemes.title")).toBe(
+      "Colors & themes",
+    );
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.interface.title")).toBe("Interface");
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.motion.title")).toBe("Motion");
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.typography.title")).toBe("Typography");
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.contrast.description")).toBe(
+      "Adjust the contrast of colors and borders across the interface.",
+    );
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.panelAnimations.description")).toBe(
+      "Set how fast panels open and close.",
+    );
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.panelAnimations.durationAriaLabel")).toBe(
+      "Panel animation duration",
+    );
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.typography.advanced")).toBe("Advanced");
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.typography.systemDefault")).toBe(
+      "System default",
+    );
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.typography.systemMonospace")).toBe(
+      "System monospace",
+    );
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.monospaceFont.title")).toBe(
+      "Monospace font",
+    );
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.wordWrap.ariaLabel")).toBe(
+      "Wrap code, tables, diffs, and file previews by default",
+    );
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.motion.replayPreview")).toBe(
+      "Replay panel animation preview",
+    );
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.terminalFont.previewLabel")).toBe(
+      "Terminal font preview",
+    );
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.promptFont.previewPlaceholder")).toBe(
+      "Ask for changes, send follow-ups, or attach images",
+    );
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.fontPicker.searchPlaceholder")).toBe(
+      "Search fonts…",
+    );
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.fontPicker.empty")).toBe(
+      "No fonts found.",
+    );
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.fontPicker.defaultBadge")).toBe("default");
+
+    expect(translate("zh-CN", "settings.appearance.colorsAndThemes.title")).toBe("颜色与主题");
+    expect(translate("zh-CN", "settings.appearance.interfaceFont.description")).toBe(
+      "代码块和终端之外的所有内容。",
+    );
+    expect(
+      translate("zh-CN", "settings.appearance.environmentIdentification.option.versionPill"),
+    ).toBe("版本标签");
+    expect(translate("zh-CN", "settings.appearance.diffColors.option.blueOrange")).toBe("蓝橙配色");
+    expect(translate("zh-CN", "settings.appearance.fontPicker.searchPlaceholder")).toBe(
+      "搜索字体…",
+    );
+    expect(translate("zh-CN", "settings.appearance.fontPicker.empty")).toBe("未找到字体。");
+    expect(translate("zh-CN", "settings.appearance.fontPicker.defaultBadge")).toBe("默认");
+    expect(
+      translate("en", "settings.appearance.fontFamily.familyAriaLabel", {
+        title: "Interface font",
+      }),
+    ).toBe("Interface font family");
+    expect(
+      translate("zh-CN", "settings.appearance.fontFamily.familyAriaLabel", { title: "界面字体" }),
+    ).toBe("界面字体（字体族）");
+  });
+
   it("interpolates values without changing unknown user content", () => {
     expect(
       translate("zh-CN", "connection.reconnectingWithReason", {
