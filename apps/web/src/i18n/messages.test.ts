@@ -355,4 +355,313 @@ describe("translation messages", () => {
       }),
     ).toBe("有可用更新：1.2.3 → 1.2.4");
   });
+
+  it("translates the theme library copy and keeps the English words verbatim", () => {
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.theme.mode.system")).toBe("System");
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.theme.mode.light")).toBe("Light");
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.theme.mode.dark")).toBe("Dark");
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.theme.create")).toBe("Create theme");
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.theme.add")).toBe("Add theme");
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.theme.duplicate")).toBe("Duplicate theme");
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.theme.edit")).toBe("Edit theme");
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.theme.exportFile")).toBe(
+      "Export theme file",
+    );
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.theme.remove")).toBe("Remove theme");
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.theme.removeMany")).toBe("Remove themes");
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.theme.removeThemeDescription")).toBe(
+      "You can bring it back anytime by importing its JSON file.",
+    );
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.theme.saveSelectionFailed")).toBe(
+      "Couldn’t save theme selection",
+    );
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.theme.removeFailed")).toBe(
+      "Couldn’t remove theme",
+    );
+
+    expect(translate("zh-CN", "settings.appearance.theme.mode.system")).toBe("跟随系统");
+    expect(translate("zh-CN", "settings.appearance.theme.mode.light")).toBe("浅色");
+    expect(translate("zh-CN", "settings.appearance.theme.mode.dark")).toBe("深色");
+    expect(translate("zh-CN", "settings.appearance.theme.create")).toBe("创建主题");
+    expect(translate("zh-CN", "settings.appearance.theme.add")).toBe("添加主题");
+    expect(translate("zh-CN", "settings.appearance.theme.duplicate")).toBe("复制主题");
+    expect(translate("zh-CN", "settings.appearance.theme.edit")).toBe("编辑主题");
+    expect(translate("zh-CN", "settings.appearance.theme.exportFile")).toBe("导出主题文件");
+    expect(translate("zh-CN", "settings.appearance.theme.remove")).toBe("移除主题");
+    expect(translate("zh-CN", "settings.appearance.theme.removeMany")).toBe("移除主题");
+    expect(translate("zh-CN", "settings.appearance.theme.saveSelectionFailed")).toBe(
+      "无法保存主题选择",
+    );
+    expect(translate("zh-CN", "settings.appearance.theme.removeFailed")).toBe("无法移除主题");
+    expect(translate("zh-CN", "settings.appearance.theme.tryAgain")).toBe("请重试。");
+  });
+
+  it("keeps theme names, modes and raw errors interpolated in the theme copy", () => {
+    expect(translate("zh-CN", "settings.appearance.theme.useTheme", { name: "Aurora" })).toBe(
+      "使用 Aurora 主题",
+    );
+    expect(translate("zh-CN", "settings.appearance.theme.duplicateLabel", { name: "Aurora" })).toBe(
+      "复制 Aurora",
+    );
+    expect(
+      translate("zh-CN", "settings.appearance.theme.removeThemeTitle", { name: "Aurora" }),
+    ).toBe("移除“Aurora”？");
+    expect(
+      translate("zh-CN", "settings.appearance.theme.removeCollectionTitle", {
+        collection: "Dracula",
+      }),
+    ).toBe("移除“Dracula”中的主题？");
+    expect(translate("zh-CN", "settings.appearance.theme.useForDarkOnly")).toBe("仅用于深色模式");
+    expect(translate("zh-CN", "settings.appearance.theme.created", { name: "Aurora" })).toBe(
+      "Aurora 已创建",
+    );
+    expect(translate("zh-CN", "settings.appearance.theme.nowActive")).toBe("现已启用。");
+    expect(translate("zh-CN", "settings.appearance.theme.darkPaletteAdded")).toBe(
+      "已添加其深色配色。",
+    );
+    expect(translate("zh-CN", "settings.appearance.theme.nowDarkTheme")).toBe(
+      "现在它是你的深色主题。",
+    );
+    expect(translate("zh-CN", "settings.appearance.theme.storageUnavailable")).toBe(
+      "浏览器存储不可用，因此更改未保存。",
+    );
+    expect(
+      translate("zh-CN", "settings.appearance.theme.extensionMeta", {
+        publisher: "Dracula Theme",
+        count: "1.2M",
+      }),
+    ).toBe("Dracula Theme · 1.2M 次下载");
+    // The sentences that name a mode inline keep the exact English the theme
+    // library has always shown.
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.theme.useLightMode")).toBe(
+      "Use light mode",
+    );
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.theme.useDarkMode")).toBe("Use dark mode");
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.theme.useForLightOnly")).toBe(
+      "Use for light mode only",
+    );
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.theme.useForDarkOnly")).toBe(
+      "Use for dark mode only",
+    );
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.theme.usePreviewDark")).toBe(
+      "Use {name} dark mode",
+    );
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.theme.lightPaletteAdded")).toBe(
+      "Its light palette was added.",
+    );
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.theme.darkPaletteAdded")).toBe(
+      "Its dark palette was added.",
+    );
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.theme.nowDarkTheme")).toBe(
+      "It’s now your dark theme.",
+    );
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.theme.panel.addDarkPalette")).toBe(
+      "Add dark palette",
+    );
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.theme.panel.missingDarkPalette")).toBe(
+      "“{name}” has no dark palette. Create a theme with the same name to add one.",
+    );
+    expect(translate("zh-CN", "settings.appearance.theme.searchResultOne", { count: 1 })).toBe(
+      "找到 1 个支持的主题。",
+    );
+    expect(translate("zh-CN", "settings.appearance.theme.searchResultOther", { count: 4 })).toBe(
+      "找到 4 个支持的主题。",
+    );
+    // The Open VSX name and the raw parser detail stay exactly as the API and
+    // the parser produce them.
+    expect(translate("zh-CN", "settings.appearance.theme.searchDescription")).toContain("Open VSX");
+    expect(
+      translate("zh-CN", "settings.appearance.theme.fileTooLarge", {
+        size: "100.0 MB",
+        limit: "256 KB",
+      }),
+    ).toBe("该文件为 100.0 MB。主题文件通常只有几 KB，因此未读取该文件（上限 256 KB）。");
+    expect(
+      translate("en", "settings.appearance.theme.fileTooLarge", {
+        size: "100.0 MB",
+        limit: "256 KB",
+      }),
+    ).toBe(
+      "That file is 100.0 MB. Theme files are only a few KB, so this one was not read (limit 256 KB).",
+    );
+  });
+
+  it("translates the theme import and Open VSX search copy", () => {
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.theme.addTitle")).toBe("Add a theme");
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.theme.jsonLabel")).toBe("Theme JSON");
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.theme.chooseFiles")).toBe("Choose files");
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.theme.reading")).toBe("Reading…");
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.theme.alreadyInstalled")).toBe(
+      "Already installed",
+    );
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.theme.searchPlaceholder")).toBe(
+      "Search themes...",
+    );
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.theme.installing")).toBe("Installing...");
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.theme.updateTitle")).toBe(
+      "Update “{name}”?",
+    );
+
+    expect(translate("zh-CN", "settings.appearance.theme.addTitle")).toBe("添加主题");
+    expect(translate("zh-CN", "settings.appearance.theme.orImportFile")).toBe("或导入文件");
+    expect(translate("zh-CN", "settings.appearance.theme.jsonLabel")).toBe("主题 JSON");
+    expect(translate("zh-CN", "settings.appearance.theme.fileLabel")).toBe("主题文件");
+    expect(translate("zh-CN", "settings.appearance.theme.chooseFiles")).toBe("选择文件");
+    expect(translate("zh-CN", "settings.appearance.theme.reading")).toBe("正在读取…");
+    expect(translate("zh-CN", "settings.appearance.theme.alreadyInstalled")).toBe("已安装");
+    expect(translate("zh-CN", "settings.appearance.theme.updateExisting")).toBe("更新现有");
+    expect(translate("zh-CN", "settings.appearance.theme.keepBoth")).toBe("两者都保留");
+    expect(translate("zh-CN", "settings.appearance.theme.back")).toBe("返回");
+    expect(translate("zh-CN", "settings.appearance.theme.searchHeading")).toBe("搜索社区主题");
+    expect(translate("zh-CN", "settings.appearance.theme.searchLabel")).toBe("搜索 Open VSX 主题");
+    expect(translate("zh-CN", "settings.appearance.theme.searchPlaceholder")).toBe("搜索主题...");
+    expect(translate("zh-CN", "settings.appearance.theme.popular")).toBe("热门");
+    expect(translate("zh-CN", "settings.appearance.theme.sort")).toBe("排序");
+    expect(translate("zh-CN", "settings.appearance.theme.sortLabel")).toBe("主题排序");
+    expect(translate("zh-CN", "settings.appearance.theme.sortMostDownloaded")).toBe("下载最多");
+    expect(translate("zh-CN", "settings.appearance.theme.sortBestRated")).toBe("评分最高");
+    expect(translate("zh-CN", "settings.appearance.theme.sortNewest")).toBe("最新");
+    expect(translate("zh-CN", "settings.appearance.theme.sortMostRelevant")).toBe("最相关");
+    expect(translate("zh-CN", "settings.appearance.theme.searching")).toBe("正在搜索主题...");
+    expect(translate("zh-CN", "settings.appearance.theme.noResults")).toBe("未找到支持的开源主题");
+    expect(translate("zh-CN", "settings.appearance.theme.broaderSearch")).toBe(
+      "请尝试更宽泛的搜索。",
+    );
+    expect(translate("zh-CN", "settings.appearance.theme.install")).toBe("安装");
+    expect(translate("zh-CN", "settings.appearance.theme.update")).toBe("更新");
+    expect(translate("zh-CN", "settings.appearance.theme.installing")).toBe("正在安装...");
+    expect(translate("zh-CN", "settings.appearance.theme.updating")).toBe("正在更新...");
+    expect(translate("zh-CN", "settings.appearance.theme.updateTheme")).toBe("更新主题");
+    expect(translate("zh-CN", "settings.appearance.theme.installAction", { name: "Dracula" })).toBe(
+      "安装 Dracula",
+    );
+    expect(translate("zh-CN", "settings.appearance.theme.viewSource", { name: "Dracula" })).toBe(
+      "查看 Dracula 的源代码",
+    );
+    expect(translate("zh-CN", "settings.appearance.theme.updateTitle", { name: "Dracula" })).toBe(
+      "更新“Dracula”？",
+    );
+  });
+
+  it("labels the theme editor groups, roles and color picker in the current language", () => {
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.theme.group.foundation")).toBe(
+      "Foundation",
+    );
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.theme.group.brandContent")).toBe(
+      "Brand & content",
+    );
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.theme.family.raisedSurface")).toBe(
+      "Raised surface",
+    );
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.theme.role.accent")).toBe("Accent color");
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.theme.role.surfaceRaised")).toBe(
+      "Surface Raised",
+    );
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.theme.role.terminalScrollbarHover")).toBe(
+      "Terminal Scrollbar Hover",
+    );
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.theme.panel.themeName")).toBe(
+      "Theme name",
+    );
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.theme.panel.simpleHint")).toBe(
+      "Two colors, rest derived",
+    );
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.theme.panel.advanced")).toBe("Advanced");
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.theme.panel.saveChanges")).toBe(
+      "Save changes",
+    );
+    expect(Reflect.get(EN_MESSAGES, "settings.appearance.theme.picker.chooseColor")).toBe(
+      "Choose a color",
+    );
+
+    expect(translate("zh-CN", "settings.appearance.theme.group.foundation")).toBe("基础");
+    expect(translate("zh-CN", "settings.appearance.theme.group.brandContent")).toBe("品牌与内容");
+    expect(translate("zh-CN", "settings.appearance.theme.group.context")).toBe("上下文");
+    expect(translate("zh-CN", "settings.appearance.theme.group.status")).toBe("状态");
+    expect(translate("zh-CN", "settings.appearance.theme.family.background")).toBe("背景");
+    expect(translate("zh-CN", "settings.appearance.theme.family.raisedSurface")).toBe("上层表面");
+    expect(translate("zh-CN", "settings.appearance.theme.family.accent")).toBe("强调色");
+    expect(translate("zh-CN", "settings.appearance.theme.family.terminalBackground")).toBe(
+      "终端背景",
+    );
+    expect(translate("zh-CN", "settings.appearance.theme.family.error")).toBe("错误");
+    expect(translate("zh-CN", "settings.appearance.theme.family.warning")).toBe("警告");
+    expect(translate("zh-CN", "settings.appearance.theme.role.canvas")).toBe("背景");
+    expect(translate("zh-CN", "settings.appearance.theme.role.mutedForeground")).toBe("弱化文本");
+    expect(translate("zh-CN", "settings.appearance.theme.role.sidebarRowSelected")).toBe(
+      "侧边栏行选中",
+    );
+    expect(translate("zh-CN", "settings.appearance.theme.panel.themeName")).toBe("主题名称");
+    expect(translate("zh-CN", "settings.appearance.theme.panel.themeNameHint")).toBe("例如 Aurora");
+    expect(translate("zh-CN", "settings.appearance.theme.panel.appearance")).toBe("外观");
+    expect(translate("zh-CN", "settings.appearance.theme.panel.colors")).toBe("颜色");
+    expect(translate("zh-CN", "settings.appearance.theme.panel.simpleHint")).toBe(
+      "两种颜色，其余自动推导",
+    );
+    expect(translate("zh-CN", "settings.appearance.theme.panel.filterColors")).toBe("筛选颜色");
+    expect(translate("zh-CN", "settings.appearance.theme.panel.advanced")).toBe("高级");
+    expect(translate("zh-CN", "settings.appearance.theme.panel.saveChanges")).toBe("保存更改");
+    expect(translate("zh-CN", "settings.appearance.theme.panel.noMatches")).toBe("无匹配项。");
+    expect(translate("zh-CN", "settings.appearance.theme.panel.selectElement")).toBe(
+      "选择元素 · 按 Esc 取消",
+    );
+    expect(translate("zh-CN", "settings.appearance.theme.panel.selectColor")).toBe(
+      "在下方选择颜色",
+    );
+    expect(translate("zh-CN", "settings.appearance.theme.panel.inspect")).toBe("检查");
+    expect(translate("zh-CN", "settings.appearance.theme.panel.inspectLabel")).toBe("检查应用颜色");
+    expect(translate("zh-CN", "settings.appearance.theme.panel.minimize")).toBe("最小化主题编辑器");
+    expect(translate("zh-CN", "settings.appearance.theme.panel.close")).toBe("关闭主题编辑器");
+    expect(
+      translate("zh-CN", "settings.appearance.theme.panel.usageOther", {
+        label: "背景",
+        count: 3,
+      }),
+    ).toBe("背景 · 3 处使用");
+    expect(
+      translate("zh-CN", "settings.appearance.theme.panel.mergeInto", { name: "Aurora" }),
+    ).toBe("合并到“Aurora”");
+    expect(
+      translate("zh-CN", "settings.appearance.theme.panel.missingDarkPalette", {
+        name: "Aurora",
+      }),
+    ).toBe("“Aurora”没有深色配色。创建一个同名主题即可添加。");
+    expect(
+      translate("zh-CN", "settings.appearance.theme.panel.mergeDarkCollision", {
+        name: "Aurora",
+      }),
+    ).toBe("“Aurora”已有深色配色。请换一个名称。");
+    expect(translate("zh-CN", "settings.appearance.theme.panel.activateFailed")).toBe(
+      "主题已保存，但无法启用。请重试。",
+    );
+    expect(translate("zh-CN", "settings.appearance.theme.picker.chooseColor")).toBe("选择颜色");
+    expect(
+      translate("zh-CN", "settings.appearance.theme.picker.chooseColorLabel", { label: "背景" }),
+    ).toBe("选择背景颜色");
+    expect(
+      translate("zh-CN", "settings.appearance.theme.picker.saturationBrightness", {
+        label: "背景",
+      }),
+    ).toBe("背景 饱和度和亮度");
+    expect(
+      translate("zh-CN", "settings.appearance.theme.picker.saturationBrightnessValue", {
+        saturation: 40,
+        brightness: 90,
+      }),
+    ).toBe("饱和度 40%，亮度 90%");
+    expect(translate("zh-CN", "settings.appearance.theme.picker.hue", { label: "背景" })).toBe(
+      "背景 色相",
+    );
+    expect(
+      translate("zh-CN", "settings.appearance.theme.picker.hideUsage", { label: "背景" }),
+    ).toBe("隐藏背景的用途");
+    expect(
+      translate("zh-CN", "settings.appearance.theme.picker.hideUsageTooltip", {
+        label: "背景",
+      }),
+    ).toBe("隐藏背景的使用位置");
+    expect(translate("zh-CN", "settings.appearance.theme.picker.hexValue", { label: "背景" })).toBe(
+      "背景 HEX 值",
+    );
+  });
 });
