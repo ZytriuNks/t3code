@@ -39,8 +39,10 @@ vi.mock("../ui/tooltip", () => ({
 }));
 
 // The indicator's popover is a portal; rendering its summary inline keeps the
-// copy the row computes observable from the markup.
-vi.mock("./SettingInheritance", () => ({
+// copy the row computes observable from the markup. The real module still
+// supplies the English copy defaults the row falls back to.
+vi.mock("./SettingInheritance", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./SettingInheritance")>()),
   SettingInheritance: ({ summary }: { readonly summary: string }) => (
     <span data-setting-inheritance-summary={summary} />
   ),
@@ -64,6 +66,7 @@ const ZH_COPY: SettingsRowCopy = {
   resetToDefaultTooltip: "重置为默认值",
   resetToInheritedLabel: (label) => `将${label}重置为继承值`,
   resetToDefaultLabel: (label) => `将${label}重置为默认值`,
+  overrideFallbackLabel: "覆盖项",
   reconnectSelectedEnvironment: "请重新连接所选环境后再更改此设置。",
   selectEnvironment: "环境级设置。请选择环境后再更改。",
   mixedAcrossEnvironments: "所选环境之间不一致",
@@ -71,6 +74,27 @@ const ZH_COPY: SettingsRowCopy = {
   inheritedFrom: (source) => `继承自 ${source}`,
   setOnEnvironment: "已在环境上设置",
   builtInDefault: "内置默认值",
+  layerProject: "项目",
+  layerEnvironment: "环境",
+  layerDefault: "默认",
+  inherits: "继承",
+  on: "开",
+  off: "关",
+  dayCount: (count) => `${count} 天`,
+  lastSelected: "上次选择",
+  never: "从不",
+  automatic: "自动",
+  textGenerationModel: "文本生成模型",
+  notSet: "未设置",
+  empty: "空",
+  itemCount: (count) => `${count} 项`,
+  custom: "自定义",
+  envModeLocal: "当前检出",
+  envModeWorktree: "新工作树",
+  overriddenBy: "被以下项目覆盖",
+  resetOverride: (count) => (count === 1 ? "重置" : "全部重置"),
+  projectOverrideSummary: (summary, count) => `${summary} · ${count} 个项目覆盖`,
+  showSourceLabel: (summary) => `${summary}。查看此值的来源`,
 };
 
 const environment = {
@@ -275,5 +299,33 @@ describe("settings row copy", () => {
     expect(markup).toContain("已为此项目覆盖");
     expect(markup).toContain('aria-label="将Automatically pull重置为继承值"');
     expect(markup).toContain("重置为继承值");
+  });
+
+  it("names the overridden row from the mounted copy when its title is a node", () => {
+    const target = {
+      environmentId,
+      label: "Laptop",
+      projectId,
+      settings: { defaultAutoPull: false },
+      sources: { defaultAutoPull: "project" as const },
+    };
+    scopeState.value = {
+      ...connectedScope(),
+      scope: { kind: "project", projectId, environmentIds: [environmentId] },
+      target,
+      targets: [target],
+    };
+    const markup = renderToStaticMarkup(
+      <SettingsRowCopyProvider copy={ZH_COPY}>
+        <SettingsRow
+          serverScoped
+          settingKeys={["defaultAutoPull"]}
+          title={<span>Automatically pull</span>}
+        />
+      </SettingsRowCopyProvider>,
+    );
+
+    expect(markup).toContain('aria-label="将覆盖项重置为继承值"');
+    expect(markup).not.toContain("将override重置为继承值");
   });
 });

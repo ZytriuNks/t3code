@@ -49,9 +49,10 @@ import { createModelSelection } from "@t3tools/shared/model";
 import * as Duration from "effect/Duration";
 import * as Equal from "effect/Equal";
 import * as Schema from "effect/Schema";
-import { APP_VERSION, HOSTED_APP_CHANNEL, HOSTED_APP_CHANNEL_LABEL } from "../../branding";
+import { APP_VERSION, HOSTED_APP_CHANNEL } from "../../branding";
 import {
   canCheckForUpdate,
+  type DesktopUpdateCopy,
   getDesktopUpdateButtonTooltip,
   getDesktopUpdateInstallConfirmationMessage,
   isDesktopUpdateButtonDisabled,
@@ -235,7 +236,7 @@ const BACKGROUND_ACTIVITY_PROFILE_DESCRIPTION_KEYS: Record<BackgroundActivityPro
   };
 
 const ADVANCED_BACKGROUND_ACTIVITY_DESCRIPTION_KEY: MessageKey =
-  "settings.general.backgroundActivity.customIntervals";
+  "settings.general.backgroundActivity.advancedDescription";
 
 const DEFAULT_DRIVER_KIND = ProviderDriverKind.make("codex");
 const BACKGROUND_ACTIVITY_BOOLEAN_OVERRIDES: ReadonlyArray<{
@@ -296,6 +297,38 @@ function AboutVersionSection() {
   const hasDesktopBridge = typeof window !== "undefined" && Boolean(window.desktopBridge);
   const selectedUpdateChannel = updateState?.channel ?? "latest";
   const selectedHostedAppChannel = hasDesktopBridge ? null : HOSTED_APP_CHANNEL;
+
+  // Versions and raw updater messages stay verbatim; only the fixed wording of
+  // the tooltips and the install prompt comes from the dictionary.
+  const updateCopy = useMemo<DesktopUpdateCopy>(
+    () => ({
+      availableTooltip: (version) =>
+        version === null
+          ? t("settings.general.version.tooltip.available")
+          : t("settings.general.version.tooltip.availableVersion", { version }),
+      downloadingTooltip: (percent) =>
+        percent === null
+          ? t("settings.general.version.tooltip.downloading")
+          : t("settings.general.version.tooltip.downloadingPercent", {
+              percent: Math.floor(percent),
+            }),
+      downloadedTooltip: (version) =>
+        version === null
+          ? t("settings.general.version.tooltip.downloadedReady")
+          : t("settings.general.version.tooltip.downloaded", { version }),
+      downloadFailedTooltip: (version) =>
+        t("settings.general.version.tooltip.downloadFailed", { version }),
+      installFailedTooltip: (version) =>
+        t("settings.general.version.tooltip.installFailed", { version }),
+      failedTooltip: t("settings.general.version.tooltip.failed"),
+      upToDateTooltip: t("settings.general.version.tooltip.upToDate"),
+      installConfirmation: (version) =>
+        version === null
+          ? t("settings.general.version.installConfirmation")
+          : t("settings.general.version.installConfirmationWithVersion", { version }),
+    }),
+    [t],
+  );
 
   const handleUpdateChannelChange = useCallback(
     (channel: DesktopUpdateChannel) => {
@@ -360,6 +393,7 @@ function AboutVersionSection() {
         confirmed = await ensureLocalApi().dialogs.confirm(
           getDesktopUpdateInstallConfirmationMessage(
             updateState ?? { availableVersion: null, downloadedVersion: null },
+            updateCopy,
           ),
         );
       } catch (error) {
@@ -418,17 +452,20 @@ function AboutVersionSection() {
           stackedThreadToast({
             type: "error",
             title: t("settings.general.version.checkFailed"),
+            // Nothing came back from the bridge, so the build may well support
+            // updates: keep this distinct from the unsupported-build copy the
+            // `checked: false` branch above uses.
             description:
               error instanceof Error
                 ? error.message
-                : t("settings.general.version.checkFailedDescription"),
+                : t("settings.general.version.checkFailedFallback"),
           }),
         );
       });
-  }, [isUpdateActionPending, t, updateState]);
+  }, [isUpdateActionPending, t, updateCopy, updateState]);
 
   const action = updateState ? resolveDesktopUpdateButtonAction(updateState) : "none";
-  const buttonTooltip = updateState ? getDesktopUpdateButtonTooltip(updateState) : null;
+  const buttonTooltip = updateState ? getDesktopUpdateButtonTooltip(updateState, updateCopy) : null;
   const buttonDisabled =
     action === "none"
       ? !canCheckForUpdate(updateState)
@@ -528,7 +565,11 @@ function AboutVersionSection() {
                 className="w-full sm:w-40"
                 aria-label={t("settings.general.version.updateTrackAriaLabel")}
               >
-                <SelectValue>{HOSTED_APP_CHANNEL_LABEL}</SelectValue>
+                <SelectValue>
+                  {selectedHostedAppChannel === "nightly"
+                    ? t("settings.general.version.nightly")
+                    : t("settings.general.version.latest")}
+                </SelectValue>
               </SelectTrigger>
               <SelectPopup align="end" alignItemWithTrigger={false}>
                 <SelectItem hideIndicator value="latest">
@@ -546,7 +587,37 @@ function AboutVersionSection() {
   );
 }
 
+/**
+ * The typography and browser helpers in `SettingsPanels.logic.ts` report the
+ * rows that differ from the defaults with their English labels. The restore
+ * dialog maps those labels back to the dictionary so the list it confirms
+ * follows the page language instead of mixing languages.
+ */
+const RESTORE_LABEL_MESSAGE_KEYS: Readonly<Record<string, MessageKey>> = {
+  "Interface font": "settings.restore.label.interfaceFont",
+  "Prompt font": "settings.restore.label.promptFont",
+  "Code font": "settings.restore.label.codeFont",
+  "Terminal font": "settings.restore.label.terminalFont",
+  "Browser viewport": "settings.restore.label.browserViewport",
+  "Browser zoom": "settings.restore.label.browserZoom",
+  "Browser appearance": "settings.restore.label.browserAppearance",
+  "Recording frame rate": "settings.restore.label.recordingFrameRate",
+  "Open links in": "settings.restore.label.openLinksIn",
+  "Floating preview": "settings.restore.label.floatingPreview",
+};
+
+function localizeRestoreLabels(
+  labels: readonly string[],
+  t: (key: MessageKey) => string,
+): string[] {
+  return labels.map((label) => {
+    const key = RESTORE_LABEL_MESSAGE_KEYS[label];
+    return key === undefined ? label : t(key);
+  });
+}
+
 export function useSettingsRestore(onRestored?: () => void) {
+  const { t } = useI18n();
   const {
     theme,
     setTheme,
@@ -567,109 +638,120 @@ export function useSettingsRestore(onRestored?: () => void) {
 
   const changedSettingLabels = useMemo(
     () => [
-      ...(theme !== "system" ? ["Theme"] : []),
-      ...(!followSystem ? ["Follow system"] : []),
-      ...(themeHalves !== null ? ["Theme mix"] : []),
+      ...(theme !== "system" ? [t("settings.restore.label.theme")] : []),
+      ...(!followSystem ? [t("settings.restore.label.followSystem")] : []),
+      ...(themeHalves !== null ? [t("settings.restore.label.themeMix")] : []),
       ...(settings.appearanceContrast !== DEFAULT_UNIFIED_SETTINGS.appearanceContrast
-        ? ["Contrast"]
+        ? [t("settings.restore.label.contrast")]
         : []),
-      ...(settings.glassOpacity !== DEFAULT_UNIFIED_SETTINGS.glassOpacity ? ["Glass opacity"] : []),
+      ...(settings.glassOpacity !== DEFAULT_UNIFIED_SETTINGS.glassOpacity
+        ? [t("settings.restore.label.glassOpacity")]
+        : []),
       ...(settings.diffColorScheme !== DEFAULT_UNIFIED_SETTINGS.diffColorScheme
-        ? ["Diff colors"]
+        ? [t("settings.restore.label.diffColors")]
         : []),
       ...(settings.panelAnimationDurationMs !== DEFAULT_UNIFIED_SETTINGS.panelAnimationDurationMs
-        ? ["Panel animations"]
+        ? [t("settings.restore.label.panelAnimations")]
         : []),
       ...(settings.environmentIdentificationMode !==
       DEFAULT_UNIFIED_SETTINGS.environmentIdentificationMode
-        ? ["Environment identification"]
+        ? [t("settings.restore.label.environmentIdentification")]
         : []),
-      ...(settings.language !== DEFAULT_UNIFIED_SETTINGS.language ? ["Language"] : []),
+      ...(settings.language !== DEFAULT_UNIFIED_SETTINGS.language
+        ? [t("settings.restore.label.language")]
+        : []),
       ...(settings.timestampFormat !== DEFAULT_UNIFIED_SETTINGS.timestampFormat
-        ? ["Time format"]
+        ? [t("settings.restore.label.timeFormat")]
         : []),
       ...(settings.notificationMode !== DEFAULT_UNIFIED_SETTINGS.notificationMode
-        ? ["Thread notifications"]
+        ? [t("settings.restore.label.threadNotifications")]
         : []),
       ...(settings.inAppNotificationsEnabled !== DEFAULT_UNIFIED_SETTINGS.inAppNotificationsEnabled
-        ? ["In-app notifications"]
+        ? [t("settings.restore.label.inAppNotifications")]
         : []),
       ...(settings.sidebarThreadPreviewCount !== DEFAULT_UNIFIED_SETTINGS.sidebarThreadPreviewCount
-        ? ["Visible threads"]
+        ? [t("settings.restore.label.visibleThreads")]
         : []),
       ...(settings.sidebarProjectGroupingMode !==
       DEFAULT_UNIFIED_SETTINGS.sidebarProjectGroupingMode
-        ? ["Project Grouping"]
+        ? [t("settings.restore.label.projectGrouping")]
         : []),
       ...(settings.sidebarAutoSettleAfterDays !==
       DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleAfterDays
-        ? ["Auto-settle inactive threads"]
+        ? [t("settings.restore.label.autoSettleInactive")]
         : []),
       ...(settings.sidebarAutoSettleOnMerge !== DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleOnMerge
-        ? ["Auto-settle merged threads"]
+        ? [t("settings.restore.label.autoSettleMerged")]
         : []),
-      ...(settings.wordWrap !== DEFAULT_UNIFIED_SETTINGS.wordWrap ? ["Word wrap"] : []),
-      ...getChangedTypographySettingLabels(settings),
+      ...(settings.wordWrap !== DEFAULT_UNIFIED_SETTINGS.wordWrap
+        ? [t("settings.restore.label.wordWrap")]
+        : []),
+      ...localizeRestoreLabels(getChangedTypographySettingLabels(settings), t),
       ...(settings.diffFilesCollapsed !== DEFAULT_UNIFIED_SETTINGS.diffFilesCollapsed
-        ? ["Default diff file state"]
+        ? [t("settings.restore.label.defaultDiffFileState")]
         : []),
       ...(settings.diffIgnoreWhitespace !== DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace
-        ? ["Diff whitespace changes"]
+        ? [t("settings.restore.label.diffWhitespaceChanges")]
         : []),
-      ...(settings.diffLayout !== DEFAULT_UNIFIED_SETTINGS.diffLayout ? ["Diff layout"] : []),
+      ...(settings.diffLayout !== DEFAULT_UNIFIED_SETTINGS.diffLayout
+        ? [t("settings.restore.label.diffLayout")]
+        : []),
       ...(settings.proactivePanelsEnabled !== DEFAULT_UNIFIED_SETTINGS.proactivePanelsEnabled
-        ? ["Proactive panels"]
+        ? [t("settings.restore.label.proactivePanels")]
         : []),
       ...(settings.showSkillsInSlashMenu !== DEFAULT_UNIFIED_SETTINGS.showSkillsInSlashMenu
-        ? ["Show skills in slash menu"]
+        ? [t("settings.restore.label.skillsInSlashMenu")]
         : []),
       ...(settings.composerCollapseOnScroll !== DEFAULT_UNIFIED_SETTINGS.composerCollapseOnScroll
-        ? ["Collapse composer on scroll"]
+        ? [t("settings.restore.label.composerCollapse")]
         : []),
       ...(settings.contextWindowMeterEnabled !== DEFAULT_UNIFIED_SETTINGS.contextWindowMeterEnabled
-        ? ["Context window indicator"]
+        ? [t("settings.restore.label.contextWindowIndicator")]
         : []),
       ...(settings.responseStreamingMode !== DEFAULT_UNIFIED_SETTINGS.responseStreamingMode
-        ? ["Response streaming"]
+        ? [t("settings.restore.label.responseStreaming")]
         : []),
       ...(settings.enableProviderUpdateChecks !==
       DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks
-        ? ["Provider update checks"]
+        ? [t("settings.restore.label.providerUpdateChecks")]
         : []),
       ...(settings.continueThreadsAfterServerUpdate !==
       DEFAULT_UNIFIED_SETTINGS.continueThreadsAfterServerUpdate
-        ? ["Continue threads after restarts"]
+        ? [t("settings.restore.label.continueThreads")]
         : []),
-      ...(isBackgroundActivityDirty ? ["Background activity"] : []),
+      ...(isBackgroundActivityDirty ? [t("settings.restore.label.backgroundActivity")] : []),
       ...(settings.defaultThreadEnvMode !== DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode
-        ? ["New thread mode"]
+        ? [t("settings.restore.label.defaultThreadEnvMode")]
         : []),
       ...(settings.newWorktreesStartFromOrigin !==
       DEFAULT_UNIFIED_SETTINGS.newWorktreesStartFromOrigin
-        ? ["New worktrees start from origin"]
+        ? [t("settings.restore.label.newWorktreesStartFromOrigin")]
         : []),
       ...(settings.addProjectBaseDirectory !== DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory
-        ? ["Add project base directory"]
+        ? [t("settings.restore.label.addProjectBaseDirectory")]
         : []),
       ...(settings.confirmThreadUnpin !== DEFAULT_UNIFIED_SETTINGS.confirmThreadUnpin
-        ? ["Unpin confirmation"]
+        ? [t("settings.restore.label.unpinConfirmation")]
         : []),
       ...(settings.confirmThreadArchive !== DEFAULT_UNIFIED_SETTINGS.confirmThreadArchive
-        ? ["Archive confirmation"]
+        ? [t("settings.restore.label.archiveConfirmation")]
         : []),
       ...(settings.confirmThreadDelete !== DEFAULT_UNIFIED_SETTINGS.confirmThreadDelete
-        ? ["Delete confirmation"]
+        ? [t("settings.restore.label.deleteConfirmation")]
         : []),
-      ...(settings.confirmQuit !== DEFAULT_UNIFIED_SETTINGS.confirmQuit ? ["Quit shortcut"] : []),
-      ...(isTextGenerationModelDirty ? ["Text generation model"] : []),
-      ...getChangedBrowserSettingLabels(settings),
+      ...(settings.confirmQuit !== DEFAULT_UNIFIED_SETTINGS.confirmQuit
+        ? [t("settings.restore.label.quitShortcut")]
+        : []),
+      ...(isTextGenerationModelDirty ? [t("settings.restore.label.textGenerationModel")] : []),
+      ...localizeRestoreLabels(getChangedBrowserSettingLabels(settings), t),
       ...(settings.enableAgentBrowserAccess !== DEFAULT_UNIFIED_SETTINGS.enableAgentBrowserAccess
-        ? ["Agent browser access"]
+        ? [t("settings.restore.label.agentBrowserAccess")]
         : []),
     ],
     [
       isTextGenerationModelDirty,
       isBackgroundActivityDirty,
+      t,
       settings.browserDefaultViewport,
       settings.browserDefaultZoomFactor,
       settings.browserDefaultAppearance,
@@ -726,9 +808,10 @@ export function useSettingsRestore(onRestored?: () => void) {
     if (changedSettingLabels.length === 0) return;
     const api = readLocalApi();
     const confirmed = await (api ?? ensureLocalApi()).dialogs.confirm(
-      ["Restore default settings?", `This will reset: ${changedSettingLabels.join(", ")}.`].join(
-        "\n",
-      ),
+      [
+        t("settings.restore.title"),
+        t("settings.restore.body", { labels: changedSettingLabels.join(", ") }),
+      ].join("\n"),
       { variant: "destructive" },
     );
     if (!confirmed) return;
@@ -756,8 +839,8 @@ export function useSettingsRestore(onRestored?: () => void) {
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Couldn’t restore theme settings",
-          description: "Try again.",
+          title: t("settings.restore.themeFailedTitle"),
+          description: t("settings.restore.themeFailedDescription"),
         }),
       );
     };
@@ -848,6 +931,7 @@ export function useSettingsRestore(onRestored?: () => void) {
     setFollowSystem,
     setTheme,
     setThemeHalf,
+    t,
     theme,
     themeHalves,
     updateSettings,
@@ -2074,6 +2158,7 @@ function AutoSettleDaysInput({
   value: number;
   onCommit: (days: number) => void;
 }) {
+  const { t } = useI18n();
   // Local draft so the field can be emptied mid-edit; the setting only moves
   // on valid input and snaps back to the persisted value on blur.
   const [draft, setDraft] = useState(String(value));
@@ -2104,7 +2189,7 @@ function AutoSettleDaysInput({
         }
       }}
       onBlur={() => setDraft(String(value))}
-      aria-label="Days of inactivity before auto-settle"
+      aria-label={t("settings.general.autoSettleDays.ariaLabel")}
     />
   );
 }
@@ -2123,6 +2208,7 @@ const LEGACY_FEATURE_TARGET_IDS: ReadonlySet<string> = new Set([
  * jump to one of the rows unfolds the section.
  */
 function LegacyFeaturesSection() {
+  const { t } = useI18n();
   const settings = useScopedSettings();
   const updateSettings = useUpdateScopedSettings();
   const [open, setOpen] = useState(false);
@@ -2149,48 +2235,48 @@ function LegacyFeaturesSection() {
       <Collapsible open={open} onOpenChange={setOpen}>
         <CollapsibleTrigger className="group flex min-h-8 w-full items-center gap-2 px-3 sm:px-4">
           <h2 className="text-sm font-normal tracking-[-0.005em] text-foreground/70 transition-colors group-hover:text-foreground">
-            Legacy features
+            {t("settings.general.legacy.title")}
           </h2>
           <ChevronRightIcon className="size-4 text-muted-foreground transition-transform duration-200 group-data-panel-open:rotate-90" />
         </CollapsibleTrigger>
         <CollapsiblePanel>
           <div className="relative overflow-visible rounded-xl border border-border/60 bg-card/40 text-foreground shadow-xs/5 [&>*+*]:border-t [&>*+*]:border-border/50 [&>[data-slot=settings-row]]:rounded-none">
             <SettingsRow
-              {...searchableSetting("legacy-plan-mode")}
-              description="Restore Build/Plan, /plan, /default, and Shift+Tab. Off uses build mode."
+              {...searchableSetting("legacy-plan-mode", t)}
+              description={t("settings.general.legacy.planMode.description")}
               control={
                 <Switch
                   checked={settings.planModeEnabled}
                   onCheckedChange={(checked) => {
                     updateSettings({ planModeEnabled: Boolean(checked) });
                   }}
-                  aria-label="Plan mode (legacy)"
+                  aria-label={searchableSetting("legacy-plan-mode", t).title}
                 />
               }
             />
             <SettingsRow
-              {...searchableSetting("legacy-context-window-indicator")}
-              description="Shows context window usage as a circular indicator in the composer."
+              {...searchableSetting("legacy-context-window-indicator", t)}
+              description={t("settings.general.legacy.contextWindowIndicator.description")}
               control={
                 <Switch
                   checked={settings.contextWindowMeterEnabled}
                   onCheckedChange={(checked) =>
                     updateSettings({ contextWindowMeterEnabled: Boolean(checked) })
                   }
-                  aria-label="Context window indicator (legacy)"
+                  aria-label={searchableSetting("legacy-context-window-indicator", t).title}
                 />
               }
             />
             <SettingsRow
-              {...searchableSetting("legacy-sidebar")}
-              description="Restore per-project thread trees instead of the default flat sidebar."
+              {...searchableSetting("legacy-sidebar", t)}
+              description={t("settings.general.legacy.sidebar.description")}
               control={
                 <Switch
                   checked={settings.legacySidebarEnabled}
                   onCheckedChange={(checked) =>
                     updateSettings({ legacySidebarEnabled: Boolean(checked) })
                   }
-                  aria-label="Sidebar (legacy)"
+                  aria-label={searchableSetting("legacy-sidebar", t).title}
                 />
               }
             />
@@ -2211,6 +2297,7 @@ export function GeneralSettingsPanel() {
           resetToDefaultTooltip: t("settings.row.copy.defaultTooltip"),
           resetToInheritedLabel: (label) => t("settings.row.copy.inheritedLabel", { label }),
           resetToDefaultLabel: (label) => t("settings.row.copy.defaultLabel", { label }),
+          overrideFallbackLabel: t("settings.row.copy.overrideFallbackLabel"),
           reconnectSelectedEnvironment: t("settings.row.copy.reconnectSelectedEnvironment"),
           selectEnvironment: t("settings.row.copy.selectEnvironment"),
           mixedAcrossEnvironments: t("settings.row.copy.mixedAcrossEnvironments"),
@@ -2218,6 +2305,44 @@ export function GeneralSettingsPanel() {
           inheritedFrom: (source) => t("settings.row.copy.inheritedFrom", { source }),
           setOnEnvironment: t("settings.row.copy.setOnEnvironment"),
           builtInDefault: t("settings.row.copy.builtInDefault"),
+          layerProject: t("settings.row.copy.layerProject"),
+          layerEnvironment: t("settings.row.copy.layerEnvironment"),
+          layerDefault: t("settings.row.copy.layerDefault"),
+          inherits: t("settings.row.copy.inherits"),
+          on: t("settings.row.copy.on"),
+          off: t("settings.row.copy.off"),
+          dayCount: (count) =>
+            t(count === 1 ? "settings.row.copy.dayCountOne" : "settings.row.copy.dayCountOther", {
+              count,
+            }),
+          lastSelected: t("settings.row.copy.lastSelected"),
+          never: t("settings.row.copy.never"),
+          automatic: t("settings.row.copy.automatic"),
+          textGenerationModel: t("settings.row.copy.textGenerationModel"),
+          notSet: t("settings.row.copy.notSet"),
+          empty: t("settings.row.copy.empty"),
+          itemCount: (count) =>
+            t(count === 1 ? "settings.row.copy.itemCountOne" : "settings.row.copy.itemCountOther", {
+              count,
+            }),
+          custom: t("settings.row.copy.custom"),
+          envModeLocal: t("settings.general.workspace.mode.local"),
+          envModeWorktree: t("settings.general.workspace.mode.worktree"),
+          overriddenBy: t("settings.row.copy.overriddenBy"),
+          resetOverride: (count) =>
+            t(
+              count === 1
+                ? "settings.row.copy.resetOverrideOne"
+                : "settings.row.copy.resetOverrideOther",
+            ),
+          projectOverrideSummary: (summary, count) =>
+            t(
+              count === 1
+                ? "settings.row.copy.projectOverrideSummaryOne"
+                : "settings.row.copy.projectOverrideSummaryOther",
+              { summary, count },
+            ),
+          showSourceLabel: (summary) => t("settings.row.copy.showSourceLabel", { summary }),
         }}
       >
         <GeneralSettingsRows />
@@ -2305,7 +2430,9 @@ function GeneralSettingsRows() {
   const mixedTextGenerationModel = useScopedSettingsMixed(["textGenerationModelSelection"]);
   const backgroundActivityDescription =
     backgroundActivityProfileOption === "advanced"
-      ? `${t(ADVANCED_BACKGROUND_ACTIVITY_DESCRIPTION_KEY)} ${t("settings.general.backgroundActivity.sharedPolicySummary", { profile: t(BACKGROUND_ACTIVITY_PROFILE_LABEL_KEYS[activeBackgroundActivityProfile]) })}`
+      ? t(ADVANCED_BACKGROUND_ACTIVITY_DESCRIPTION_KEY, {
+          profile: t(BACKGROUND_ACTIVITY_PROFILE_LABEL_KEYS[activeBackgroundActivityProfile]),
+        })
       : t(BACKGROUND_ACTIVITY_PROFILE_DESCRIPTION_KEYS[resolvedBackgroundActivity.profile]);
   const canResetBackgroundActivity = !Equal.equals(
     settings.backgroundActivity,
@@ -2876,7 +3003,11 @@ function GeneralSettingsRows() {
           title={
             <span className="inline-flex items-center gap-1.5">
               {searchableSetting("background-activity", t).title}
-              <PolicyTooltip>{t("settings.general.backgroundActivity.tooltip")}</PolicyTooltip>
+              <PolicyTooltip
+                detailsLabel={t("settings.general.backgroundActivity.policyDetailsLabel")}
+              >
+                {t("settings.general.backgroundActivity.tooltip")}
+              </PolicyTooltip>
             </span>
           }
           description={backgroundActivityDescription}

@@ -30,7 +30,9 @@ import {
 } from "./scopedSettings";
 import { useClearProjectOverrides, useClearScopedSettings } from "./useScopedSettings";
 import {
+  SETTING_INHERITANCE_COPY_DEFAULTS,
   SettingInheritance,
+  type SettingInheritanceCopy,
   type SettingInheritanceState,
   type SettingOverridingProject,
 } from "./SettingInheritance";
@@ -144,13 +146,20 @@ export const SETTINGS_PICKER_TRIGGER_CLASSNAME =
   "h-8 min-h-8 min-w-0 max-w-none shrink-0 text-foreground/90 hover:text-foreground sm:h-7 sm:min-h-7";
 
 /** Info affordance explaining how a setting interacts with the shared background policy. */
-export function PolicyTooltip({ children }: { readonly children: string }) {
+export function PolicyTooltip({
+  children,
+  detailsLabel = "Background policy details",
+}: {
+  readonly children: string;
+  /** Accessible name for the icon button; pages that translate themselves pass their own. */
+  readonly detailsLabel?: string;
+}) {
   return (
     <Tooltip>
       <TooltipTrigger
         delay={200}
         render={
-          <Button size="icon-micro" variant="ghost-muted" aria-label="Background policy details">
+          <Button size="icon-micro" variant="ghost-muted" aria-label={detailsLabel}>
             <InfoIcon className="size-3.5" />
           </Button>
         }
@@ -265,11 +274,13 @@ export function SettingsUnavailableGroup({
  * - Inline affordances (reset arrows, info tooltips, table-cell buttons): `icon-micro`.
  * Dialog footers keep the app-wide default button size.
  */
-export interface SettingsRowCopy {
+export interface SettingsRowCopy extends SettingInheritanceCopy {
   readonly resetToInheritedTooltip: string;
   readonly resetToDefaultTooltip: string;
   readonly resetToInheritedLabel: (label: string) => string;
   readonly resetToDefaultLabel: (label: string) => string;
+  /** Names a row whose title is a node instead of a string. */
+  readonly overrideFallbackLabel: string;
   readonly reconnectSelectedEnvironment: string;
   readonly selectEnvironment: string;
   readonly mixedAcrossEnvironments: string;
@@ -285,10 +296,12 @@ export interface SettingsRowCopy {
  * defaults below, so their rows render exactly as before.
  */
 export const SETTINGS_ROW_COPY_DEFAULTS: SettingsRowCopy = {
+  ...SETTING_INHERITANCE_COPY_DEFAULTS,
   resetToInheritedTooltip: "Reset to inherited value",
   resetToDefaultTooltip: "Reset to default",
   resetToInheritedLabel: (label) => `Reset ${label} to inherited value`,
   resetToDefaultLabel: (label) => `Reset ${label} to default`,
+  overrideFallbackLabel: "override",
   reconnectSelectedEnvironment: "Reconnect the selected environment to change this setting.",
   selectEnvironment: "Environment-wide setting. Select an environment to change it.",
   mixedAcrossEnvironments: "Mixed across selected environments",
@@ -404,7 +417,7 @@ export function SettingsRow({
   const renderedReset = unavailable ? null : isProjectScope && scopedKeys.length > 0 ? (
     source === "project" || source === "mixed" ? (
       <SettingResetButton
-        label={typeof title === "string" ? title : "override"}
+        label={typeof title === "string" ? title : copy.overrideFallbackLabel}
         labelKind="inherited"
         onClick={() => (onResetOverride ? onResetOverride() : clearOverrides(scopedKeys))}
       />
@@ -475,6 +488,7 @@ export function SettingsRow({
         keys={settingKeys}
         overridingProjects={overridingProjects}
         onClearOverrides={(entries) => clearProjectOverrides(entries, scopedKeys)}
+        copy={copy}
       />
     ) : null;
   const renderedStatus = status;

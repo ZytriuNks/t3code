@@ -3,12 +3,14 @@ import {
   EnvironmentId,
   type ModelSelection,
   type ProviderInstanceId,
+  type RuntimeMode,
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
 import { useNavigate } from "@tanstack/react-router";
 
 import { useT3ProjectFileState } from "../../hooks/useT3ProjectFileScripts";
 import { useI18n } from "../../i18n/I18nProvider";
+import type { MessageKey } from "../../i18n/messages";
 import { getCustomModelOptionsByInstance } from "../../modelSelection";
 import {
   applyProviderInstanceSettings,
@@ -18,7 +20,6 @@ import {
 } from "../../providerInstances";
 import { useEnvironments } from "../../state/environments";
 import { EMPTY_SERVER_PROVIDERS } from "../../state/server";
-import { resolveEnvModeLabel } from "../BranchToolbar.logic";
 import { ProviderModelPicker } from "../chat/ProviderModelPicker";
 import { runtimeModeConfig, runtimeModeOptions } from "../chat/runtimeModeConfig";
 import { PULL_REQUEST_MERGE_METHOD_LABELS } from "../pullRequest/pullRequestDetail.logic";
@@ -41,6 +42,30 @@ import {
   useScopedSettingSource,
   useUpdateScopedSettings,
 } from "./useScopedSettings";
+
+/**
+ * The permissions and workspace pickers share their option labels with the
+ * composer, which stays English for now. The general page maps those options
+ * onto the dictionary inside this component instead.
+ */
+const PERMISSIONS_MODE_LABEL_KEYS: Record<RuntimeMode, MessageKey> = {
+  "approval-required": "settings.general.permissions.mode.supervised",
+  "auto-accept-edits": "settings.general.permissions.mode.autoAcceptEdits",
+  auto: "settings.general.permissions.mode.auto",
+  "full-access": "settings.general.permissions.mode.fullAccess",
+};
+
+const PERMISSIONS_MODE_DESCRIPTION_KEYS: Record<RuntimeMode, MessageKey> = {
+  "approval-required": "settings.general.permissions.mode.supervisedDescription",
+  "auto-accept-edits": "settings.general.permissions.mode.autoAcceptEditsDescription",
+  auto: "settings.general.permissions.mode.autoDescription",
+  "full-access": "settings.general.permissions.mode.fullAccessDescription",
+};
+
+const WORKSPACE_MODE_LABEL_KEYS: Record<"local" | "worktree", MessageKey> = {
+  local: "settings.general.workspace.mode.local",
+  worktree: "settings.general.workspace.mode.worktree",
+};
 
 /**
  * Rows for the settings a project may override. The same rows edit
@@ -117,7 +142,7 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
     workspaceSource === "project"
       ? null
       : repositoryEnvMode
-        ? `${resolveEnvModeLabel(repositoryEnvMode)} (t3.json)`
+        ? `${t(WORKSPACE_MODE_LABEL_KEYS[repositoryEnvMode])} (t3.json)`
         : null;
 
   function modelDisabledReason(instanceId: ProviderInstanceId, model: string): string | null {
@@ -142,7 +167,9 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
         entry.driverKind !== sourceEntry?.driverKind ||
         !options?.some((option) => option.slug === model && !option.isUnavailable)
       ) {
-        return `This model is unavailable on ${environment?.label ?? "a selected environment"}. Select that environment to choose its model separately.`;
+        return t("settings.general.defaultModel.unavailableOnEnvironment", {
+          environment: environment?.label ?? t("settings.general.defaultModel.otherEnvironment"),
+        });
       }
     }
     return null;
@@ -151,7 +178,11 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
   const setModel = (value: ModelSelection | null) => {
     const reason = value ? modelDisabledReason(value.instanceId, value.model) : null;
     if (reason) {
-      toastManager.add({ type: "error", title: "Default model not saved", description: reason });
+      toastManager.add({
+        type: "error",
+        title: t("settings.general.defaultModel.notSaved"),
+        description: reason,
+      });
       return;
     }
     updateSettings({ defaultModelSelection: value });
@@ -278,22 +309,21 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
                   <SelectValue>
                     {mixedPermissions
                       ? text.mixed
-                      : runtimeModeConfig[settings.defaultRuntimeMode].label}
+                      : t(PERMISSIONS_MODE_LABEL_KEYS[settings.defaultRuntimeMode])}
                   </SelectValue>
                 </SelectTrigger>
                 <SelectPopup align="end" alignItemWithTrigger={false}>
                   {runtimeModeOptions.map((mode) => {
-                    const option = runtimeModeConfig[mode];
-                    const Icon = option.icon;
+                    const Icon = runtimeModeConfig[mode].icon;
                     return (
                       <SelectItem key={mode} value={mode} className="min-w-64 py-2">
                         <div className="grid gap-0.5">
                           <span className="inline-flex items-center gap-1.5 font-medium">
                             <Icon className="size-3.5 shrink-0 text-muted-foreground" />
-                            {option.label}
+                            {t(PERMISSIONS_MODE_LABEL_KEYS[mode])}
                           </span>
                           <span className="text-xs leading-4 text-muted-foreground">
-                            {option.description}
+                            {t(PERMISSIONS_MODE_DESCRIPTION_KEYS[mode])}
                           </span>
                         </div>
                       </SelectItem>
@@ -343,7 +373,7 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
                   <SelectValue>
                     {(value: string | null) =>
                       value === "local" || value === "worktree"
-                        ? resolveEnvModeLabel(value)
+                        ? t(WORKSPACE_MODE_LABEL_KEYS[value])
                         : unavailable
                           ? text.workspaceUnavailable
                           : text.mixed
@@ -351,8 +381,8 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
                   </SelectValue>
                 </SelectTrigger>
                 <SelectPopup align="end" alignItemWithTrigger={false}>
-                  <SelectItem value="local">{resolveEnvModeLabel("local")}</SelectItem>
-                  <SelectItem value="worktree">{resolveEnvModeLabel("worktree")}</SelectItem>
+                  <SelectItem value="local">{t(WORKSPACE_MODE_LABEL_KEYS.local)}</SelectItem>
+                  <SelectItem value="worktree">{t(WORKSPACE_MODE_LABEL_KEYS.worktree)}</SelectItem>
                 </SelectPopup>
               </Select>
             }
