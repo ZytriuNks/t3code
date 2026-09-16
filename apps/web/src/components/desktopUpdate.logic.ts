@@ -70,38 +70,72 @@ export function getArm64IntelBuildWarningDescription(state: DesktopUpdateState):
   return "This Mac has Apple Silicon, but T3 Code is still running the Intel build under Rosetta. The next app update will replace it with the native Apple Silicon build.";
 }
 
-export function getDesktopUpdateButtonTooltip(state: DesktopUpdateState): string {
+/**
+ * Words and formatters for the updater's tooltips and install prompt. Pages
+ * that translate themselves pass a copy; every other caller keeps the defaults
+ * below and renders exactly the same English as before. Versions and the raw
+ * updater message always stay verbatim.
+ */
+export interface DesktopUpdateCopy {
+  readonly availableTooltip: (version: string | null) => string;
+  readonly downloadingTooltip: (percent: number | null) => string;
+  readonly downloadedTooltip: (version: string | null) => string;
+  readonly downloadFailedTooltip: (version: string) => string;
+  readonly installFailedTooltip: (version: string) => string;
+  readonly failedTooltip: string;
+  readonly upToDateTooltip: string;
+  readonly installConfirmation: (version: string | null) => string;
+}
+
+export const DESKTOP_UPDATE_COPY_DEFAULTS: DesktopUpdateCopy = {
+  availableTooltip: (version) => `Update ${version ?? "available"} ready to download`,
+  downloadingTooltip: (percent) =>
+    `Downloading update${percent === null ? "" : ` (${Math.floor(percent)}%)`}`,
+  downloadedTooltip: (version) =>
+    `Update ${version ?? "ready"} downloaded. Click to restart and install.`,
+  downloadFailedTooltip: (version) => `Download failed for ${version}. Click to retry.`,
+  installFailedTooltip: (version) => `Install failed for ${version}. Click to retry.`,
+  failedTooltip: "Update failed",
+  upToDateTooltip: "Up to date",
+  installConfirmation: (version) =>
+    `Install update${version ? ` ${version}` : ""} and restart T3 Code?\n\nAny running tasks will be interrupted. Make sure you're ready before continuing.`,
+};
+
+export function getDesktopUpdateButtonTooltip(
+  state: DesktopUpdateState,
+  copy: DesktopUpdateCopy = DESKTOP_UPDATE_COPY_DEFAULTS,
+): string {
   if (state.status === "available") {
-    return `Update ${state.availableVersion ?? "available"} ready to download`;
+    return copy.availableTooltip(state.availableVersion);
   }
   if (state.status === "downloading") {
-    const progress =
-      typeof state.downloadPercent === "number" ? ` (${Math.floor(state.downloadPercent)}%)` : "";
-    return `Downloading update${progress}`;
+    return copy.downloadingTooltip(
+      typeof state.downloadPercent === "number" ? state.downloadPercent : null,
+    );
   }
   if (state.status === "downloaded") {
-    return `Update ${state.downloadedVersion ?? state.availableVersion ?? "ready"} downloaded. Click to restart and install.`;
+    return copy.downloadedTooltip(state.downloadedVersion ?? state.availableVersion);
   }
   if (state.status === "error") {
     if (state.errorContext === "download" && state.availableVersion) {
-      return `Download failed for ${state.availableVersion}. Click to retry.`;
+      return copy.downloadFailedTooltip(state.availableVersion);
     }
     if (state.errorContext === "install" && state.downloadedVersion) {
-      return `Install failed for ${state.downloadedVersion}. Click to retry.`;
+      return copy.installFailedTooltip(state.downloadedVersion);
     }
     if (state.downloadedVersion) {
-      return `Update ${state.downloadedVersion} downloaded. Click to restart and install.`;
+      return copy.downloadedTooltip(state.downloadedVersion);
     }
-    return state.message ?? "Update failed";
+    return state.message ?? copy.failedTooltip;
   }
-  return "Up to date";
+  return copy.upToDateTooltip;
 }
 
 export function getDesktopUpdateInstallConfirmationMessage(
   state: Pick<DesktopUpdateState, "availableVersion" | "downloadedVersion">,
+  copy: DesktopUpdateCopy = DESKTOP_UPDATE_COPY_DEFAULTS,
 ): string {
-  const version = state.downloadedVersion ?? state.availableVersion;
-  return `Install update${version ? ` ${version}` : ""} and restart T3 Code?\n\nAny running tasks will be interrupted. Make sure you're ready before continuing.`;
+  return copy.installConfirmation(state.downloadedVersion ?? state.availableVersion);
 }
 
 export function getDesktopUpdateActionError(result: DesktopUpdateActionResult): string | null {

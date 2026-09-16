@@ -8,6 +8,7 @@ import {
 } from "@tanstack/react-router";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { RotateCcwIcon } from "lucide-react";
+import { useI18n } from "../i18n/I18nProvider";
 import { Button } from "../components/ui/button";
 import { useSettingsRestore } from "../components/settings/SettingsPanels";
 
@@ -33,6 +34,7 @@ import {
 } from "../components/settings/settingsSearch";
 
 function RestoreDeviceDefaultsButton({ onRestored }: { onRestored: () => void }) {
+  const { t } = useI18n();
   const { changedSettingLabels, restoreDefaults } = useSettingsRestore(onRestored);
   return (
     <Button
@@ -42,7 +44,7 @@ function RestoreDeviceDefaultsButton({ onRestored }: { onRestored: () => void })
       onClick={() => void restoreDefaults()}
     >
       <RotateCcwIcon className="mx-1 size-3.5" />
-      Restore device defaults
+      {t("settings.header.restoreDeviceDefaults")}
     </Button>
   );
 }
@@ -55,10 +57,11 @@ const DEVICE_ONLY_PATHS = new Set([
 ]);
 
 function SettingsScopeBoundary({ pathname, children }: { pathname: string; children: ReactNode }) {
+  const { t } = useI18n();
   const { scope, connectedEnvironments } = useSettingsScope();
   const { environments } = useEnvironments();
   const hash = useLocation({ select: (location) => location.hash });
-  const searchTarget = getSettingsSearchTargetScope(hash);
+  const searchTarget = getSettingsSearchTargetScope(hash, t);
   const autoSettlementAvailability = searchTarget?.requiresThreadAutoSettlement
     ? getThreadAutoSettlementSearchAvailability(environments, scope)
     : null;
@@ -75,8 +78,12 @@ function SettingsScopeBoundary({ pathname, children }: { pathname: string; child
         eligibleEnvironmentIds={autoSettlementAvailability.eligibleEnvironmentIds}
       >
         {autoSettlementAvailability.eligibleEnvironmentIds.length > 0
-          ? `${searchTarget.title} requires a supporting environment. Choose one to continue.`
-          : `${searchTarget.title} requires a supporting environment. Connect or update an environment to continue.`}
+          ? t("settings.scope.requiresSupportingEnvironment.choose", {
+              setting: searchTarget.title,
+            })
+          : t("settings.scope.requiresSupportingEnvironment.connect", {
+              setting: searchTarget.title,
+            })}
       </SettingsScopeNotice>
     );
   }
@@ -93,7 +100,7 @@ function SettingsScopeBoundary({ pathname, children }: { pathname: string; child
         : "all";
     return (
       <SettingsScopeNotice target={target} targetId={hash}>
-        {`${searchTarget.title} is not available for the selected target. Choose its owning scope to continue.`}
+        {t("settings.scope.notAvailableForTarget", { setting: searchTarget.title })}
       </SettingsScopeNotice>
     );
   }
@@ -102,12 +109,25 @@ function SettingsScopeBoundary({ pathname, children }: { pathname: string; child
   if (DEVICE_ONLY_PATHS.has(pathname) || pathname === "/settings/projects") {
     return children;
   }
-  if (scope.kind === "unavailable")
-    return <p className="p-8 text-sm text-muted-foreground">{scope.message}</p>;
+  if (scope.kind === "unavailable") {
+    const message =
+      scope.reason === "project-required"
+        ? t("settings.scope.unavailable.projectRequired")
+        : scope.reason === "environment-missing"
+          ? scope.message === "This checkout's environment is no longer available."
+            ? t("settings.scope.unavailable.checkoutEnvironmentMissing")
+            : t("settings.scope.unavailable.environmentMissing")
+          : scope.reason === "project-missing"
+            ? t("settings.scope.unavailable.projectMissing")
+            : scope.message === "This project has no checkout on this environment."
+              ? t("settings.scope.unavailable.projectCheckoutMissing")
+              : t("settings.scope.unavailable.checkoutMissing");
+    return <p className="p-8 text-sm text-muted-foreground">{message}</p>;
+  }
   if (scope.kind === "environment" && connectedEnvironments.length === 0) {
     return (
       <p className="p-8 text-sm text-muted-foreground">
-        Reconnect {scope.label} to change its settings.
+        {t("settings.scope.reconnectEnvironment", { environment: scope.label })}
       </p>
     );
   }

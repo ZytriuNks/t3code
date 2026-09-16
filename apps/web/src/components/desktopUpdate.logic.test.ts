@@ -3,6 +3,7 @@ import type { DesktopUpdateActionResult, DesktopUpdateState } from "@t3tools/con
 
 import {
   canCheckForUpdate,
+  type DesktopUpdateCopy,
   getArm64IntelBuildWarningDescription,
   getDesktopUpdateActionError,
   getDesktopUpdateButtonTooltip,
@@ -345,5 +346,117 @@ describe("getDesktopUpdateButtonTooltip", () => {
     expect(getDesktopUpdateButtonTooltip({ ...baseState, status: "up-to-date" })).toBe(
       "Up to date",
     );
+  });
+});
+
+const zhCopy: DesktopUpdateCopy = {
+  availableTooltip: (version) => (version ? `更新 ${version} 已可下载` : "有可下载的更新"),
+  downloadingTooltip: (percent) =>
+    `正在下载更新${percent === null ? "" : ` (${Math.floor(percent)}%)`}`,
+  downloadedTooltip: (version) => `更新 ${version ?? "ready"} 已下载。点击重启并安装。`,
+  downloadFailedTooltip: (version) => `下载 ${version} 失败。点击重试。`,
+  installFailedTooltip: (version) => `安装 ${version} 失败。点击重试。`,
+  failedTooltip: "更新失败",
+  upToDateTooltip: "已是最新",
+  installConfirmation: (version) =>
+    version
+      ? `安装更新 ${version} 并重启 T3 Code?\n\n正在运行的任务将被中断。请确认已做好准备后再继续。`
+      : "安装更新并重启 T3 Code?\n\n正在运行的任务将被中断。请确认已做好准备后再继续。",
+};
+
+const rawUpdaterMessage = "network unavailable";
+
+describe("desktop update copy", () => {
+  it("keeps the tooltips and confirmation verbatim in English by default", () => {
+    expect(
+      getDesktopUpdateButtonTooltip({
+        ...baseState,
+        status: "available",
+        availableVersion: "1.1.0",
+      }),
+    ).toBe("Update 1.1.0 ready to download");
+    expect(
+      getDesktopUpdateButtonTooltip({
+        ...baseState,
+        status: "downloading",
+        availableVersion: "1.1.0",
+        downloadPercent: 42.5,
+      }),
+    ).toBe("Downloading update (42%)");
+    expect(
+      getDesktopUpdateButtonTooltip({
+        ...baseState,
+        status: "downloaded",
+        downloadedVersion: "1.1.0",
+        availableVersion: "1.1.0",
+      }),
+    ).toBe("Update 1.1.0 downloaded. Click to restart and install.");
+    expect(getDesktopUpdateButtonTooltip({ ...baseState, status: "error", message: null })).toBe(
+      "Update failed",
+    );
+    expect(
+      getDesktopUpdateInstallConfirmationMessage({
+        availableVersion: null,
+        downloadedVersion: null,
+      }),
+    ).toBe(
+      "Install update and restart T3 Code?\n\nAny running tasks will be interrupted. Make sure you're ready before continuing.",
+    );
+  });
+
+  it("formats the tooltips and confirmation with the supplied copy", () => {
+    expect(
+      getDesktopUpdateButtonTooltip(
+        { ...baseState, status: "available", availableVersion: "1.1.0" },
+        zhCopy,
+      ),
+    ).toBe("更新 1.1.0 已可下载");
+    expect(
+      getDesktopUpdateButtonTooltip(
+        { ...baseState, status: "downloading", downloadPercent: 42.5 },
+        zhCopy,
+      ),
+    ).toBe("正在下载更新 (42%)");
+    expect(
+      getDesktopUpdateButtonTooltip(
+        {
+          ...baseState,
+          status: "downloaded",
+          downloadedVersion: "1.1.1",
+          availableVersion: "1.1.0",
+        },
+        zhCopy,
+      ),
+    ).toBe("更新 1.1.1 已下载。点击重启并安装。");
+    expect(
+      getDesktopUpdateButtonTooltip(
+        { ...baseState, status: "error", errorContext: "download", availableVersion: "1.1.0" },
+        zhCopy,
+      ),
+    ).toBe("下载 1.1.0 失败。点击重试。");
+    expect(
+      getDesktopUpdateButtonTooltip(
+        { ...baseState, status: "error", errorContext: "install", downloadedVersion: "1.1.0" },
+        zhCopy,
+      ),
+    ).toBe("安装 1.1.0 失败。点击重试。");
+    expect(getDesktopUpdateButtonTooltip({ ...baseState, status: "idle" }, zhCopy)).toBe(
+      "已是最新",
+    );
+    expect(
+      getDesktopUpdateInstallConfirmationMessage(
+        { availableVersion: "1.1.0", downloadedVersion: "1.1.1" },
+        zhCopy,
+      ),
+    ).toBe("安装更新 1.1.1 并重启 T3 Code?\n\n正在运行的任务将被中断。请确认已做好准备后再继续。");
+  });
+
+  it("keeps the raw updater message ahead of the localized fallback", () => {
+    expect(
+      getDesktopUpdateButtonTooltip(
+        { ...baseState, status: "error", errorContext: "check", message: rawUpdaterMessage },
+        zhCopy,
+      ),
+    ).toBe(rawUpdaterMessage);
   });
 });

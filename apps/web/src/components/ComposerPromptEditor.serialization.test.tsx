@@ -1,10 +1,11 @@
 import { useLexicalComposerContext } from "@lexical/react/LexicalComposerContext";
 import { $copyNode, $getRoot, $isElementNode, PASTE_COMMAND, type LexicalEditor } from "lexical";
-import { act, createRef } from "react";
+import { act, createRef, type ReactNode } from "react";
 import { create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { collapseExpandedComposerCursor } from "../composer-logic";
+import { ContextChipPopover } from "./contextChipParts";
 import { ComposerPromptEditor, type ComposerPromptEditorHandle } from "./ComposerPromptEditor";
 
 vi.mock("./chat/FileTagChip", () => ({
@@ -15,6 +16,15 @@ vi.mock("./chat/ComposerPendingTerminalContexts", () => ({
   ComposerPendingTerminalContextChip: () => null,
 }));
 vi.mock("./chat/AssistantCitationChip", () => ({ AssistantCitationChip: () => null }));
+
+// The chip's popover is a portalled base-ui primitive; the trigger is what
+// carries the spoken name under test.
+vi.mock("./ui/popover", () => ({
+  Popover: ({ children }: { readonly children?: ReactNode }) => <div>{children}</div>,
+  PopoverPopup: ({ children }: { readonly children?: ReactNode }) => <div>{children}</div>,
+  PopoverTitle: ({ children }: { readonly children?: ReactNode }) => <div>{children}</div>,
+  PopoverTrigger: ({ render }: { readonly render?: ReactNode }) => <>{render}</>,
+}));
 
 let lexicalEditor: LexicalEditor;
 // Keep the real composer, registered nodes, updates, and snapshot API. Only the
@@ -179,5 +189,45 @@ describe("composer mention serialization", () => {
     expect(event.defaultPrevented).toBe(true);
     expect(editorRef.current?.readSnapshot().value).toBe("[README.md](README.md) ");
     expect(lexicalEditor.getEditorState().read(() => $firstMention().isInline())).toBe(true);
+  });
+});
+
+/** The chip's spoken name comes from the trigger, which owns the details hint. */
+function chipAccessibleName(): string {
+  const trigger = renderer!.root.find(
+    (node) => typeof node.type === "string" && typeof node.props["aria-label"] === "string",
+  );
+  return trigger.props["aria-label"] as string;
+}
+
+describe("composer chip accessible name", () => {
+  it("announces the details popover in the caller's language", async () => {
+    const chip = <span>Frontend Design</span>;
+
+    await act(() => {
+      renderer = create(
+        <ContextChipPopover accessibleLabel="Skill Frontend Design" chip={chip} triggerClassName="">
+          details
+        </ContextChipPopover>,
+        { createNodeMock: () => ({}) },
+      );
+    });
+
+    expect(chipAccessibleName()).toBe("Skill Frontend Design. Show details");
+
+    await act(() => {
+      renderer!.update(
+        <ContextChipPopover
+          accessibleLabel="技能 Frontend Design"
+          accessibleLabelSuffix="。显示详情"
+          chip={chip}
+          triggerClassName=""
+        >
+          details
+        </ContextChipPopover>,
+      );
+    });
+
+    expect(chipAccessibleName()).toBe("技能 Frontend Design。显示详情");
   });
 });

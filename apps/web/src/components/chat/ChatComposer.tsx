@@ -15,6 +15,7 @@ import {
 } from "../../questionAttachments";
 import type {
   ApprovalRequestId,
+  KeybindingCommand,
   AssistantCitation,
   ChatFileAttachment,
   EnvironmentId,
@@ -62,7 +63,7 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
-import { createPortal } from "react-dom";
+import { createPortal, flushSync } from "react-dom";
 import {
   clampCollapsedComposerCursor,
   type ComposerSubmissionIntent,
@@ -75,6 +76,7 @@ import {
   replaceTextRange,
 } from "../../composer-logic";
 import { DISCONNECTED_COMPOSER_PLACEHOLDER } from "../../composerPlaceholder";
+import { useI18n } from "../../i18n/I18nProvider";
 import {
   deriveComposerSendState,
   getAntigravitySendBlockReason,
@@ -1103,6 +1105,7 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
           <TooltipTrigger
             render={
               <ComposerSelectControl
+                data-composer-shortcut="composer.mode"
                 size={size}
                 className={size === "xs" ? undefined : "font-medium"}
                 aria-label="Runtime mode"
@@ -1164,7 +1167,6 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
   isEnvironmentUnavailable: boolean;
   hasSendableContent: boolean;
   preserveComposerFocusOnPointerDown?: boolean;
-  showSendWhileRunning?: boolean;
   onPreviousPendingQuestion: () => void;
   onInterrupt: () => void;
   onImplementPlanInNewThread: () => void;
@@ -1198,7 +1200,6 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
         isPreparingWorktree={props.isPreparingWorktree}
         hasSendableContent={props.hasSendableContent}
         preserveComposerFocusOnPointerDown={props.preserveComposerFocusOnPointerDown ?? false}
-        showSendWhileRunning={props.showSendWhileRunning ?? false}
         onPreviousPendingQuestion={props.onPreviousPendingQuestion}
         onInterrupt={props.onInterrupt}
         onImplementPlanInNewThread={props.onImplementPlanInNewThread}
@@ -1231,6 +1232,7 @@ export interface ChatComposerHandle {
   ) => boolean;
   openModelPicker: () => void;
   toggleModelPicker: () => void;
+  openControl: (command: KeybindingCommand) => void;
   isModelPickerOpen: () => boolean;
   compactContext: () => void;
   readSnapshot: () => {
@@ -1430,6 +1432,7 @@ export interface ChatComposerProps {
 // --------------------------------------------------------------------------
 
 export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps) {
+  const { t } = useI18n();
   const {
     composerDraftTarget,
     environmentId,
@@ -5743,6 +5746,28 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           openModelPicker();
         }
       },
+      openControl: (command) => {
+        if (composerBlurFrameRef.current !== null) {
+          window.cancelAnimationFrame(composerBlurFrameRef.current);
+          composerBlurFrameRef.current = null;
+        }
+        flushSync(() => {
+          setIsComposerScrollCollapsed(false);
+          setIsComposerFocused(true);
+        });
+        const shell = composerFormRef.current?.closest('[data-slot="composer-shell"]');
+        const trigger = Array.from(
+          shell?.querySelectorAll<HTMLButtonElement>(
+            `button[data-composer-shortcut~="${command}"]:not(:disabled)`,
+          ) ?? [],
+        ).find(
+          (element) =>
+            !element.closest("[inert]") && element.checkVisibility({ visibilityProperty: true }),
+        );
+        if (!trigger) return;
+        trigger.focus({ preventScroll: true });
+        trigger.click();
+      },
       compactContext: compactThreadContext,
       isModelPickerOpen: () => isComposerModelPickerOpen,
       readSnapshot: () => {
@@ -6672,12 +6697,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                           : showPlanFollowUpPrompt && activeProposedPlan
                             ? "Add feedback to refine the plan, or leave this blank to implement it"
                             : projectSelectionRequired
-                              ? "Choose a project above to start a thread"
+                              ? t("composer.placeholder.chooseProject")
                               : showProviderUnavailable
-                                ? "Enable a provider in Settings to send a message"
+                                ? t("composer.placeholder.enableProvider")
                                 : phase === "disconnected"
                                   ? DISCONNECTED_COMPOSER_PLACEHOLDER
-                                  : "Ask anything, @tag files/folders, $use skills, or / for commands"
+                                  : t("composer.placeholder.default")
                     }
                     disabled={
                       isConnecting ||
@@ -6820,7 +6845,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     isPreparingWorktree={isPreparingWorktree}
                     hasSendableContent={composerSendState.hasSendableContent}
                     preserveComposerFocusOnPointerDown={isMobileViewport || isComposerResting}
-                    showSendWhileRunning={isMobileViewport}
                     onPreviousPendingQuestion={onPreviousActivePendingUserInputQuestion}
                     onInterrupt={handleInterruptPrimaryAction}
                     onImplementPlanInNewThread={handleImplementPlanInNewThreadPrimaryAction}

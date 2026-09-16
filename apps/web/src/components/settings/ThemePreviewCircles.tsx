@@ -4,6 +4,8 @@ import {
   STANDARD_THEME_PREVIEW_COLORS as SHARED_STANDARD_THEME_PREVIEW_COLORS,
   THEME_PREVIEW_RENDER_SPECS,
 } from "@t3tools/shared/themePreview";
+import { useI18n } from "../../i18n/I18nProvider";
+import type { MessageKey } from "../../i18n/messages";
 import { cn } from "../../lib/utils";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import {
@@ -34,6 +36,17 @@ export type ThemeCardDefinition = {
 };
 export type ThemeMode = ThemeAppearance | "system";
 export type ThemeCardPreviewColors = ThemeCardPreview["colors"];
+
+/** The dictionary key naming an appearance mode, shared by the library tiles. */
+const THEME_MODE_MESSAGE_KEYS: Record<ThemeMode, MessageKey> = {
+  system: "settings.appearance.theme.mode.system",
+  light: "settings.appearance.theme.mode.light",
+  dark: "settings.appearance.theme.mode.dark",
+};
+
+export function themeModeMessageKey(mode: ThemeMode): MessageKey {
+  return THEME_MODE_MESSAGE_KEYS[mode];
+}
 
 const STANDARD_THEME_PREVIEW_COLORS: Record<
   ThemeAppearance,
@@ -169,6 +182,7 @@ export function ThemePreviewCircles({
   onSelectMode: (mode: ThemeMode) => void;
   previews: ThemeCardDefinition["previews"];
 }) {
+  const { t } = useI18n();
   return (
     <div className="flex min-h-16 items-center justify-center gap-2.5 px-3 pt-3">
       {previews.map((preview) => {
@@ -179,7 +193,11 @@ export function ThemePreviewCircles({
             <TooltipTrigger
               render={
                 <button
-                  aria-label={`Use ${label} ${mode} mode`}
+                  aria-label={
+                    mode === "light"
+                      ? t("settings.appearance.theme.usePreviewLight", { name: label })
+                      : t("settings.appearance.theme.usePreviewDark", { name: label })
+                  }
                   aria-pressed={isPicked}
                   className={cn(
                     "relative flex size-[68px] shrink-0 transform-gpu cursor-pointer items-center justify-center rounded-full p-1 outline-none transition-transform hover:scale-105 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-card",
@@ -215,7 +233,9 @@ export function ThemePreviewCircles({
               }
             />
             <TooltipPopup>
-              {mode === "light" ? "Use for light mode only" : "Use for dark mode only"}
+              {mode === "light"
+                ? t("settings.appearance.theme.useForLightOnly")
+                : t("settings.appearance.theme.useForDarkOnly")}
             </TooltipPopup>
           </Tooltip>
         );

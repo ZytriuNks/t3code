@@ -30,7 +30,9 @@ import {
 } from "./scopedSettings";
 import { useClearProjectOverrides, useClearScopedSettings } from "./useScopedSettings";
 import {
+  SETTING_INHERITANCE_COPY_DEFAULTS,
   SettingInheritance,
+  type SettingInheritanceCopy,
   type SettingInheritanceState,
   type SettingOverridingProject,
 } from "./SettingInheritance";
@@ -144,13 +146,20 @@ export const SETTINGS_PICKER_TRIGGER_CLASSNAME =
   "h-8 min-h-8 min-w-0 max-w-none shrink-0 text-foreground/90 hover:text-foreground sm:h-7 sm:min-h-7";
 
 /** Info affordance explaining how a setting interacts with the shared background policy. */
-export function PolicyTooltip({ children }: { readonly children: string }) {
+export function PolicyTooltip({
+  children,
+  detailsLabel = "Background policy details",
+}: {
+  readonly children: string;
+  /** Accessible name for the icon button; pages that translate themselves pass their own. */
+  readonly detailsLabel?: string;
+}) {
   return (
     <Tooltip>
       <TooltipTrigger
         delay={200}
         render={
-          <Button size="icon-micro" variant="ghost-muted" aria-label="Background policy details">
+          <Button size="icon-micro" variant="ghost-muted" aria-label={detailsLabel}>
             <InfoIcon className="size-3.5" />
           </Button>
         }
@@ -265,6 +274,60 @@ export function SettingsUnavailableGroup({
  * - Inline affordances (reset arrows, info tooltips, table-cell buttons): `icon-micro`.
  * Dialog footers keep the app-wide default button size.
  */
+export interface SettingsRowCopy extends SettingInheritanceCopy {
+  readonly resetToInheritedTooltip: string;
+  readonly resetToDefaultTooltip: string;
+  readonly resetToInheritedLabel: (label: string) => string;
+  readonly resetToDefaultLabel: (label: string) => string;
+  /** Names a row whose title is a node instead of a string. */
+  readonly overrideFallbackLabel: string;
+  readonly reconnectSelectedEnvironment: string;
+  readonly selectEnvironment: string;
+  readonly mixedAcrossEnvironments: string;
+  readonly overriddenForProject: string;
+  readonly inheritedFrom: (source: string) => string;
+  readonly setOnEnvironment: string;
+  readonly builtInDefault: string;
+}
+
+/**
+ * Rows own the shape of their copy, pages own the words. Pages that translate
+ * themselves provide a copy through the provider; every other page keeps the
+ * defaults below, so their rows render exactly as before.
+ */
+export const SETTINGS_ROW_COPY_DEFAULTS: SettingsRowCopy = {
+  ...SETTING_INHERITANCE_COPY_DEFAULTS,
+  resetToInheritedTooltip: "Reset to inherited value",
+  resetToDefaultTooltip: "Reset to default",
+  resetToInheritedLabel: (label) => `Reset ${label} to inherited value`,
+  resetToDefaultLabel: (label) => `Reset ${label} to default`,
+  overrideFallbackLabel: "override",
+  reconnectSelectedEnvironment: "Reconnect the selected environment to change this setting.",
+  selectEnvironment: "Environment-wide setting. Select an environment to change it.",
+  mixedAcrossEnvironments: "Mixed across selected environments",
+  overriddenForProject: "Overridden for this project",
+  inheritedFrom: (source) => `Inherited from ${source}`,
+  setOnEnvironment: "Set on the environment",
+  builtInDefault: "Built-in default",
+};
+
+const SettingsRowCopyContext = createContext<SettingsRowCopy | null>(null);
+
+/** Provides localized copy to the rows inside `children`; renders no DOM of its own. */
+export function SettingsRowCopyProvider({
+  copy,
+  children,
+}: {
+  copy: SettingsRowCopy;
+  children: ReactNode;
+}) {
+  return <SettingsRowCopyContext value={copy}>{children}</SettingsRowCopyContext>;
+}
+
+export function useSettingsRowCopy(): SettingsRowCopy {
+  return useContext(SettingsRowCopyContext) ?? SETTINGS_ROW_COPY_DEFAULTS;
+}
+
 export function SettingsRow({
   title,
   description,
@@ -296,6 +359,7 @@ export function SettingsRow({
   const context = useOptionalSettingsScope();
   const clearOverrides = useClearScopedSettings();
   const clearProjectOverrides = useClearProjectOverrides();
+  const copy = useSettingsRowCopy();
   const isProjectScope =
     context !== null && (context.scope.kind === "project" || context.scope.kind === "checkout");
   const scopedKeys = settingKeys.filter(isProjectScopedSettingKey);
@@ -353,8 +417,8 @@ export function SettingsRow({
   const renderedReset = unavailable ? null : isProjectScope && scopedKeys.length > 0 ? (
     source === "project" || source === "mixed" ? (
       <SettingResetButton
-        label={typeof title === "string" ? title : "override"}
-        tooltip="Reset to inherited value"
+        label={typeof title === "string" ? title : copy.overrideFallbackLabel}
+        labelKind="inherited"
         onClick={() => (onResetOverride ? onResetOverride() : clearOverrides(scopedKeys))}
       />
     ) : null
@@ -387,12 +451,10 @@ export function SettingsRow({
   const renderedControl =
     unavailable && control
       ? inertControl(
-          context
-            ? "Reconnect the selected environment to change this setting."
-            : PRIMARY_SETTINGS_UNAVAILABLE_MESSAGE,
+          context ? copy.reconnectSelectedEnvironment : PRIMARY_SETTINGS_UNAVAILABLE_MESSAGE,
         )
       : environmentWide && control
-        ? inertControl("Environment-wide setting. Select an environment to change it.")
+        ? inertControl(copy.selectEnvironment)
         : control;
   // Server rows get an indicator beside the title that opens the resolution
   // chain per target at every scope; client rows keep a plain status only.
@@ -408,14 +470,14 @@ export function SettingsRow({
       }),
     );
   const inheritance: { state: SettingInheritanceState; summary: string } = mixed
-    ? { state: "mixed", summary: "Mixed across selected environments" }
+    ? { state: "mixed", summary: copy.mixedAcrossEnvironments }
     : source === "project"
-      ? { state: "overridden", summary: "Overridden for this project" }
+      ? { state: "overridden", summary: copy.overriddenForProject }
       : source === "environment" && scopedKeys.length > 0
-        ? { state: "inherited", summary: `Inherited from ${inheritedFrom}` }
+        ? { state: "inherited", summary: copy.inheritedFrom(inheritedFrom) }
         : customized
-          ? { state: "environment", summary: "Set on the environment" }
-          : { state: "default", summary: "Built-in default" };
+          ? { state: "environment", summary: copy.setOnEnvironment }
+          : { state: "default", summary: copy.builtInDefault };
   const renderedInheritance =
     context && serverScoped && settingKeys.length > 0 ? (
       <SettingInheritance
@@ -426,6 +488,7 @@ export function SettingsRow({
         keys={settingKeys}
         overridingProjects={overridingProjects}
         onClearOverrides={(entries) => clearProjectOverrides(entries, scopedKeys)}
+        copy={copy}
       />
     ) : null;
   const renderedStatus = status;
@@ -483,15 +546,19 @@ export function SettingsRow({
 
 export function SettingResetButton({
   label,
-  tooltip = "Reset to default",
+  labelKind = "default",
+  tooltip,
   disabled = false,
   onClick,
 }: {
   label: string;
+  /** `inherited` clears a project override; `default` restores the built-in value. */
+  labelKind?: "default" | "inherited";
   tooltip?: string;
   disabled?: boolean;
   onClick: () => void;
 }) {
+  const copy = useSettingsRowCopy();
   return (
     <Tooltip>
       <TooltipTrigger
@@ -499,7 +566,11 @@ export function SettingResetButton({
           <Button
             size="icon-micro"
             variant="ghost-muted"
-            aria-label={`Reset ${label} to default`}
+            aria-label={
+              labelKind === "inherited"
+                ? copy.resetToInheritedLabel(label)
+                : copy.resetToDefaultLabel(label)
+            }
             disabled={disabled}
             onClick={(event) => {
               event.stopPropagation();
@@ -510,7 +581,10 @@ export function SettingResetButton({
           </Button>
         }
       />
-      <TooltipPopup side="top">{tooltip}</TooltipPopup>
+      <TooltipPopup side="top">
+        {tooltip ??
+          (labelKind === "inherited" ? copy.resetToInheritedTooltip : copy.resetToDefaultTooltip)}
+      </TooltipPopup>
     </Tooltip>
   );
 }

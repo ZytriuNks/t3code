@@ -131,6 +131,30 @@ describe("connection presentation", () => {
     expect(connectionStatusTitle(connection)).toBe("Failed to connect. Reconnecting...");
   });
 
+  it("accepts localized copy without translating the remote error detail", () => {
+    const connection = {
+      phase: "reconnecting",
+      error: "Relay request timed out.",
+      traceId: "trace-retry",
+    } as const;
+    const copy = {
+      available: "可用",
+      offline: "离线",
+      connecting: "正在连接…",
+      reconnecting: "正在重新连接…",
+      reconnectingWithReason: (reason: string) => `连接失败，正在重新连接… 原因：${reason}`,
+      connected: "已连接",
+      connectionFailed: "连接失败",
+      connectionFailedWithReason: (reason: string) => `连接失败。原因：${reason}`,
+      reconnectingTitle: "连接失败，正在重新连接…",
+    };
+
+    expect(connectionStatusText(connection, copy)).toBe(
+      "连接失败，正在重新连接… 原因：Relay request timed out.",
+    );
+    expect(connectionStatusTitle(connection, copy)).toBe("连接失败，正在重新连接…");
+  });
+
   it("presents the supervisor's offline state without consulting shell state", () => {
     expect(
       presentEnvironmentConnection(

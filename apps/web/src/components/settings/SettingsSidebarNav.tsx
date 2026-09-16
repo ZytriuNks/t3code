@@ -42,12 +42,15 @@ import { scrollToSettingsTarget } from "./settingsLayout";
 import {
   searchSettings,
   isSettingsOverviewVisible,
+  settingsSearchItemTitle,
   SETTINGS_SECTION_LABELS,
+  SETTINGS_SECTION_MESSAGE_KEYS,
   type SettingsPath,
   type SettingsSearchItem,
 } from "./settingsSearch";
 import { useAvailableSettingsSearchItems } from "./useAvailableSettingsSearchItems";
 import { validateSettingsScopeSearch } from "./settingsScope";
+import { useI18n } from "../../i18n/I18nProvider";
 
 const SnapShotIcon = createLucideIcon("snap-shot", [
   [
@@ -103,6 +106,7 @@ function SettingsSectionIcon({ to }: { to: SettingsPath }) {
 }
 
 export function SettingsSidebarNav({ pathname }: { pathname: string }) {
+  const { t } = useI18n();
   const navigate = useNavigate();
   const currentHash = useLocation({ select: (location) => location.hash });
   const currentSearch = useLocation({ select: (location) => location.search });
@@ -115,7 +119,10 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
   const [query, setQuery] = useState("");
   const [activeResultIndex, setActiveResultIndex] = useState(0);
   const searchableItems = useAvailableSettingsSearchItems();
-  const results = useMemo(() => searchSettings(query, searchableItems), [query, searchableItems]);
+  const results = useMemo(
+    () => searchSettings(query, searchableItems, t),
+    [query, searchableItems, t],
+  );
   const isSearching = query.trim().length > 0;
   const hasResults = results.length > 0;
 
@@ -246,8 +253,8 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
                 setActiveResultIndex(0);
               }}
               onKeyDown={handleSearchKeyDown}
-              placeholder="Search"
-              aria-label="Search settings"
+              placeholder={t("settings.search.placeholder")}
+              aria-label={t("settings.search.label")}
               role="combobox"
               aria-autocomplete="list"
               aria-expanded={isSearching && hasResults}
@@ -265,7 +272,7 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
                 size="icon-micro"
                 variant="ghost"
                 className="shrink-0 text-sidebar-muted-foreground hover:bg-sidebar-control-surface hover:text-sidebar-foreground"
-                aria-label="Clear settings search"
+                aria-label={t("settings.search.clear")}
                 onClick={() => {
                   clearSearch();
                   searchInputRef.current?.focus();
@@ -282,7 +289,7 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
               role="status"
               className="px-2 py-6 text-center text-xs text-sidebar-muted-foreground"
             >
-              No settings found
+              {t("settings.search.empty")}
             </p>
           ) : null}
           {isSearching ? (
@@ -290,7 +297,7 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
               className="ps-px"
               id={hasResults ? "settings-search-results" : undefined}
               role={hasResults ? "listbox" : undefined}
-              aria-label={hasResults ? "Settings search results" : undefined}
+              aria-label={hasResults ? t("settings.search.results") : undefined}
             >
               {results.map((item, index) => (
                 <SidebarMenuItem key={item.id} role="presentation">
@@ -308,10 +315,10 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
                     <SettingsSectionIcon to={item.to} />
                     <span className="min-w-0 flex-1">
                       <span className="block truncate text-sm font-medium text-sidebar-foreground">
-                        {item.title}
+                        {settingsSearchItemTitle(item, t)}
                       </span>
                       <span className="block truncate text-[11px] text-sidebar-muted-foreground/75">
-                        {SETTINGS_SECTION_LABELS[item.to]}
+                        {t(SETTINGS_SECTION_MESSAGE_KEYS[item.to])}
                       </span>
                     </span>
                   </SidebarMenuButton>
@@ -333,7 +340,7 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
                       onClick={() => handleSectionClick(item.to)}
                     >
                       <Icon />
-                      <span className="truncate">{item.label}</span>
+                      <span className="truncate">{t(SETTINGS_SECTION_MESSAGE_KEYS[item.to])}</span>
                     </SidebarMenuButton>
                   </SidebarMenuItem>
                 );

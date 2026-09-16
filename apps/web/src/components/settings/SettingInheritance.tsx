@@ -9,7 +9,6 @@ import * as Equal from "effect/Equal";
 import { cn } from "../../lib/utils";
 import type { EnvironmentPresentation } from "../../state/environments";
 import { EnvironmentMachineIcon } from "../EnvironmentMachineIcon";
-import { resolveEnvModeLabel } from "../BranchToolbar.logic";
 import { PULL_REQUEST_MERGE_METHOD_LABELS } from "../pullRequest/pullRequestDetail.logic";
 import { Button } from "../ui/button";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
@@ -25,6 +24,67 @@ interface InheritanceLayer {
   readonly set: boolean;
 }
 
+/**
+ * Words and value formatters for the resolution chain. Pages that translate
+ * themselves provide a copy; every other page keeps the defaults below, so its
+ * popover renders exactly as it did before.
+ */
+export interface SettingInheritanceCopy {
+  /**
+   * Labels a stored string setting value before the chain renders it. Pages
+   * that translate an enum setting provide a mapping; the identity default
+   * keeps the stored value, so single-language pages render as before.
+   */
+  readonly settingValueLabel?: (key: keyof ServerSettings, value: string) => string;
+  readonly layerProject: string;
+  readonly layerEnvironment: string;
+  readonly layerDefault: string;
+  readonly inherits: string;
+  readonly on: string;
+  readonly off: string;
+  readonly dayCount: (count: number) => string;
+  readonly lastSelected: string;
+  readonly never: string;
+  readonly automatic: string;
+  readonly textGenerationModel: string;
+  readonly notSet: string;
+  readonly empty: string;
+  readonly itemCount: (count: number) => string;
+  readonly custom: string;
+  readonly envModeLocal: string;
+  readonly envModeWorktree: string;
+  readonly overriddenBy: string;
+  readonly resetOverride: (count: number) => string;
+  readonly projectOverrideSummary: (summary: string, count: number) => string;
+  readonly showSourceLabel: (summary: string) => string;
+}
+
+export const SETTING_INHERITANCE_COPY_DEFAULTS: SettingInheritanceCopy = {
+  settingValueLabel: (_key, value) => value,
+  layerProject: "Project",
+  layerEnvironment: "Environment",
+  layerDefault: "Default",
+  inherits: "Inherits",
+  on: "On",
+  off: "Off",
+  dayCount: (count) => `${count} ${count === 1 ? "day" : "days"}`,
+  lastSelected: "Last selected",
+  never: "Never",
+  automatic: "Automatic",
+  textGenerationModel: "Text generation model",
+  notSet: "Not set",
+  empty: "Empty",
+  itemCount: (count) => `${count} ${count === 1 ? "item" : "items"}`,
+  custom: "Custom",
+  envModeLocal: "Current checkout",
+  envModeWorktree: "New worktree",
+  overriddenBy: "Overridden by",
+  resetOverride: (count) => (count === 1 ? "Reset it" : "Reset all"),
+  projectOverrideSummary: (summary, count) =>
+    `${summary} · ${count} project ${count === 1 ? "override" : "overrides"}`,
+  showSourceLabel: (summary) => `${summary}. Show where this value comes from`,
+};
+
 const WRITING_STYLE_LABELS: Record<string, string> = {
   repo_conventions: "Repository conventions",
   conventional_commits: "Conventional Commits",
@@ -32,43 +92,46 @@ const WRITING_STYLE_LABELS: Record<string, string> = {
 };
 
 /** Human labels for the values the chain can show; falls back to a type summary. */
-function formatValue(key: keyof ServerSettings, value: unknown): string {
+function formatValue(
+  key: keyof ServerSettings,
+  value: unknown,
+  copy: SettingInheritanceCopy,
+): string {
   if (value === null || value === undefined) {
     return key === "pullRequestMergeMethod"
-      ? "Last selected"
+      ? copy.lastSelected
       : key === "sidebarAutoSettleAfterDays"
-        ? "Never"
+        ? copy.never
         : key === "defaultModelSelection"
-          ? "Automatic"
+          ? copy.automatic
           : key === "sourceControlWriterModelSelection"
-            ? "Text generation model"
-            : "Not set";
+            ? copy.textGenerationModel
+            : copy.notSet;
   }
-  if (typeof value === "boolean") return value ? "On" : "Off";
+  if (typeof value === "boolean") return value ? copy.on : copy.off;
   if (typeof value === "number") {
-    return key === "sidebarAutoSettleAfterDays"
-      ? `${value} ${value === 1 ? "day" : "days"}`
-      : String(value);
+    return key === "sidebarAutoSettleAfterDays" ? copy.dayCount(value) : String(value);
   }
   if (typeof value === "string") {
     if (key === "defaultThreadEnvMode" && (value === "local" || value === "worktree")) {
-      return resolveEnvModeLabel(value);
+      return value === "worktree" ? copy.envModeWorktree : copy.envModeLocal;
     }
     if (key === "pullRequestMergeMethod" && value in PULL_REQUEST_MERGE_METHOD_LABELS) {
       return PULL_REQUEST_MERGE_METHOD_LABELS[
         value as keyof typeof PULL_REQUEST_MERGE_METHOD_LABELS
       ];
     }
-    return value === "" ? "Empty" : value;
+    if (value === "") return copy.empty;
+    return copy.settingValueLabel?.(key, value) ?? value;
   }
-  if (Array.isArray(value)) return `${value.length} ${value.length === 1 ? "item" : "items"}`;
+  if (Array.isArray(value)) return copy.itemCount(value.length);
   if (typeof value === "object") {
     if ("model" in value && typeof value.model === "string") return value.model;
     if ("mode" in value && typeof value.mode === "string") {
       return WRITING_STYLE_LABELS[value.mode] ?? value.mode;
     }
   }
-  return "Custom";
+  return copy.custom;
 }
 
 /**
@@ -80,6 +143,7 @@ export function settingInheritanceLayers(
   target: ScopedSettingsTarget,
   environmentSettings: ServerSettings,
   key: keyof ServerSettings,
+  copy: SettingInheritanceCopy = SETTING_INHERITANCE_COPY_DEFAULTS,
 ): readonly InheritanceLayer[] {
   const builtIn = DEFAULT_SERVER_SETTINGS[key];
   const environmentValue = environmentSettings[key];
@@ -89,8 +153,9 @@ export function settingInheritanceLayers(
   if (target.projectId !== null && isProjectScopedSettingKey(key)) {
     layers.push({
       key: "project",
-      label: "Project",
-      value: projectSource === "project" ? formatValue(key, target.settings[key]) : "Inherits",
+      label: copy.layerProject,
+      value:
+        projectSource === "project" ? formatValue(key, target.settings[key], copy) : copy.inherits,
       effective: projectSource === "project",
       set: projectSource === "project",
     });
@@ -98,14 +163,14 @@ export function settingInheritanceLayers(
   layers.push({
     key: "environment",
     label: target.label,
-    value: environmentSet ? formatValue(key, environmentValue) : "Inherits",
+    value: environmentSet ? formatValue(key, environmentValue, copy) : copy.inherits,
     effective: projectSource !== "project" && environmentSet,
     set: environmentSet,
   });
   layers.push({
     key: "built-in",
-    label: "Default",
-    value: formatValue(key, builtIn),
+    label: copy.layerDefault,
+    value: formatValue(key, builtIn, copy),
     effective: projectSource !== "project" && !environmentSet,
     set: true,
   });
@@ -138,6 +203,7 @@ export function SettingInheritance({
   keys,
   overridingProjects = [],
   onClearOverrides,
+  copy = SETTING_INHERITANCE_COPY_DEFAULTS,
 }: {
   state: SettingInheritanceState;
   summary: string;
@@ -147,12 +213,14 @@ export function SettingInheritance({
   /** At environment scope: projects whose own value hides the environment's. */
   overridingProjects?: readonly SettingOverridingProject[];
   onClearOverrides?: (entries: readonly ProjectOverrideEntry[]) => void;
+  /** Localized words for the chain; defaults keep the English copy. */
+  copy?: SettingInheritanceCopy;
 }) {
   const key = keys[0];
   if (!key || targets.length === 0) return null;
   const overrideSummary =
     overridingProjects.length > 0
-      ? `${summary} · ${overridingProjects.length} project ${overridingProjects.length === 1 ? "override" : "overrides"}`
+      ? copy.projectOverrideSummary(summary, overridingProjects.length)
       : summary;
   const chains = targets.flatMap((target) => {
     const environment = environments.find(
@@ -164,7 +232,7 @@ export function SettingInheritance({
         target,
         environment: { ...environment, serverConfig: environment.serverConfig },
         machine: resolveEnvironmentMachineKind(environment.serverConfig),
-        layers: settingInheritanceLayers(target, environment.serverConfig.settings, key),
+        layers: settingInheritanceLayers(target, environment.serverConfig.settings, key, copy),
       },
     ];
   });
@@ -178,7 +246,7 @@ export function SettingInheritance({
                 <Button
                   size="icon-micro"
                   variant="ghost-muted"
-                  aria-label={`${overrideSummary}. Show where this value comes from`}
+                  aria-label={copy.showSourceLabel(overrideSummary)}
                   className={cn(
                     "[--control-icon-color:currentColor]",
                     state === "overridden"
@@ -228,7 +296,7 @@ export function SettingInheritance({
                         layer.effective ? "font-medium text-foreground" : "text-muted-foreground",
                       )}
                     >
-                      {layer.key === "environment" ? "Environment" : layer.label}
+                      {layer.key === "environment" ? copy.layerEnvironment : layer.label}
                     </span>
                     <span
                       className={cn(
@@ -259,14 +327,14 @@ export function SettingInheritance({
                 return (
                   <div className="mt-2 border-t border-border/60 pt-2">
                     <div className="flex items-center justify-between gap-3 px-2 text-xs text-muted-foreground">
-                      <span>Overridden by</span>
+                      <span>{copy.overriddenBy}</span>
                       {onClearOverrides ? (
                         <button
                           type="button"
                           className="cursor-pointer font-medium text-foreground underline-offset-2 hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
                           onClick={() => onClearOverrides(overriding)}
                         >
-                          Reset {overriding.length === 1 ? "it" : "all"}
+                          {copy.resetOverride(overriding.length)}
                         </button>
                       ) : null}
                     </div>
@@ -285,7 +353,7 @@ export function SettingInheritance({
                           </button>
                           <span className="max-w-32 truncate text-muted-foreground tabular-nums">
                             {isProjectScopedSettingKey(key)
-                              ? formatValue(key, overrides[project.projectId]?.[key])
+                              ? formatValue(key, overrides[project.projectId]?.[key], copy)
                               : null}
                           </span>
                         </li>
