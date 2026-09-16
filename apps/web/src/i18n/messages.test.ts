@@ -7,10 +7,26 @@ describe("translation messages", () => {
     expect(Object.keys(ZH_CN_MESSAGES).sort()).toEqual(Object.keys(EN_MESSAGES).sort());
   });
 
-  it("translates static copy", () => {
-    expect(translate("zh-CN", "settings.language.title")).toBe("语言");
-    expect(translate("en", "settings.language.title")).toBe("Language");
-    expect(translate("zh-CN", "connection.switchedOff")).toBe("已关闭");
+  it("translates project and connection settings copy", () => {
+    expect(Reflect.get(ZH_CN_MESSAGES, "settings.project.name")).toBe("名称");
+    expect(Reflect.get(ZH_CN_MESSAGES, "settings.project.icon")).toBe("项目图标");
+    expect(Reflect.get(ZH_CN_MESSAGES, "settings.project.actions")).toBe("操作");
+    expect(Reflect.get(ZH_CN_MESSAGES, "settings.connections.environments")).toBe("环境");
+    expect(Reflect.get(ZH_CN_MESSAGES, "settings.connections.addEnvironment")).toBe("添加环境");
+    expect(Reflect.get(ZH_CN_MESSAGES, "settings.connections.creating")).toBe("正在创建…");
+    expect(Reflect.get(ZH_CN_MESSAGES, "settings.connections.applying")).toBe("正在应用…");
+    expect(Reflect.get(ZH_CN_MESSAGES, "settings.connections.remoteLink")).toBe("远程链接");
+    expect(Reflect.get(ZH_CN_MESSAGES, "settings.connections.wslBackend")).toBe("WSL 后端");
+    expect(Reflect.get(ZH_CN_MESSAGES, "settings.connections.tailscaleHttps")).toBe(
+      "Tailscale HTTPS",
+    );
+    expect(Reflect.get(ZH_CN_MESSAGES, "settings.connections.networkAccess")).toBe("网络访问");
+    expect(Reflect.get(ZH_CN_MESSAGES, "settings.connections.authorizedClients")).toBe(
+      "已授权客户端",
+    );
+    expect(Reflect.get(ZH_CN_MESSAGES, "settings.connections.t3Connect")).toBe("T3 Connect");
+    expect(Reflect.get(EN_MESSAGES, "settings.project.name")).toBe("Name");
+    expect(Reflect.get(EN_MESSAGES, "settings.connections.addEnvironment")).toBe("Add environment");
   });
 
   it("translates the toolbar and follow-up behavior copy", () => {

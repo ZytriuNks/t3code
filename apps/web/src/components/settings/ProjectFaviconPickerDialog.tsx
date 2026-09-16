@@ -3,6 +3,8 @@ import type { EnvironmentId } from "@t3tools/contracts";
 import { isWindowsAbsolutePath } from "@t3tools/shared/path";
 import { useMemo, useState } from "react";
 
+import { useI18n } from "../../i18n/I18nProvider";
+
 import { primaryServerKeybindingsAtom } from "~/state/server";
 import { useTheme } from "~/hooks/useTheme";
 import { getLocalFileManagerName, isWindowsPlatform } from "~/lib/utils";
@@ -18,10 +20,27 @@ import { useProjectFilePickerQuery } from "../files/projectFilesQueryState";
 import { CommandDialog, CommandDialogPopup, CommandFooterAction } from "../ui/command";
 import { toastManager } from "../ui/toast";
 
-function emptyMessage(query: string, error: string | null, isPending: boolean): string {
+function emptyMessage(
+  query: string,
+  error: string | null,
+  isPending: boolean,
+  t: (
+    key:
+      | "settings.project.searchingProjectFiles"
+      | "settings.project.indexingProjectFiles"
+      | "settings.project.noMatchingImageFiles"
+      | "settings.project.noImageFilesFound",
+  ) => string,
+): string {
   if (error) return error;
-  if (isPending) return query.trim() ? "Searching project files…" : "Indexing project files…";
-  return query.trim() ? "No matching image files." : "No image files found.";
+  if (isPending) {
+    return query.trim()
+      ? t("settings.project.searchingProjectFiles")
+      : t("settings.project.indexingProjectFiles");
+  }
+  return query.trim()
+    ? t("settings.project.noMatchingImageFiles")
+    : t("settings.project.noImageFilesFound");
 }
 export function canPickExternalProjectFavicon(cwd: string, platform: string): boolean {
   return !isWindowsPlatform(platform) || isWindowsAbsolutePath(cwd);
@@ -36,6 +55,7 @@ export function ProjectFaviconPickerDialog(props: {
   readonly open: boolean;
   readonly projectName: string;
 }) {
+  const { t } = useI18n();
   const [query, setQuery] = useState("");
   const [highlightedItemValue, setHighlightedItemValue] = useState<string | null>(null);
   const [isPickingExternal, setIsPickingExternal] = useState(false);
@@ -70,15 +90,15 @@ export function ProjectFaviconPickerDialog(props: {
     <CommandDialog open={props.open} onOpenChange={props.onOpenChange}>
       {props.open ? (
         <CommandDialogPopup
-          aria-label="Choose project icon"
+          aria-label={t("settings.project.imagePickerTitle")}
           className="overflow-hidden p-0"
           onBackdropPointerDown={() => props.onOpenChange(false)}
         >
           <CommandPaletteContent
-            aria-label="Choose project icon"
+            aria-label={t("settings.project.imagePickerTitle")}
             autoHighlight="always"
-            escapeLabel="Close"
-            footerActionLabel="Select icon"
+            escapeLabel={t("settings.project.close")}
+            footerActionLabel={t("settings.project.selectIcon")}
             footerTrailing={
               pickExternal ? (
                 <CommandFooterAction
@@ -94,19 +114,21 @@ export function ProjectFaviconPickerDialog(props: {
                       .catch((error: unknown) => {
                         toastManager.add({
                           type: "error",
-                          title: "Could not open image picker",
+                          title: t("settings.project.openImagePickerFailed"),
                           description:
-                            error instanceof Error ? error.message : "An error occurred.",
+                            error instanceof Error
+                              ? error.message
+                              : t("settings.project.errorOccurred"),
                         });
                       })
                       .finally(() => setIsPickingExternal(false));
                   }}
                 >
-                  {`Open in ${fileManagerName}`}
+                  {t("settings.project.openIn", { fileManager: fileManagerName })}
                 </CommandFooterAction>
               ) : null
             }
-            inputProps={{ placeholder: "Search image files…" }}
+            inputProps={{ placeholder: t("settings.project.searchImageFiles") }}
             mode="none"
             onItemHighlighted={(value) => {
               setHighlightedItemValue(typeof value === "string" ? value : null);
@@ -133,7 +155,7 @@ export function ProjectFaviconPickerDialog(props: {
                 props.onOpenChange(false);
                 void item.run();
               }}
-              emptyStateMessage={emptyMessage(query, result.error, result.isPending)}
+              emptyStateMessage={emptyMessage(query, result.error, result.isPending, t)}
             />
           </CommandPaletteContent>
         </CommandDialogPopup>

@@ -1,5 +1,6 @@
 import type { ProjectScript, ResolvedKeybindingsConfig } from "@t3tools/contracts";
 import { SettingsIcon } from "lucide-react";
+import { useI18n } from "../../i18n/I18nProvider";
 import { shortcutLabelForCommand } from "../../keybindings";
 import { commandForProjectScript } from "../../projectScripts";
 import { ScriptIcon } from "../projectScriptEditor";
@@ -17,10 +18,11 @@ export function ProjectActionsList({
   disabled: boolean;
   onEdit: (script: ProjectScript) => void;
 }) {
+  const { t } = useI18n();
   if (scripts.length === 0)
     return (
       <p className="px-3 py-2 text-base text-muted-foreground sm:px-4 sm:text-sm">
-        No actions configured.
+        {t("settings.project.noActions")}
       </p>
     );
   return scripts.map((script) => {
@@ -35,12 +37,12 @@ export function ProjectActionsList({
             <span className="min-w-0 truncate">{script.name}</span>
             {script.runOnWorktreeCreate ? (
               <span className="shrink-0 rounded-sm border border-border/60 px-1.5 py-px text-[11px] font-normal text-muted-foreground">
-                setup
+                {t("settings.project.setup")}
               </span>
             ) : null}
             {script.previewUrl ? (
               <span className="shrink-0 rounded-sm border border-border/60 px-1.5 py-px text-[11px] font-normal text-muted-foreground max-sm:hidden">
-                preview · desktop only
+                {t("settings.project.previewDesktopOnly")}
               </span>
             ) : null}
           </span>
@@ -55,7 +57,7 @@ export function ProjectActionsList({
               size="icon-xs"
               variant="ghost"
               className="shrink-0 text-muted-foreground opacity-0 group-focus-within:opacity-100 group-hover:opacity-100"
-              aria-label={`Edit ${script.name}`}
+              aria-label={t("settings.project.editAction", { name: script.name })}
               disabled={disabled}
               onClick={() => onEdit(script)}
             >

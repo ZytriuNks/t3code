@@ -24,10 +24,33 @@ vi.mock("@effect/atom-react", () => ({
   useAtomValue: () => ({}),
 }));
 
-vi.mock("~/state/server", () => ({
-  primaryServerKeybindingsAtom: Symbol("keybindings"),
+vi.mock("../../i18n/I18nProvider", () => ({
+  useI18n: () => ({
+    language: "en",
+    preference: "en",
+    t: (key: string, values?: Record<string, string | number>) => {
+      const messages: Record<string, string> = {
+        "settings.project.openImagePickerFailed": "Could not open image picker",
+        "settings.project.errorOccurred": "An error occurred.",
+        "settings.project.openIn": `Open in ${values?.fileManager ?? ""}`,
+        "settings.project.searchImageFiles": "Search image files…",
+        "settings.project.searchingProjectFiles": "Searching project files…",
+        "settings.project.indexingProjectFiles": "Indexing project files…",
+        "settings.project.noMatchingImageFiles": "No matching image files.",
+        "settings.project.noImageFilesFound": "No image files found.",
+        "settings.project.imagePickerTitle": "Choose project icon",
+        "settings.project.close": "Close",
+        "settings.project.selectIcon": "Select icon",
+      };
+      return messages[key] ?? key;
+    },
+  }),
 }));
 
+vi.mock("~/state/server", () => ({
+  primaryServerKeybindingsAtom: Symbol("keybindings"),
+  serverEnvironment: { configValueAtom: Symbol("server-config") },
+}));
 vi.mock("~/hooks/useTheme", () => ({
   useTheme: () => ({ resolvedTheme: "dark" }),
 }));
