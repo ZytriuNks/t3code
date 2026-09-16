@@ -834,6 +834,9 @@ export const EN_MESSAGES = {
   "settings.search.item.composer-collapse.title": "Collapse composer on scroll",
   "settings.search.item.composer-collapse.keywords":
     "composer rest resting scroll wheel conversation timeline shrink minimize",
+  "settings.search.item.follow-up-behavior.title": "Follow-up behavior",
+  "settings.search.item.follow-up-behavior.keywords":
+    "queue steer running turn send default behavior composer",
   "settings.search.item.provider-update-checks.title": "Provider update checks",
   "settings.search.item.provider-update-checks.keywords":
     "installed cli versions newer available codex claude cursor grok opencode",
@@ -1814,6 +1817,8 @@ export const ZH_CN_MESSAGES = {
   "settings.search.item.skills-in-slash-menu.keywords": "命令 菜单 美元符号 $ 斜杠 /",
   "settings.search.item.composer-collapse.title": "滚动时折叠输入区",
   "settings.search.item.composer-collapse.keywords": "输入区 滚动 对话 时间线 收起 最小化",
+  "settings.search.item.follow-up-behavior.title": "跟进消息行为",
+  "settings.search.item.follow-up-behavior.keywords": "排队 转向 运行 回合 发送 默认 行为 输入区",
   "settings.search.item.provider-update-checks.title": "提供商更新检查",
   "settings.search.item.provider-update-checks.keywords":
     "已安装 CLI 版本 更新 可用 Codex Claude Cursor Grok OpenCode",

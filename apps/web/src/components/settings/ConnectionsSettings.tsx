@@ -1458,7 +1458,8 @@ function savedBackendStatus(environment: EnvironmentPresentation): {
   readonly text: string;
   readonly tone: "muted" | "error";
 } {
-  if (!environment.entry.enabled) return { text: "Off", tone: "muted" };
+  if (!environment.entry.enabled && environment.connection.phase !== "unsupported")
+    return { text: "Off", tone: "muted" };
   const { connection } = environment;
   switch (connection.phase) {
     case "connected":
@@ -1470,6 +1471,8 @@ function savedBackendStatus(environment: EnvironmentPresentation): {
         text: connection.error ? `Reconnecting: ${connection.error}` : "Reconnecting",
         tone: "error",
       };
+    case "unsupported":
+      return { text: "Client not supported", tone: "error" };
     case "error":
       return {
         text: connection.error ? `Connection failed: ${connection.error}` : "Connection failed",
@@ -1496,7 +1499,8 @@ function SavedBackendListRow({
   const connectionStatusCopy = useConnectionStatusCopy();
   const { t } = useI18n();
   const environmentId = environment.environmentId;
-  const enabled = environment.entry.enabled;
+  const unsupported = environment.connection.phase === "unsupported";
+  const enabled = environment.entry.enabled && !unsupported;
   const isConnected = environment.connection.phase === "connected";
   const isRemoving = removingEnvironmentId === environmentId;
   const errorTraceId = environment.connection.traceId;
@@ -1559,7 +1563,10 @@ function SavedBackendListRow({
               <span
                 className={cn(
                   "block truncate",
-                  enabled && status.tone === "error" && !resumingServerUpdate && "text-destructive",
+                  (enabled || unsupported) &&
+                    status.tone === "error" &&
+                    !resumingServerUpdate &&
+                    "text-destructive",
                 )}
               />
             }
@@ -1567,7 +1574,7 @@ function SavedBackendListRow({
             {subtitleText}
           </TooltipTrigger>
           <TooltipPopup side="top" className="max-w-80 whitespace-pre-wrap leading-tight">
-            {enabled
+            {enabled || unsupported
               ? connectionStatusText(environment.connection, connectionStatusCopy)
               : t("connection.switchedOff")}
             {versionMismatch
@@ -1605,13 +1612,15 @@ function SavedBackendListRow({
             <Switch
               size="sm"
               checked={enabled}
-              disabled={isRemoving}
+              disabled={isRemoving || unsupported}
               aria-label={`${enabled ? "Switch off" : "Switch on"} ${environment.label}`}
               onCheckedChange={(checked) => onSetEnabled(environmentId, checked)}
             />
           }
         />
-        <TooltipPopup side="top">{enabled ? "Switch off" : "Switch on"}</TooltipPopup>
+        <TooltipPopup side="top">
+          {unsupported ? "Client not supported" : enabled ? "Switch off" : "Switch on"}
+        </TooltipPopup>
       </Tooltip>
       <Menu>
         <MenuTrigger
