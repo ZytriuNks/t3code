@@ -184,13 +184,26 @@ export function resolveBranchToolbarValue(input: {
   return currentGitBranch ?? activeThreadBranch;
 }
 
-export function resolveBranchTriggerLabel(input: {
-  activeWorktreePath: string | null;
-  effectiveEnvMode: EnvMode;
-  resolvedActiveBranch: string | null;
-  resolvedActiveBranchIsRemote: boolean | null;
-  startFromOrigin: boolean;
-}): string {
+export interface BranchTriggerCopy {
+  readonly selectRef: string;
+  readonly fromRef: (ref: string) => string;
+}
+
+const DEFAULT_BRANCH_TRIGGER_COPY: BranchTriggerCopy = {
+  selectRef: "Select ref",
+  fromRef: (ref) => `From ${ref}`,
+};
+
+export function resolveBranchTriggerLabel(
+  input: {
+    activeWorktreePath: string | null;
+    effectiveEnvMode: EnvMode;
+    resolvedActiveBranch: string | null;
+    resolvedActiveBranchIsRemote: boolean | null;
+    startFromOrigin: boolean;
+  },
+  copy: BranchTriggerCopy = DEFAULT_BRANCH_TRIGGER_COPY,
+): string {
   const {
     activeWorktreePath,
     effectiveEnvMode,
@@ -199,14 +212,14 @@ export function resolveBranchTriggerLabel(input: {
     startFromOrigin,
   } = input;
   if (!resolvedActiveBranch) {
-    return "Select ref";
+    return copy.selectRef;
   }
   if (effectiveEnvMode === "worktree" && !activeWorktreePath) {
     const baseRef =
       startFromOrigin && resolvedActiveBranchIsRemote === false
         ? `origin/${resolvedActiveBranch}`
         : resolvedActiveBranch;
-    return `From ${baseRef}`;
+    return copy.fromRef(baseRef);
   }
   return resolvedActiveBranch;
 }

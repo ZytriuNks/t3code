@@ -259,6 +259,39 @@ describe("resolveBranchTriggerLabel", () => {
     ).toBe("Select ref");
   });
 
+  it("uses caller-provided copy without changing the ref value", () => {
+    expect(
+      resolveBranchTriggerLabel(
+        {
+          activeWorktreePath: null,
+          effectiveEnvMode: "worktree",
+          resolvedActiveBranch: "feature/demo",
+          resolvedActiveBranchIsRemote: false,
+          startFromOrigin: true,
+        },
+        {
+          selectRef: "选择引用",
+          fromRef: (ref) => `基于 ${ref}`,
+        },
+      ),
+    ).toBe("基于 origin/feature/demo");
+    expect(
+      resolveBranchTriggerLabel(
+        {
+          activeWorktreePath: null,
+          effectiveEnvMode: "worktree",
+          resolvedActiveBranch: null,
+          resolvedActiveBranchIsRemote: null,
+          startFromOrigin: true,
+        },
+        {
+          selectRef: "选择引用",
+          fromRef: (ref) => `基于 ${ref}`,
+        },
+      ),
+    ).toBe("选择引用");
+  });
+
   it("does not fabricate an origin ref while branch metadata is loading", () => {
     expect(
       resolveBranchTriggerLabel({

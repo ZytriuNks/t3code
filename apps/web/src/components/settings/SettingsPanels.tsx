@@ -742,7 +742,7 @@ export function useSettingsRestore(onRestored?: () => void) {
         ? [t("settings.restore.label.composerCollapse")]
         : []),
       ...(settings.followUpBehavior !== DEFAULT_UNIFIED_SETTINGS.followUpBehavior
-        ? ["Follow-up behavior"]
+        ? [t("settings.restore.label.followUpBehavior")]
         : []),
       ...(settings.contextWindowMeterEnabled !== DEFAULT_UNIFIED_SETTINGS.contextWindowMeterEnabled
         ? [t("settings.restore.label.contextWindowIndicator")]
@@ -3028,12 +3028,12 @@ function GeneralSettingsRows() {
         />
 
         <SettingsRow
-          {...searchableSetting("follow-up-behavior")}
-          description="Queue follow-ups while the agent runs or steer the current turn."
+          {...searchableSetting("follow-up-behavior", t)}
+          description={t("settings.general.followUpBehavior.description")}
           resetAction={
             settings.followUpBehavior !== DEFAULT_UNIFIED_SETTINGS.followUpBehavior ? (
               <SettingResetButton
-                label="follow-up behavior"
+                label={t("settings.general.followUpBehavior.resetLabel")}
                 onClick={() =>
                   updateSettings({
                     followUpBehavior: DEFAULT_UNIFIED_SETTINGS.followUpBehavior,
@@ -3051,17 +3051,23 @@ function GeneralSettingsRows() {
                 }
               }}
             >
-              <SelectTrigger size="sm" className="w-full sm:w-40" aria-label="Follow-up behavior">
+              <SelectTrigger
+                size="sm"
+                className="w-full sm:w-40"
+                aria-label={t("settings.search.item.follow-up-behavior.title")}
+              >
                 <SelectValue>
-                  {settings.followUpBehavior === "queue" ? "Queue" : "Steer"}
+                  {settings.followUpBehavior === "queue"
+                    ? t("settings.general.followUpBehavior.option.queue")
+                    : t("settings.general.followUpBehavior.option.steer")}
                 </SelectValue>
               </SelectTrigger>
               <SelectPopup align="end" alignItemWithTrigger={false}>
                 <SelectItem hideIndicator value="queue">
-                  Queue
+                  {t("settings.general.followUpBehavior.option.queue")}
                 </SelectItem>
                 <SelectItem hideIndicator value="steer">
-                  Steer
+                  {t("settings.general.followUpBehavior.option.steer")}
                 </SelectItem>
               </SelectPopup>
             </Select>

@@ -13,6 +13,33 @@ describe("translation messages", () => {
     expect(translate("zh-CN", "connection.switchedOff")).toBe("已关闭");
   });
 
+  it("translates the toolbar and follow-up behavior copy", () => {
+    expect(translate("zh-CN", "toolbar.environment.runOn")).toBe("运行于");
+    expect(translate("zh-CN", "toolbar.environment.autoBalance")).toBe("自动均衡");
+    expect(translate("zh-CN", "toolbar.workspace.title")).toBe("工作区");
+    expect(
+      translate("zh-CN", "toolbar.workspace.previousWorktreeWithBranch", { branch: "feat/i18n" }),
+    ).toBe("上一个工作树（feat/i18n）");
+    expect(translate("zh-CN", "toolbar.branch.createRef", { ref: "feat/i18n" })).toBe(
+      "创建新引用“feat/i18n”",
+    );
+    expect(translate("zh-CN", "toolbar.branch.showingRefs", { shown: 20, total: 42 })).toBe(
+      "显示 42 个引用中的 20 个",
+    );
+    expect(translate("zh-CN", "settings.general.followUpBehavior.description")).toBe(
+      "智能体运行时将跟进消息排队，或用消息引导当前回合。",
+    );
+    expect(translate("zh-CN", "settings.general.followUpBehavior.option.queue")).toBe("排队");
+    expect(translate("zh-CN", "settings.general.followUpBehavior.option.steer")).toBe("引导");
+
+    expect(translate("en", "toolbar.environment.runOn")).toBe("Run on");
+    expect(translate("en", "toolbar.workspace.title")).toBe("Workspace");
+    expect(translate("en", "toolbar.branch.createRef", { ref: "feat/i18n" })).toBe(
+      'Create new ref "feat/i18n"',
+    );
+    expect(translate("en", "settings.general.followUpBehavior.option.queue")).toBe("Queue");
+  });
+
   it("translates the upstream queue-message action", () => {
     expect(Object.entries(ZH_CN_MESSAGES)).toContainEqual([
       "composer.queueMessage",

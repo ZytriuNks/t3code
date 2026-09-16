@@ -257,6 +257,7 @@ import {
   useClientSettingsHydrated,
   useEnvironmentSettings,
 } from "../hooks/useSettings";
+import { useI18n } from "../i18n/I18nProvider";
 import { useNowMinute } from "../hooks/useNowMinute";
 import { usePanelAnimationSettings, usePanelPresence } from "../panelAnimations";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
@@ -1442,6 +1443,7 @@ function releaseChatTimelineAnchor<T extends { readonly messageId: MessageId | n
 }
 
 export default function ChatView(props: ChatViewProps) {
+  const { t } = useI18n();
   const {
     environmentId,
     threadId,
@@ -3839,12 +3841,12 @@ export default function ChatView(props: ChatViewProps) {
   ]);
   const autoEnvironmentLabel = automaticEnvironment
     ? draftThread?.loadBalancedEnvironmentId
-      ? "Auto balance"
+      ? t("toolbar.environment.autoBalance")
       : loadBalancing.pending
-        ? "Checking machines…"
+        ? t("toolbar.environment.checkingMachines")
         : loadBalancing.failed
-          ? "Auto balance unavailable"
-          : "Auto balance"
+          ? t("toolbar.environment.autoBalanceUnavailable")
+          : t("toolbar.environment.autoBalance")
     : undefined;
 
   // Handle environment change for draft threads.  When the user picks a
