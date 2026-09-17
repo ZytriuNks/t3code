@@ -17,4 +17,16 @@ describe("summarizeGitHubRouting", () => {
       ]),
     ).toBe("bb-1, Theo's MacBook Pro read and act · alvin read PRs");
   });
+
+  it("accepts localized permission labels for the collapsed summary", () => {
+    expect(
+      summarizeGitHubRouting(
+        [
+          { label: "alvin", permission: "read" },
+          { label: "bb-1", permission: "read-write" },
+        ],
+        { "read-write": "可读取并操作", read: "可读取 PR" },
+      ),
+    ).toBe("bb-1 可读取并操作 · alvin 可读取 PR");
+  });
 });

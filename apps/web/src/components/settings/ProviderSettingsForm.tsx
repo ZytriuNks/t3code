@@ -11,6 +11,8 @@ import type {
 } from "@t3tools/contracts";
 
 import { cn } from "../../lib/utils";
+import { useI18n } from "../../i18n/I18nProvider";
+import type { MessageKey } from "../../i18n/messages";
 import { DraftInput } from "../ui/draft-input";
 import { Input } from "../ui/input";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
@@ -18,6 +20,23 @@ import { Switch } from "../ui/switch";
 import { Textarea } from "../ui/textarea";
 import type { ProviderClientDefinition } from "./providerDriverMeta";
 import { SettingsRow } from "./settingsLayout";
+
+const PROVIDER_FIELD_LABEL_KEYS: Readonly<Record<string, MessageKey>> = {
+  "Binary path": "settings.providers.field.binaryPath",
+  "CODEX_HOME path": "settings.providers.field.homePath",
+  "Shadow home path": "settings.providers.field.shadowHomePath",
+  "Launch arguments": "settings.providers.field.launchArgs",
+};
+
+const PROVIDER_FIELD_DESCRIPTION_KEYS: Readonly<Record<string, MessageKey>> = {
+  "Path to the Codex binary used by this instance.":
+    "settings.providers.field.binaryPathDescription",
+  "Custom Codex home and config directory.": "settings.providers.field.homePathDescription",
+  "Account-specific Codex home. Keeps auth.json separate while sharing state from CODEX_HOME.":
+    "settings.providers.field.shadowHomePathDescription",
+  "Additional CLI arguments passed to codex app-server on session start.":
+    "settings.providers.field.launchArgsDescription",
+};
 
 export interface ProviderSettingsFieldModel {
   readonly key: string;
@@ -412,7 +431,22 @@ export function ProviderSettingsForm({
   variant,
   onChange,
 }: ProviderSettingsFormProps) {
-  const fields = useMemo(() => deriveProviderSettingsFields(definition), [definition]);
+  const { t } = useI18n();
+  const fields = useMemo(
+    () =>
+      deriveProviderSettingsFields(definition).map((field) => {
+        const labelKey = PROVIDER_FIELD_LABEL_KEYS[field.label];
+        const descriptionKey = field.description
+          ? PROVIDER_FIELD_DESCRIPTION_KEYS[field.description]
+          : undefined;
+        return {
+          ...field,
+          label: labelKey ? t(labelKey) : field.label,
+          ...(descriptionKey ? { description: t(descriptionKey) } : {}),
+        };
+      }),
+    [definition, t],
+  );
 
   if (fields.length === 0) {
     return null;

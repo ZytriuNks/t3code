@@ -7,6 +7,44 @@ describe("translation messages", () => {
     expect(Object.keys(ZH_CN_MESSAGES).sort()).toEqual(Object.keys(EN_MESSAGES).sort());
   });
 
+  it("translates integration and device settings copy", () => {
+    expect(translate("zh-CN", "settings.integrations.section.browser")).toBe("浏览器");
+    expect(translate("zh-CN", "settings.browserImport.importFrom", { source: "Helium" })).toBe(
+      "从 Helium 导入",
+    );
+    expect(translate("zh-CN", "settings.devices.section.title")).toBe("设备");
+  });
+
+  it("translates the remaining settings pages shown in the review", () => {
+    expect(translate("zh-CN", "settings.keybindings.command.composerWorkspace")).toBe(
+      "输入区：工作区",
+    );
+    expect(translate("zh-CN", "settings.keybindings.countOther", { count: 59 })).toBe(
+      "59 个快捷键",
+    );
+    expect(translate("zh-CN", "settings.snapshots.description")).toBe("捕获窗口并附加到当前草稿。");
+    expect(translate("zh-CN", "settings.providers.field.shadowHomePath")).toBe("影子主目录路径");
+    expect(
+      translate("zh-CN", "settings.providers.limitedPermissionsDescription", {
+        environment: "Dev Box",
+      }),
+    ).toBe("此会话可以查看 Dev Box 的提供商，但无法更改其设置。");
+    expect(translate("zh-CN", "settings.defaults.agentBrowserAccess")).toBe("代理浏览器访问");
+    expect(translate("zh-CN", "settings.defaults.automaticPull")).toBe("自动拉取");
+    expect(translate("zh-CN", "settings.connections.local.ariaLabel")).toBe("本地环境");
+    expect(translate("zh-CN", "settings.archive.empty")).toBe("没有已归档线程");
+  });
+
+  it("translates source control settings copy", () => {
+    expect(translate("zh-CN", "settings.sourceControl.section.serverEnvironment")).toBe(
+      "服务器环境",
+    );
+    expect(translate("zh-CN", "settings.sourceControl.github.readWrite")).toBe("可读取并操作");
+    expect(translate("zh-CN", "settings.sourceControl.writing.writeAll")).toBe(
+      "为全部环境编写自定义指令",
+    );
+  });
+
   it("translates project and connection settings copy", () => {
     expect(Reflect.get(ZH_CN_MESSAGES, "settings.project.name")).toBe("名称");
     expect(Reflect.get(ZH_CN_MESSAGES, "settings.project.icon")).toBe("项目图标");

@@ -10,6 +10,7 @@ import { Switch } from "~/components/ui/switch";
 import { deviceEnvironment } from "~/state/device";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { cn } from "~/lib/utils";
+import { useI18n } from "~/i18n/I18nProvider";
 
 const platformName = (platform: DevicePlatform) => (platform === "ios" ? "iOS" : "Android");
 
@@ -18,14 +19,20 @@ export const deviceHubDescription =
 export const agentDeviceDescription =
   "Allow new agent sessions in this environment to start and control local and remote devices, with required tools set up automatically.";
 
-export function platformSetupStatus(state: DeviceServiceState, platform: DevicePlatform) {
+export function platformSetupStatus(
+  state: DeviceServiceState,
+  platform: DevicePlatform,
+  t: ReturnType<typeof useI18n>["t"],
+) {
   const availability = state.hosts
     .flatMap((host) => host.platforms)
     .find((candidate) => candidate.platform === platform);
   if (!availability?.available) {
     return {
       ready: false,
-      message: availability?.reason ?? `${platformName(platform)} support was not detected.`,
+      message:
+        availability?.reason ??
+        t("settings.devices.setup.supportNotDetected", { platform: platformName(platform) }),
     };
   }
   if (
@@ -36,16 +43,16 @@ export function platformSetupStatus(state: DeviceServiceState, platform: DeviceP
       ready: false,
       message:
         platform === "ios"
-          ? "Xcode is installed, but no iOS Simulator is available. Install a runtime in Xcode Settings → Components."
-          : "The Android SDK is installed, but no virtual device exists. Create one in Android Studio → Device Manager.",
+          ? t("settings.devices.setup.iosRuntimeMissing")
+          : t("settings.devices.setup.androidDeviceMissing"),
     };
   }
   return {
     ready: true,
     message:
       platform === "ios"
-        ? "Xcode and iOS Simulator are available."
-        : "The Android SDK and Emulator are available.",
+        ? t("settings.devices.setup.iosReady")
+        : t("settings.devices.setup.androidReady"),
   };
 }
 
@@ -54,6 +61,7 @@ export function DeviceSetup(props: {
   readonly state: DeviceServiceState;
   readonly onComplete?: () => void;
 }) {
+  const { t } = useI18n();
   const configure = useAtomCommand(deviceEnvironment.configure);
   const list = useAtomCommand(deviceEnvironment.list, { reportFailure: false });
   const [pending, setPending] = useState<"hub" | "check" | "agent" | "complete" | null>(null);
@@ -77,11 +85,15 @@ export function DeviceSetup(props: {
   return (
     <>
       <WizardHeader
-        title="Set up devices"
-        description="Review what runs on this environment before using simulators and emulators."
+        title={t("settings.devices.setup.title")}
+        description={t("settings.devices.setup.description")}
       >
         <WizardSteps
-          steps={["Device hub", "Simulators", "Agent access"]}
+          steps={[
+            t("settings.devices.setup.step.deviceHub"),
+            t("settings.devices.setup.step.simulators"),
+            t("settings.devices.setup.step.agentAccess"),
+          ]}
           currentStep={step}
           onStepChange={setStep}
           isStepDisabled={(requested) => busy || pending !== null || requested > step}
@@ -91,13 +103,13 @@ export function DeviceSetup(props: {
       <WizardPanel>
         {step === 0 ? (
           <section className="space-y-3 text-sm">
-            <h3 className="font-medium">Enable the device hub</h3>
+            <h3 className="font-medium">{t("settings.devices.setup.enableHub")}</h3>
             <div className="flex items-start justify-between gap-4">
-              <p className="text-muted-foreground">{deviceHubDescription}</p>
+              <p className="text-muted-foreground">{t("settings.devices.hub.description")}</p>
               <Switch
                 checked={enabled}
                 disabled={busy || pending !== null}
-                aria-label="Enable device hub"
+                aria-label={t("settings.devices.setup.enableHub")}
                 onCheckedChange={(checked) =>
                   void update("hub", {
                     enabled: Boolean(checked),
@@ -115,7 +127,7 @@ export function DeviceSetup(props: {
 
         {step === 1 ? (
           <section className="space-y-3 text-sm">
-            <h3 className="font-medium">Check simulator support</h3>
+            <h3 className="font-medium">{t("settings.devices.setup.checkSupport")}</h3>
             <DevicePlatformSetup
               state={props.state}
               checking={pending === "check"}
@@ -132,13 +144,13 @@ export function DeviceSetup(props: {
 
         {step === 2 ? (
           <section className="space-y-3 text-sm">
-            <h3 className="font-medium">Allow agent control</h3>
+            <h3 className="font-medium">{t("settings.devices.setup.allowAgentControl")}</h3>
             <div className="flex items-start justify-between gap-4">
-              <p className="text-muted-foreground">{agentDeviceDescription}</p>
+              <p className="text-muted-foreground">{t("settings.devices.agent.description")}</p>
               <Switch
                 checked={props.state.agentAccessEnabled}
                 disabled={!enabled || busy || pending !== null}
-                aria-label="Allow agents to control devices"
+                aria-label={t("settings.devices.setup.allowAgentControl")}
                 onCheckedChange={(checked) =>
                   void update("agent", { agentAccessEnabled: Boolean(checked) })
                 }
@@ -146,7 +158,7 @@ export function DeviceSetup(props: {
             </div>
             <AgentDeviceSetupStatus state={props.state} pending={pending === "agent"} />
             <p className="text-xs text-muted-foreground">
-              Leave this off to keep manual device controls without giving agents access.
+              {t("settings.devices.setup.manualControls")}
             </p>
           </section>
         ) : null}
@@ -159,14 +171,16 @@ export function DeviceSetup(props: {
 
       <WizardFooter>
         {step === 0 ? (
-          <DialogClose render={<Button variant="outline" />}>Cancel</DialogClose>
+          <DialogClose render={<Button variant="outline" />}>
+            {t("settings.general.cancel")}
+          </DialogClose>
         ) : (
           <Button
             variant="outline"
             disabled={busy || pending !== null}
             onClick={() => setStep(step - 1)}
           >
-            Back
+            {t("settings.devices.setup.back")}
           </Button>
         )}
         {step < 2 ? (
@@ -174,14 +188,16 @@ export function DeviceSetup(props: {
             disabled={props.state.hostStatus !== "ready" || pending !== null}
             onClick={() => setStep(step + 1)}
           >
-            Continue
+            {t("settings.devices.setup.continue")}
           </Button>
         ) : (
           <Button
             disabled={props.state.hostStatus !== "ready" || pending !== null}
             onClick={() => void update("complete", { onboardingCompleted: true })}
           >
-            {pending === "complete" ? "Saving…" : "Done"}
+            {pending === "complete"
+              ? t("settings.devices.setup.saving")
+              : t("settings.devices.setup.done")}
           </Button>
         )}
       </WizardFooter>
@@ -198,6 +214,7 @@ export function DeviceHubSetupStatus({
   readonly pending: boolean;
   readonly compact?: boolean;
 }) {
+  const { t } = useI18n();
   if (!pending && state.hostStatus !== "ready") return null;
   return (
     <p role="status" className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -205,16 +222,16 @@ export function DeviceHubSetupStatus({
       {pending
         ? state.hostStatus === "installing"
           ? compact
-            ? "Installing…"
-            : "Installing device hub…"
+            ? t("settings.devices.setup.installing")
+            : t("settings.devices.setup.installingHub")
           : state.hostStatus === "starting"
             ? compact
-              ? "Starting…"
-              : "Starting device hub…"
+              ? t("settings.devices.setup.starting")
+              : t("settings.devices.setup.startingHub")
             : compact
-              ? "Updating…"
-              : "Updating device hub…"
-        : "Device hub is ready."}
+              ? t("settings.devices.setup.updating")
+              : t("settings.devices.setup.updatingHub")
+        : t("settings.devices.setup.hubReady")}
     </p>
   );
 }
@@ -225,16 +242,17 @@ function DevicePlatformSetup(props: {
   readonly disabled: boolean;
   readonly onCheck: () => void;
 }) {
+  const { t } = useI18n();
   return (
     <div className="space-y-3">
-      <PlatformStatus platform="iOS" status={platformSetupStatus(props.state, "ios")} />
-      <PlatformStatus platform="Android" status={platformSetupStatus(props.state, "android")} />
-      <p className="text-xs text-muted-foreground">
-        You can use either platform. Fixing a missing platform does not block the other one.
-      </p>
+      <PlatformStatus platform="iOS" status={platformSetupStatus(props.state, "ios", t)} />
+      <PlatformStatus platform="Android" status={platformSetupStatus(props.state, "android", t)} />
+      <p className="text-xs text-muted-foreground">{t("settings.devices.setup.platformHint")}</p>
       <Button size="compact" variant="outline" disabled={props.disabled} onClick={props.onCheck}>
         {props.checking ? <Spinner className="size-3" /> : null}
-        {props.checking ? "Checking…" : "Check again"}
+        {props.checking
+          ? t("settings.devices.setup.checking")
+          : t("settings.devices.setup.checkAgain")}
       </Button>
     </div>
   );
@@ -245,19 +263,20 @@ export function AgentDeviceSetupStatus(props: {
   readonly pending: boolean;
   readonly compact?: boolean;
 }) {
+  const { t } = useI18n();
   if (props.pending) {
     const label =
       props.state.hostStatus === "installing"
         ? props.compact
-          ? "Installing…"
-          : "Installing agent tools…"
+          ? t("settings.devices.setup.installing")
+          : t("settings.devices.setup.installingAgentTools")
         : props.state.hostStatus === "starting"
           ? props.compact
-            ? "Starting…"
-            : "Starting agent tools…"
+            ? t("settings.devices.setup.starting")
+            : t("settings.devices.setup.startingAgentTools")
           : props.compact
-            ? "Updating…"
-            : "Updating agent access…";
+            ? t("settings.devices.setup.updating")
+            : t("settings.devices.setup.updatingAgentAccess");
     return (
       <p role="status" className="flex items-center gap-2 text-xs text-muted-foreground">
         <Spinner className="size-3" />
@@ -273,7 +292,7 @@ export function AgentDeviceSetupStatus(props: {
     return (
       <p role="status" className="flex items-center gap-2 text-xs text-muted-foreground">
         <Check className="size-3 text-success" />
-        Agent tools are ready.
+        {t("settings.devices.setup.agentReady")}
       </p>
     );
   }
@@ -285,6 +304,7 @@ export function PlatformStatus(props: {
   readonly status: { readonly ready: boolean; readonly message: string };
   readonly compact?: boolean;
 }) {
+  const { t } = useI18n();
   const Icon = props.status.ready ? Check : CircleAlert;
   return (
     <div
@@ -299,7 +319,9 @@ export function PlatformStatus(props: {
       <div className={cn(props.compact && props.status.ready && "flex items-center gap-2")}>
         <p className="font-medium">{props.platform}</p>
         <p className="text-xs text-muted-foreground">
-          {props.compact && props.status.ready ? "Ready" : props.status.message}
+          {props.compact && props.status.ready
+            ? t("settings.devices.setup.ready")
+            : props.status.message}
         </p>
       </div>
     </div>

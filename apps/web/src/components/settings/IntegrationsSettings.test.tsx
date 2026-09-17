@@ -13,7 +13,8 @@ import { act, StrictMode, type ReactNode } from "react";
 import { create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
-const { listBrowserImportSources } = vi.hoisted(() => ({
+const { languageState, listBrowserImportSources } = vi.hoisted(() => ({
+  languageState: { current: "zh-CN" as "system" | "en" | "zh-CN" },
   listBrowserImportSources: vi.fn().mockResolvedValue([]),
 }));
 
@@ -28,8 +29,10 @@ vi.mock("../../state/environments", () => ({
 vi.mock("../../hooks/useSettings", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../hooks/useSettings")>()),
   PRIMARY_SETTINGS_UNAVAILABLE_MESSAGE: "Connect to an environment",
-  useClientSettings: (selector?: (settings: typeof DEFAULT_CLIENT_SETTINGS) => unknown) =>
-    selector ? selector(DEFAULT_CLIENT_SETTINGS) : DEFAULT_CLIENT_SETTINGS,
+  useClientSettings: (selector?: (settings: typeof DEFAULT_CLIENT_SETTINGS) => unknown) => {
+    const settings = { ...DEFAULT_CLIENT_SETTINGS, language: languageState.current };
+    return selector ? selector(settings) : settings;
+  },
   useClientSettingsHydrated: () => true,
   usePrimarySettingsAvailable: () => true,
   usePrimarySettings: () => DEFAULT_UNIFIED_SETTINGS,
@@ -57,11 +60,39 @@ vi.mock("./SettingsScopeContext", () => ({
 
 import { IntegrationsSettingsPanel } from "./IntegrationsSettings";
 import { platformSetupStatus } from "../device/DeviceSetup";
+import { I18nProvider } from "../../i18n/I18nProvider";
+import { translate } from "../../i18n/messages";
 
 let renderer: ReactTestRenderer | undefined;
+const english = (key: Parameters<typeof translate>[1], values?: Parameters<typeof translate>[2]) =>
+  translate("en", key, values);
 
 beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  vi.stubGlobal("addEventListener", vi.fn());
+  vi.stubGlobal("removeEventListener", vi.fn());
+  vi.stubGlobal("window", {
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+    location: { href: "http://localhost/" },
+    history: {
+      scrollRestoration: "auto",
+      replaceState: vi.fn(),
+      pushState: vi.fn(),
+    },
+  });
+  vi.stubGlobal("self", globalThis.window);
+  vi.stubGlobal("history", {
+    scrollRestoration: "auto",
+    replaceState: vi.fn(),
+    pushState: vi.fn(),
+  });
+  vi.stubGlobal("document", {
+    documentElement: { lang: "en" },
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+    querySelector: vi.fn().mockReturnValue(null),
+  });
   listBrowserImportSources.mockClear();
 });
 
@@ -79,14 +110,46 @@ async function openSettings() {
   await act(() => {
     renderer = create(
       <StrictMode>
-        <RouterProvider router={router} />
+        <I18nProvider>
+          <RouterProvider router={router} />
+        </I18nProvider>
       </StrictMode>,
     );
   });
   expect(renderer!.root.findByType(IntegrationsSettingsPanel)).toBeDefined();
 }
 
+function textContents(): string[] {
+  const collected: string[] = [];
+  const walk = (node: unknown): void => {
+    if (typeof node === "string") {
+      collected.push(node);
+      return;
+    }
+    if (Array.isArray(node)) {
+      node.forEach(walk);
+      return;
+    }
+    if (node && typeof node === "object" && "children" in node) {
+      walk((node as { children: unknown }).children);
+    }
+  };
+  walk(renderer?.toJSON());
+  return collected;
+}
+
 describe("Integrations browser discovery", () => {
+  it("renders the browser and device sections in Simplified Chinese", async () => {
+    await openSettings();
+    expect(textContents()).toContain("浏览器");
+    expect(textContents()).toContain("浏览器配置文件");
+    expect(textContents()).toContain("默认浏览器视口");
+    expect(textContents()).toContain("设备");
+    expect(
+      renderer!.root.findAll((node) => node.props["aria-label"] === "默认浏览器视口"),
+    ).not.toHaveLength(0);
+  });
+
   it("does not scan browser files when entering or revisiting settings", async () => {
     await openSettings();
     expect(listBrowserImportSources).not.toHaveBeenCalled();
@@ -133,8 +196,10 @@ const deviceState = (overrides: Partial<DeviceServiceState> = {}): DeviceService
 
 describe("device setup guidance", () => {
   it("directs users to install an iOS runtime and create an Android virtual device", () => {
-    expect(platformSetupStatus(deviceState(), "ios").message).toContain("Xcode Settings");
-    expect(platformSetupStatus(deviceState(), "android").message).toContain("Device Manager");
+    expect(platformSetupStatus(deviceState(), "ios", english).message).toContain("Xcode Settings");
+    expect(platformSetupStatus(deviceState(), "android", english).message).toContain(
+      "Device Manager",
+    );
   });
 
   it("preserves a specific missing-tool explanation from the server", () => {
@@ -149,6 +214,8 @@ describe("device setup guidance", () => {
         },
       ],
     });
-    expect(platformSetupStatus(state, "android").message).toBe("Android Emulator is missing.");
+    expect(platformSetupStatus(state, "android", english).message).toBe(
+      "Android Emulator is missing.",
+    );
   });
 });

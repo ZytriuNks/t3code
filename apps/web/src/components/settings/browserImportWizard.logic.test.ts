@@ -222,4 +222,11 @@ describe("formatSkippedDomains", () => {
       "a.com, b.com, c.com and 2 more",
     );
   });
+
+  it("uses Chinese domain punctuation and count copy", () => {
+    expect(formatSkippedDomains(["a.com", "b.com"], "zh-CN")).toBe("a.com、b.com");
+    expect(formatSkippedDomains(["a.com", "b.com", "c.com", "d.com", "e.com"], "zh-CN")).toBe(
+      "a.com、b.com、c.com及另外 2 个",
+    );
+  });
 });

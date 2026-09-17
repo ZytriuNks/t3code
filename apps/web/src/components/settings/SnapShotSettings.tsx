@@ -13,6 +13,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { cn } from "~/lib/utils";
 
 import { useClientSettings, useUpdateClientSettings } from "../../hooks/useSettings";
+import { useI18n } from "../../i18n/I18nProvider";
 import { getDesktopSnapShotBridge } from "../../lib/desktopSnapShot";
 import {
   readSnapShotSetupResume,
@@ -74,6 +75,7 @@ type ShortcutCheck =
     };
 
 export function SnapShotSettings() {
+  const { t } = useI18n();
   const settings = useClientSettings();
   const updateSettings = useUpdateClientSettings();
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
@@ -372,16 +374,22 @@ export function SnapShotSettings() {
 
   return (
     <SettingsPageContainer>
-      <SettingsSection id="snap-shot" title="SnapShots">
+      <SettingsSection id="snap-shot" title={t("settings.section.snapshots")}>
         <SettingsUnavailableGroup message={unavailableMessage}>
           <SettingsRow
-            {...searchableSetting("snap-shot-enabled")}
-            description={snapShotDescription(state)}
+            {...searchableSetting("snap-shot-enabled", t)}
+            description={
+              state?.mode === "portal" && state.linuxBackend === "picker"
+                ? snapShotDescription(state)
+                : t("settings.snapshots.description")
+            }
             status={
               bridge
                 ? setupBusy && !wizard
-                  ? "Updating capture settings…"
-                  : snapShotStatus(state, settings.snapShotEnabled)
+                  ? t("settings.snapshots.updating")
+                  : settings.snapShotEnabled
+                    ? snapShotStatus(state, true)
+                    : t("settings.snapshots.setupHint")
                 : undefined
             }
             control={
@@ -400,7 +408,7 @@ export function SnapShotSettings() {
                 <Switch
                   checked={settings.snapShotEnabled || Boolean(wizard)}
                   disabled={!captureAvailable || setupBusy}
-                  aria-label="Enable snapshots"
+                  aria-label={t("settings.snapshots.enable")}
                   onCheckedChange={(checked) => {
                     if (!checked) void save({ snapShotEnabled: false });
                     else if (state?.windows) void save({ snapShotEnabled: true });
@@ -413,8 +421,8 @@ export function SnapShotSettings() {
           {settings.snapShotEnabled && captureAvailable ? (
             <>
               <SettingsRow
-                {...searchableSetting("snap-shot-accessibility")}
-                description="Include text and controls when the app makes them available."
+                {...searchableSetting("snap-shot-accessibility", t)}
+                description={t("settings.snapshots.accessibilityDescription")}
                 status={snapShotAccessibilityUnavailableMessage(state)}
                 control={
                   <Switch
@@ -425,17 +433,17 @@ export function SnapShotSettings() {
                     disabled={
                       !captureAvailable || Boolean(snapShotAccessibilityUnavailableMessage(state))
                     }
-                    aria-label="Include app text in snapshots"
+                    aria-label={t("settings.snapshots.accessibilityAriaLabel")}
                     onCheckedChange={(checked) => void saveIncludeAccessibility(checked)}
                   />
                 }
               />
               <SettingsRow
-                {...searchableSetting("snap-shot-shortcut")}
+                {...searchableSetting("snap-shot-shortcut", t)}
                 description={
                   state?.linuxBackend === "picker"
-                    ? "Choose a window to capture from any app."
-                    : "Capture the window you're using without switching apps."
+                    ? t("settings.snapshots.shortcutPickerDescription")
+                    : t("settings.snapshots.shortcutDirectDescription")
                 }
                 status={managedShortcut ? undefined : shortcutStatus}
                 control={
@@ -446,7 +454,7 @@ export function SnapShotSettings() {
                       disabled={setupBusy}
                       onClick={() => void openSetup("shortcut")}
                     >
-                      Change shortcut
+                      {t("settings.snapshots.changeShortcut")}
                     </Button>
                   ) : (
                     <>
@@ -491,8 +499,8 @@ export function SnapShotSettings() {
                 }
               />
               <SettingsRow
-                {...searchableSetting("snap-shot-sound")}
-                description="Choose the sound played when capture starts."
+                {...searchableSetting("snap-shot-sound", t)}
+                description={t("settings.snapshots.soundDescription")}
                 control={
                   <Menu>
                     <MenuTrigger
@@ -563,27 +571,27 @@ export function SnapShotSettings() {
                 }
               />
               <SettingsRow
-                {...searchableSetting("snap-shot-flash")}
-                description="Show a gentle cue on the captured window."
+                {...searchableSetting("snap-shot-flash", t)}
+                description={t("settings.snapshots.flashDescription")}
                 status={feedbackUnavailable}
                 control={
                   <Switch
                     checked={!feedbackUnavailable && settings.snapShotFlash}
                     disabled={!captureAvailable || Boolean(feedbackUnavailable)}
-                    aria-label="Flash captured window"
+                    aria-label={t("settings.snapshots.flashAriaLabel")}
                     onCheckedChange={(checked) => void save({ snapShotFlash: checked })}
                   />
                 }
               />
               <SettingsRow
-                {...searchableSetting("snap-shot-animations")}
-                description="Animate captured windows into your draft."
+                {...searchableSetting("snap-shot-animations", t)}
+                description={t("settings.snapshots.animationsDescription")}
                 status={feedbackUnavailable}
                 control={
                   <Switch
                     checked={!feedbackUnavailable && settings.snapShotAnimations}
                     disabled={!captureAvailable || Boolean(feedbackUnavailable)}
-                    aria-label="Animate snapshots"
+                    aria-label={t("settings.snapshots.animationsAriaLabel")}
                     onCheckedChange={(checked) => void save({ snapShotAnimations: checked })}
                   />
                 }

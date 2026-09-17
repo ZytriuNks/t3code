@@ -39,6 +39,8 @@ import {
   SettingsSection,
 } from "./settingsLayout";
 import { searchableSetting } from "./settingsSearch";
+import { useI18n } from "../../i18n/I18nProvider";
+import type { MessageKey } from "../../i18n/messages";
 
 const MODE_OPTIONS: Record<SourceControlWritingStyleMode, { label: string; description: string }> =
   {
@@ -57,7 +59,13 @@ const MODE_OPTIONS: Record<SourceControlWritingStyleMode, { label: string; descr
     },
   };
 
+const modeCopy = (mode: SourceControlWritingStyleMode, t: ReturnType<typeof useI18n>["t"]) => ({
+  label: t(`settings.sourceControl.writing.mode.${mode}.label` as MessageKey),
+  description: t(`settings.sourceControl.writing.mode.${mode}.description` as MessageKey),
+});
+
 export function SourceControlWritingSettingsSection() {
+  const { t } = useI18n();
   const settings = useScopedSettings();
   const updateSettings = useUpdateScopedSettings();
   const navigate = useNavigate();
@@ -125,17 +133,20 @@ export function SourceControlWritingSettingsSection() {
   const writerModelDisabledReason = useScopedModelDisabledReason(settings, instanceEntries);
 
   return (
-    <SettingsSection id="source-control-text-generation" title="Text generation">
+    <SettingsSection
+      id="source-control-text-generation"
+      title={t("settings.general.section.textGeneration")}
+    >
       <SettingsRow
         serverScoped
         settingKeys={["sourceControlWritingStyle"]}
         mixed={writingStyleMixed}
-        {...searchableSetting("source-control-writing-style")}
-        description={MODE_OPTIONS[style.mode].description}
+        {...searchableSetting("source-control-writing-style", t)}
+        description={modeCopy(style.mode, t).description}
         resetAction={
           isSourceControlWritingStyleDirty ? (
             <SettingResetButton
-              label="source control writing style"
+              label={t("settings.sourceControl.writing.resetStyle")}
               onClick={() =>
                 updateSettings({
                   sourceControlWritingStyle: {
@@ -163,18 +174,20 @@ export function SourceControlWritingSettingsSection() {
             <SelectTrigger
               size="sm"
               className="w-full sm:w-56"
-              aria-label="Source control writing style"
+              aria-label={t("settings.sourceControl.writing.styleAriaLabel")}
             >
               <SelectValue>
                 {(value: SourceControlWritingStyleMode | null) =>
-                  value === null ? "Mixed" : MODE_OPTIONS[value].label
+                  value === null
+                    ? t("settings.sourceControl.writing.mixed")
+                    : modeCopy(value, t).label
                 }
               </SelectValue>
             </SelectTrigger>
             <SelectPopup align="end" alignItemWithTrigger={false}>
               {(Object.keys(MODE_OPTIONS) as SourceControlWritingStyleMode[]).map((mode) => (
                 <SelectItem key={mode} hideIndicator value={mode}>
-                  {MODE_OPTIONS[mode].label}
+                  {modeCopy(mode, t).label}
                 </SelectItem>
               ))}
             </SelectPopup>
@@ -189,8 +202,8 @@ export function SourceControlWritingSettingsSection() {
                   value={allInstructions ?? ""}
                   onChange={(event) => setAllInstructions(event.target.value)}
                   rows={4}
-                  aria-label="Custom source control instructions for all selected environments"
-                  placeholder="Write the instructions each selected environment should use."
+                  aria-label={t("settings.sourceControl.writing.bulkInstructionsAriaLabel")}
+                  placeholder={t("settings.sourceControl.writing.bulkInstructionsPlaceholder")}
                 />
                 <Button
                   size="sm"
@@ -207,7 +220,7 @@ export function SourceControlWritingSettingsSection() {
                     setEditingAllInstructions(false);
                   }}
                 >
-                  Apply instructions to all
+                  {t("settings.sourceControl.writing.applyAll")}
                 </Button>
               </>
             ) : (
@@ -219,7 +232,7 @@ export function SourceControlWritingSettingsSection() {
                   setEditingAllInstructions(true);
                 }}
               >
-                Write custom instructions for all
+                {t("settings.sourceControl.writing.writeAll")}
               </Button>
             )}
           </div>
@@ -236,8 +249,8 @@ export function SourceControlWritingSettingsSection() {
                 }
               }}
               rows={4}
-              placeholder="Keep titles concise. Use short bullet points in descriptions."
-              aria-label="Custom source control writing instructions"
+              placeholder={t("settings.sourceControl.writing.instructionsPlaceholder")}
+              aria-label={t("settings.sourceControl.writing.instructionsAriaLabel")}
             />
           </div>
         ) : null}
@@ -247,13 +260,13 @@ export function SourceControlWritingSettingsSection() {
         serverScoped
         settingKeys={["sourceControlWritingStyle"]}
         mixed={templatesMixed}
-        {...searchableSetting("follow-change-request-templates")}
-        description="Use the repository's template for change request descriptions when available."
+        {...searchableSetting("follow-change-request-templates", t)}
+        description={t("settings.sourceControl.writing.templatesDescription")}
         resetAction={
           templatesMixed ||
           style.followChangeRequestTemplates !== defaults.followChangeRequestTemplates ? (
             <SettingResetButton
-              label="change request templates"
+              label={t("settings.sourceControl.writing.resetTemplates")}
               onClick={() =>
                 updateSettings({
                   sourceControlWritingStyle: {
@@ -275,7 +288,7 @@ export function SourceControlWritingSettingsSection() {
                 },
               })
             }
-            aria-label="Follow change request templates"
+            aria-label={t("settings.sourceControl.writing.templatesAriaLabel")}
           />
         }
       />
@@ -283,18 +296,18 @@ export function SourceControlWritingSettingsSection() {
       <SettingsRow
         serverScoped
         settingKeys={["sourceControlWriterModelSelection"]}
-        {...searchableSetting("source-control-writer-model")}
-        description="Model for source control text and branch or bookmark names. Off uses the environment's text generation model."
+        {...searchableSetting("source-control-writer-model", t)}
+        description={t("settings.sourceControl.writing.modelDescription")}
         control={
           !hasServerTargets ? (
             <span className="text-sm text-muted-foreground">
-              Connect an environment to choose its source control writer model.
+              {t("settings.sourceControl.writing.connectForModel")}
             </span>
           ) : (
             <div className="flex flex-wrap items-center justify-end gap-2">
               {usesDedicatedModel && !canEnableDedicatedModel ? (
                 <span className="text-sm text-muted-foreground">
-                  No text generation providers available.
+                  {t("settings.sourceControl.writing.noProviders")}
                 </span>
               ) : null}
               {usesDedicatedModel && canEnableDedicatedModel ? (
@@ -306,8 +319,10 @@ export function SourceControlWritingSettingsSection() {
                   modelOptionsByInstance={modelOptionsByInstance}
                   triggerVariant="outline"
                   triggerClassName={SETTINGS_PICKER_TRIGGER_CLASSNAME}
-                  triggerAriaLabel="Source control writer model"
-                  {...(mixedWriterModel ? { triggerLabel: "Mixed" } : {})}
+                  triggerAriaLabel={t("settings.sourceControl.writing.modelAriaLabel")}
+                  {...(mixedWriterModel
+                    ? { triggerLabel: t("settings.sourceControl.writing.mixed") }
+                    : {})}
                   {...(environmentId
                     ? {
                         onOpenProviderSetup: (instanceId: ProviderInstanceId) => {
@@ -324,7 +339,7 @@ export function SourceControlWritingSettingsSection() {
                     if (reason) {
                       toastManager.add({
                         type: "error",
-                        title: "Source control writer model not saved",
+                        title: t("settings.sourceControl.writing.modelSaveFailed"),
                         description: reason,
                       });
                       return;
@@ -349,7 +364,7 @@ export function SourceControlWritingSettingsSection() {
                       : null,
                   })
                 }
-                aria-label="Use a separate source control writer model"
+                aria-label={t("settings.sourceControl.writing.useSeparateModel")}
               />
             </div>
           )

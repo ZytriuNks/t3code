@@ -1,6 +1,7 @@
 import { useState } from "react";
 
 import { isLocalEnvironmentDisabled } from "../../localEnvironment";
+import { useI18n } from "../../i18n/I18nProvider";
 import {
   AlertDialog,
   AlertDialogClose,
@@ -19,6 +20,7 @@ import { searchableSetting } from "./settingsSearch";
 // Toggling relaunches the desktop app, so the switch only reflects the value
 // this process started with; there is no live state to keep in sync.
 export function LocalEnvironmentSetting() {
+  const { t } = useI18n();
   const setEnabled = window.desktopBridge?.setLocalEnvironmentEnabled;
   const [enabled] = useState(() => !isLocalEnvironmentDisabled());
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -40,18 +42,18 @@ export function LocalEnvironmentSetting() {
   return (
     <>
       <SettingsRow
-        {...searchableSetting("local-environment")}
+        {...searchableSetting("local-environment", t)}
         description={
           enabled
-            ? "Run agents on this computer. Turn off to use T3 Code only with remote environments."
-            : "Turned off. Agents only run in remote environments."
+            ? t("settings.connections.local.enabledDescription")
+            : t("settings.connections.local.disabledDescription")
         }
         control={
           <Switch
             checked={enabled}
             disabled={isUpdating}
             onCheckedChange={() => setConfirmOpen(true)}
-            aria-label="Local environment"
+            aria-label={t("settings.connections.local.ariaLabel")}
           />
         }
       />
@@ -66,12 +68,14 @@ export function LocalEnvironmentSetting() {
         <AlertDialogPopup>
           <AlertDialogHeader>
             <AlertDialogTitle>
-              {enabled ? "Turn off local environment?" : "Turn on local environment?"}
+              {enabled
+                ? t("settings.connections.local.turnOffTitle")
+                : t("settings.connections.local.turnOnTitle")}
             </AlertDialogTitle>
             <AlertDialogDescription>
               {enabled
-                ? "T3 Code will restart without running a server on this computer. Any agents and terminals running here will stop, and other devices will no longer be able to connect to this computer. Your projects, history, and remote environments are unaffected."
-                : "T3 Code will restart and start running a server on this computer again."}
+                ? t("settings.connections.local.turnOffDescription")
+                : t("settings.connections.local.turnOnDescription")}
             </AlertDialogDescription>
           </AlertDialogHeader>
           {error ? <p className="px-6 pb-4 text-sm text-destructive">{error}</p> : null}
@@ -90,9 +94,9 @@ export function LocalEnvironmentSetting() {
                   Restarting…
                 </>
               ) : enabled ? (
-                "Restart and turn off"
+                t("settings.connections.local.restartAndTurnOff")
               ) : (
-                "Restart and turn on"
+                t("settings.connections.local.restartAndTurnOn")
               )}
             </Button>
           </AlertDialogFooter>
