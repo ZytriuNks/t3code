@@ -2,6 +2,7 @@ import type { EnvironmentId } from "@t3tools/contracts";
 import { ScaleIcon } from "lucide-react";
 import { memo, useMemo } from "react";
 
+import { useI18n } from "../i18n/I18nProvider";
 import type { EnvironmentOption } from "./BranchToolbar.logic";
 import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
 import { useComposerMenuProps } from "./chat/composerEventScope";
@@ -34,6 +35,7 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
   availableEnvironments,
   onEnvironmentChange,
 }: BranchToolbarEnvironmentSelectorProps) {
+  const { t } = useI18n();
   const composerFloatingLayerProps = useComposerMenuProps();
   const activeEnvironment = useMemo(() => {
     return availableEnvironments.find((env) => env.environmentId === environmentId) ?? null;
@@ -42,14 +44,14 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
   const environmentItems = useMemo(
     () => [
       ...(onAutoEnvironment
-        ? [{ value: "auto", label: autoEnvironmentLabel ?? "Auto balance" }]
+        ? [{ value: "auto", label: autoEnvironmentLabel ?? t("toolbar.environment.autoBalance") }]
         : []),
       ...availableEnvironments.map((env) => ({
         value: env.environmentId,
         label: env.label,
       })),
     ],
-    [availableEnvironments, autoEnvironmentLabel, onAutoEnvironment],
+    [availableEnvironments, autoEnvironmentLabel, onAutoEnvironment, t],
   );
 
   // The static label carries the xs control's height (h-7 sm:h-6) as well as
@@ -75,7 +77,7 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
             data-composer-label-motion
             className="block w-full min-w-0 max-w-[240px] truncate transition-opacity duration-180 ease-[cubic-bezier(0.32,0.72,0,1)] group-data-[compact]/composer-context:opacity-0 motion-reduce:transition-none"
           >
-            {activeEnvironment?.label ?? "Run on"}
+            {activeEnvironment?.label ?? t("toolbar.environment.runOn")}
           </span>
         </span>
       </span>
@@ -95,7 +97,7 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
         variant="ghost"
         size="xs"
         className="min-w-0 max-w-full font-normal text-xs!"
-        aria-label="Run on"
+        aria-label={t("toolbar.environment.runOn")}
         data-composer-shortcut="composer.host"
         data-composer-context-control
       >
@@ -121,7 +123,7 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
       </SelectTrigger>
       <SelectPopup alignItemWithTrigger={false} {...composerFloatingLayerProps}>
         <SelectGroup>
-          <SelectGroupLabel>Run on</SelectGroupLabel>
+          <SelectGroupLabel>{t("toolbar.environment.runOn")}</SelectGroupLabel>
           {onAutoEnvironment && (
             <SelectItem
               value="auto"
@@ -131,7 +133,7 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
             >
               <span className="inline-flex items-center gap-1.5">
                 <ScaleIcon className="size-3" aria-hidden="true" />
-                {autoEnvironmentLabel ?? "Auto balance"}
+                {autoEnvironmentLabel ?? t("toolbar.environment.autoBalance")}
               </span>
             </SelectItem>
           )}

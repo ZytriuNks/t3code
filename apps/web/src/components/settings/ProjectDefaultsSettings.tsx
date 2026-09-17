@@ -75,8 +75,6 @@ const WORKSPACE_MODE_LABEL_KEYS: Record<"local" | "worktree", MessageKey> = {
 export function ProjectDefaultsSettings({ category }: { category: ProjectSettingsCategory }) {
   const { t } = useI18n();
   const { scope, target, targets, connectedEnvironments } = useSettingsScope();
-  // Only the general page is localized; the source-control and integrations
-  // pages keep their English rows until their own pass.
   const generalSectionTitle: string =
     category === "general" ? t("settings.general.newThreads.title") : "";
   const text = {
@@ -201,8 +199,8 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
         category === "general"
           ? generalSectionTitle
           : category === "integrations"
-            ? "Browser"
-            : "Repositories"
+            ? t("settings.defaults.browser")
+            : t("settings.defaults.repositories")
       }
     >
       {category === "general" ? (
@@ -395,11 +393,11 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
             settingKeys={["defaultAutoPull"]}
             mixed={mixedAutoPull}
             id="automatic-pull"
-            title="Automatically pull"
+            title={t("settings.defaults.automaticPull")}
             description={
               isProjectScope
-                ? "Keeps this project's default branch current when the checkout has no local changes or commits."
-                : "Keeps the default branch current when the checkout has no local changes or commits. Projects can override it."
+                ? t("settings.defaults.automaticPullProjectDescription")
+                : t("settings.defaults.automaticPullDescription")
             }
             resetAction={
               settings.defaultAutoPull ? (
@@ -423,11 +421,11 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
             serverScoped
             settingKeys={["pullRequestMergeMethod"]}
             mixed={mixedMergeMethod}
-            {...searchableSetting("pull-request-merge-method")}
+            {...searchableSetting("pull-request-merge-method", t)}
             description={
               isProjectScope
-                ? "Pull requests in this project start with this method."
-                : "Pull requests start with this method. Last selected reuses whatever you chose most recently on this device."
+                ? t("settings.defaults.mergeProjectDescription")
+                : t("settings.defaults.mergeDescription")
             }
             resetAction={
               settings.pullRequestMergeMethod !== null ? (
@@ -453,13 +451,13 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
                       value === "merge" || value === "squash" || value === "rebase"
                         ? PULL_REQUEST_MERGE_METHOD_LABELS[value]
                         : value === "last"
-                          ? "Last selected"
-                          : "Mixed"
+                          ? t("settings.defaults.lastSelected")
+                          : t("settings.defaults.mixed")
                     }
                   </SelectValue>
                 </SelectTrigger>
                 <SelectPopup align="end" alignItemWithTrigger={false}>
-                  <SelectItem value="last">Last selected</SelectItem>
+                  <SelectItem value="last">{t("settings.defaults.lastSelected")}</SelectItem>
                   <SelectItem value="merge">{PULL_REQUEST_MERGE_METHOD_LABELS.merge}</SelectItem>
                   <SelectItem value="squash">{PULL_REQUEST_MERGE_METHOD_LABELS.squash}</SelectItem>
                   <SelectItem value="rebase">{PULL_REQUEST_MERGE_METHOD_LABELS.rebase}</SelectItem>
@@ -475,11 +473,11 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
             settingKeys={["enableAgentBrowserAccess"]}
             mixed={mixedBrowser}
             id={searchableSetting("agent-browser-access").id}
-            title="Agent browser access"
+            title={t("settings.defaults.agentBrowserAccess")}
             description={
               isProjectScope
-                ? "Allow agents in this project to use the shared browser. Applies when the agent session next starts."
-                : "Allow agents to use the shared browser. Projects can override it."
+                ? t("settings.defaults.agentBrowserProjectDescription")
+                : t("settings.defaults.agentBrowserDescription")
             }
             resetAction={
               settings.enableAgentBrowserAccess !==

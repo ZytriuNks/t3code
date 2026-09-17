@@ -7,10 +7,91 @@ describe("translation messages", () => {
     expect(Object.keys(ZH_CN_MESSAGES).sort()).toEqual(Object.keys(EN_MESSAGES).sort());
   });
 
-  it("translates static copy", () => {
-    expect(translate("zh-CN", "settings.language.title")).toBe("语言");
-    expect(translate("en", "settings.language.title")).toBe("Language");
-    expect(translate("zh-CN", "connection.switchedOff")).toBe("已关闭");
+  it("translates integration and device settings copy", () => {
+    expect(translate("zh-CN", "settings.integrations.section.browser")).toBe("浏览器");
+    expect(translate("zh-CN", "settings.browserImport.importFrom", { source: "Helium" })).toBe(
+      "从 Helium 导入",
+    );
+    expect(translate("zh-CN", "settings.devices.section.title")).toBe("设备");
+  });
+
+  it("translates the remaining settings pages shown in the review", () => {
+    expect(translate("zh-CN", "settings.keybindings.command.composerWorkspace")).toBe(
+      "输入区：工作区",
+    );
+    expect(translate("zh-CN", "settings.keybindings.countOther", { count: 59 })).toBe(
+      "59 个快捷键",
+    );
+    expect(translate("zh-CN", "settings.snapshots.description")).toBe("捕获窗口并附加到当前草稿。");
+    expect(translate("zh-CN", "settings.providers.field.shadowHomePath")).toBe("影子主目录路径");
+    expect(
+      translate("zh-CN", "settings.providers.limitedPermissionsDescription", {
+        environment: "Dev Box",
+      }),
+    ).toBe("此会话可以查看 Dev Box 的提供商，但无法更改其设置。");
+    expect(translate("zh-CN", "settings.defaults.agentBrowserAccess")).toBe("代理浏览器访问");
+    expect(translate("zh-CN", "settings.defaults.automaticPull")).toBe("自动拉取");
+    expect(translate("zh-CN", "settings.connections.local.ariaLabel")).toBe("本地环境");
+    expect(translate("zh-CN", "settings.archive.empty")).toBe("没有已归档线程");
+  });
+
+  it("translates source control settings copy", () => {
+    expect(translate("zh-CN", "settings.sourceControl.section.serverEnvironment")).toBe(
+      "服务器环境",
+    );
+    expect(translate("zh-CN", "settings.sourceControl.github.readWrite")).toBe("可读取并操作");
+    expect(translate("zh-CN", "settings.sourceControl.writing.writeAll")).toBe(
+      "为全部环境编写自定义指令",
+    );
+  });
+
+  it("translates project and connection settings copy", () => {
+    expect(Reflect.get(ZH_CN_MESSAGES, "settings.project.name")).toBe("名称");
+    expect(Reflect.get(ZH_CN_MESSAGES, "settings.project.icon")).toBe("项目图标");
+    expect(Reflect.get(ZH_CN_MESSAGES, "settings.project.actions")).toBe("操作");
+    expect(Reflect.get(ZH_CN_MESSAGES, "settings.connections.environments")).toBe("环境");
+    expect(Reflect.get(ZH_CN_MESSAGES, "settings.connections.addEnvironment")).toBe("添加环境");
+    expect(Reflect.get(ZH_CN_MESSAGES, "settings.connections.creating")).toBe("正在创建…");
+    expect(Reflect.get(ZH_CN_MESSAGES, "settings.connections.applying")).toBe("正在应用…");
+    expect(Reflect.get(ZH_CN_MESSAGES, "settings.connections.remoteLink")).toBe("远程链接");
+    expect(Reflect.get(ZH_CN_MESSAGES, "settings.connections.wslBackend")).toBe("WSL 后端");
+    expect(Reflect.get(ZH_CN_MESSAGES, "settings.connections.tailscaleHttps")).toBe(
+      "Tailscale HTTPS",
+    );
+    expect(Reflect.get(ZH_CN_MESSAGES, "settings.connections.networkAccess")).toBe("网络访问");
+    expect(Reflect.get(ZH_CN_MESSAGES, "settings.connections.authorizedClients")).toBe(
+      "已授权客户端",
+    );
+    expect(Reflect.get(ZH_CN_MESSAGES, "settings.connections.t3Connect")).toBe("T3 Connect");
+    expect(Reflect.get(EN_MESSAGES, "settings.project.name")).toBe("Name");
+    expect(Reflect.get(EN_MESSAGES, "settings.connections.addEnvironment")).toBe("Add environment");
+  });
+
+  it("translates the toolbar and follow-up behavior copy", () => {
+    expect(translate("zh-CN", "toolbar.environment.runOn")).toBe("运行于");
+    expect(translate("zh-CN", "toolbar.environment.autoBalance")).toBe("自动均衡");
+    expect(translate("zh-CN", "toolbar.workspace.title")).toBe("工作区");
+    expect(
+      translate("zh-CN", "toolbar.workspace.previousWorktreeWithBranch", { branch: "feat/i18n" }),
+    ).toBe("上一个工作树（feat/i18n）");
+    expect(translate("zh-CN", "toolbar.branch.createRef", { ref: "feat/i18n" })).toBe(
+      "创建新引用“feat/i18n”",
+    );
+    expect(translate("zh-CN", "toolbar.branch.showingRefs", { shown: 20, total: 42 })).toBe(
+      "显示 42 个引用中的 20 个",
+    );
+    expect(translate("zh-CN", "settings.general.followUpBehavior.description")).toBe(
+      "智能体运行时将跟进消息排队，或用消息引导当前回合。",
+    );
+    expect(translate("zh-CN", "settings.general.followUpBehavior.option.queue")).toBe("排队");
+    expect(translate("zh-CN", "settings.general.followUpBehavior.option.steer")).toBe("引导");
+
+    expect(translate("en", "toolbar.environment.runOn")).toBe("Run on");
+    expect(translate("en", "toolbar.workspace.title")).toBe("Workspace");
+    expect(translate("en", "toolbar.branch.createRef", { ref: "feat/i18n" })).toBe(
+      'Create new ref "feat/i18n"',
+    );
+    expect(translate("en", "settings.general.followUpBehavior.option.queue")).toBe("Queue");
   });
 
   it("translates the upstream queue-message action", () => {

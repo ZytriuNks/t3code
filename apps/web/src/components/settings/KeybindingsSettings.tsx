@@ -35,6 +35,8 @@ import {
 import { isElectron } from "../../env";
 import { useOpenInPreferredEditor } from "../../editorPreferences";
 import { formatShortcutLabel } from "../../keybindings";
+import { useI18n } from "../../i18n/I18nProvider";
+import type { MessageKey } from "../../i18n/messages";
 import { cn } from "../../lib/utils";
 import { serverEnvironment } from "../../state/server";
 import { useSettingsScope } from "./SettingsScopeContext";
@@ -68,6 +70,28 @@ import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsL
 import { searchableSetting } from "./settingsSearch";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { useAtomCommand } from "../../state/use-atom-command";
+
+const LOCALIZED_COMMAND_LABEL_KEYS: Readonly<Record<string, MessageKey>> = {
+  "chat.new": "settings.keybindings.command.chatNew",
+  "chat.newLocal": "settings.keybindings.command.chatNewLocal",
+  "commandPalette.toggle": "settings.keybindings.command.commandPaletteToggle",
+  "composer.branch": "settings.keybindings.command.composerBranch",
+  "composer.effort": "settings.keybindings.command.composerEffort",
+  "composer.host": "settings.keybindings.command.composerHost",
+  "composer.mode": "settings.keybindings.command.composerMode",
+  "composer.previousWorktree": "settings.keybindings.command.composerPreviousWorktree",
+  "composer.stash": "settings.keybindings.command.composerStash",
+  "composer.workspace": "settings.keybindings.command.composerWorkspace",
+  "diff.toggle": "settings.keybindings.command.diffToggle",
+};
+
+function localizedCommandLabel(
+  command: KeybindingCommand,
+  t: ReturnType<typeof useI18n>["t"],
+): string {
+  const key = LOCALIZED_COMMAND_LABEL_KEYS[String(command)];
+  return key ? t(key) : commandLabel(command);
+}
 
 function KeybindingPill({ value }: { value: string }) {
   // Keys dedupe repeated parts; a literal "+" in a shortcut splits into empty strings.
@@ -117,6 +141,8 @@ function ExpandableHeaderSearch({
   inputRef?: RefObject<HTMLInputElement | null>;
   collapsedAccessory?: ReactNode;
 }) {
+  const { t } = useI18n();
+  const label = t("settings.keybindings.search");
   if (!isOpen) {
     return (
       <>
@@ -129,13 +155,13 @@ function ExpandableHeaderSearch({
                 size="icon-xs"
                 variant="ghost-muted"
                 onClick={() => onOpenChange(true)}
-                aria-label="Search keybindings"
+                aria-label={label}
               >
                 <SearchIcon />
               </Button>
             }
           />
-          <TooltipPopup side="top">Search keybindings</TooltipPopup>
+          <TooltipPopup side="top">{label}</TooltipPopup>
         </Tooltip>
       </>
     );
@@ -160,8 +186,8 @@ function ExpandableHeaderSearch({
             onOpenChange(false);
           }
         }}
-        placeholder="Search keybindings"
-        aria-label="Search keybindings"
+        placeholder={label}
+        aria-label={label}
         className="w-44 [&_[data-slot=input]]:pl-7"
         size="sm"
       />
@@ -837,6 +863,8 @@ function KeybindingKeyControl({
   isSaving: boolean;
   pillClassName?: string | undefined;
 }) {
+  const { t } = useI18n();
+  const label = localizedCommandLabel(row.command, t);
   const { keyDraft, isRecording, isDirty, isWhenDraftValid, setDraft, save, captureKeybinding } =
     editor;
   const showPill = !isRecording && keyDraft === row.key && row.key.length > 0 && !isDirty;
@@ -849,14 +877,14 @@ function KeybindingKeyControl({
           disabled={isSaving || keyDraft.trim().length === 0 || !isWhenDraftValid}
           onClick={save}
         >
-          {isSaving ? "Saving" : "Save"}
+          {isSaving ? t("settings.keybindings.saving") : t("settings.keybindings.save")}
         </Button>
       ) : null}
       {showPill ? (
         <button
           type="button"
           onClick={() => setDraft({ isRecording: true })}
-          aria-label={`Edit shortcut for ${commandLabel(row.command)}: ${formatShortcutLabel(row.binding.shortcut)}`}
+          aria-label={`Edit shortcut for ${label}: ${formatShortcutLabel(row.binding.shortcut)}`}
           className={cn(
             "inline-flex h-8 cursor-pointer items-center rounded-md border border-transparent px-1.5 sm:h-7 outline-none transition-colors hover:border-border/70 hover:bg-accent focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/24",
             pillClassName,
@@ -868,9 +896,13 @@ function KeybindingKeyControl({
         <Input
           data-keybinding-capture=""
           autoFocus={isRecording}
-          aria-label={`Keybinding for ${commandLabel(row.command)}`}
+          aria-label={`Keybinding for ${label}`}
           value={isRecording ? "" : keyDraft}
-          placeholder={isRecording ? "Press shortcut" : "Unassigned"}
+          placeholder={
+            isRecording
+              ? t("settings.keybindings.pressShortcut")
+              : t("settings.keybindings.unassigned")
+          }
           size="sm"
           className={cn("w-44 font-mono", isRecording && "border-primary/70 bg-primary/5")}
           onFocus={() => setDraft({ isRecording: true })}
@@ -899,6 +931,7 @@ function WhenClauseControl({
   onChange: (value: KeybindingWhenNode | undefined) => void;
   onValidityChange: (valid: boolean) => void;
 }) {
+  const { t } = useI18n();
   return (
     <Popover>
       <PopoverTrigger
@@ -911,7 +944,7 @@ function WhenClauseControl({
         }
         aria-label={`Edit when clause for ${label}`}
       >
-        <span className="truncate">{expression || "Always"}</span>
+        <span className="truncate">{expression || t("settings.keybindings.always")}</span>
         <ChevronDownIcon className="size-3.5 shrink-0 opacity-60" />
       </PopoverTrigger>
       <PopoverContent align="start" sideOffset={6}>
@@ -983,10 +1016,11 @@ function KeybindingSourceBadge({ source }: { source: KeybindingRow["source"] }) 
 }
 
 function KeybindingRowTitle({ row }: { row: KeybindingRow }) {
+  const { t } = useI18n();
   return (
     <Tooltip>
       <TooltipTrigger render={<span className="flex items-center gap-2" />}>
-        {commandLabel(row.command)}
+        {localizedCommandLabel(row.command, t)}
         <KeybindingSourceBadge source={row.source} />
       </TooltipTrigger>
       <TooltipPopup side="top">{row.command}</TooltipPopup>
@@ -1003,11 +1037,14 @@ function KeybindingRowWhen({
   editor: KeybindingRowEditor;
   variables: ReadonlyArray<WhenVariableOption>;
 }) {
+  const { t } = useI18n();
   return (
     <span className="flex h-6 items-center gap-1.5">
-      <span className="text-[12px] leading-none text-muted-foreground/70">When</span>
+      <span className="text-[12px] leading-none text-muted-foreground/70">
+        {t("settings.keybindings.when")}
+      </span>
       <WhenClauseControl
-        label={commandLabel(row.command)}
+        label={localizedCommandLabel(row.command, t)}
         expression={editor.whenDraftExpression}
         value={editor.whenDraft}
         variables={variables}
@@ -1071,6 +1108,7 @@ function useNewKeybindingDraft({
   allRows: ReadonlyArray<KeybindingRow>;
   onSave: (input: ServerUpsertKeybindingInput) => void;
 }) {
+  const { t } = useI18n();
   const [commandDraft, setCommandDraft] = useState<KeybindingCommand | "">("");
   const [draft, setDraft] = useReducer(keybindingRowDraftReducer, {
     keyDraft: "",
@@ -1085,7 +1123,9 @@ function useNewKeybindingDraft({
     key: keyDraft,
     when: whenDraftExpression,
   });
-  const commandLabelText = commandDraft ? commandLabel(commandDraft) : "new keybinding";
+  const commandLabelText = commandDraft
+    ? localizedCommandLabel(commandDraft, t)
+    : t("settings.keybindings.new");
   const canSave = Boolean(commandDraft) && keyDraft.trim().length > 0 && isWhenDraftValid;
 
   const save = () => {
@@ -1145,13 +1185,14 @@ function NewKeybindingCommandSelect({
   commandOptions: ReadonlyArray<KeybindingCommandOption>;
   className?: string | undefined;
 }) {
+  const { t } = useI18n();
   return (
     <Select
       value={draft.commandDraft}
       onValueChange={(value) => draft.setCommandDraft(value as KeybindingCommand)}
     >
       <SelectTrigger size="sm" className={className}>
-        <SelectValue placeholder="Command" />
+        <SelectValue placeholder={t("settings.keybindings.command")} />
       </SelectTrigger>
       <SelectContent
         alignItemWithTrigger={false}
@@ -1160,7 +1201,7 @@ function NewKeybindingCommandSelect({
       >
         {commandOptions.map((command) => (
           <SelectItem key={command} value={command} className="min-h-7 w-full py-1 text-[12px]">
-            <span className="truncate">{commandLabel(command)}</span>
+            <span className="truncate">{localizedCommandLabel(command, t)}</span>
           </SelectItem>
         ))}
       </SelectContent>
@@ -1177,13 +1218,18 @@ function NewKeybindingKeyInput({
   autoFocus?: boolean;
   className?: string | undefined;
 }) {
+  const { t } = useI18n();
   return (
     <Input
       data-keybinding-capture=""
       autoFocus={autoFocus}
       aria-label={`Keybinding for ${draft.commandLabelText}`}
       value={draft.isRecording ? "" : draft.keyDraft}
-      placeholder={draft.isRecording ? "Press shortcut" : "Unassigned"}
+      placeholder={
+        draft.isRecording
+          ? t("settings.keybindings.pressShortcut")
+          : t("settings.keybindings.unassigned")
+      }
       size="sm"
       className={cn("font-mono", draft.isRecording && "border-primary/70 bg-primary/5", className)}
       onFocus={() => draft.setDraft({ isRecording: true })}
@@ -1220,6 +1266,7 @@ function NewKeybindingCancelIcon({
   isSaving: boolean;
   onCancel: () => void;
 }) {
+  const { t } = useI18n();
   return (
     <Tooltip>
       <TooltipTrigger
@@ -1230,30 +1277,33 @@ function NewKeybindingCancelIcon({
             size="icon-sm"
             className="text-muted-foreground hover:text-foreground"
             disabled={isSaving}
-            aria-label="Cancel new keybinding"
+            aria-label={t("settings.keybindings.cancel")}
             onClick={onCancel}
           />
         }
       >
         <XIcon className="size-3.5" />
       </TooltipTrigger>
-      <TooltipPopup side="top">Cancel</TooltipPopup>
+      <TooltipPopup side="top">{t("settings.keybindings.cancel")}</TooltipPopup>
     </Tooltip>
   );
 }
 
 /** Add-binding form shaped like the binding rows below it. */
 function NewKeybindingSettingsRow(props: NewKeybindingProps) {
+  const { t } = useI18n();
   const { commandOptions, allRows, variables, isSaving, onSave, onCancel } = props;
   const draft = useNewKeybindingDraft({ allRows, onSave });
 
   return (
     <SettingsRow
       className="rounded-none bg-muted/15"
-      title="New keybinding"
+      title={t("settings.keybindings.new")}
       description={
         <span className="flex h-6 items-center gap-1.5">
-          <span className="text-[12px] leading-none text-muted-foreground/70">When</span>
+          <span className="text-[12px] leading-none text-muted-foreground/70">
+            {t("settings.keybindings.when")}
+          </span>
           <NewKeybindingWhen draft={draft} variables={variables} />
         </span>
       }
@@ -1267,7 +1317,7 @@ function NewKeybindingSettingsRow(props: NewKeybindingProps) {
           <KeybindingConflictWarning labels={draft.conflictLabels} />
           <NewKeybindingKeyInput draft={draft} className="w-44" />
           <Button size="sm" disabled={isSaving || !draft.canSave} onClick={draft.save}>
-            {isSaving ? "Saving" : "Save"}
+            {isSaving ? t("settings.keybindings.saving") : t("settings.keybindings.save")}
           </Button>
           <NewKeybindingCancelIcon isSaving={isSaving} onCancel={onCancel} />
         </div>
@@ -1286,6 +1336,7 @@ interface KeybindingsListProps extends KeybindingRowActions {
 
 /** The add-binding row, one settings row per binding, and the empty state. */
 function KeybindingsList(props: KeybindingsListProps) {
+  const { t } = useI18n();
   const { rows, commandOptions, savingCommand, isAddingBinding, onCancelAdd, ...rowActions } =
     props;
   const newProps: NewKeybindingProps = {
@@ -1309,7 +1360,7 @@ function KeybindingsList(props: KeybindingsListProps) {
       ))}
       {rows.length === 0 && !isAddingBinding ? (
         <div className="px-4 py-12 text-center text-sm text-muted-foreground">
-          No keybindings match your search.
+          {t("settings.keybindings.noMatches")}
         </div>
       ) : null}
     </div>
@@ -1318,18 +1369,17 @@ function KeybindingsList(props: KeybindingsListProps) {
 
 /** Shown in the browser build only; the desktop app receives every shortcut. */
 function BrowserKeybindingNotice() {
+  const { t } = useI18n();
   return (
     <div className="flex items-center gap-2 px-3 py-2.5 text-[12px] leading-[1.45] text-muted-foreground sm:px-4">
       <TriangleAlertIcon className="size-3.5 shrink-0 text-warning" aria-hidden />
-      <span>
-        Some shortcuts may be claimed by the browser before T3 Code sees them. Use the desktop app
-        for better keybinding support.
-      </span>
+      <span>{t("settings.keybindings.browserNotice")}</span>
     </div>
   );
 }
 
 export function KeybindingsSettingsPanel() {
+  const { t } = useI18n();
   // The representative environment supplies the displayed bindings; edits
   // fan out to every connected environment in the selection, so one
   // shortcut change reaches each machine the user runs T3 Code on.
@@ -1486,8 +1536,12 @@ export function KeybindingsSettingsPanel() {
 
   const bindingsCount = (
     <span className="text-[11px] text-muted-foreground">
-      {rows.length + (isAddingBinding ? 1 : 0)}{" "}
-      {rows.length + (isAddingBinding ? 1 : 0) === 1 ? "binding" : "bindings"}
+      {t(
+        rows.length + (isAddingBinding ? 1 : 0) === 1
+          ? "settings.keybindings.countOne"
+          : "settings.keybindings.countOther",
+        { count: rows.length + (isAddingBinding ? 1 : 0) },
+      )}
     </span>
   );
 
@@ -1507,7 +1561,7 @@ export function KeybindingsSettingsPanel() {
   return (
     <SettingsPageContainer>
       <SettingsSection
-        {...searchableSetting("keybindings")}
+        {...searchableSetting("keybindings", t)}
         headerAction={
           <div className="flex items-center gap-1.5">
             <ExpandableHeaderSearch
@@ -1526,13 +1580,13 @@ export function KeybindingsSettingsPanel() {
                     size="icon-xs"
                     variant="ghost-muted"
                     onClick={() => setIsAddingBinding(true)}
-                    aria-label="Add keybinding"
+                    aria-label={t("settings.keybindings.add")}
                   >
                     <PlusIcon />
                   </Button>
                 }
               />
-              <TooltipPopup side="top">Add keybinding</TooltipPopup>
+              <TooltipPopup side="top">{t("settings.keybindings.add")}</TooltipPopup>
             </Tooltip>
             <Tooltip>
               <TooltipTrigger
@@ -1543,13 +1597,13 @@ export function KeybindingsSettingsPanel() {
                     variant="ghost-muted"
                     disabled={!keybindingsConfigPath}
                     onClick={openKeybindingsFile}
-                    aria-label="Open keybindings.json"
+                    aria-label={t("settings.keybindings.openFile")}
                   >
                     <FileJsonIcon />
                   </Button>
                 }
               />
-              <TooltipPopup side="top">Open keybindings.json</TooltipPopup>
+              <TooltipPopup side="top">{t("settings.keybindings.openFile")}</TooltipPopup>
             </Tooltip>
           </div>
         }

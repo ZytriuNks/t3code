@@ -30,7 +30,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 
 import { isDesktopLocalConnectionTarget } from "../../connection/desktopLocal";
 import { isElectron } from "../../env";
-import { useConnectionStatusCopy } from "../../i18n/I18nProvider";
+import { useConnectionStatusCopy, useI18n } from "../../i18n/I18nProvider";
 import { usePrimarySessionState } from "../../environments/primary";
 import {
   useEnvironmentSettings,
@@ -139,6 +139,7 @@ function configuredBinaryPath(config: unknown): string {
 }
 
 function ProviderLastChecked({ lastCheckedAt }: { lastCheckedAt: string | null }) {
+  const { t } = useI18n();
   useRelativeTimeTick();
   const lastCheckedRelative = getRelativeTimeState(lastCheckedAt);
 
@@ -147,19 +148,15 @@ function ProviderLastChecked({ lastCheckedAt }: { lastCheckedAt: string | null }
   }
 
   if (lastCheckedRelative.status === "invalid") {
-    return <span>Checked unavailable</span>;
+    return <span>{t("settings.providers.checkedUnavailable")}</span>;
   }
 
   return (
     <span>
-      {lastCheckedRelative.suffix ? (
-        <>
-          Checked <span className="font-mono tabular-nums">{lastCheckedRelative.value}</span>{" "}
-          {lastCheckedRelative.suffix}
-        </>
-      ) : (
-        <>Checked {lastCheckedRelative.value}</>
-      )}
+      {t("settings.providers.checked", {
+        value: lastCheckedRelative.value,
+        suffix: lastCheckedRelative.suffix ?? "",
+      })}
     </span>
   );
 }
@@ -194,8 +191,9 @@ function ProviderSettingsPlaceholder({
   readonly description: string;
   readonly children?: ReactNode;
 }) {
+  const { t } = useI18n();
   return (
-    <SettingsSection {...searchableSetting("providers")} hideTitle variant="plain">
+    <SettingsSection {...searchableSetting("providers", t)} hideTitle variant="plain">
       {deviceTabs ? (
         <div className="flex min-h-11 min-w-0 items-center px-3 sm:px-4">{deviceTabs}</div>
       ) : null}
@@ -283,6 +281,7 @@ export function ProviderSettingsPanel(target: ProviderSettingsTarget) {
 }
 
 function ProviderSettingsPanelContent(target: ProviderSettingsTarget) {
+  const { t } = useI18n();
   const connectionStatusCopy = useConnectionStatusCopy();
   const { environments, isReady } = useEnvironments();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
@@ -573,6 +572,7 @@ export function EnvironmentProviderSettings({
    */
   readonly readOnly?: boolean;
 }) {
+  const { t } = useI18n();
   const settings = useEnvironmentSettings(environmentId);
   // Provider instances hold per-machine credentials and binaries, so this
   // page always edits exactly the environment it displays.
@@ -992,7 +992,7 @@ export function EnvironmentProviderSettings({
 
   return (
     <>
-      <SettingsSection {...searchableSetting("providers")} hideTitle variant="plain">
+      <SettingsSection {...searchableSetting("providers", t)} hideTitle variant="plain">
         <div className="flex min-h-11 min-w-0 items-center gap-2 px-3 sm:px-4">
           {deviceTabs}
           <div className="ml-auto flex min-w-0 shrink-0 items-center gap-2">
@@ -1013,10 +1013,10 @@ export function EnvironmentProviderSettings({
                         onClick={() => void refreshProviders()}
                       >
                         <RefreshIcon refreshing={isRefreshingProviders} />
-                        <span className="sr-only">Refresh provider status</span>
+                        <span className="sr-only">{t("settings.providers.refresh")}</span>
                         <span className="hidden min-w-0 truncate sm:inline">
                           {isRefreshingProviders ? (
-                            "Refreshing providers"
+                            t("settings.providers.refreshing")
                           ) : (
                             <ProviderLastChecked lastCheckedAt={lastCheckedAt} />
                           )}
@@ -1024,7 +1024,7 @@ export function EnvironmentProviderSettings({
                       </Button>
                     }
                   />
-                  <TooltipPopup side="top">Refresh provider status</TooltipPopup>
+                  <TooltipPopup side="top">{t("settings.providers.refresh")}</TooltipPopup>
                 </Tooltip>
                 <Tooltip>
                   <TooltipTrigger
@@ -1033,13 +1033,13 @@ export function EnvironmentProviderSettings({
                         size="icon-xs"
                         variant="ghost-muted"
                         onClick={() => setIsAddInstanceDialogOpen(true)}
-                        aria-label="Add provider"
+                        aria-label={t("settings.providers.add")}
                       >
                         <PlusIcon />
                       </Button>
                     }
                   />
-                  <TooltipPopup side="top">Add provider</TooltipPopup>
+                  <TooltipPopup side="top">{t("settings.providers.add")}</TooltipPopup>
                 </Tooltip>
               </>
             )}
@@ -1048,8 +1048,10 @@ export function EnvironmentProviderSettings({
         {readOnly ? (
           <div className={cn(providerCardClassName, "overflow-hidden")}>
             <SettingsRow
-              title="Limited permissions"
-              description={`This session can view ${environmentLabel}'s providers but can't change their settings.`}
+              title={t("settings.providers.limitedPermissions")}
+              description={t("settings.providers.limitedPermissionsDescription", {
+                environment: environmentLabel,
+              })}
             />
           </div>
         ) : null}
@@ -1076,8 +1078,8 @@ export function EnvironmentProviderSettings({
             ) : (
               <div className="p-6 text-sm text-muted-foreground">
                 {targetInstanceMissing
-                  ? "This provider instance is no longer available on this device."
-                  : "No providers configured."}
+                  ? t("settings.providers.instanceUnavailable")
+                  : t("settings.providers.none")}
               </div>
             )}
           </div>
@@ -1092,12 +1094,12 @@ export function EnvironmentProviderSettings({
         readOnly={readOnly}
       />
 
-      <SettingsSection title="Advanced">
+      <SettingsSection title={t("settings.providers.advanced")}>
         <SettingsRow
           id={searchableSetting("provider-health-check-interval").id}
           title={
             <span className="inline-flex items-center gap-1.5">
-              {searchableSetting("provider-health-check-interval").title}
+              {searchableSetting("provider-health-check-interval", t).title}
               <PolicyTooltip>
                 This interval is configured here, then the shared Background activity policy decides
                 whether provider probes may run when the timer fires. Custom intervals appear as
@@ -1105,7 +1107,7 @@ export function EnvironmentProviderSettings({
               </PolicyTooltip>
             </span>
           }
-          description="Refresh provider status, versions, and models in the background. Set to 0 to disable."
+          description={t("settings.providers.healthDescription")}
           resetAction={
             providerHealthRefreshIntervalSeconds !== defaultProviderHealthRefreshIntervalSeconds ? (
               <span inert={readOnly} className={readOnly ? "opacity-50" : undefined}>

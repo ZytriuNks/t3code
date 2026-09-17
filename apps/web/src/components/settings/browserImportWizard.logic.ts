@@ -1,4 +1,5 @@
 import type { BrowserImportFailureReason, BrowserImportSource } from "@t3tools/contracts";
+import type { AppLanguage } from "../../i18n/locale";
 
 export interface WizardTargetProfile {
   readonly id: string;
@@ -166,9 +167,16 @@ export function isRetryableReason(reason: BrowserImportFailureReason): boolean {
  * Names the sites whose cookies were skipped: "example.com and google.com",
  * or "a, b, c and 4 more" past a few, so the line stays short.
  */
-export function formatSkippedDomains(domains: ReadonlyArray<string>): string {
+export function formatSkippedDomains(
+  domains: ReadonlyArray<string>,
+  language: AppLanguage = "en",
+): string {
   if (domains.length === 0) return "";
   if (domains.length === 1) return domains[0]!;
+  if (language === "zh-CN") {
+    if (domains.length <= 3) return domains.join("、");
+    return `${domains.slice(0, 3).join("、")}及另外 ${domains.length - 3} 个`;
+  }
   if (domains.length <= 3) return `${domains.slice(0, -1).join(", ")} and ${domains.at(-1)}`;
   return `${domains.slice(0, 3).join(", ")} and ${domains.length - 3} more`;
 }

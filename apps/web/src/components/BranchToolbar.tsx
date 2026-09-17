@@ -21,17 +21,14 @@ import {
 } from "react";
 
 import { useComposerDraftStore, type DraftId } from "../composerDraftStore";
+import { useI18n } from "../i18n/I18nProvider";
 import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
 import { useProject, useThreadShell, useThreadShellsForProjectRefs } from "../state/entities";
 import {
   type EnvMode,
   type EnvironmentOption,
   resolveContextStripLabelsCompact,
-  resolveCurrentWorkspaceLabel,
-  resolveEnvModeLabel,
   resolveEffectiveEnvMode,
-  resolveLockedWorkspaceLabel,
-  resolvePreviousWorktreeLabel,
   resolvePreviousWorktreeSeed,
   shouldShowEnvironmentIndicator,
 } from "./BranchToolbar.logic";
@@ -120,6 +117,7 @@ const MobileRunContextSelector = memo(function MobileRunContextSelector({
   previousWorktreeLabel,
   onUsePreviousWorktree,
 }: MobileRunContextSelectorProps) {
+  const { t } = useI18n();
   const composerFloatingLayerProps = useComposerMenuProps();
   const activeEnvironment = useMemo(
     () => availableEnvironments?.find((env) => env.environmentId === environmentId) ?? null,
@@ -132,10 +130,14 @@ const MobileRunContextSelector = memo(function MobileRunContextSelector({
         ? FolderGitIcon
         : FolderIcon;
   const workspaceLabel = envModeLocked
-    ? resolveLockedWorkspaceLabel(activeWorktreePath)
+    ? activeWorktreePath
+      ? t("toolbar.workspace.worktree")
+      : t("toolbar.workspace.localCheckout")
     : effectiveEnvMode === "worktree"
-      ? resolveEnvModeLabel("worktree")
-      : resolveCurrentWorkspaceLabel(activeWorktreePath);
+      ? t("settings.general.workspace.mode.worktree")
+      : activeWorktreePath
+        ? t("toolbar.workspace.currentWorktree")
+        : t("settings.general.workspace.mode.local");
   const isLocked = envLocked || envModeLocked;
   const icon = showEnvironmentIndicator ? (
     // Button's base styles apply `-mx-0.5` to descendant SVGs, which eats 4px
@@ -166,7 +168,9 @@ const MobileRunContextSelector = memo(function MobileRunContextSelector({
           className="block w-full min-w-0 max-w-[240px] truncate transition-opacity duration-180 ease-[cubic-bezier(0.32,0.72,0,1)] group-data-[compact]/composer-context:opacity-0 motion-reduce:transition-none"
         >
           {autoEnvironmentLabel ??
-            (showEnvironmentIndicator ? (activeEnvironment?.label ?? "Run on") : workspaceLabel)}
+            (showEnvironmentIndicator
+              ? (activeEnvironment?.label ?? t("toolbar.environment.runOn"))
+              : workspaceLabel)}
         </span>
       </span>
     </>
@@ -201,7 +205,7 @@ const MobileRunContextSelector = memo(function MobileRunContextSelector({
         {showEnvironmentPicker && availableEnvironments && onEnvironmentChange ? (
           <>
             <MenuGroup>
-              <MenuGroupLabel>Run on</MenuGroupLabel>
+              <MenuGroupLabel>{t("toolbar.environment.runOn")}</MenuGroupLabel>
               <MenuRadioGroup
                 value={autoEnvironmentLabel ? "auto" : environmentId}
                 onValueChange={(value) =>
@@ -221,7 +225,7 @@ const MobileRunContextSelector = memo(function MobileRunContextSelector({
                     <span className="flex min-w-0 items-center gap-1.5">
                       <ScaleIcon className="size-3" aria-hidden="true" />
                       <span className="min-w-0 truncate">
-                        {autoEnvironmentLabel ?? "Auto balance"}
+                        {autoEnvironmentLabel ?? t("toolbar.environment.autoBalance")}
                       </span>
                     </span>
                   </MenuRadioItem>
@@ -244,7 +248,7 @@ const MobileRunContextSelector = memo(function MobileRunContextSelector({
           </>
         ) : null}
         <MenuGroup>
-          <MenuGroupLabel>Workspace</MenuGroupLabel>
+          <MenuGroupLabel>{t("toolbar.workspace.title")}</MenuGroupLabel>
           <MenuRadioGroup
             value={effectiveEnvMode}
             onValueChange={(value) => {
@@ -263,14 +267,18 @@ const MobileRunContextSelector = memo(function MobileRunContextSelector({
                   <FolderIcon className="size-3" />
                 )}
                 <span className="min-w-0 truncate">
-                  {resolveCurrentWorkspaceLabel(activeWorktreePath)}
+                  {activeWorktreePath
+                    ? t("toolbar.workspace.currentWorktree")
+                    : t("settings.general.workspace.mode.local")}
                 </span>
               </span>
             </MenuRadioItem>
             <MenuRadioItem disabled={envModeLocked} value="worktree">
               <span className="flex min-w-0 items-center gap-1.5">
                 <FolderGit2Icon className="size-3" />
-                <span className="min-w-0 truncate">{resolveEnvModeLabel("worktree")}</span>
+                <span className="min-w-0 truncate">
+                  {t("settings.general.workspace.mode.worktree")}
+                </span>
               </span>
             </MenuRadioItem>
             {previousWorktreeLabel ? (
@@ -483,6 +491,7 @@ export const BranchToolbar = memo(function BranchToolbar({
   composerControlsHostRef,
   contextStripVisible = true,
 }: BranchToolbarProps) {
+  const { t } = useI18n();
   const branchSelectorRef = useRef<BranchToolbarBranchSelectorHandle>(null);
   const threadRef = useMemo(
     () => scopeThreadRef(environmentId, threadId),
@@ -530,7 +539,11 @@ export const BranchToolbar = memo(function BranchToolbar({
     [activeWorktreePath, canUsePreviousWorktree, projectThreads],
   );
   const previousWorktreeLabel = previousWorktreeSeed
-    ? resolvePreviousWorktreeLabel(previousWorktreeSeed)
+    ? previousWorktreeSeed.branch
+      ? t("toolbar.workspace.previousWorktreeWithBranch", {
+          branch: previousWorktreeSeed.branch,
+        })
+      : t("toolbar.workspace.previousWorktree")
     : null;
   const onUsePreviousWorktree = useCallback(() => {
     if (!previousWorktreeSeed || !activeProjectRef) return;

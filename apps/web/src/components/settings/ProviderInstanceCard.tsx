@@ -33,6 +33,7 @@ import {
 } from "@t3tools/shared/model";
 import { cn } from "../../lib/utils";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
+import { useI18n } from "../../i18n/I18nProvider";
 import { normalizeProviderAccentColor } from "../../providerInstances";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -174,6 +175,7 @@ function ProviderEnvironmentSection(props: {
   readonly environment: ReadonlyArray<ProviderInstanceEnvironmentVariable>;
   readonly onChange: (environment: ReadonlyArray<ProviderInstanceEnvironmentVariable>) => void;
 }) {
+  const { t } = useI18n();
   const [rows, setRows] = useState<ReadonlyArray<EnvironmentDraftRow>>(() =>
     props.environment.map(makeEnvironmentDraftRow),
   );
@@ -253,12 +255,12 @@ function ProviderEnvironmentSection(props: {
 
   return (
     <SettingsRow
-      title="Variables"
-      description="API keys, base URLs, and other per-instance CLI settings."
+      title={t("settings.providers.variables")}
+      description={t("settings.providers.variablesDescription")}
       control={
         <Button type="button" size="sm" variant="outline" onClick={addVariable}>
           <PlusIcon className="size-3" />
-          Add variable
+          {t("settings.providers.addVariable")}
         </Button>
       }
     >
@@ -424,6 +426,7 @@ export function ProviderInstanceCard({
   onRunUpdate,
   isUpdating = false,
 }: ProviderInstanceCardProps) {
+  const { t } = useI18n();
   const enabled = resolveProviderInstanceEnabled(instance);
   // A locally disabled provider reads "Disabled" with a muted dot even if its
   // last server status is stale. Enabled providers use the server status.
@@ -433,13 +436,16 @@ export function ProviderInstanceCard({
   const statusStyle = PROVIDER_STATUS_STYLES[statusKey];
   const summary = enabled
     ? getProviderSummary(liveProvider)
-    : { headline: "Disabled", detail: null };
+    : { headline: t("settings.providers.disabled"), detail: null };
   const authEmail = liveProvider?.auth.email?.trim();
   const isAuthenticated = enabled && liveProvider?.auth.status === "authenticated";
   const authLabel =
     enabled && liveProvider?.auth.status === "authenticated"
       ? (liveProvider.auth.label ?? liveProvider.auth.type ?? null)
       : null;
+  const summaryHeadline = isAuthenticated
+    ? `${t("settings.providers.authenticated")}${authLabel ? ` · ${authLabel}` : ""}`
+    : summary.headline;
   const versionLabel = getProviderVersionLabel(liveProvider?.version);
   const versionAdvisory = getProviderVersionAdvisoryPresentation(liveProvider?.versionAdvisory);
   const updateCommand = versionAdvisory?.updateCommand ?? null;
@@ -579,7 +585,7 @@ export function ProviderInstanceCard({
     isAuthenticated && authEmail ? (
       <>
         {needsAttention ? statusDotNode : null}
-        <span>Authenticated as</span>
+        <span>{t("settings.providers.authenticatedAs")}</span>
         <ProviderAuthEmail email={authEmail} />
         {authLabel ? <span>· {authLabel}</span> : null}
         {summary.detail ? (
@@ -589,7 +595,7 @@ export function ProviderInstanceCard({
     ) : (
       <>
         {statusDotNode}
-        <span>{summary.headline}</span>
+        <span>{summaryHeadline}</span>
         {summary.detail ? (
           <span className="min-w-0 [overflow-wrap:anywhere]">· {summary.detail}</span>
         ) : null}
@@ -664,7 +670,7 @@ export function ProviderInstanceCard({
                 <span className="flex h-[1.45em] shrink-0 items-center">{statusDotNode}</span>
               ) : null}
               <span className="line-clamp-2 [overflow-wrap:anywhere]">
-                {summary.headline}
+                {summaryHeadline}
                 {needsAttention && summary.detail ? ` · ${summary.detail}` : null}
               </span>
             </span>
@@ -808,7 +814,7 @@ export function ProviderInstanceCard({
     <>
       <SettingsSection title={displayName} icon={titleIconNode} headerAction={editorHeaderAction}>
         <SettingsRow
-          title="Display name"
+          title={t("settings.providers.displayName")}
           status={
             <div className="flex min-w-0 flex-wrap items-center gap-x-1.5">{editorStatusNode}</div>
           }
@@ -842,10 +848,12 @@ export function ProviderInstanceCard({
         />
       </SettingsSection>
 
-      {setup ? <SettingsSection title="Setup">{setup}</SettingsSection> : null}
+      {setup ? (
+        <SettingsSection title={t("settings.providers.setup")}>{setup}</SettingsSection>
+      ) : null}
 
       <SettingsSection
-        title="Runtime"
+        title={t("settings.providers.runtime")}
         inert={readOnly}
         aria-disabled={readOnly || undefined}
         className={readOnly ? "opacity-50 select-none" : undefined}
@@ -860,7 +868,7 @@ export function ProviderInstanceCard({
           />
         ) : (
           <SettingsRow
-            title="Driver"
+            title={t("settings.providers.driver")}
             description={
               <span>
                 This instance uses{" "}
@@ -873,7 +881,7 @@ export function ProviderInstanceCard({
       </SettingsSection>
 
       <SettingsSection
-        title="Environment"
+        title={t("settings.providers.environment")}
         inert={readOnly}
         aria-disabled={readOnly || undefined}
         className={readOnly ? "opacity-50 select-none" : undefined}
@@ -886,15 +894,14 @@ export function ProviderInstanceCard({
 
       {driverOption !== undefined ? (
         <SettingsSection
-          title="Models"
+          title={t("settings.providers.models")}
           inert={readOnly}
           aria-disabled={readOnly || undefined}
           className={readOnly ? "opacity-50 select-none" : undefined}
         >
           <div className="px-3 py-3 sm:px-4">
             <p className="mb-3 text-xs text-muted-foreground">
-              Favorites, visibility, and ordering are saved on this device. Custom models are saved
-              on the selected environment.
+              {t("settings.providers.modelsDescription")}
             </p>
             <ProviderModelsSection
               instanceId={instanceId}

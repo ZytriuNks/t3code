@@ -3,6 +3,7 @@ import { PlusIcon } from "lucide-react";
 import { useState } from "react";
 
 import { useUpdateEnvironmentSettings } from "../../hooks/useSettings";
+import { useI18n } from "../../i18n/I18nProvider";
 import {
   AlertDialog,
   AlertDialogClose,
@@ -29,6 +30,7 @@ export function UsageProviderSettings({
   readonly sources: UnifiedSettings["usageLimitSources"];
   readonly readOnly: boolean;
 }) {
+  const { t } = useI18n();
   const updateSettings = useUpdateEnvironmentSettings(environmentId);
   const [adding, setAdding] = useState(false);
   const entries = Object.entries(sources);
@@ -36,18 +38,18 @@ export function UsageProviderSettings({
   return (
     <>
       <SettingsSection
-        {...searchableSetting("usage-providers")}
+        {...searchableSetting("usage-providers", t)}
         headerAction={
           !readOnly ? (
             <Button size="xs" variant="outline" onClick={() => setAdding(true)}>
               <PlusIcon className="size-3" aria-hidden />
-              Add hub
+              {t("settings.providers.usage.addHub")}
             </Button>
           ) : null
         }
       >
         {entries.length === 0 ? (
-          <SettingsRow title="No usage providers configured." />
+          <SettingsRow title={t("settings.providers.usage.none")} />
         ) : (
           entries.map(([id, source]) => {
             const label = source.label?.trim() || source.url;
