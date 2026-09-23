@@ -9,6 +9,7 @@ import {
   TriangleAlertIcon,
   XIcon,
 } from "lucide-react";
+import { useLocation } from "@tanstack/react-router";
 import {
   type KeyboardEvent,
   type ReactNode,
@@ -43,6 +44,7 @@ import { useSettingsScope } from "./SettingsScopeContext";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
+import { InputGroup, InputGroupAddon, InputGroupInput } from "../ui/input-group";
 import { Kbd, KbdGroup } from "../ui/kbd";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
@@ -67,7 +69,7 @@ import {
   whenNodeRemoveLabel,
 } from "./KeybindingsSettings.logic";
 import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
-import { searchableSetting } from "./settingsSearch";
+import { keybindingSearchAnchorId, searchableSetting } from "./settingsSearch";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { useAtomCommand } from "../../state/use-atom-command";
 
@@ -102,9 +104,9 @@ function KeybindingPill({ value }: { value: string }) {
     return { part, key: seen === 0 ? part : `${part}-${seen}` };
   });
   return (
-    <KbdGroup className="bg-transparent p-0 shadow-none">
+    <KbdGroup>
       {parts.map(({ part, key }) => (
-        <Kbd key={key} className="min-w-6 justify-center px-1.5">
+        <Kbd key={key}>
           {part === "mod"
             ? navigator.platform.toLowerCase().includes("mac")
               ? "⌘"
@@ -168,9 +170,11 @@ function ExpandableHeaderSearch({
   }
 
   return (
-    <div className="relative">
-      <SearchIcon className="pointer-events-none absolute top-1/2 left-2 size-3 -translate-y-1/2 text-muted-foreground" />
-      <Input
+    <InputGroup className="w-44">
+      <InputGroupAddon>
+        <SearchIcon aria-hidden className="size-3" />
+      </InputGroupAddon>
+      <InputGroupInput
         ref={inputRef}
         autoFocus
         type="search"
@@ -188,10 +192,9 @@ function ExpandableHeaderSearch({
         }}
         placeholder={label}
         aria-label={label}
-        className="w-44 [&_[data-slot=input]]:pl-7"
         size="sm"
       />
-    </div>
+    </InputGroup>
   );
 }
 
@@ -286,9 +289,7 @@ function WarningTooltipIcon({
       >
         <TriangleAlertIcon className="size-3.5" />
       </TooltipTrigger>
-      <TooltipPopup side="top" className="max-w-72 whitespace-normal leading-relaxed">
-        {children}
-      </TooltipPopup>
+      <TooltipPopup side="top">{children}</TooltipPopup>
     </Tooltip>
   );
 }
@@ -345,24 +346,15 @@ function WhenVariableSelect({
 
   return (
     <Select value={value} onValueChange={(nextValue) => nextValue && onChange(nextValue)}>
-      <SelectTrigger size="compact" className="min-w-0 flex-1 font-mono">
-        <SelectValue placeholder="Condition" className="leading-7" />
+      <SelectTrigger size="compact" className="min-w-0 flex-1">
+        <SelectValue placeholder="Condition" />
         {unknownIdentifiers && unknownIdentifiers.length > 0 ? (
           <UnknownWhenVariableWarning identifiers={unknownIdentifiers} focusable={false} />
         ) : null}
       </SelectTrigger>
-      <SelectContent
-        alignItemWithTrigger={false}
-        matchTriggerWidth={false}
-        popupClassName="w-fit"
-        className="max-h-72 w-fit min-w-44"
-      >
+      <SelectContent alignItemWithTrigger={false} matchTriggerWidth={false} className="max-h-72">
         {options.map((option) => (
-          <SelectItem
-            key={option}
-            value={option}
-            className="min-h-7 w-full py-1 font-mono text-[12px]"
-          >
+          <SelectItem key={option} value={option} className="w-full">
             <span className="truncate">{option}</span>
           </SelectItem>
         ))}
@@ -565,18 +557,9 @@ function WhenExpressionNodeEditor({
           <SelectTrigger size="compact" className="w-24">
             <SelectValue />
           </SelectTrigger>
-          <SelectContent
-            alignItemWithTrigger={false}
-            matchTriggerWidth={false}
-            popupClassName="w-fit"
-            className="w-fit min-w-24"
-          >
-            <SelectItem value="and" className="min-h-7 py-1 font-mono text-[12px]">
-              and
-            </SelectItem>
-            <SelectItem value="or" className="min-h-7 py-1 font-mono text-[12px]">
-              or
-            </SelectItem>
+          <SelectContent alignItemWithTrigger={false} matchTriggerWidth={false}>
+            <SelectItem value="and">and</SelectItem>
+            <SelectItem value="or">or</SelectItem>
           </SelectContent>
         </Select>
         <Button type="button" variant="outline" size="compact" onClick={addCondition}>
@@ -694,25 +677,22 @@ function WhenExpressionBuilder({
       </div>
 
       <div className="space-y-1.5">
-        <div className="relative">
-          <Input
+        <InputGroup>
+          <InputGroupInput
             value={expressionDraft}
             onChange={(event) => updateExpressionDraft(event.currentTarget.value)}
             placeholder="Always"
             aria-invalid={Boolean(parseError)}
             aria-label="When expression"
-            className={cn(
-              "h-7 rounded-md font-mono text-[12px] leading-7 sm:h-7 sm:leading-7",
-              unknownIdentifiers.length > 0 && "pr-9",
-              parseError && "border-destructive/70 focus-visible:border-destructive",
-            )}
+            size="compact"
+            font="mono"
           />
           {unknownIdentifiers.length > 0 ? (
-            <span className="absolute inset-y-0 right-2 flex items-center">
+            <InputGroupAddon align="inline-end">
               <UnknownWhenVariableWarning identifiers={unknownIdentifiers} />
-            </span>
+            </InputGroupAddon>
           ) : null}
-        </div>
+        </InputGroup>
         {parseError ? (
           <div className="flex items-center gap-1.5 text-[11px] text-destructive">
             <CircleXIcon className="size-3.5" />
@@ -849,7 +829,11 @@ interface KeybindingRowActions {
   onRemove: (row: KeybindingRow) => void;
 }
 
-type KeybindingRowProps = KeybindingRowActions & { row: KeybindingRow; isSaving: boolean };
+type KeybindingRowProps = KeybindingRowActions & {
+  row: KeybindingRow;
+  isSaving: boolean;
+  anchorId?: string | undefined;
+};
 
 /** Shortcut pill that turns into a capture input when clicked, plus Save once the draft changes. */
 function KeybindingKeyControl({
@@ -904,7 +888,8 @@ function KeybindingKeyControl({
               : t("settings.keybindings.unassigned")
           }
           size="sm"
-          className={cn("w-44 font-mono", isRecording && "border-primary/70 bg-primary/5")}
+          font="mono"
+          className="w-44"
           onFocus={() => setDraft({ isRecording: true })}
           onBlur={() => setDraft({ isRecording: false })}
           onChange={(event) => setDraft({ keyDraft: event.currentTarget.value })}
@@ -939,12 +924,12 @@ function WhenClauseControl({
           <Button
             variant={expression ? "ghost" : "ghost-muted"}
             size="micro"
-            className="min-w-0 shrink font-mono"
+            className="min-w-0 shrink"
           />
         }
         aria-label={`Edit when clause for ${label}`}
       >
-        <span className="truncate">{expression || t("settings.keybindings.always")}</span>
+        <span className="truncate font-mono">{expression || t("settings.keybindings.always")}</span>
         <ChevronDownIcon className="size-3.5 shrink-0 opacity-60" />
       </PopoverTrigger>
       <PopoverContent align="start" sideOffset={6}>
@@ -980,9 +965,8 @@ function KeybindingRowMenu({
         render={
           <Button
             type="button"
-            variant="ghost"
+            variant="ghost-muted"
             size="icon-sm"
-            className="text-muted-foreground hover:text-foreground"
             disabled={isSaving}
             aria-label={`Actions for ${commandLabel(row.command)}`}
           />
@@ -990,7 +974,7 @@ function KeybindingRowMenu({
       >
         <EllipsisIcon className="size-3.5" />
       </MenuTrigger>
-      <MenuPopup align="end" className="min-w-36">
+      <MenuPopup align="end">
         {canReset ? (
           <MenuItem disabled={isSaving} onClick={() => onReset(row)}>
             Reset to default
@@ -1009,7 +993,7 @@ function KeybindingRowMenu({
 function KeybindingSourceBadge({ source }: { source: KeybindingRow["source"] }) {
   if (source === "Default") return null;
   return (
-    <Badge variant="outline" size="sm" className="font-normal text-muted-foreground">
+    <Badge variant="outline" size="sm">
       {source}
     </Badge>
   );
@@ -1071,11 +1055,12 @@ function KeybindingHoverRowMenu(props: {
 
 /** One binding as a settings row: pills flush right, actions fading in beside them on hover. */
 function KeybindingSettingsRow(props: KeybindingRowProps) {
-  const { row, isSaving, allRows, variables, onSave, onReset, onRemove } = props;
+  const { row, isSaving, anchorId, allRows, variables, onSave, onReset, onRemove } = props;
   const editor = useKeybindingRowEditor({ row, allRows, onSave });
 
   return (
     <SettingsRow
+      id={anchorId}
       className="group/row rounded-none"
       title={<KeybindingRowTitle row={row} />}
       description={<KeybindingRowWhen row={row} editor={editor} variables={variables} />}
@@ -1194,13 +1179,9 @@ function NewKeybindingCommandSelect({
       <SelectTrigger size="sm" className={className}>
         <SelectValue placeholder={t("settings.keybindings.command")} />
       </SelectTrigger>
-      <SelectContent
-        alignItemWithTrigger={false}
-        matchTriggerWidth={false}
-        className="max-h-72 w-fit min-w-56"
-      >
+      <SelectContent alignItemWithTrigger={false} matchTriggerWidth={false} className="max-h-72">
         {commandOptions.map((command) => (
-          <SelectItem key={command} value={command} className="min-h-7 w-full py-1 text-[12px]">
+          <SelectItem key={command} value={command} className="w-full">
             <span className="truncate">{localizedCommandLabel(command, t)}</span>
           </SelectItem>
         ))}
@@ -1231,7 +1212,8 @@ function NewKeybindingKeyInput({
           : t("settings.keybindings.unassigned")
       }
       size="sm"
-      className={cn("font-mono", draft.isRecording && "border-primary/70 bg-primary/5", className)}
+      font="mono"
+      className={className}
       onFocus={() => draft.setDraft({ isRecording: true })}
       onBlur={() => draft.setDraft({ isRecording: false })}
       onChange={(event) => draft.setDraft({ keyDraft: event.currentTarget.value })}
@@ -1273,9 +1255,8 @@ function NewKeybindingCancelIcon({
         render={
           <Button
             type="button"
-            variant="ghost"
+            variant="ghost-muted"
             size="icon-sm"
-            className="text-muted-foreground hover:text-foreground"
             disabled={isSaving}
             aria-label={t("settings.keybindings.cancel")}
             onClick={onCancel}
@@ -1347,6 +1328,17 @@ function KeybindingsList(props: KeybindingsListProps) {
     onSave: rowActions.onSave,
     onCancel: onCancelAdd,
   };
+  // Settings search jumps to a command, so only its first row anchors.
+  const anchorIds = useMemo(() => {
+    const ids = new Map<string, string>();
+    const seen = new Set<KeybindingCommand>();
+    for (const row of rows) {
+      if (seen.has(row.command)) continue;
+      seen.add(row.command);
+      ids.set(row.id, keybindingSearchAnchorId(row.command));
+    }
+    return ids;
+  }, [rows]);
   return (
     <div>
       {isAddingBinding ? <NewKeybindingSettingsRow {...newProps} /> : null}
@@ -1354,6 +1346,7 @@ function KeybindingsList(props: KeybindingsListProps) {
         <KeybindingSettingsRow
           key={row.id}
           row={row}
+          anchorId={anchorIds.get(row.id)}
           isSaving={savingCommand === row.command}
           {...rowActions}
         />
@@ -1407,6 +1400,16 @@ export function KeybindingsSettingsPanel() {
   const [savingCommand, setSavingCommand] = useState<KeybindingCommand | null>(null);
   const [isAddingBinding, setIsAddingBinding] = useState(false);
   const rows = useMemo(() => buildKeybindingRows(keybindings, query), [keybindings, query]);
+  // The search-target context is provided by this panel's own page container,
+  // so the jump target is read from the route hash here.
+  const searchTargetId = useLocation({ select: (location) => location.hash.replace(/^#/, "") });
+  const [handledSearchTargetId, setHandledSearchTargetId] = useState(searchTargetId);
+
+  // A settings-search jump must not be hidden by the page's own filter.
+  if (searchTargetId !== handledSearchTargetId) {
+    setHandledSearchTargetId(searchTargetId);
+    if (searchTargetId.startsWith("keybinding-")) setQuery("");
+  }
   const commandOptions = useMemo(() => buildKeybindingCommandOptions(keybindings), [keybindings]);
   const whenVariables = useMemo(() => buildWhenVariableOptions(), []);
 

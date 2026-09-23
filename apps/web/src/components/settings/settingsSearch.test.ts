@@ -49,8 +49,9 @@ const ITEMS: ReadonlyArray<SettingsSearchItem> = [
 const zh = (key: MessageKey, values?: MessageValues) => translate("zh-CN", key, values);
 
 describe("searchSettings", () => {
-  it("gives every catalog item stable typed message keys", () => {
+  it("gives localized catalog items stable typed message keys", () => {
     for (const item of SETTINGS_SEARCH_ITEMS) {
+      if (!item.titleKey) continue;
       expect(Object.entries(item)).toContainEqual([
         "titleKey",
         `settings.search.item.${item.id}.title`,
@@ -77,6 +78,10 @@ describe("searchSettings", () => {
   it("keeps English and Chinese queries on the same stable target", () => {
     expect(searchSettings("default model", SETTINGS_SEARCH_ITEMS, zh)[0]?.id).toBe("default-model");
     expect(searchSettings("默认模型", SETTINGS_SEARCH_ITEMS, zh)[0]?.id).toBe("default-model");
+  });
+
+  it.each(["send shortcut", "multiline", "new line"])("finds Send shortcut for %s", (query) => {
+    expect(searchSettings(query).map((item) => item.id)).toContain("send-shortcut");
   });
 
   it("matches titles, sections, and remembered setting details", () => {
@@ -246,6 +251,32 @@ describe("searchSettings", () => {
     ]);
   });
 
+  it("finds keybinding commands by label, command id, and default key", () => {
+    expect(searchSettings("toggle sidebar")[0]?.id).toBe("keybinding-sidebar.toggle");
+    expect(searchSettings("sidebar.toggle")[0]?.id).toBe("keybinding-sidebar.toggle");
+    expect(searchSettings("mod+b")[0]?.id).toBe("keybinding-sidebar.toggle");
+    expect(searchSettings("copy link")[0]).toMatchObject({
+      id: "keybinding-thread.copyReference",
+      to: "/settings/keybindings",
+    });
+  });
+
+  it("ranks keybinding commands after other settings", () => {
+    const ids = searchSettings("model").map((item) => item.id);
+    expect(ids[0]).toBe("default-model");
+    expect(ids.indexOf("keybinding-modelPicker.toggle")).toBeGreaterThan(
+      ids.indexOf("text-generation-model"),
+    );
+  });
+
+  it("sends commands without a default binding to the section", () => {
+    expect(searchSettings("thread.stop")[0]).toMatchObject({
+      id: "keybinding-thread.stop",
+      targetId: "keybindings",
+    });
+    expect(searchSettings("sidebar.toggle")[0]?.targetId).toBeUndefined();
+  });
+
   it("keeps catalog result ids unique", () => {
     const ids = SETTINGS_SEARCH_ITEMS.map((item) => item.id);
     expect(new Set(ids).size).toBe(ids.length);
@@ -265,6 +296,10 @@ describe("searchSettings", () => {
     });
     expect(searchSettings("word wrap")[0]).toMatchObject({
       id: "word-wrap",
+      to: "/settings/appearance",
+    });
+    expect(searchSettings("composer context")[0]).toMatchObject({
+      id: "composer-context",
       to: "/settings/appearance",
     });
     expect(searchSettings("environment identification")[0]).toMatchObject({

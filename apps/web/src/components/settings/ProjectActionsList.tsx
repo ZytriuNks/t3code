@@ -53,16 +53,17 @@ export function ProjectActionsList({
             {shortcutLabel ? (
               <span className="text-xs text-muted-foreground">{shortcutLabel}</span>
             ) : null}
-            <Button
-              size="icon-xs"
-              variant="ghost"
-              className="shrink-0 text-muted-foreground opacity-0 group-focus-within:opacity-100 group-hover:opacity-100"
-              aria-label={t("settings.project.editAction", { name: script.name })}
-              disabled={disabled}
-              onClick={() => onEdit(script)}
-            >
-              <SettingsIcon className="size-3.5" />
-            </Button>
+            <span className="flex shrink-0 opacity-0 group-focus-within:opacity-100 group-hover:opacity-100">
+              <Button
+                size="icon-xs"
+                variant="ghost-muted"
+                aria-label={t("settings.project.editAction", { name: script.name })}
+                disabled={disabled}
+                onClick={() => onEdit(script)}
+              >
+                <SettingsIcon className="size-3.5" />
+              </Button>
+            </span>
           </>
         }
       />

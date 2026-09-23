@@ -29,13 +29,17 @@ const reads = new Set<string>([
   WS_METHODS.pullRequestsSummary,
   WS_METHODS.pullRequestsStack,
   WS_METHODS.pullRequestsDetail,
+  WS_METHODS.pullRequestsPreview,
+  WS_METHODS.pullRequestsChecks,
   WS_METHODS.pullRequestsActivity,
   WS_METHODS.pullRequestsThreadComments,
   WS_METHODS.pullRequestsDiffFileContents,
+  WS_METHODS.pullRequestsFilesViewed,
   WS_METHODS.pullRequestsReviewerCandidates,
   WS_METHODS.pullRequestsLabelCandidates,
 ]);
 const writes = new Set<string>([
+  WS_METHODS.pullRequestsSetFilesViewed,
   WS_METHODS.pullRequestsRunAction,
   WS_METHODS.pullRequestsUpdate,
   WS_METHODS.pullRequestsComment,
@@ -182,7 +186,7 @@ export function createPullRequestRouter() {
         targets,
         ([target, reference]) =>
           invalidateTarget(registry, origin.target.environmentId, target, [
-            input.reference === undefined ? {} : { reference },
+            { ...input, ...(input.reference === undefined ? {} : { reference }) },
           ]),
         { concurrency: 4, discard: true },
       );
@@ -229,8 +233,13 @@ export function createPullRequestRouter() {
             targets,
             ([target, refs]) =>
               invalidateTarget(registry, origin.target.environmentId, target, [
-                ...refs.map((reference) => ({ reference })),
-                {},
+                ...refs.map((reference) => ({
+                  reference,
+                  ...(tag === WS_METHODS.pullRequestsSetFilesViewed
+                    ? { filesViewedOnly: true }
+                    : {}),
+                })),
+                ...(tag === WS_METHODS.pullRequestsSetFilesViewed ? [] : [{}]),
               ]),
             { concurrency: 4, discard: true },
           );
@@ -244,7 +253,18 @@ export function createPullRequestRouter() {
       const connected = yield* registry
         .run(id, EnvironmentSupervisor.pipe(Effect.flatMap((s) => SubscriptionRef.get(s.session))))
         .pipe(Effect.orElseSucceed(() => Option.none()));
-      if (Option.isSome(connected)) alternatives.push({ id, local: isLocal(entry) });
+      if (Option.isNone(connected)) continue;
+      if (tag === WS_METHODS.pullRequestsChecks) {
+        const supported = yield* connected.value.initialConfig.pipe(
+          Effect.map((config) => config.environment.capabilities.pullRequestChecks === true),
+          Effect.timeout("2 seconds"),
+          Effect.catchCause((cause) =>
+            Cause.hasInterrupts(cause) ? Effect.interrupt : Effect.succeed(false),
+          ),
+        );
+        if (!supported) continue;
+      }
+      alternatives.push({ id, local: isLocal(entry) });
     }
     if (alternatives.length === 0) return yield* finish(source);
 

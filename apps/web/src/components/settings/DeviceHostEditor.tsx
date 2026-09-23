@@ -76,7 +76,7 @@ export function DeviceHostEditor({
             {t("settings.devices.hosts.sameMachineSkipped")}
           </DialogDescription>
         </DialogHeader>
-        <DialogPanel className="space-y-4">
+        <DialogPanel>
           <label className="block space-y-1.5 text-sm">
             <span>{t("settings.devices.hosts.name")}</span>
             <Input
@@ -162,7 +162,7 @@ export function DeviceHostEditor({
                   if (Option.isSome(input)) void testConnection(input.value);
                 }}
               >
-                {checking ? <Spinner className="size-3" /> : null}{" "}
+                {checking ? <Spinner size="xs" /> : null}{" "}
                 {t("settings.devices.hosts.testConnection")}
               </Button>
             </div>
@@ -180,7 +180,7 @@ export function DeviceHostEditor({
                         >
                           {result.status === "pending" ? (
                             <>
-                              <Spinner className="size-3" /> {t("settings.devices.hosts.checking")}
+                              <Spinner size="xs" /> {t("settings.devices.hosts.checking")}
                             </>
                           ) : result.status === "local" ? (
                             <>
@@ -225,7 +225,7 @@ export function DeviceHostEditor({
             {t("settings.browserImport.cancel")}
           </Button>
           <Button type="submit" disabled={busy || checking || !valid || !draft.label.trim()}>
-            {busy ? <Spinner className="size-3" /> : null} {t("settings.devices.hosts.save")}
+            {busy ? <Spinner size="xs" /> : null} {t("settings.devices.hosts.save")}
           </Button>
         </DialogFooter>
       </DialogPopup>

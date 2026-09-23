@@ -15,6 +15,33 @@ vi.mock("./chat/composerEventScope", () => ({
   useComposerMenuProps: () => ({}),
 }));
 
+vi.mock("./chat/ThreadDetailsControl", () => ({
+  ThreadDetailsSelectControl: ({
+    "aria-label": ariaLabel,
+    children,
+  }: {
+    readonly "aria-label"?: string;
+    readonly children?: ReactNode;
+  }) => <button aria-label={ariaLabel}>{children}</button>,
+}));
+
+vi.mock("./ui/tooltip", () => ({
+  Tooltip: ({ children }: { readonly children?: ReactNode }) => <div>{children}</div>,
+  TooltipTrigger: ({
+    render,
+    children,
+  }: {
+    readonly render?: ReactNode;
+    readonly children?: ReactNode;
+  }) => (
+    <>
+      {render}
+      {children}
+    </>
+  ),
+  TooltipPopup: ({ children }: { readonly children?: ReactNode }) => <span>{children}</span>,
+}));
+
 vi.mock("./ui/select", () => {
   const Container = ({ children }: { readonly children?: ReactNode }) => <div>{children}</div>;
   return {

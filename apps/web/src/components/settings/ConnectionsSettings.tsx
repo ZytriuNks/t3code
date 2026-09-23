@@ -120,6 +120,7 @@ import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "../ui/men
 import { Switch } from "../ui/switch";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { Alert, AlertDescription } from "../ui/alert";
 import { Button } from "../ui/button";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "../ui/empty";
 import { AnimatedHeight } from "../AnimatedHeight";
@@ -164,6 +165,7 @@ import {
   type EnvironmentPresentation,
   useEnvironments,
   usePrimaryEnvironment,
+  useRelayEnvironmentDiscovery,
 } from "~/state/environments";
 import { requestConfirmDialog } from "~/confirmDialog";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -869,12 +871,11 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
                     : t("settings.connections.clipboardCodeHint")}
                 </DialogDescription>
               </DialogHeader>
-              <DialogPanel className="space-y-4">
+              <DialogPanel>
                 <Textarea
                   readOnly
                   value={revealValue}
                   rows={isRevealValueUrl ? 4 : 3}
-                  className="text-xs leading-relaxed"
                   onFocus={(event) => event.currentTarget.select()}
                   onClick={(event) => event.currentTarget.select()}
                 />
@@ -970,9 +971,7 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
                     </code>
                   }
                 />
-                <TooltipPopup side="top" className="max-w-80 break-all">
-                  {qrPairingUrl}
-                </TooltipPopup>
+                <TooltipPopup side="top">{qrPairingUrl}</TooltipPopup>
               </Tooltip>
               <Button
                 size="xs"
@@ -1192,7 +1191,7 @@ const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHeaderActio
               {t("settings.connections.createPairingLinkDescription")}
             </DialogDescription>
           </DialogHeader>
-          <DialogPanel className="space-y-5">
+          <DialogPanel>
             <label className="block">
               <span className="mb-1.5 block text-xs font-medium text-foreground">
                 {t("settings.connections.clientLabelOptional")}
@@ -1401,9 +1400,7 @@ const AdvertisedEndpointListRow = memo(function AdvertisedEndpointListRow({
                   </p>
                 }
               />
-              <TooltipPopup side="top" className="max-w-80">
-                {endpoint.httpBaseUrl}
-              </TooltipPopup>
+              <TooltipPopup side="top">{endpoint.httpBaseUrl}</TooltipPopup>
             </Tooltip>
           ) : null}
           {!isAvailable ? (
@@ -1535,8 +1532,9 @@ function savedBackendStatus(
           : t("settings.connections.reconnecting"),
         tone: "error",
       };
+    // Not a failure: the machine is fine, this build just cannot talk to it.
     case "unsupported":
-      return { text: t("settings.connections.clientNotSupported"), tone: "error" };
+      return { text: t("settings.connections.clientNotSupported"), tone: "muted" };
     case "error":
       return {
         text: connection.error
@@ -1601,6 +1599,23 @@ function SavedBackendListRow({
     serverUpdateState.status === "running" && serverUpdateState.stage === "resuming";
   const status = savedBackendStatus(environment, t);
   const serverVersion = environment.serverConfig?.environment.serverVersion ?? null;
+  // A saved T3 Connect machine this device has never reached (unsupported,
+  // or not yet connected) still has a descriptor from relay discovery, so
+  // it can wear its detected glyph instead of the generic server. Discovery
+  // empties its map on every refresh, so hold the last descriptor seen or
+  // the glyph would blink back to the generic one each time.
+  const relayDiscovery = useRelayEnvironmentDiscovery();
+  const discoveredDescriptor = Option.getOrNull(
+    relayDiscovery.environments.get(environmentId)?.status ?? Option.none(),
+  )?.descriptor;
+  const [lastDescriptor, setLastDescriptor] = useState(discoveredDescriptor);
+  if (discoveredDescriptor !== undefined && discoveredDescriptor !== lastDescriptor) {
+    setLastDescriptor(discoveredDescriptor);
+  }
+  const machineKind = resolveEnvironmentMachineKind(
+    environment.serverConfig ??
+      (lastDescriptor === undefined ? null : { environment: lastDescriptor }),
+  );
   const subtitleText = [
     environmentTransportLabel(environment),
     resumingServerUpdate ? t("settings.connections.restarting") : status.text,
@@ -1619,7 +1634,7 @@ function SavedBackendListRow({
 
   return (
     <EnvironmentRow
-      kind={resolveEnvironmentMachineKind(environment.serverConfig)}
+      kind={machineKind}
       label={environment.label}
       dimmed={!enabled}
       subtitle={
@@ -1629,10 +1644,7 @@ function SavedBackendListRow({
               <span
                 className={cn(
                   "block truncate",
-                  (enabled || unsupported) &&
-                    status.tone === "error" &&
-                    !resumingServerUpdate &&
-                    "text-destructive",
+                  enabled && status.tone === "error" && !resumingServerUpdate && "text-destructive",
                 )}
               />
             }
@@ -1640,9 +1652,12 @@ function SavedBackendListRow({
             {subtitleText}
           </TooltipTrigger>
           <TooltipPopup side="top" className="max-w-80 whitespace-pre-wrap leading-tight">
-            {enabled || unsupported
-              ? connectionStatusText(environment.connection, connectionStatusCopy)
-              : t("connection.switchedOff")}
+            {unsupported
+              ? (environment.connection.error ??
+                connectionStatusText(environment.connection, connectionStatusCopy))
+              : enabled
+                ? connectionStatusText(environment.connection, connectionStatusCopy)
+                : t("connection.switchedOff")}
             {versionMismatch
               ? `\n${t("connection.updateAvailable", {
                   serverVersion: versionMismatch.serverVersion,
@@ -1701,9 +1716,8 @@ function SavedBackendListRow({
           render={
             <Button
               type="button"
-              variant="ghost"
+              variant="ghost-muted"
               size="icon-xs"
-              className="text-muted-foreground hover:text-foreground"
               disabled={isRemoving}
               aria-label={t("settings.connections.moreActionsFor", {
                 environment: environment.label,
@@ -1713,7 +1727,7 @@ function SavedBackendListRow({
         >
           <EllipsisIcon className="size-3.5" />
         </MenuTrigger>
-        <MenuPopup align="end" className="min-w-52">
+        <MenuPopup align="end">
           <EnvironmentIconMenu
             environmentId={environmentId}
             serverConfig={environment.serverConfig}
@@ -2870,7 +2884,7 @@ export function ConnectionsSettings() {
                         <AutocompleteItem
                           key={`${target.alias}:${target.hostname}:${target.port ?? ""}`}
                           value={target}
-                          className="h-8 min-h-8 gap-2 whitespace-nowrap"
+                          className="h-8 min-h-8 whitespace-nowrap"
                         >
                           <span className="min-w-0 truncate text-sm font-medium">
                             {target.alias}
@@ -2930,9 +2944,9 @@ export function ConnectionsSettings() {
           </label>
         </div>
         {savedBackendError || discoveredSshHostsError ? (
-          <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
-            {savedBackendError ?? discoveredSshHostsError}
-          </div>
+          <Alert variant="error">
+            <AlertDescription>{savedBackendError ?? discoveredSshHostsError}</AlertDescription>
+          </Alert>
         ) : null}
         <Button
           variant="outline"
@@ -3442,16 +3456,15 @@ export function ConnectionsSettings() {
                     render={
                       <Button
                         type="button"
-                        variant="ghost"
+                        variant="ghost-muted"
                         size="icon-xs"
-                        className="text-muted-foreground hover:text-foreground"
                         aria-label={t("settings.connections.primaryMachineActions")}
                       />
                     }
                   >
                     <EllipsisIcon className="size-3.5" />
                   </MenuTrigger>
-                  <MenuPopup align="end" className="min-w-52">
+                  <MenuPopup align="end">
                     <EnvironmentIconMenu
                       environmentId={primaryEnvironmentId}
                       serverConfig={primaryServerConfig}
@@ -3583,27 +3596,25 @@ export function ConnectionsSettings() {
                   disabled={isUpdatingDesktopServerExposure}
                   render={<Button variant="outline" disabled={isUpdatingDesktopServerExposure} />}
                 >
-                  {t("settings.general.cancel")}
+                  <span className="[text-box:trim-both_cap_alphabetic]">
+                    {t("settings.general.cancel")}
+                  </span>
                 </AlertDialogClose>
                 <Button
-                  variant={
-                    pendingDesktopServerExposureMode === "local-only" ? "destructive" : "default"
-                  }
+                  variant="default"
                   onClick={handleConfirmDesktopServerExposureChange}
                   disabled={
                     pendingDesktopServerExposureMode === null || isUpdatingDesktopServerExposure
                   }
                 >
-                  {isUpdatingDesktopServerExposure ? (
-                    <>
-                      <Spinner className="size-3.5" />
-                      {t("settings.connections.restartingAction")}
-                    </>
-                  ) : pendingDesktopServerExposureMode === "network-accessible" ? (
-                    t("settings.connections.restartAndEnable")
-                  ) : (
-                    t("settings.connections.restartAndDisable")
-                  )}
+                  {isUpdatingDesktopServerExposure && <Spinner size="sm" />}
+                  <span className="[text-box:trim-both_cap_alphabetic]">
+                    {isUpdatingDesktopServerExposure
+                      ? t("settings.connections.restartingAction")
+                      : pendingDesktopServerExposureMode === "network-accessible"
+                        ? t("settings.connections.restartAndEnable")
+                        : t("settings.connections.restartAndDisable")}
+                  </span>
                 </Button>
               </AlertDialogFooter>
             </AlertDialogPopup>
@@ -3660,7 +3671,7 @@ export function ConnectionsSettings() {
                     >
                       {isUpdatingWslBackend ? (
                         <>
-                          <Spinner className="size-3.5" />
+                          <Spinner size="sm" />
                           {t("settings.connections.applying")}
                         </>
                       ) : (
@@ -3674,7 +3685,7 @@ export function ConnectionsSettings() {
                     >
                       {isUpdatingWslBackend ? (
                         <>
-                          <Spinner className="size-3.5" />
+                          <Spinner size="sm" />
                           {t("settings.connections.applying")}
                         </>
                       ) : (
@@ -3695,7 +3706,7 @@ export function ConnectionsSettings() {
                   >
                     {isUpdatingWslBackend ? (
                       <>
-                        <Spinner className="size-3.5" />
+                        <Spinner size="sm" />
                         {t("settings.connections.applying")}
                       </>
                     ) : pendingWslChange?.kind === "disable" ? (
@@ -3746,7 +3757,7 @@ export function ConnectionsSettings() {
                 >
                   {isUpdatingTailscaleServe ? (
                     <>
-                      <Spinner className="size-3.5" />
+                      <Spinner size="sm" />
                       {t("settings.connections.restartingAction")}
                     </>
                   ) : (
@@ -3770,7 +3781,7 @@ export function ConnectionsSettings() {
                   {t("settings.connections.tailscaleSetupDescription")}
                 </DialogDescription>
               </DialogHeader>
-              <DialogPanel className="space-y-4">
+              <DialogPanel>
                 <label className="block">
                   <span className="text-sm font-medium text-foreground">
                     {t("settings.connections.httpsPort")}
@@ -3806,9 +3817,7 @@ export function ConnectionsSettings() {
                       }
                     />
                     {pendingTailscaleServeBaseUrl ? (
-                      <TooltipPopup side="top" className="max-w-80">
-                        {pendingTailscaleServeBaseUrl}
-                      </TooltipPopup>
+                      <TooltipPopup side="top">{pendingTailscaleServeBaseUrl}</TooltipPopup>
                     ) : null}
                   </Tooltip>
                 </div>
@@ -3826,7 +3835,7 @@ export function ConnectionsSettings() {
                 >
                   {isUpdatingTailscaleServe ? (
                     <>
-                      <Spinner className="size-3.5" />
+                      <Spinner size="sm" />
                       {t("settings.connections.restartingAction")}
                     </>
                   ) : (
@@ -3858,11 +3867,7 @@ export function ConnectionsSettings() {
         headerAction={
           <div className="flex items-center gap-1">
             {savedServerUpdateTargets.length > 0 ? (
-              <ServerUpdatesAction
-                targets={savedServerUpdateTargets}
-                variant="ghost"
-                className="font-normal text-muted-foreground/60 hover:text-muted-foreground"
-              />
+              <ServerUpdatesAction targets={savedServerUpdateTargets} variant="ghost-muted" />
             ) : null}
             <Dialog
               open={addBackendDialogOpen}
@@ -3880,8 +3885,7 @@ export function ConnectionsSettings() {
                       render={
                         <Button
                           size="xs"
-                          variant="ghost"
-                          className="font-normal text-muted-foreground/60 hover:text-muted-foreground"
+                          variant="ghost-muted"
                           aria-label={t("settings.connections.addEnvironment")}
                         >
                           <PlusIcon className="size-3" />

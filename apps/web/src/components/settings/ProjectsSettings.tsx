@@ -4,6 +4,7 @@ import { EnvironmentId } from "@t3tools/contracts";
 import { ProjectSettingsPanel } from "./ProjectSettingsPanel";
 import { useSettingsScope } from "./SettingsScopeContext";
 import { SettingsScopeNotice } from "./SettingsScopeNotice";
+import { SettingsPageContainer } from "./settingsLayout";
 
 /** Project identity and checkout management for the selected project. */
 export function ProjectsSettings() {
@@ -24,7 +25,9 @@ export function ProjectsSettings() {
           checkoutKey={value.checkout ?? null}
         />
       ) : scope.kind === "unavailable" ? (
-        <p className="p-8 text-sm text-muted-foreground">{scope.message}</p>
+        <SettingsPageContainer>
+          <p className="text-sm text-muted-foreground">{scope.message}</p>
+        </SettingsPageContainer>
       ) : (
         <SettingsScopeNotice target="project">
           {t("settings.project.chooseProjectToManage")}
