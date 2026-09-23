@@ -334,7 +334,6 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
         {children}
         <SidebarControl />
         <NavigationHistoryShortcuts />
-        <MainAppLocationTracker />
       </SidebarProvider>
     </PanelAnimationSuppressionProvider>
   );
