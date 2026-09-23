@@ -462,7 +462,7 @@ export function ThemeImportDialog({
         <DialogHeader>
           <DialogTitle>{t("settings.appearance.theme.addTitle")}</DialogTitle>
         </DialogHeader>
-        <DialogPanel className="space-y-5">
+        <DialogPanel>
           <ThemeSearchSection
             onInstalled={(themes, context) => {
               onImportedMany(themes, context);

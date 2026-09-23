@@ -69,6 +69,7 @@ vi.mock("../ui/toast", () => ({
 
 vi.mock("../ui/select", () => ({
   Select: ({ children }: { readonly children?: ReactNode }) => <div>{children}</div>,
+  SelectButton: "button",
   SelectItem: ({ children }: { readonly children?: ReactNode }) => <div>{children}</div>,
   SelectPopup: ({ children }: { readonly children?: ReactNode }) => <div>{children}</div>,
   SelectTrigger: ({
@@ -85,6 +86,7 @@ vi.mock("../ui/combobox", () => ({
   Combobox: "div",
   ComboboxEmpty: "p",
   ComboboxInput: "input",
+  ComboboxSearchInput: "input",
   ComboboxItem: "div",
   ComboboxListVirtualized: "div",
   ComboboxPopup: "div",

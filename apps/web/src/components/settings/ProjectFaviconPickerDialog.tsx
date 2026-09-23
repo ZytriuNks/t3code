@@ -91,7 +91,7 @@ export function ProjectFaviconPickerDialog(props: {
       {props.open ? (
         <CommandDialogPopup
           aria-label={t("settings.project.imagePickerTitle")}
-          className="overflow-hidden p-0"
+          className="overflow-hidden"
           onBackdropPointerDown={() => props.onOpenChange(false)}
         >
           <CommandPaletteContent

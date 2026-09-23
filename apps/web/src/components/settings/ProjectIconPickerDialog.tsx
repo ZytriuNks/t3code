@@ -107,7 +107,7 @@ export function ProjectIconPickerDialog({
           <DialogTitle>{t("settings.project.iconDialogTitle")}</DialogTitle>
           <DialogDescription>{t("settings.project.iconDialogDescription")}</DialogDescription>
         </DialogHeader>
-        <DialogPanel className="flex min-h-0 flex-col gap-4">
+        <DialogPanel className="flex min-h-0 flex-col">
           <ToggleGroup
             aria-label={t("settings.project.iconType")}
             variant="segmented"

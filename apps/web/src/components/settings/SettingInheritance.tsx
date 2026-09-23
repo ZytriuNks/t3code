@@ -1,7 +1,10 @@
 import {
   DEFAULT_SERVER_SETTINGS,
+  PROJECT_FILE_BACKED_SETTINGS,
+  type ProjectFileBackedSettingKey,
   resolveEnvironmentMachineKind,
   type ServerSettings,
+  type WorktreeSubmodules,
 } from "@t3tools/contracts";
 import { CheckIcon, LayersIcon } from "lucide-react";
 import * as Equal from "effect/Equal";
@@ -9,15 +12,16 @@ import * as Equal from "effect/Equal";
 import { cn } from "../../lib/utils";
 import type { EnvironmentPresentation } from "../../state/environments";
 import { EnvironmentMachineIcon } from "../EnvironmentMachineIcon";
+import { resolveEnvModeLabel, WORKTREE_SUBMODULES_LABELS } from "../BranchToolbar.logic";
 import { PULL_REQUEST_MERGE_METHOD_LABELS } from "../pullRequest/pullRequestDetail.logic";
-import { Button } from "../ui/button";
+import { Button, InlineButton } from "../ui/button";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import type { ProjectOverrideEntry, ScopedSettingsTarget } from "./scopedSettings";
 import { isProjectScopedSettingKey } from "./scopedSettings";
 
 interface InheritanceLayer {
-  readonly key: "project" | "environment" | "built-in";
+  readonly key: "project" | "environment" | "t3.json" | "built-in";
   readonly label: string;
   readonly value: string;
   readonly effective: boolean;
@@ -106,7 +110,9 @@ function formatValue(
           ? copy.automatic
           : key === "sourceControlWriterModelSelection"
             ? copy.textGenerationModel
-            : copy.notSet;
+            : key === "defaultThreadEnvMode" || key === "worktreeSubmodules"
+              ? copy.inherits
+              : copy.notSet;
   }
   if (typeof value === "boolean") return value ? copy.on : copy.off;
   if (typeof value === "number") {
@@ -115,6 +121,9 @@ function formatValue(
   if (typeof value === "string") {
     if (key === "defaultThreadEnvMode" && (value === "local" || value === "worktree")) {
       return value === "worktree" ? copy.envModeWorktree : copy.envModeLocal;
+    }
+    if (key === "worktreeSubmodules" && value in WORKTREE_SUBMODULES_LABELS) {
+      return WORKTREE_SUBMODULES_LABELS[value as WorktreeSubmodules];
     }
     if (key === "pullRequestMergeMethod" && value in PULL_REQUEST_MERGE_METHOD_LABELS) {
       return PULL_REQUEST_MERGE_METHOD_LABELS[
@@ -137,7 +146,8 @@ function formatValue(
 /**
  * The layers a setting resolves through for one target, top-down: the
  * project override when the target is a project, the environment's value,
- * and the built-in default. The first layer that is set wins.
+ * the checkout's t3.json for file-backed keys, and the built-in default. The
+ * first layer that is set wins. Same order as `resolveProjectSettings`.
  */
 export function settingInheritanceLayers(
   target: ScopedSettingsTarget,
@@ -145,36 +155,55 @@ export function settingInheritanceLayers(
   key: keyof ServerSettings,
   copy: SettingInheritanceCopy = SETTING_INHERITANCE_COPY_DEFAULTS,
 ): readonly InheritanceLayer[] {
-  const builtIn = DEFAULT_SERVER_SETTINGS[key];
   const environmentValue = environmentSettings[key];
-  const projectSource = isProjectScopedSettingKey(key) ? target.sources[key] : "environment";
-  const environmentSet = !Equal.equals(environmentValue, builtIn);
+  const source = isProjectScopedSettingKey(key) ? target.sources[key] : "environment";
+  const environmentSet = !Equal.equals(environmentValue, DEFAULT_SERVER_SETTINGS[key]);
+  const fileBacked = isProjectFileBackedSettingKey(key);
   const layers: InheritanceLayer[] = [];
   if (target.projectId !== null && isProjectScopedSettingKey(key)) {
     layers.push({
       key: "project",
       label: copy.layerProject,
-      value:
-        projectSource === "project" ? formatValue(key, target.settings[key], copy) : copy.inherits,
-      effective: projectSource === "project",
-      set: projectSource === "project",
+      value: source === "project" ? formatValue(key, target.settings[key], copy) : copy.inherits,
+      effective: source === "project",
+      set: source === "project",
     });
   }
   layers.push({
     key: "environment",
     label: target.label,
     value: environmentSet ? formatValue(key, environmentValue, copy) : copy.inherits,
-    effective: projectSource !== "project" && environmentSet,
+    effective: source === "environment" && environmentSet,
     set: environmentSet,
   });
+  if (fileBacked && target.projectId !== null) {
+    layers.push({
+      key: "t3.json",
+      label: "t3.json",
+      value: source === "t3.json" ? formatValue(key, target.settings[key], copy) : copy.inherits,
+      effective: source === "t3.json",
+      set: source === "t3.json",
+    });
+  }
+  // For a file-backed key the built-in is what the resolver produced with
+  // nothing set, not the null the schema decodes to.
+  const builtIn = fileBacked
+    ? PROJECT_FILE_BACKED_SETTINGS[key].builtIn
+    : DEFAULT_SERVER_SETTINGS[key];
   layers.push({
     key: "built-in",
     label: copy.layerDefault,
     value: formatValue(key, builtIn, copy),
-    effective: projectSource !== "project" && !environmentSet,
+    effective: source === "environment" && !environmentSet,
     set: true,
   });
   return layers;
+}
+
+function isProjectFileBackedSettingKey(
+  key: keyof ServerSettings,
+): key is ProjectFileBackedSettingKey {
+  return Object.hasOwn(PROJECT_FILE_BACKED_SETTINGS, key);
 }
 
 export type SettingInheritanceState =
@@ -247,30 +276,22 @@ export function SettingInheritance({
                   size="icon-micro"
                   variant="ghost-muted"
                   aria-label={copy.showSourceLabel(overrideSummary)}
-                  className={cn(
-                    "[--control-icon-color:currentColor]",
-                    state === "overridden"
-                      ? "text-primary hover:text-primary"
-                      : state === "mixed"
-                        ? "text-warning hover:text-warning"
-                        : state === "environment"
-                          ? "text-foreground/70 hover:text-foreground"
-                          : "text-muted-foreground/60 hover:text-foreground",
-                  )}
                 />
               }
             />
           }
         >
-          <LayersIcon className="size-3" />
+          <LayersIcon
+            className={cn(
+              "size-3",
+              state === "overridden" && "text-primary",
+              state === "mixed" && "text-warning",
+            )}
+          />
         </TooltipTrigger>
         <TooltipPopup side="top">{overrideSummary}</TooltipPopup>
       </Tooltip>
-      <PopoverPopup
-        align="start"
-        className="w-72 max-w-[calc(100vw-2rem)]"
-        viewportClassName="p-0 [--viewport-inline-padding:0px]"
-      >
+      <PopoverPopup align="start" width="md" padding="none">
         <div className="divide-y divide-border/60">
           {chains.map(({ target, environment, machine, layers }) => (
             <section
@@ -329,13 +350,9 @@ export function SettingInheritance({
                     <div className="flex items-center justify-between gap-3 px-2 text-xs text-muted-foreground">
                       <span>{copy.overriddenBy}</span>
                       {onClearOverrides ? (
-                        <button
-                          type="button"
-                          className="cursor-pointer font-medium text-foreground underline-offset-2 hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-                          onClick={() => onClearOverrides(overriding)}
-                        >
+                        <InlineButton onClick={() => onClearOverrides(overriding)}>
                           {copy.resetOverride(overriding.length)}
-                        </button>
+                        </InlineButton>
                       ) : null}
                     </div>
                     <ul role="list" className="mt-0.5 text-sm">
@@ -344,13 +361,9 @@ export function SettingInheritance({
                           key={project.projectId}
                           className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 px-2 py-1"
                         >
-                          <button
-                            type="button"
-                            className="min-w-0 cursor-pointer truncate text-left text-foreground underline-offset-2 hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-                            onClick={project.open}
-                          >
-                            {project.label}
-                          </button>
+                          <InlineButton className="min-w-0 justify-start" onClick={project.open}>
+                            <span className="truncate">{project.label}</span>
+                          </InlineButton>
                           <span className="max-w-32 truncate text-muted-foreground tabular-nums">
                             {isProjectScopedSettingKey(key)
                               ? formatValue(key, overrides[project.projectId]?.[key], copy)

@@ -514,11 +514,13 @@ function ImportingStep() {
         <DialogTitle>{t("settings.browserImport.importing.title")}</DialogTitle>
         <DialogDescription>{t("settings.browserImport.importing.description")}</DialogDescription>
       </DialogHeader>
-      <DialogPanel className="flex items-center gap-3 py-6">
-        <Spinner className="size-4 text-muted-foreground" />
-        <span className="text-sm text-muted-foreground">
-          {t("settings.browserImport.importing.progress")}
-        </span>
+      <DialogPanel>
+        <div className="flex items-center gap-3 py-2">
+          <Spinner size="md" tone="muted" />
+          <span className="text-sm text-muted-foreground">
+            {t("settings.browserImport.importing.progress")}
+          </span>
+        </div>
       </DialogPanel>
     </>
   );
@@ -544,13 +546,15 @@ function CheckingStep({
             : t("settings.browserImport.checking.browser")}
         </DialogDescription>
       </DialogHeader>
-      <DialogPanel className="flex items-center gap-3 py-6">
-        <Spinner className="size-4 text-muted-foreground" />
-        <span className="text-sm text-muted-foreground">
-          {check === "fullDiskAccess"
-            ? t("settings.browserImport.checking.accessProgress")
-            : t("settings.browserImport.checking.progress")}
-        </span>
+      <DialogPanel>
+        <div className="flex items-center gap-3 py-2">
+          <Spinner size="md" tone="muted" />
+          <span className="text-sm text-muted-foreground">
+            {check === "fullDiskAccess"
+              ? t("settings.browserImport.checking.accessProgress")
+              : t("settings.browserImport.checking.progress")}
+          </span>
+        </div>
       </DialogPanel>
     </>
   );

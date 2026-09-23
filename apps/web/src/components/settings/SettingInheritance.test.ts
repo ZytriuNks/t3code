@@ -164,7 +164,7 @@ describe("settingInheritanceLayers", () => {
         DEFAULT_SERVER_SETTINGS,
         "defaultThreadEnvMode",
       ).map((layer) => layer.value),
-    ).toEqual(["Inherits", "Inherits", "Current checkout"]);
+    ).toEqual(["Inherits", "Inherits", "Inherits", "Current checkout"]);
   });
 
   it("formats the workspace mode labels with the supplied copy", () => {
@@ -180,14 +180,14 @@ describe("settingInheritanceLayers", () => {
         "defaultThreadEnvMode",
         zhCopy,
       ).map((layer) => layer.value),
-    ).toEqual(["继承", "新工作树", "当前检出"]);
+    ).toEqual(["继承", "新工作树", "继承", "当前检出"]);
   });
 
   it("keeps the stored runtime and streaming enums verbatim in English by default", () => {
     const settings = {
       ...DEFAULT_SERVER_SETTINGS,
       defaultRuntimeMode: "auto-accept-edits" as const,
-      responseStreamingMode: "token" as const,
+      responseStreamingMode: "turn" as const,
     };
     const target = {
       environmentId,
@@ -202,7 +202,7 @@ describe("settingInheritanceLayers", () => {
       settingInheritanceLayers(target, settings, "responseStreamingMode").map(
         (layer) => layer.value,
       ),
-    ).toEqual(["Inherits", "token", "paragraph"]);
+    ).toEqual(["Inherits", "turn", "paragraph"]);
   });
 
   it("maps the stored runtime mode with the supplied copy", () => {
@@ -229,11 +229,10 @@ describe("settingInheritanceLayers", () => {
     for (const [mode, label] of [
       ["turn", "等待完整响应"],
       ["paragraph", "显示已完成的段落"],
-      ["token", "逐 Token 显示（旧版）"],
     ] as const) {
       const settings = {
         ...DEFAULT_SERVER_SETTINGS,
-        responseStreamingMode: "token" as const,
+        responseStreamingMode: "turn" as const,
         projectSettingsOverrides: { [projectId]: { responseStreamingMode: mode } },
       };
       expect(
@@ -248,7 +247,7 @@ describe("settingInheritanceLayers", () => {
           "responseStreamingMode",
           zhCopy,
         ).map((layer) => layer.value),
-      ).toEqual([label, "逐 Token 显示（旧版）", "显示已完成的段落"]);
+      ).toEqual([label, "等待完整响应", "显示已完成的段落"]);
     }
   });
 
@@ -270,5 +269,41 @@ describe("settingInheritanceLayers", () => {
         zhCopy,
       ).map((layer) => layer.value),
     ).toEqual(["/home/laptop/projects", "空"]);
+  });
+  it("shows the checkout's t3.json as a layer for file-backed keys", () => {
+    const file = { defaultThreadEnvMode: "worktree" as const };
+    const fromFile = settingInheritanceLayers(
+      {
+        environmentId,
+        label: "Laptop",
+        projectId,
+        ...resolveProjectSettings(DEFAULT_SERVER_SETTINGS, projectId, null, file),
+      },
+      DEFAULT_SERVER_SETTINGS,
+      "defaultThreadEnvMode",
+    );
+    expect(fromFile.map((layer) => [layer.label, layer.value, layer.effective])).toEqual([
+      ["Project", "Inherits", false],
+      ["Laptop", "Inherits", false],
+      ["t3.json", "New worktree", true],
+      ["Default", "Current checkout", false],
+    ]);
+    const settings = { ...DEFAULT_SERVER_SETTINGS, defaultThreadEnvMode: "local" as const };
+    const fromEnvironment = settingInheritanceLayers(
+      {
+        environmentId,
+        label: "Laptop",
+        projectId,
+        ...resolveProjectSettings(settings, projectId, null, file),
+      },
+      settings,
+      "defaultThreadEnvMode",
+    );
+    expect(fromEnvironment.map((layer) => [layer.value, layer.effective])).toEqual([
+      ["Inherits", false],
+      ["Current checkout", true],
+      ["Inherits", false],
+      ["Current checkout", false],
+    ]);
   });
 });

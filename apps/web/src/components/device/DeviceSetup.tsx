@@ -1,3 +1,4 @@
+import { DeviceHostUpdates } from "./DeviceHostUpdates";
 import type { DevicePlatform, DeviceServiceState, EnvironmentId } from "@t3tools/contracts";
 import { Check, CircleAlert } from "lucide-react";
 import { useState } from "react";
@@ -101,6 +102,7 @@ export function DeviceSetup(props: {
       </WizardHeader>
 
       <WizardPanel>
+        <DeviceHostUpdates state={props.state} environmentId={props.environmentId} />
         {step === 0 ? (
           <section className="space-y-3 text-sm">
             <h3 className="font-medium">{t("settings.devices.setup.enableHub")}</h3>
@@ -218,7 +220,7 @@ export function DeviceHubSetupStatus({
   if (!pending && state.hostStatus !== "ready") return null;
   return (
     <p role="status" className="flex items-center gap-2 text-xs text-muted-foreground">
-      {pending ? <Spinner className="size-3" /> : <Check className="size-3 text-success" />}
+      {pending ? <Spinner size="xs" /> : <Check className="size-3 text-success" />}
       {pending
         ? state.hostStatus === "installing"
           ? compact
@@ -249,7 +251,7 @@ function DevicePlatformSetup(props: {
       <PlatformStatus platform="Android" status={platformSetupStatus(props.state, "android", t)} />
       <p className="text-xs text-muted-foreground">{t("settings.devices.setup.platformHint")}</p>
       <Button size="compact" variant="outline" disabled={props.disabled} onClick={props.onCheck}>
-        {props.checking ? <Spinner className="size-3" /> : null}
+        {props.checking ? <Spinner size="xs" /> : null}
         {props.checking
           ? t("settings.devices.setup.checking")
           : t("settings.devices.setup.checkAgain")}
@@ -279,7 +281,7 @@ export function AgentDeviceSetupStatus(props: {
             : t("settings.devices.setup.updatingAgentAccess");
     return (
       <p role="status" className="flex items-center gap-2 text-xs text-muted-foreground">
-        <Spinner className="size-3" />
+        <Spinner size="xs" />
         {label}
       </p>
     );

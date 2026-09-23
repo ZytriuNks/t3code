@@ -15,15 +15,7 @@ function renderBreadcrumb(language: "en" | "zh-CN") {
   settingsState.language = language;
   return renderToStaticMarkup(
     <I18nProvider>
-      <SettingsBreadcrumb
-        pathname="/settings/appearance"
-        scope={{
-          value: {},
-          groups: [],
-          environments: [],
-          onChange: vi.fn(),
-        }}
-      />
+      <SettingsBreadcrumb pathname="/settings/appearance" />
     </I18nProvider>,
   );
 }
@@ -33,14 +25,12 @@ afterEach(() => {
 });
 
 describe("SettingsBreadcrumb", () => {
-  it("renders the settings header and broad scopes in Simplified Chinese", () => {
+  it("renders the settings breadcrumb in Simplified Chinese", () => {
     const markup = renderBreadcrumb("zh-CN");
 
     expect(markup).toContain('aria-label="设置面包屑"');
     expect(markup).toContain("设置");
     expect(markup).toContain("外观");
-    expect(markup).toContain("全部环境");
-    expect(markup).toContain("全部项目");
   });
 
   it("keeps the existing English copy", () => {
@@ -49,7 +39,5 @@ describe("SettingsBreadcrumb", () => {
     expect(markup).toContain('aria-label="Settings breadcrumb"');
     expect(markup).toContain("Settings");
     expect(markup).toContain("Appearance");
-    expect(markup).toContain("All environments");
-    expect(markup).toContain("All projects");
   });
 });
