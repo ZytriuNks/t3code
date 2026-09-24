@@ -270,7 +270,41 @@ export function readEnvironmentSupportsSnooze(environmentId: EnvironmentId): boo
 export function readEnvironmentSupportsVisitedTracking(environmentId: EnvironmentId): boolean {
   return (
     appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities
-      .threadVisitedTracking === true
+      .threadPinning === true
+  );
+}
+
+/** Whether the environment's server understands thread title regeneration.
+    Same version-skew contract as settlement. */
+export function readEnvironmentSupportsTitleRegeneration(environmentId: EnvironmentId): boolean {
+  return (
+    appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities
+      .threadTitleRegeneration === true
+  );
+}
+
+/** Whether the environment's server understands thread.pin.reorder (and
+    orderKey on thread.pin). Same version-skew contract as settlement. */
+export function readEnvironmentSupportsPinReorder(environmentId: EnvironmentId): boolean {
+  return (
+    appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities
+      .threadPinReorder === true
+  );
+}
+
+/** Whether the environment's server understands thread.auto-settle.set.
+    Same version-skew contract as settlement. */
+export function readEnvironmentSupportsAutoSettleOptOut(environmentId: EnvironmentId): boolean {
+  return (
+    appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities
+      .threadAutoSettleOptOut === true
+  );
+}
+
+export function readEnvironmentSupportsActiveReorder(environmentId: EnvironmentId): boolean {
+  return (
+    appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities
+      .threadActiveReorder === true
   );
 }
 
