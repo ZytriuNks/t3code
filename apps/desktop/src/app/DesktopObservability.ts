@@ -4,6 +4,7 @@ import {
   makeTraceSink,
   otlpSerializationLayer,
 } from "@t3tools/shared/observability";
+import * as OtelEnvironment from "@t3tools/shared/otelEnvironment";
 import {
   parsePersistedServerObservabilitySettings,
   type PersistedServerObservabilitySettings,
@@ -355,13 +356,7 @@ const readPersistedObservabilitySettings: Effect.Effect<
 const resolveOtlpEndpoints = Effect.gen(function* () {
   const otel = yield* OtelEnvironment.load;
   if (otel.disabled) {
-    return {
-      traces: undefined,
-      metrics: undefined,
-      logs: undefined,
-      warnings: otel.warnings,
-      resourceAttributes: otel.resourceAttributes,
-    };
+    return { traces: undefined, metrics: undefined, logs: undefined, warnings: otel.warnings };
   }
 
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
@@ -370,11 +365,11 @@ const resolveOtlpEndpoints = Effect.gen(function* () {
     traces: Option.getOrUndefined(environment.otlpTracesUrl) ?? persisted.otlpTracesUrl,
     metrics: Option.getOrUndefined(environment.otlpMetricsUrl) ?? persisted.otlpMetricsUrl,
     logs: Option.getOrUndefined(environment.otlpLogsUrl) ?? persisted.otlpLogsUrl,
-<<<<<<< HEAD
-=======
     warnings: otel.warnings,
     resourceAttributes: otel.resourceAttributes,
->>>>>>> 87d8428019 (fix(observability): a malformed OTEL_RESOURCE_ATTRIBUTES no longer stops startup (#13469))
+=======
+    warnings: otel.warnings,
+>>>>>>> e67abcf798 (feat(observability): honor the OpenTelemetry kill switch (#13355))
   };
 });
 
@@ -688,19 +683,13 @@ const telemetryLayer = Layer.unwrap(
     //         resource,
     //       }).pipe(Layer.provide(serializationLayer));
 
-<<<<<<< HEAD
-    return Layer.mergeAll(loggerLayer, tracerLayer);
 =======
     // Logged once the loggers above are installed, so the warnings use them.
     const otelWarningsLayer = Layer.effectDiscard(
       Effect.forEach(endpoints.warnings, (warning) => Effect.logWarning(warning)),
     );
 
-    return otelWarningsLayer.pipe(
-      Layer.provideMerge(Layer.mergeAll(loggerLayer, tracerLayer)),
-      Layer.provide(OtelEnvironment.layerResourceAttributes(endpoints.resourceAttributes)),
-    );
->>>>>>> 87d8428019 (fix(observability): a malformed OTEL_RESOURCE_ATTRIBUTES no longer stops startup (#13469))
+    return otelWarningsLayer.pipe(Layer.provideMerge(Layer.mergeAll(loggerLayer, tracerLayer)));
   }),
 );
 

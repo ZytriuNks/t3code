@@ -21,6 +21,7 @@ import * as BrowserTraceCollector from "../BrowserTraceCollector.ts";
 export const ObservabilityLive = Layer.unwrap(
   Effect.gen(function* () {
     const config = yield* ServerConfig.ServerConfig;
+
     const traces = config.otlpTracesExport;
     const metrics = config.otlpMetricsExport;
     // The trace serializer stays in the returned context because the browser
@@ -95,9 +96,6 @@ export const ObservabilityLive = Layer.unwrap(
     return otelWarningsLayer.pipe(
       Layer.provideMerge(
         Layer.mergeAll(ServerLoggerLive, traceReferencesLayer, tracerLayer, metricsLayer),
-      ),
-      Layer.provide(
-        OtelEnvironment.layerResourceAttributes(config.otelEnvironment.resourceAttributes),
       ),
     );
   }),
