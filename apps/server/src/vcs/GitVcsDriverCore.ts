@@ -2379,10 +2379,9 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     if (indexExists) {
       const { mtime } = yield* fileSystem.stat(indexPath);
       yield* fileSystem.copyFile(indexPath, tempIndexPath);
-      // Node FileSystem.stat truncates bigint timestamps to milliseconds before creating its Date.
-      // Flooring preserves the source second without making preceding-second files racy.
+      // A newer copy timestamp hides racily clean edits. Round down before Git reads or rewrites it.
       const indexTime = Option.isSome(mtime)
-        ? Math.max(0, Math.floor(mtime.value.getTime() / 1000))
+        ? Math.max(0, Math.floor((mtime.value.getTime() - 1) / 1000))
         : 0;
       yield* fileSystem.utimes(tempIndexPath, indexTime, indexTime);
     }
