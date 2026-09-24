@@ -186,7 +186,7 @@ export const readClaudeResetCredits = Effect.fn("readClaudeResetCredits")(
     );
   },
   Effect.timeout("10 seconds"),
-  Effect.orElseSucceed(() => undefined),
+  Effect.catch(() => Effect.succeed(undefined)),
 );
 
 /** The CLI keeps the account record beside its settings, or in the home directory by default. */
