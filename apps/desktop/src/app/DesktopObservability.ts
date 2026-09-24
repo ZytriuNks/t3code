@@ -366,9 +366,8 @@ const resolveOtlpEndpoints = Effect.gen(function* () {
     metrics: Option.getOrUndefined(environment.otlpMetricsUrl) ?? persisted.otlpMetricsUrl,
     logs: Option.getOrUndefined(environment.otlpLogsUrl) ?? persisted.otlpLogsUrl,
     warnings: otel.warnings,
-    resourceAttributes: otel.resourceAttributes,
-=======
     warnings: otel.warnings,
+=======
 >>>>>>> e67abcf798 (feat(observability): honor the OpenTelemetry kill switch (#13355))
   };
 });
