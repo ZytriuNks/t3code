@@ -15,6 +15,7 @@ import { ProviderRegistry } from "./Services/ProviderRegistry.ts";
 import { ProviderInstanceRegistry } from "./Services/ProviderInstanceRegistry.ts";
 import type { ProviderInstance } from "./ProviderDriver.ts";
 import { makeManualOnlyProviderMaintenanceCapabilities } from "./providerMaintenance.ts";
+import { BUILT_IN_DRIVERS } from "./builtInDrivers.ts";
 import * as Schema from "effect/Schema";
 import {
   applyProviderCompatibility,
@@ -60,24 +61,6 @@ describe("provider compatibility", () => {
           null,
         ),
         `Missing bundled compatibility policy for ${builtIn.driverKind}`,
-      );
-    }
-  });
-
-  it("supports Codex 0.156 and marks Codex without Thread.projectId broken", () => {
-    const bundled = ModelManifest.BUNDLED_MODEL_MANIFEST.compatibility;
-    for (const [t3CodeVersion, codexVersion, expected] of [
-      ["0.0.42", "0.148.0", "broken"],
-      ["0.0.42", "0.149.0", "unsupported"],
-      ["0.0.42", "0.155.0", "unsupported"],
-      ["0.0.42", "0.156.0", "supported"],
-      ["0.0.43-nightly.20260924.2200", "0.153.3", "unsupported"],
-      ["0.0.43-nightly.20260924.2200", "0.156.1", "supported"],
-    ] as const) {
-      assert.strictEqual(
-        resolveProviderCompatibility(bundled, driver, codexVersion, t3CodeVersion)?.status,
-        expected,
-        `T3 Code ${t3CodeVersion} with Codex ${codexVersion}`,
       );
     }
   });
