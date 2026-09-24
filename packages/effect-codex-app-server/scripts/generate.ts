@@ -364,6 +364,7 @@ function adaptSchemaForEffect(value: Schema.Json): Schema.Json {
   };
 }
 
+<<<<<<< HEAD
 // Codex 0.153 adds async questions to agent messages. Keep older protocol
 // fields until the next full refresh, including every thread history namespace.
 function addAsyncQuestionFields(value: Schema.Json): Schema.Json {
@@ -434,6 +435,8 @@ function addAsyncQuestionFields(value: Schema.Json): Schema.Json {
   };
 }
 
+=======
+>>>>>>> d5d48742c9 (feat(codex): require Codex 0.156 and regenerate its protocol (#13481))
 function toPascalCaseMethod(method: string) {
   return method
     .split("/")
@@ -751,7 +754,7 @@ const generateFiles = Effect.fn("generateFiles")(function* () {
   for (const [name, schema] of Object.entries(aggregateSchemas).toSorted(([left], [right]) =>
     left.localeCompare(right),
   )) {
-    aggregateSchemas[name] = adaptSchemaForEffect(addAsyncQuestionFields(schema));
+    aggregateSchemas[name] = adaptSchemaForEffect(schema);
     generator.addSchema(name, aggregateSchemas[name] as never);
   }
 
