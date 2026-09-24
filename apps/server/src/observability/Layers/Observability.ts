@@ -97,9 +97,6 @@ export const ObservabilityLive = Layer.unwrap(
       Layer.provideMerge(
         Layer.mergeAll(ServerLoggerLive, traceReferencesLayer, tracerLayer, metricsLayer),
       ),
-      Layer.provide(
-        OtelEnvironment.layerResourceAttributes(config.otelEnvironment.resourceAttributes),
-      ),
     );
   }),
 );
