@@ -1297,79 +1297,11 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
 
   return (
     <RichComposerSkillsContext value={skills}>
-<<<<<<< HEAD
-      <RichComposerAccessibleCopyContext value={accessibleCopy ?? DEFAULT_COMPOSER_ACCESSIBLE_COPY}>
-        <ComposerContextRecordsContext value={contextRecords}>
-          <ComposerCitationCommentContext value={citationCommentActions}>
-            <div
-              className={cn(
-                "relative [font-family:var(--font-composer,var(--font-sans))] [font-size:var(--font-size-prompt,0.875rem)] [@media(max-width:39.999rem)_and_(pointer:coarse)]:[font-size:max(var(--font-size-prompt,1rem),16px)]",
-                containerClassName,
-              )}
-            >
-              <EditorContent
-                editor={editor}
-                onKeyDown={(event) => {
-                  if (
-                    event.key === "Control" ||
-                    event.key === "Meta" ||
-                    event.key === "Alt" ||
-                    event.key === "Shift"
-                  ) {
-                    onPageScrollRelease?.();
-                  }
-                  if (event.key !== "PageUp" && event.key !== "PageDown") return;
-                  const target = event.currentTarget.querySelector(
-                    '[data-testid="composer-editor"]',
-                  ) as HTMLElement | null;
-                  if (!target) return;
-                  const pageScrollKey = getTimelinePageScrollKey({
-                    altKey: event.altKey,
-                    clientHeight: target.clientHeight,
-                    ctrlKey: event.ctrlKey,
-                    defaultPrevented: event.defaultPrevented,
-                    isComposing: event.nativeEvent.isComposing,
-                    key: event.key,
-                    keyCode: event.keyCode,
-                    metaKey: event.metaKey,
-                    scrollHeight: target.scrollHeight,
-                    scrollTop: target.scrollTop,
-                    shiftKey: event.shiftKey,
-                  });
-                  if (!pageScrollKey) {
-                    onPageScrollRelease?.();
-                    return;
-                  }
-                  if (!onPageScrollKeyDown) return;
-                  event.preventDefault();
-                  onPageScrollKeyDown(pageScrollKey);
-                }}
-                onKeyUp={(event) => onPageScrollKeyUp?.(event.key)}
-                onBlur={onPageScrollRelease}
-                onPasteCapture={onPaste}
-                onCopyCapture={(event) => handleCopyCut(event, false)}
-                onCutCapture={(event) => handleCopyCut(event, true)}
-              />
-              {isEmpty && contextRecords.size === 0 && placeholder ? (
-                <div
-                  className={cn(
-                    "pointer-events-none absolute inset-0 leading-relaxed text-placeholder/75",
-                    placeholderClassName,
-                  )}
-                >
-                  {placeholder}
-                </div>
-              ) : null}
-            </div>
-          </ComposerCitationCommentContext>
-        </ComposerContextRecordsContext>
-      </RichComposerAccessibleCopyContext>
-=======
       <ComposerContextRecordsContext value={contextRecords}>
         <ComposerCitationCommentContext value={citationCommentActions}>
           <div
             className={cn(
-              "relative flow-root font-(family-name:--font-composer,var(--font-sans)) text-(length:--font-size-prompt,var(--text-sm)) max-sm:pointer-coarse:text-(length:--font-size-prompt-touch)",
+              "relative flow-root [font-family:var(--font-composer,var(--font-sans))] [font-size:var(--font-size-prompt,0.875rem)] [@media(max-width:39.999rem)_and_(pointer:coarse)]:[font-size:max(var(--font-size-prompt,1rem),16px)]",
               containerClassName,
             )}
           >
@@ -1429,7 +1361,6 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
           </div>
         </ComposerCitationCommentContext>
       </ComposerContextRecordsContext>
->>>>>>> 9030a60eaf (fix(web): composer chip rings no longer clip at the editor edge (#13301))
     </RichComposerSkillsContext>
   );
 }
