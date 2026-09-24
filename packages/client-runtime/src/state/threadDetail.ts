@@ -17,9 +17,58 @@ import {
 } from "./threadRequests.ts";
 import { arrayElementsEqual, parseThreadKey, threadKey } from "./entities.ts";
 
-const EMPTY_VISIBLE_TURN_ITEMS: OrchestrationV2ThreadProjection["visibleTurnItems"] = Object.freeze(
-  [],
-);
+const EMPTY_MESSAGES: ReadonlyArray<OrchestrationMessage> = Object.freeze([]);
+const EMPTY_ACTIVITIES: ReadonlyArray<OrchestrationThreadActivity> = Object.freeze([]);
+const EMPTY_PROPOSED_PLANS: ReadonlyArray<OrchestrationProposedPlan> = Object.freeze([]);
+const EMPTY_CHECKPOINTS: ReadonlyArray<OrchestrationCheckpointSummary> = Object.freeze([]);
+
+/**
+ * Combine detail-only collections with the shell's authoritative thread metadata.
+ *
+ * Shell and detail subscriptions are intentionally independent. A cached detail can
+ * therefore briefly outlive a newer shell snapshot after reconnecting. Workspace
+ * consumers must use the shell branch/worktree/project fields so they do not target
+ * a stale checkout while retaining messages, activities, plans, and checkpoints
+ * from the detail subscription.
+ */
+export function mergeEnvironmentThread(
+  detail: EnvironmentThread | null,
+  shell: EnvironmentThreadShell | null,
+): EnvironmentThread | null {
+  if (detail === null || shell === null) {
+    return detail;
+  }
+  if (detail.environmentId !== shell.environmentId || detail.id !== shell.id) {
+    return detail;
+  }
+
+  return {
+    ...detail,
+    environmentId: shell.environmentId,
+    id: shell.id,
+    projectId: shell.projectId,
+    title: shell.title,
+    modelSelection: shell.modelSelection,
+    runtimeMode: shell.runtimeMode,
+    interactionMode: shell.interactionMode,
+    branch: shell.branch,
+    worktreePath: shell.worktreePath,
+    latestTurn: shell.latestTurn,
+    createdAt: shell.createdAt,
+    updatedAt: shell.updatedAt,
+    archivedAt: shell.archivedAt,
+    settledOverride: shell.settledOverride,
+    settledAt: shell.settledAt,
+    unsettledAt: shell.unsettledAt,
+    activeOrderKey: shell.activeOrderKey,
+    autoSettleDisabledAt: shell.autoSettleDisabledAt,
+    snoozedUntil: shell.snoozedUntil,
+    snoozedAt: shell.snoozedAt,
+    pinnedAt: shell.pinnedAt,
+    pinOrderKey: shell.pinOrderKey,
+    session: shell.session,
+  };
+}
 
 export function createEnvironmentThreadDetailAtoms<E>(
   threadStateAtom: (
