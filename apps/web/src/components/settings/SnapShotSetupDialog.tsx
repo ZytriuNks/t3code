@@ -268,7 +268,9 @@ export function SnapShotSetupDialog({
                     permissions={[
                       {
                         id: "screenRecording",
-                        icon: <MacScreenRecordingIcon className="size-8 shrink-0 drop-shadow-sm" />,
+                        icon: (
+                          <MacScreenRecordingIcon className="size-8 shrink-0 drop-shadow-[0_1px_1px_#0005]" />
+                        ),
                         title: "Screen Recording",
                         description: "Capture the window you're using.",
                         granted: macPermissions.screenRecording,
@@ -276,7 +278,9 @@ export function SnapShotSetupDialog({
                       },
                       {
                         id: "accessibility",
-                        icon: <MacAccessibilityIcon className="size-8 shrink-0 drop-shadow-sm" />,
+                        icon: (
+                          <MacAccessibilityIcon className="size-8 shrink-0 drop-shadow-[0_1px_1px_#0005]" />
+                        ),
                         title: "Accessibility",
                         description: includeAccessibility
                           ? "Include text and controls from the captured app."
