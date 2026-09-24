@@ -19,14 +19,6 @@
  * The decoder only runs while frames arrive and the viewer is attached; a
  * hidden panel calls `stop()` so an idle device costs nothing on the GPU.
  */
-import {
-  createDuoControl,
-  type DuoCommand,
-  type DuoControlState,
-  type DuoPose,
-} from "./duoControl.ts";
-import * as Schema from "effect/Schema";
-import * as Option from "effect/Option";
 import { createCanvasFrameSink, type DeviceFrameSink } from "./frame.ts";
 import { type DeviceHubAccess, withDeviceHubQuery } from "./hubAccess.ts";
 import type { DevicePlatform } from "@t3tools/contracts";
@@ -276,11 +268,6 @@ export interface DeviceStreamClient {
   readonly pressButton: (button: DeviceHardwareButton) => void;
   readonly rotate: () => void;
   readonly setOrientation: (orientation: DeviceScreenSize["orientation"]) => void;
-  readonly controlDuo: (command: DuoCommand) => void;
-  /** Switch between one active feed and two fixed-panel feeds without replacing HID. */
-  readonly setDuoPanels: (panels: DuoPanelSinks | null) => void;
-  /** Model UVs already map to the hardware framebuffer. */
-  readonly sendRawTouch: (phase: "begin" | "move" | "end", x: number, y: number) => void;
 }
 
 const HID_USAGE_BY_CODE: Readonly<Record<string, number>> = {
@@ -1083,6 +1070,9 @@ export function createDeviceStreamClient(
         rotationCursor = next;
         duoControl.enqueue({ control: "orientation", value: next });
       } else send(taggedJson(IOS_MSG_ORIENTATION, { orientation: next }));
+    },
+    setOrientation: (orientation) => {
+      if (platform === "ios") send(taggedJson(IOS_MSG_ORIENTATION, { orientation }));
     },
     setOrientation: (orientation) => {
       if (platform === "ios") send(taggedJson(IOS_MSG_ORIENTATION, { orientation }));
