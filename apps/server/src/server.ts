@@ -52,6 +52,7 @@ import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
 import * as ProviderEventIngestor from "./orchestration-v2/ProviderEventIngestor.ts";
 import * as ModelManifest from "./provider/ModelManifest.ts";
+import * as ResetCreditCoordinator from "./provider/Layers/resetCreditCoordinator.ts";
 import * as ProviderEventLoggers from "./provider/Layers/ProviderEventLoggers.ts";
 import * as OpenCodeRuntime from "./provider/opencodeRuntime.ts";
 import { AcpRegistryCatalogLive } from "./provider/Layers/AcpRegistryCatalog.ts";
@@ -567,7 +568,7 @@ const RuntimeCoreDependenciesLive = RuntimeCoreDependenciesBaseLive.pipe(
   // from the repo's `model-manifest.json` on `main` and applied by the
   // Codex/Claude drivers.
   Layer.provideMerge(
-    Layer.mergeAll(ProviderEventLoggers.layer, ModelManifest.layer, CodexResetCredit.layer),
+    Layer.mergeAll(ProviderEventLoggers.layer, ModelManifest.layer, ResetCreditCoordinator.layer),
   ),
   // `OpenCodeDriver.create()` yields `OpenCodeRuntime`; previously the old
   // `ProviderRegistryLive` pulled `OpenCodeRuntimeLive` in for itself, but
