@@ -63,8 +63,13 @@ export function PromptFontPreview() {
         skills={EMPTY_SKILLS}
         accessibleCopy={accessibleCopy}
         disabled={false}
+<<<<<<< HEAD
         placeholder={t("settings.appearance.promptFont.previewPlaceholder")}
         className="max-h-40 min-h-12"
+=======
+        placeholder={DISCONNECTED_COMPOSER_PLACEHOLDER}
+        className="max-h-42 min-h-14"
+>>>>>>> 9030a60eaf (fix(web): composer chip rings no longer clip at the editor edge (#13301))
         onChange={onChange}
         onPaste={noop}
       />
