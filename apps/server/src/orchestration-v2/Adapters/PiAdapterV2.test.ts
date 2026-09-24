@@ -913,6 +913,198 @@ describe("PiAdapterV2", () => {
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
+  it.effect("enables fast mode through a correlated extension command before the real prompt", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      fake.queueCommands({
+        commands: [
+          {
+            name: "fast",
+            source: "extension",
+            sourceInfo: { source: "npm:@benvargas/pi-openai-fast" },
+          },
+        ],
+      });
+      fake.queueCommands({
+        commands: [
+          {
+            name: "fast",
+            source: "extension",
+            sourceInfo: { source: "npm:@benvargas/pi-openai-fast" },
+          },
+        ],
+      });
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+
+      yield* startTurn(runtime, providerThread, "default", [], "Hello pi", {
+        instanceId: PI_INSTANCE_ID,
+        model: "openai/gpt-fast",
+        options: [{ id: "serviceTier", value: "priority" }],
+      });
+
+      const fast = yield* fake.takeRequest("prompt");
+      assert.equal(fast["message"], "/fast on");
+      assert.equal(typeof fast["id"], "string");
+      const prompt = yield* fake.takeRequest("prompt");
+      assert.equal(prompt["message"], "Hello pi");
+      assert.isUndefined(prompt["id"]);
+      assert.equal(
+        fake.allRequests().filter((request) => request["type"] === "get_commands").length,
+        2,
+      );
+      const providerTurn = yield* takeEvent((event) => event.type === "provider_turn.updated");
+      assert.isTrue(providerTurn.type === "provider_turn.updated");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect(
+    "disables fast mode through a correlated extension command before the real prompt",
+    () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        fake.queueCommands({
+          commands: [
+            {
+              name: "fast",
+              source: "extension",
+              sourceInfo: { source: "npm:@benvargas/pi-openai-fast" },
+            },
+          ],
+        });
+        fake.queueCommands({
+          commands: [
+            {
+              name: "fast",
+              source: "extension",
+              sourceInfo: { source: "npm:@benvargas/pi-openai-fast" },
+            },
+          ],
+        });
+        const { runtime } = yield* openRuntime(fake);
+        const providerThread = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+
+        yield* startTurn(runtime, providerThread, "default", [], "Hello pi", {
+          instanceId: PI_INSTANCE_ID,
+          model: "openai/gpt-fast",
+          options: [{ id: "serviceTier", value: "default" }],
+        });
+
+        const fast = yield* fake.takeRequest("prompt");
+        assert.equal(fast["message"], "/fast off");
+        assert.equal(typeof fast["id"], "string");
+        const prompt = yield* fake.takeRequest("prompt");
+        assert.equal(prompt["message"], "Hello pi");
+        assert.isUndefined(prompt["id"]);
+      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("leaves fast mode untouched for a thinking-only selection", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+
+      yield* startTurn(runtime, providerThread, "default", [], "Hello pi", {
+        instanceId: PI_INSTANCE_ID,
+        model: "openai/gpt-fast",
+        options: [{ id: "thinking", value: "high" }],
+      });
+
+      const prompt = yield* fake.takeRequest("prompt");
+      assert.equal(prompt["message"], "Hello pi");
+      assert.isUndefined(prompt["id"]);
+      assert.isTrue(
+        fake
+          .allRequests()
+          .some(
+            (request) => request["type"] === "set_thinking_level" && request["level"] === "high",
+          ),
+      );
+      assert.equal(
+        fake.allRequests().filter((request) => request["type"] === "get_commands").length,
+        1,
+      );
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("rejects a service tier without the fast extension before the real prompt", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      fake.queueCommands({ commands: [] });
+      const { runtime } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+
+      yield* startTurn(runtime, providerThread, "default", [], "Hello pi", {
+        instanceId: PI_INSTANCE_ID,
+        model: "default",
+        options: [{ id: "serviceTier", value: "priority" }],
+      }).pipe(Effect.flip);
+
+      assert.isTrue(fake.allRequests().some((request) => request["type"] === "get_commands"));
+      assert.isFalse(fake.allRequests().some((request) => request["type"] === "prompt"));
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("rejects a same-named fast command from another extension", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      fake.queueCommands({
+        commands: [
+          {
+            name: "fast",
+            source: "extension",
+            sourceInfo: { source: "npm:@example/pi-fast" },
+          },
+        ],
+      });
+      fake.queueCommands({
+        commands: [
+          {
+            name: "fast",
+            source: "extension",
+            sourceInfo: { source: "npm:@example/pi-fast" },
+          },
+        ],
+      });
+      const { runtime } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+
+      const result = yield* startTurn(runtime, providerThread, "default", [], "Hello pi", {
+        instanceId: PI_INSTANCE_ID,
+        model: "default",
+        options: [{ id: "serviceTier", value: "priority" }],
+      }).pipe(Effect.result);
+
+      assert.equal(result._tag, "Failure");
+      assert.equal(
+        fake.allRequests().filter((request) => request["type"] === "get_commands").length,
+        2,
+      );
+      assert.isFalse(fake.allRequests().some((request) => request["type"] === "prompt"));
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
   it.effect("expands a selected $ skill through Pi's native skill command", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;

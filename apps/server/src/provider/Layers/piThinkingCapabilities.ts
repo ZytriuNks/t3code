@@ -1,4 +1,8 @@
-import { type ModelCapabilities, type ProviderOptionChoice } from "@t3tools/contracts";
+import {
+  type ModelCapabilities,
+  type ProviderOptionChoice,
+  type ProviderOptionDescriptor,
+} from "@t3tools/contracts";
 import { createModelCapabilities } from "@t3tools/shared/model";
 import * as Predicate from "effect/Predicate";
 
@@ -28,24 +32,47 @@ export const EMPTY_PI_MODEL_CAPABILITIES: ModelCapabilities = createModelCapabil
 export function thinkingCapabilitiesForPiModel(
   model: unknown,
   defaultThinkingLevel: unknown,
+  fastModeActive?: boolean,
 ): ModelCapabilities {
   const levels = supportedPiThinkingLevelsFromModel(model);
-  if (levels.length === 0) return EMPTY_PI_MODEL_CAPABILITIES;
-  const defaultLevel = clampPiThinkingLevel(defaultThinkingLevel, levels);
-  return createModelCapabilities({
-    optionDescriptors: [
-      {
-        id: "thinking",
-        label: "Thinking",
-        type: "select",
-        options: levels.map((level): ProviderOptionChoice => ({
-          id: level,
-          label: PI_THINKING_LEVEL_LABELS[level],
-          ...(level === defaultLevel ? { isDefault: true } : {}),
-        })),
-      },
-    ],
-  });
+  const optionDescriptors: Array<ProviderOptionDescriptor> = [];
+  if (levels.length > 0) {
+    const defaultLevel = clampPiThinkingLevel(defaultThinkingLevel, levels);
+    optionDescriptors.push({
+      id: "thinking",
+      label: "Thinking",
+      type: "select",
+      options: levels.map((level): ProviderOptionChoice => ({
+        id: level,
+        label: PI_THINKING_LEVEL_LABELS[level],
+        ...(level === defaultLevel ? { isDefault: true } : {}),
+      })),
+    });
+  }
+  if (fastModeActive !== undefined) {
+    const serviceTier = fastModeActive ? "priority" : "default";
+    optionDescriptors.push({
+      id: "serviceTier",
+      label: "Service Tier",
+      type: "select",
+      options: [
+        {
+          id: "default",
+          label: "Standard",
+          ...(serviceTier === "default" ? { isDefault: true } : {}),
+        },
+        {
+          id: "priority",
+          label: "Fast",
+          ...(serviceTier === "priority" ? { isDefault: true } : {}),
+        },
+      ],
+      currentValue: serviceTier,
+    });
+  }
+  return optionDescriptors.length === 0
+    ? EMPTY_PI_MODEL_CAPABILITIES
+    : createModelCapabilities({ optionDescriptors });
 }
 
 /** Mirrors `@earendil-works/pi-ai` `clampThinkingLevel`. */

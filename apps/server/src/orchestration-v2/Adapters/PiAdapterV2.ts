@@ -273,6 +273,39 @@ function providerRef(
 }
 
 const PI_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+const PI_OPENAI_FAST_PACKAGE = "@benvargas/pi-openai-fast";
+
+function hasPiOpenAIFastExtensionCommand(data: unknown): boolean {
+  const commands = recordField(data, "commands");
+  if (!Array.isArray(commands)) return false;
+  return commands.some((command) => {
+    if (
+      recordString(command, "name") !== "fast" ||
+      recordString(command, "source") !== "extension"
+    ) {
+      return false;
+    }
+    const sourceInfo = recordField(command, "sourceInfo");
+    return [
+      recordString(sourceInfo, "source"),
+      recordString(sourceInfo, "path"),
+      recordString(sourceInfo, "baseDir"),
+    ].some((value) => isPiOpenAIFastPackageSource(value));
+  });
+}
+
+function isPiOpenAIFastPackageSource(value: string | undefined): boolean {
+  if (value === undefined) return false;
+  const normalized = value.replaceAll("\\", "/").replace(/\/+$/, "").toLowerCase();
+  const packageName = PI_OPENAI_FAST_PACKAGE.toLowerCase();
+  return (
+    normalized === packageName ||
+    normalized === `npm:${packageName}` ||
+    normalized.startsWith(`npm:${packageName}@`) ||
+    normalized.includes(`/node_modules/${packageName}/`) ||
+    normalized.endsWith(`/node_modules/${packageName}`)
+  );
+}
 
 // ── per-session state ─────────────────────────────────────────
 
@@ -2169,6 +2202,19 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
         ) {
           yield* request({ type: "set_thinking_level", level: thinking });
           appliedThinking = thinking;
+        }
+        const serviceTier = getModelSelectionStringOptionValue(modelSelection, "serviceTier");
+        if (serviceTier === "default" || serviceTier === "priority") {
+          const commands = yield* request({ type: "get_commands" }, PI_SKILL_DISCOVERY_TIMEOUT_MS);
+          if (!hasPiOpenAIFastExtensionCommand(commands)) {
+            return yield* protocolError(
+              "Pi fast extension command is unavailable for service tier selection",
+            );
+          }
+          yield* request({
+            type: "prompt",
+            message: serviceTier === "priority" ? "/fast on" : "/fast off",
+          });
         }
       });
 
