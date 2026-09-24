@@ -184,19 +184,25 @@ const MobileRunContextSelector = memo(function MobileRunContextSelector({
   const triggerContent = (
     <>
       {icon}
-      <ComposerContextLabel>
-        {autoEnvironmentLabel ??
-          (showEnvironmentIndicator
-            ? (activeEnvironment?.label ?? t("toolbar.environment.runOn"))
-            : workspaceLabel)}
-      </ComposerContextLabel>
+      <span
+        data-composer-label
+        className="min-w-0 max-w-[240px] group-data-[compact]/composer-context:max-w-0"
+      >
+        <span
+          data-composer-label-motion
+          className="block w-full min-w-0 max-w-[240px] truncate transition-opacity duration-180 ease-drawer group-data-[compact]/composer-context:opacity-0 motion-reduce:transition-none"
+        >
+          {autoEnvironmentLabel ??
+            (showEnvironmentIndicator ? (activeEnvironment?.label ?? "Run on") : workspaceLabel)}
+        </span>
+      </span>
     </>
   );
 
   if (isLocked) {
     return (
       <span
-        className="inline-flex h-7 min-w-0 max-w-[48%] flex-initial items-center justify-start gap-1 rounded-md border border-transparent px-[calc(--spacing(2)-1px)] font-normal text-muted-foreground/70 text-xs sm:h-6"
+        className="inline-flex h-7 min-w-0 max-w-[48%] flex-initial items-center justify-start gap-1 rounded-md border border-transparent px-1.75 font-normal text-muted-foreground/70 text-xs sm:h-6"
         data-composer-context-control
       >
         {triggerContent}

@@ -83,7 +83,7 @@ interface PreviewPanelShellProps {
             : "shrink-0 border-l border-border"
           : "w-full",
         collapsible &&
-          "[[data-panel-animations=true]_&]:transition-[width] [[data-panel-animations=true]_&]:[transition-duration:var(--panel-animation-duration)] [[data-panel-animations=true]_&]:ease-out",
+          "[[data-panel-animations=true]_&]:transition-[width] [[data-panel-animations=true]_&]:duration-(--panel-animation-duration) [[data-panel-animations=true]_&]:ease-out",
         collapsible && open && "[[data-panel-animations=true]_&]:starting:w-0!",
         collapsible && !open && "pointer-events-none",
       )}

@@ -1230,7 +1230,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
         "grid shrink-0 overflow-clip",
         active ? (visible ? "grid-rows-[1fr]" : "grid-rows-[0fr]") : "hidden",
         active &&
-          "[[data-panel-animations=true]_&]:transition-[grid-template-rows] [[data-panel-animations=true]_&]:[transition-duration:var(--panel-animation-duration)] [[data-panel-animations=true]_&]:ease-out",
+          "[[data-panel-animations=true]_&]:transition-[grid-template-rows] [[data-panel-animations=true]_&]:duration-(--panel-animation-duration) [[data-panel-animations=true]_&]:ease-out",
         active && visible && "[[data-panel-animations=true]_&]:starting:grid-rows-[0fr]!",
       )}
     >
@@ -10018,6 +10018,52 @@ export default function ChatView(props: ChatViewProps) {
     return <NoActiveThreadState />;
   }
 
+  const panelToggleControls = (
+    <PanelLayoutControls
+      terminalAvailable={activeProject !== null}
+      terminalOpen={terminalUiState.terminalOpen}
+      terminalShortcutLabel={shortcutLabelForCommand(keybindings, "terminal.toggle")}
+      rightPanelAvailable={activeProject !== null}
+      rightPanelOpen={rightPanelOpen}
+      rightPanelShortcutLabel={shortcutLabelForCommand(keybindings, "rightPanel.toggle")}
+      // Suppressed while the Agents surface is visible: the roster itself is
+      // on screen, so the toggle badge would be pointing at nothing.
+      liveAgentCount={
+        rightPanelOpen && activeRightPanelSurface?.kind === "agents" ? 0 : agentPanelModel.liveCount
+      }
+      onToggleTerminal={toggleTerminalVisibility}
+      onToggleRightPanel={toggleRightPanel}
+    />
+  );
+  const panelLayoutControls = (
+    <div
+      className={cn(
+        // Keep one viewport anchor inside the header's no-drag region. The
+        // header can shrink behind the right panel without moving the controls.
+        "pointer-events-none fixed top-[var(--workspace-controls-top)] right-[var(--workspace-controls-right)] z-50 mr-px flex h-[var(--workspace-topbar-height)] items-center gap-1 [-webkit-app-region:no-drag]",
+      )}
+      data-workspace-titlebar-controls
+    >
+      {!shouldUseRightPanelSheet ? (
+        <span
+          aria-hidden={!rightPanelOpen}
+          className={cn(
+            "flex shrink-0",
+            panelAnimationsActive &&
+              "motion-safe:transition-opacity motion-safe:duration-(--panel-animation-duration) motion-safe:ease-out",
+            rightPanelOpen ? "pointer-events-auto opacity-100" : "pointer-events-none opacity-0",
+          )}
+          inert={!rightPanelOpen}
+        >
+          <RightPanelMaximizeControl
+            maximized={rightPanelMaximized}
+            onToggle={toggleRightPanelMaximized}
+          />
+        </span>
+      ) : null}
+      <div className="pointer-events-auto flex h-full items-center">{panelToggleControls}</div>
+    </div>
+  );
   const rightPanelContent = activeThreadRef ? (
     renderedRightPanelSurface?.kind === "preview" ? (
       <Suspense fallback={null}>
@@ -10559,8 +10605,8 @@ export default function ChatView(props: ChatViewProps) {
               }
             >
               <div
-                ref={draftHeroTransition.transitionGroupRef}
-                className="w-full ps-[calc(env(safe-area-inset-left)+0.75rem)] pe-[calc(env(safe-area-inset-right)+0.75rem+var(--thread-details-panel-inset))] sm:ps-[calc(env(safe-area-inset-left)+1.25rem)] sm:pe-[calc(env(safe-area-inset-right)+1.25rem+var(--thread-details-panel-inset))]"
+                ref={attachDraftHeroTransitionGroupRef}
+                className="w-full ps-(--workspace-gutter-start) pe-(--workspace-gutter-end)"
               >
                 <div
                   data-chat-composer-stack="true"

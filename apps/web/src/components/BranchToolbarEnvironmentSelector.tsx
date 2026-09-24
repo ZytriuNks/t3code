@@ -87,8 +87,28 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
     );
     return (
       <Tooltip>
-        <TooltipTrigger render={lockedRow} />
-        <TooltipPopup>{activeEnvironment?.label ?? t("toolbar.environment.runOn")}</TooltipPopup>
+        <TooltipTrigger
+          render={<span />}
+          className="inline-flex h-7 min-w-0 max-w-full items-center gap-1 border border-transparent px-1.75 font-normal text-muted-foreground/70 text-xs sm:h-6"
+          data-composer-context-control
+        >
+          <EnvironmentMachineIcon
+            kind={activeEnvironment?.machine ?? "server"}
+            className="size-3 shrink-0"
+          />
+          <span
+            data-composer-label
+            className="min-w-0 max-w-[240px] group-data-[compact]/composer-context:max-w-0"
+          >
+            <span
+              data-composer-label-motion
+              className="block w-full min-w-0 max-w-[240px] truncate transition-opacity duration-180 ease-drawer group-data-[compact]/composer-context:opacity-0 motion-reduce:transition-none"
+            >
+              {activeEnvironment?.label ?? "Run on"}
+            </span>
+          </span>
+        </TooltipTrigger>
+        <TooltipPopup>{activeEnvironment?.label ?? "Run on"}</TooltipPopup>
       </Tooltip>
     );
   }
@@ -129,9 +149,17 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
               }
             />
           )}
-          <ComposerContextLabel displayMode={displayMode}>
-            <SelectValue />
-          </ComposerContextLabel>
+          <span
+            data-composer-label
+            className="min-w-0 max-w-[240px] group-data-[compact]/composer-context:max-w-0"
+          >
+            <span
+              data-composer-label-motion
+              className="block w-full min-w-0 max-w-[240px] truncate transition-opacity duration-180 ease-drawer group-data-[compact]/composer-context:opacity-0 motion-reduce:transition-none"
+            >
+              <SelectValue />
+            </span>
+          </span>
         </TooltipTrigger>
         <TooltipPopup>
           {autoEnvironmentLabel ?? activeEnvironment?.label ?? t("toolbar.environment.runOn")}

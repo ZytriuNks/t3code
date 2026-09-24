@@ -438,7 +438,7 @@ export function AddProviderInstanceDialog({
               value={label}
               onChange={(event) => setLabel(event.target.value)}
             />
-            <span className="text-[11px] text-muted-foreground">
+            <span className="text-2xs text-muted-foreground">
               Shown in the provider list. Optional.
             </span>
           </label>
@@ -454,9 +454,9 @@ export function AddProviderInstanceDialog({
               aria-invalid={showInstanceIdError}
             />
             {showInstanceIdError ? (
-              <span className="text-[11px] text-destructive">{instanceIdError}</span>
+              <span className="text-2xs text-destructive">{instanceIdError}</span>
             ) : (
-              <span className="text-[11px] text-muted-foreground">
+              <span className="text-2xs text-muted-foreground">
                 Routing key used by threads and sessions. Letters, digits, '-', or '_'.
               </span>
             )}
@@ -593,6 +593,11 @@ export function AddProviderInstanceDialog({
                   )}
                 </div>
               ) : null}
+            </div>
+            <span className="text-2xs text-muted-foreground">
+              Optional marker shown in the picker.
+            </span>
+          </div>
 
               {isAcpRegistry && wizardStep === 1 && selectedAcp ? (
                 <div className="mb-4 flex items-start justify-between gap-3 border-b border-border/70 pb-3">
