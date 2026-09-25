@@ -66,61 +66,16 @@ function formatThreadError(cause: Cause.Cause<unknown>): string {
     : "Could not synchronize the thread.";
 }
 
-function formatHistoryError(error: unknown): string {
-  if (error instanceof Error && error.message.trim().length > 0) {
-    return error.message;
-  }
-  return "Could not load earlier activity.";
+/**
+ * A starting or running session is mid-turn. Its detail can change many times
+ * per second, so the disk cache waits for it to settle.
+ */
+export function isThreadSessionRunning(session: OrchestrationThread["session"]): boolean {
+  return session?.status === "starting" || session?.status === "running";
 }
 
-function historyMetaFromCachedSnapshot(
-  snapshot: OrchestrationV2ThreadDetailSnapshot,
-): ThreadHistoryMeta {
-  const historyCursor = snapshot.historyCursor ?? null;
-  const hasMoreHistory = snapshot.hasMoreHistory ?? false;
-  return {
-    historyCursor,
-    hasMoreHistory,
-    loading: false,
-    error: null,
-    // Cache never stores expanded progressive history (load-earlier growth).
-    expanded: false,
-    latestLocalTurnOrdinal: snapshot.latestLocalTurnOrdinal ?? null,
-  };
-}
-
-function snapshotToPersist(
-  snapshotSequence: number,
-  projection: OrchestrationV2ThreadProjection,
-  history: ThreadHistoryMeta,
-  acceptsBoundedSnapshots: boolean,
-): OrchestrationV2ThreadDetailSnapshot {
-  // A complete bounded snapshot still proves paging support. Retain that evidence
-  // so a thread that grows while closed can resume with a bounded fallback.
-  if (acceptsBoundedSnapshots || history.hasMoreHistory || history.historyCursor !== null) {
-    return {
-      snapshotSequence,
-      projection,
-      historyCursor: history.historyCursor,
-      hasMoreHistory: history.hasMoreHistory,
-      latestLocalTurnOrdinal: history.latestLocalTurnOrdinal,
-    };
-  }
-  return { snapshotSequence, projection };
-}
-
-function shouldPersistThread(
-  thread: OrchestrationV2ThreadProjection,
-  history: ThreadHistoryMeta,
-): boolean {
-  // After the user loads older pages the in-memory timeline can grow large.
-  // Keep those expanded projections out of the monolithic cache.
-  if (history.expanded) {
-    return false;
-  }
-  return !thread.runs.some(
-    (run) => run.status === "preparing" || run.status === "starting" || run.status === "running",
-  );
+function shouldPersistThread(thread: OrchestrationThread): boolean {
+  return !isThreadSessionRunning(thread.session);
 }
 
 interface ThreadResumeSnapshot {
