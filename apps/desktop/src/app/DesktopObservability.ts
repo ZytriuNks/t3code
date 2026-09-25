@@ -376,11 +376,28 @@ const resolveOtlpEndpoints = Effect.gen(function* () {
     exportIntervalMs: environment.otlpExportIntervalMs,
   };
   return {
-    resourceAttributes: otel.resourceAttributes,
-=======
     traces: Option.getOrUndefined(environment.otlpTracesUrl) ?? persisted.otlpTracesUrl,
     metrics: Option.getOrUndefined(environment.otlpMetricsUrl) ?? persisted.otlpMetricsUrl,
     logs: Option.getOrUndefined(environment.otlpLogsUrl) ?? persisted.otlpLogsUrl,
+=======
+    traces: OtelEnvironment.resolveSignalEndpoint(
+      otel,
+      "traces",
+      { url: Option.getOrUndefined(environment.otlpTracesUrl), export: signalExport },
+      persisted.otlpTracesUrl,
+    ),
+    metrics: OtelEnvironment.resolveSignalEndpoint(
+      otel,
+      "metrics",
+      { url: Option.getOrUndefined(environment.otlpMetricsUrl), export: signalExport },
+      persisted.otlpMetricsUrl,
+    ),
+    logs: OtelEnvironment.resolveSignalEndpoint(
+      otel,
+      "logs",
+      { url: Option.getOrUndefined(environment.otlpLogsUrl), export: signalExport },
+      persisted.otlpLogsUrl,
+    ),
     warnings: otel.warnings,
     resourceAttributes: otel.resourceAttributes,
   };
