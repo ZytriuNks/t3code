@@ -329,9 +329,25 @@ export const ApiLive = Api.make(
               }),
             ),
           ),
-        ),
+          ManagedEndpointReaper.ManagedEndpointReaper.pipe(
+            Effect.flatMap((reaper) => reaper.sweep.pipe(Effect.timeout("2 minutes"))),
+            Effect.tap((result) =>
+              result.scanned > 0
+                ? Effect.logInfo("Finished managed tunnel cleanup", result)
+                : Effect.void,
+            ),
+            Effect.catchCause((cause) =>
+              Cause.hasInterrupts(cause)
+                ? Effect.interrupt
+                : Effect.logWarning("Failed to clean up inactive managed tunnels", { cause }),
+            ),
+          ),
+        ],
+        { concurrency: 2, discard: true },
+      ).pipe(
         Effect.withSpan("relay.cron.prune_expired_state"),
-        Effect.provide(runtimeLayer),
+        // Export cron spans to Axiom like HTTP spans; the scope flushes them before the run ends.
+        Effect.provide(Layer.merge(runtimeLayer, relayTraceLayer)),
       ),
     );
 
