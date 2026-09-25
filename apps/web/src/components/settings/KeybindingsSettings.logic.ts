@@ -30,6 +30,7 @@ export interface KeybindingRow {
 
 export type WhenVariableOption = string;
 export type KeybindingCommandOption = KeybindingCommand;
+export type KeybindingCommandLabelResolver = (command: KeybindingCommand) => string;
 
 const CORE_WHEN_VARIABLES = [
   "terminalFocus",
@@ -155,6 +156,7 @@ function conflictsWithWhen(leftWhen: string, rightWhen: string): boolean {
 export function keybindingConflictLabels(
   rows: ReadonlyArray<KeybindingRow>,
   input: { readonly rowId: string; readonly key: string; readonly when: string },
+  labelForCommand: KeybindingCommandLabelResolver = commandLabel,
 ): ReadonlyArray<string> {
   if (input.key.trim().length === 0) return [];
   const conflicts: Array<string> = [];
@@ -164,7 +166,7 @@ export function keybindingConflictLabels(
       candidate.key === input.key &&
       conflictsWithWhen(candidate.when, input.when)
     ) {
-      conflicts.push(commandLabel(candidate.command));
+      conflicts.push(labelForCommand(candidate.command));
     }
   }
   return [...new Set(conflicts)].toSorted();
@@ -173,6 +175,7 @@ export function keybindingConflictLabels(
 export function buildKeybindingRows(
   keybindings: ResolvedKeybindingsConfig,
   query: string,
+  labelForCommand: KeybindingCommandLabelResolver = commandLabel,
 ): ReadonlyArray<KeybindingRow> {
   const normalizedQuery = query.trim().toLowerCase();
   const rows = keybindings.map((binding, index) => {
@@ -193,11 +196,15 @@ export function buildKeybindingRows(
   });
 
   const rowsWithConflicts = rows.map((row) => {
-    const conflicts = keybindingConflictLabels(rows, {
-      rowId: row.id,
-      key: row.key,
-      when: row.when,
-    });
+    const conflicts = keybindingConflictLabels(
+      rows,
+      {
+        rowId: row.id,
+        key: row.key,
+        when: row.when,
+      },
+      labelForCommand,
+    );
     return conflicts.length > 0
       ? Object.assign({}, row, { conflicts: [...new Set(conflicts)].toSorted() })
       : row;
@@ -216,7 +223,7 @@ export function buildKeybindingRows(
   return rowsWithConflicts.filter((row) => {
     return (
       row.command.toLowerCase().includes(normalizedQuery) ||
-      commandLabel(row.command).toLowerCase().includes(normalizedQuery) ||
+      labelForCommand(row.command).toLowerCase().includes(normalizedQuery) ||
       row.key.toLowerCase().includes(normalizedQuery) ||
       row.when.toLowerCase().includes(normalizedQuery) ||
       row.source.toLowerCase().includes(normalizedQuery)

@@ -20,7 +20,6 @@ import {
 } from "../../providerInstances";
 import { useEnvironments } from "../../state/environments";
 import { EMPTY_SERVER_PROVIDERS } from "../../state/server";
-import { WORKTREE_SUBMODULES_LABELS } from "../BranchToolbar.logic";
 import { ProviderModelPicker } from "../chat/ProviderModelPicker";
 import { runtimeModeConfig, runtimeModeOptions } from "../chat/runtimeModeConfig";
 import { PULL_REQUEST_MERGE_METHOD_LABELS } from "../pullRequest/pullRequestDetail.logic";
@@ -74,6 +73,11 @@ const WORKSPACE_MODE_LABEL_KEYS: Record<"local" | "worktree", MessageKey> = {
  * project or checkout scope; the scoped hooks route the write.
  */
 const WORKTREE_SUBMODULES_OPTIONS = ["recursive", "top-level", "none"] as const;
+const WORKTREE_SUBMODULE_LABEL_KEYS: Record<WorktreeSubmodules, MessageKey> = {
+  recursive: "settings.general.submodules.recursive",
+  "top-level": "settings.general.submodules.topLevel",
+  none: "settings.general.submodules.none",
+};
 function isWorktreeSubmodules(value: string | null): value is WorktreeSubmodules {
   return value !== null && (WORKTREE_SUBMODULES_OPTIONS as readonly string[]).includes(value);
 }
@@ -382,16 +386,16 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
             serverScoped
             settingKeys={["worktreeSubmodules"]}
             mixed={mixedSubmodules}
-            {...searchableSetting("worktree-submodules")}
+            {...searchableSetting("worktree-submodules", t)}
             description={
               isProjectScope
-                ? "How new worktrees in this project populate git submodules."
-                : "How new worktrees populate git submodules. Projects and their t3.json can override it."
+                ? t("settings.general.submodules.projectDescription")
+                : t("settings.general.submodules.description")
             }
             resetAction={
               !isProjectScope && settings.worktreeSubmodules !== null ? (
                 <SettingResetButton
-                  label="worktree submodules"
+                  label={t("settings.general.submodules.resetLabel")}
                   onClick={() => updateSettings({ worktreeSubmodules: null })}
                 />
               ) : null
@@ -403,11 +407,11 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
                   if (isWorktreeSubmodules(value)) updateSettings({ worktreeSubmodules: value });
                 }}
               >
-                <SelectTrigger size="sm" aria-label="Worktree submodules">
+                <SelectTrigger size="sm" aria-label={t("settings.general.submodules.ariaLabel")}>
                   <SelectValue>
                     {(value: string | null) =>
                       isWorktreeSubmodules(value)
-                        ? WORKTREE_SUBMODULES_LABELS[value]
+                        ? t(WORKTREE_SUBMODULE_LABEL_KEYS[value])
                         : unavailable
                           ? text.workspaceUnavailable
                           : text.mixed
@@ -417,7 +421,7 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
                 <SelectPopup align="end" alignItemWithTrigger={false}>
                   {WORKTREE_SUBMODULES_OPTIONS.map((option) => (
                     <SelectItem key={option} value={option}>
-                      {WORKTREE_SUBMODULES_LABELS[option]}
+                      {t(WORKTREE_SUBMODULE_LABEL_KEYS[option])}
                     </SelectItem>
                   ))}
                 </SelectPopup>
@@ -441,15 +445,15 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
             resetAction={
               settings.defaultAutoPull ? (
                 <SettingResetButton
-                  label="default automatic pull"
-                  tooltip="Reset automatic pull to off"
+                  label={t("settings.defaults.automaticPullResetLabel")}
+                  tooltip={t("settings.defaults.automaticPullResetTooltip")}
                   onClick={() => updateSettings({ defaultAutoPull: false })}
                 />
               ) : null
             }
             control={
               <Switch
-                aria-label="Default automatic pull"
+                aria-label={t("settings.defaults.automaticPullAriaLabel")}
                 mixed={mixedAutoPull}
                 checked={mixedAutoPull ? false : settings.defaultAutoPull}
                 onCheckedChange={(enabled) => updateSettings({ defaultAutoPull: enabled })}
@@ -469,8 +473,8 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
             resetAction={
               settings.pullRequestMergeMethod !== null ? (
                 <SettingResetButton
-                  label="default merge method"
-                  tooltip="Reset to last selected"
+                  label={t("settings.defaults.mergeResetLabel")}
+                  tooltip={t("settings.defaults.mergeResetTooltip")}
                   onClick={() => updateSettings({ pullRequestMergeMethod: null })}
                 />
               ) : null
@@ -484,7 +488,7 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
                     updateSettings({ pullRequestMergeMethod: value });
                 }}
               >
-                <SelectTrigger size="sm" aria-label="Default pull request merge method">
+                <SelectTrigger size="sm" aria-label={t("settings.defaults.mergeAriaLabel")}>
                   <SelectValue>
                     {(value: string | null) =>
                       value === "merge" || value === "squash" || value === "rebase"
@@ -522,7 +526,7 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
               settings.enableAgentBrowserAccess !==
               DEFAULT_SERVER_SETTINGS.enableAgentBrowserAccess ? (
                 <SettingResetButton
-                  label="default browser access"
+                  label={t("settings.defaults.agentBrowserResetLabel")}
                   onClick={() =>
                     updateSettings({
                       enableAgentBrowserAccess: DEFAULT_SERVER_SETTINGS.enableAgentBrowserAccess,
@@ -533,7 +537,7 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
             }
             control={
               <Switch
-                aria-label="Agent browser access"
+                aria-label={t("settings.defaults.agentBrowserAriaLabel")}
                 mixed={mixedBrowser}
                 checked={mixedBrowser ? false : settings.enableAgentBrowserAccess}
                 onCheckedChange={(enabled) => updateSettings({ enableAgentBrowserAccess: enabled })}

@@ -10,6 +10,7 @@ import {
 import { type CustomModelDefinition, normalizeCustomModelSlug } from "@t3tools/shared/model";
 
 import { cn } from "../../lib/utils";
+import { useI18n } from "../../i18n/I18nProvider";
 import { sortModelsForProviderInstance } from "../../modelOrdering";
 import { MAX_CUSTOM_MODEL_LENGTH } from "../../modelSelection";
 import { Button } from "../ui/button";
@@ -40,7 +41,10 @@ const FILTER_THRESHOLD = 8;
  * `serviceTier` select whose fast tier is labelled "Fast" (catalog id
  * `priority`, or `fast` from the speed-tier fallback), matching the composer.
  */
-function describeModelCapabilities(model: ServerProviderModel): string[] {
+function describeModelCapabilities(
+  model: ServerProviderModel,
+  t?: ReturnType<typeof useI18n>["t"],
+): string[] {
   const descriptors = model.capabilities?.optionDescriptors ?? [];
   const labels: string[] = [];
   const hasFastMode = descriptors.some(
@@ -50,8 +54,9 @@ function describeModelCapabilities(model: ServerProviderModel): string[] {
         descriptor.type === "select" &&
         descriptor.options.some((option) => option.id === "fast" || option.label === "Fast")),
   );
-  if (hasFastMode) labels.push("Fast mode");
-  if (descriptors.some((descriptor) => descriptor.id === "thinking")) labels.push("Thinking");
+  if (hasFastMode) labels.push(t ? t("settings.providers.models.fastMode") : "Fast mode");
+  if (descriptors.some((descriptor) => descriptor.id === "thinking"))
+    labels.push(t ? t("settings.providers.models.thinking") : "Thinking");
   if (
     descriptors.some(
       (descriptor) =>
@@ -62,7 +67,7 @@ function describeModelCapabilities(model: ServerProviderModel): string[] {
           descriptor.id === "variant"),
     )
   ) {
-    labels.push("Reasoning");
+    labels.push(t ? t("settings.providers.models.reasoning") : "Reasoning");
   }
   return labels;
 }
@@ -172,6 +177,7 @@ export function ProviderModelsSection({
   onFavoriteModelsChange,
   onModelOrderChange,
 }: ProviderModelsSectionProps) {
+  const { t } = useI18n();
   const [input, setInput] = useState("");
   const [isAdding, setIsAdding] = useState(false);
   const [filter, setFilter] = useState("");
@@ -227,19 +233,19 @@ export function ProviderModelsSection({
     if (driverKind === "antigravity") return;
     const normalized = normalizeCustomModelSlug(input);
     if (!normalized) {
-      setError("Enter a model slug.");
+      setError(t("settings.providers.models.error.empty"));
       return;
     }
     if (models.some((model) => !model.isCustom && model.slug === normalized)) {
-      setError("That model is already built in.");
+      setError(t("settings.providers.models.error.builtIn"));
       return;
     }
     if (normalized.length > MAX_CUSTOM_MODEL_LENGTH) {
-      setError(`Model slugs must be ${MAX_CUSTOM_MODEL_LENGTH} characters or less.`);
+      setError(t("settings.providers.models.error.tooLong", { limit: MAX_CUSTOM_MODEL_LENGTH }));
       return;
     }
     if (customModels.some((entry) => entry.slug === normalized)) {
-      setError("That custom model is already saved.");
+      setError(t("settings.providers.models.error.saved"));
       return;
     }
 
@@ -315,16 +321,23 @@ export function ProviderModelsSection({
             size="icon-micro"
             variant="ghost-muted"
             onClick={() => handleToggleFavorite(model.slug)}
-            aria-label={`${isFavorite ? "Remove" : "Add"} ${model.name} ${
-              isFavorite ? "from" : "to"
-            } favorites`}
+            aria-label={t(
+              isFavorite
+                ? "settings.providers.models.removeNamedFavorite"
+                : "settings.providers.models.addNamedFavorite",
+              { name: model.name },
+            )}
           />
         }
       >
         <StarIcon className={cn("size-3", isFavorite && "fill-current text-warning")} />
       </TooltipTrigger>
       <TooltipPopup side="top">
-        {isFavorite ? "Remove from favorites" : "Add to favorites"}
+        {t(
+          isFavorite
+            ? "settings.providers.models.removeFavorite"
+            : "settings.providers.models.addFavorite",
+        )}
       </TooltipPopup>
     </Tooltip>
   );
@@ -350,13 +363,13 @@ export function ProviderModelsSection({
                   variant="ghost-muted"
                   disabled={!options.canMoveUp}
                   onClick={() => handleMove(model.slug, -1)}
-                  aria-label={`Move ${model.name} up`}
+                  aria-label={t("settings.providers.models.moveNamedUp", { name: model.name })}
                 />
               }
             >
               <ArrowUpIcon className="size-3" />
             </TooltipTrigger>
-            <TooltipPopup side="top">Move up</TooltipPopup>
+            <TooltipPopup side="top">{t("settings.providers.models.moveUp")}</TooltipPopup>
           </Tooltip>
           <Tooltip>
             <TooltipTrigger
@@ -366,13 +379,13 @@ export function ProviderModelsSection({
                   variant="ghost-muted"
                   disabled={!options.canMoveDown}
                   onClick={() => handleMove(model.slug, 1)}
-                  aria-label={`Move ${model.name} down`}
+                  aria-label={t("settings.providers.models.moveNamedDown", { name: model.name })}
                 />
               }
             >
               <ArrowDownIcon className="size-3" />
             </TooltipTrigger>
-            <TooltipPopup side="top">Move down</TooltipPopup>
+            <TooltipPopup side="top">{t("settings.providers.models.moveDown")}</TooltipPopup>
           </Tooltip>
         </>
       ) : null}
@@ -384,7 +397,7 @@ export function ProviderModelsSection({
                 <Button
                   size="icon-micro"
                   variant="ghost-muted"
-                  aria-label={`Edit ${model.slug}`}
+                  aria-label={t("settings.providers.models.editNamed", { name: model.slug })}
                   onClick={() =>
                     setEditingSlug((current) => (current === model.slug ? null : model.slug))
                   }
@@ -393,7 +406,7 @@ export function ProviderModelsSection({
             >
               <PencilIcon className="size-3" />
             </TooltipTrigger>
-            <TooltipPopup side="top">Edit name and options</TooltipPopup>
+            <TooltipPopup side="top">{t("settings.providers.models.edit")}</TooltipPopup>
           </Tooltip>
           <Tooltip>
             <TooltipTrigger
@@ -401,14 +414,14 @@ export function ProviderModelsSection({
                 <Button
                   size="icon-micro"
                   variant="ghost-muted"
-                  aria-label={`Remove ${model.slug}`}
+                  aria-label={t("settings.providers.models.removeNamed", { name: model.slug })}
                   onClick={() => handleRemove(model.slug)}
                 />
               }
             >
               <XIcon className="size-3" />
             </TooltipTrigger>
-            <TooltipPopup side="top">Remove custom model</TooltipPopup>
+            <TooltipPopup side="top">{t("settings.providers.models.remove")}</TooltipPopup>
           </Tooltip>
         </>
       ) : null}
@@ -417,10 +430,10 @@ export function ProviderModelsSection({
 
   const pickerTooltip = (model: DisplayModel, isHidden: boolean) =>
     model.isCustom
-      ? "Custom models are always shown in the picker"
+      ? t("settings.providers.models.customAlwaysVisible")
       : isHidden
-        ? "Hidden from picker"
-        : "Shown in picker";
+        ? t("settings.providers.models.hiddenFromPicker")
+        : t("settings.providers.models.shownInPicker");
 
   // The trigger is a wrapper span: a disabled switch gets no pointer events,
   // so it could not open the tooltip itself.
@@ -432,7 +445,7 @@ export function ProviderModelsSection({
           checked={!isHidden}
           disabled={model.isCustom}
           onCheckedChange={(checked) => setHidden(model.slug, !checked)}
-          aria-label={`Show ${model.name} in the model picker`}
+          aria-label={t("settings.providers.models.showNamed", { name: model.name })}
         />
       </TooltipTrigger>
       <TooltipPopup side="top">{pickerTooltip(model, isHidden)}</TooltipPopup>
@@ -440,7 +453,7 @@ export function ProviderModelsSection({
   );
 
   const renderRow = (model: DisplayModel) => {
-    const capLabels = describeModelCapabilities(model);
+    const capLabels = describeModelCapabilities(model, t);
     const group = groupOf(model);
     // Hidden is read from the preference itself: a favorited model can still be
     // hidden, and its switch must say so even though it sits in the favorites group.
@@ -476,7 +489,9 @@ export function ProviderModelsSection({
             </code>
           ) : null}
           {model.isCustom ? (
-            <span className="text-[11px] text-muted-foreground/70">custom</span>
+            <span className="text-[11px] text-muted-foreground/70">
+              {t("settings.providers.models.custom")}
+            </span>
           ) : null}
         </span>
         {/*
@@ -507,11 +522,11 @@ export function ProviderModelsSection({
           <Input
             value={filter}
             onChange={(event) => setFilter(event.target.value)}
-            placeholder="Filter models"
+            placeholder={t("settings.providers.models.filter")}
             size="sm"
             className="w-56 max-w-full"
             spellCheck={false}
-            aria-label="Filter models"
+            aria-label={t("settings.providers.models.filter")}
           />
         ) : null}
         <div className="flex items-center gap-2">
@@ -524,15 +539,31 @@ export function ProviderModelsSection({
                 onHiddenModelsChange(nextHiddenModelsForBulkToggle(models, hiddenModels))
               }
             >
-              {allBuiltInModelsHidden ? "Enable all" : "Disable all"}
+              {t(
+                allBuiltInModelsHidden
+                  ? "settings.providers.models.enableAll"
+                  : "settings.providers.models.disableAll",
+              )}
             </Button>
           ) : null}
           <span className="text-xs text-muted-foreground">
-            {models.length} model{models.length === 1 ? "" : "s"}
+            {t(
+              models.length === 1
+                ? "settings.providers.models.countOne"
+                : "settings.providers.models.countOther",
+              { count: models.length },
+            )}
             {favoriteCount > 0
-              ? ` · ${favoriteCount} favorite${favoriteCount === 1 ? "" : "s"}`
+              ? ` · ${t(
+                  favoriteCount === 1
+                    ? "settings.providers.models.favoriteCountOne"
+                    : "settings.providers.models.favoriteCountOther",
+                  { count: favoriteCount },
+                )}`
               : ""}
-            {hiddenCount > 0 ? ` · ${hiddenCount} hidden` : ""}
+            {hiddenCount > 0
+              ? ` · ${t("settings.providers.models.hiddenCount", { count: hiddenCount })}`
+              : ""}
           </span>
         </div>
         {driverKind !== "antigravity" && !isAdding ? (
@@ -544,7 +575,7 @@ export function ProviderModelsSection({
             onClick={() => setIsAdding(true)}
           >
             <PlusIcon className="size-3" />
-            Add custom model
+            {t("settings.providers.models.addCustom")}
           </Button>
         ) : null}
       </div>
@@ -554,7 +585,9 @@ export function ProviderModelsSection({
       >
         {visibleModels.length === 0 ? (
           <p className="px-2 py-2 text-xs text-muted-foreground">
-            {isFiltering ? "No models match." : "No models reported for this provider yet."}
+            {t(
+              isFiltering ? "settings.providers.models.noMatch" : "settings.providers.models.none",
+            )}
           </p>
         ) : null}
         {visibleModels.map((model, index) => {
@@ -568,13 +601,13 @@ export function ProviderModelsSection({
           return (
             <div key={`${instanceId}:${model.slug}:group`}>
               {startsGroup && favoriteCount > 0 && group === "favorite"
-                ? groupLabel("Favorites", index === 0)
+                ? groupLabel(t("settings.providers.models.group.favorites"), index === 0)
                 : null}
               {startsGroup && favoriteCount > 0 && group === "visible"
-                ? groupLabel("All", index === 0)
+                ? groupLabel(t("settings.providers.models.group.all"), index === 0)
                 : null}
               {startsGroup && group === "hidden"
-                ? groupLabel("Hidden from picker", index === 0)
+                ? groupLabel(t("settings.providers.models.group.hidden"), index === 0)
                 : null}
               {renderRow(model)}
               {editingEntry ? (
@@ -619,10 +652,10 @@ export function ProviderModelsSection({
           />
           <div className="flex shrink-0 gap-2">
             <Button size="sm" variant="outline" onClick={handleAdd}>
-              Add
+              {t("settings.providers.models.add")}
             </Button>
             <Button size="sm" variant="ghost" onClick={cancelAdd}>
-              Cancel
+              {t("settings.providers.models.cancel")}
             </Button>
           </div>
         </div>

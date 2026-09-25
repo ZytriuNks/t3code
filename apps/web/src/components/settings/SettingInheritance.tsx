@@ -64,7 +64,10 @@ export interface SettingInheritanceCopy {
 }
 
 export const SETTING_INHERITANCE_COPY_DEFAULTS: SettingInheritanceCopy = {
-  settingValueLabel: (_key, value) => value,
+  settingValueLabel: (key, value) =>
+    key === "worktreeSubmodules" && value in WORKTREE_SUBMODULES_LABELS
+      ? WORKTREE_SUBMODULES_LABELS[value as WorktreeSubmodules]
+      : value,
   layerProject: "Project",
   layerEnvironment: "Environment",
   layerDefault: "Default",
@@ -121,9 +124,6 @@ function formatValue(
   if (typeof value === "string") {
     if (key === "defaultThreadEnvMode" && (value === "local" || value === "worktree")) {
       return value === "worktree" ? copy.envModeWorktree : copy.envModeLocal;
-    }
-    if (key === "worktreeSubmodules" && value in WORKTREE_SUBMODULES_LABELS) {
-      return WORKTREE_SUBMODULES_LABELS[value as WorktreeSubmodules];
     }
     if (key === "pullRequestMergeMethod" && value in PULL_REQUEST_MERGE_METHOD_LABELS) {
       return PULL_REQUEST_MERGE_METHOD_LABELS[

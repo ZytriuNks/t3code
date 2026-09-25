@@ -94,7 +94,137 @@ describe("translation messages", () => {
     expect(translate("en", "settings.general.followUpBehavior.option.queue")).toBe("Queue");
   });
 
-  it("translates the upstream queue-message action", () => {
+  it("translates the settings scope sentence and picker labels", () => {
+    expect(translate("zh-CN", "settings.scope.applyingSettingsFor")).toBe("正在应用设置：");
+    expect(translate("zh-CN", "settings.scope.on")).toBe("在");
+    expect(translate("zh-CN", "settings.scope.across")).toBe("跨");
+  });
+
+  it("translates new general settings and search labels", () => {
+    expect(translate("zh-CN", "settings.general.autoResumeLimitedThreads.description")).toBe(
+      "在报告的重置时间自动继续因用量限制而暂停的线程。每个线程都可以单独取消计划中的继续运行。",
+    );
+    expect(translate("zh-CN", "settings.general.snoozeLimitedThreads.description")).toBe(
+      "将因用量限制而暂停的线程静默到报告的重置时间。与自动继续配合使用，限制解除后不再自动恢复。",
+    );
+    expect(translate("zh-CN", "settings.search.item.composer-context.title")).toBe("输入区上下文");
+    expect(translate("zh-CN", "settings.search.item.composer-rich-text.title")).toBe(
+      "富文本输入区",
+    );
+    expect(translate("zh-CN", "settings.search.item.send-shortcut.title")).toBe("发送快捷键");
+    expect(
+      translate("zh-CN", "settings.general.sendShortcut.multiline", { modifier: "Ctrl" }),
+    ).toBe("Ctrl + Enter 用于多行提示词");
+    expect(translate("zh-CN", "settings.general.submodules.recursive")).toBe("递归");
+    expect(translate("zh-CN", "settings.general.submodules.topLevel")).toBe("仅顶层");
+    expect(translate("zh-CN", "settings.general.submodules.none")).toBe("跳过");
+  });
+
+  it("translates storage settings and archive timestamps", () => {
+    expect(translate("zh-CN", "settings.storage.worktrees.title")).toBe("工作树");
+    expect(translate("zh-CN", "settings.search.item.storage-worktrees.title")).toBe("工作树清理");
+    expect(translate("zh-CN", "settings.search.item.storage-artifacts.title")).toBe("构件和日志");
+    expect(translate("zh-CN", "settings.storage.mode.inherit")).toBe("继承");
+    expect(translate("zh-CN", "settings.storage.worktreeOnDelete.title")).toBe(
+      "删除已删除线程对应的工作树",
+    );
+    expect(translate("zh-CN", "settings.storage.artifacts.title")).toBe("构件和日志");
+    expect(translate("zh-CN", "settings.archive.archivedAt", { value: "2 天前" })).toBe(
+      "已归档 2 天前",
+    );
+    expect(translate("zh-CN", "settings.archive.createdAt", { value: "3 天前" })).toBe(
+      "创建于 3 天前",
+    );
+    expect(translate("zh-CN", "settings.archive.relative.days", { count: 2 })).toBe("2 天前");
+    expect(translate("zh-CN", "settings.archive.relative.justNow")).toBe("刚刚");
+  });
+
+  it("translates newly added keybinding commands without rewriting technical names", () => {
+    expect(translate("zh-CN", "settings.keybindings.command.composerSendAlternate")).toBe(
+      "输入区：切换排队/引导操作",
+    );
+    expect(translate("zh-CN", "settings.keybindings.command.composerSendBackground")).toBe(
+      "输入区：在后台启动",
+    );
+    expect(translate("zh-CN", "settings.keybindings.command.editorOpenFavorite")).toBe(
+      "编辑器：打开收藏项",
+    );
+    expect(translate("zh-CN", "settings.keybindings.command.filePickerToggle")).toBe(
+      "文件选择器：切换",
+    );
+    expect(translate("zh-CN", "settings.keybindings.command.modelPickerJump", { index: 1 })).toBe(
+      "模型选择器：跳转：1",
+    );
+    expect(translate("zh-CN", "settings.keybindings.condition")).toBe("条件");
+    expect(translate("zh-CN", "settings.keybindings.group.terminal")).toBe("终端");
+    expect(translate("zh-CN", "settings.keybindings.action.splitVertical")).toBe("垂直拆分");
+    expect(translate("zh-CN", "settings.keybindings.command.threadJump", { index: 2 })).toBe(
+      "线程：跳转：2",
+    );
+    expect(translate("zh-CN", "settings.keybindings.command.runScript", { name: "Setup Db" })).toBe(
+      "运行脚本：Setup Db",
+    );
+  });
+
+  it("translates provider settings and preserves account labels", () => {
+    expect(translate("zh-CN", "settings.providers.dialog.title")).toBe("添加提供商");
+    expect(translate("zh-CN", "settings.providers.dialog.searchAgents")).toBe("搜索代理…");
+    expect(translate("zh-CN", "settings.providers.dialog.enterManually")).toBe("手动输入");
+    expect(translate("zh-CN", "settings.providers.field.registryAgentId")).toBe("注册表代理 ID");
+    expect(translate("zh-CN", "settings.providers.field.executableOverride")).toBe(
+      "可执行文件覆盖",
+    );
+    expect(translate("zh-CN", "settings.providers.auth.method")).toBe("登录方式");
+    expect(translate("zh-CN", "settings.providers.auth.defaultMethod")).toBe("提供商默认方式");
+    expect(translate("zh-CN", "settings.providers.summary.checking")).toBe("正在检查提供商状态");
+    expect(translate("zh-CN", "settings.providers.models.filter")).toBe("筛选模型");
+    expect(translate("zh-CN", "settings.providers.models.countOther", { count: 3 })).toBe(
+      "3 个模型",
+    );
+    expect(translate("en", "settings.providers.models.countOne", { count: 1 })).toBe("1 model");
+    expect(translate("en", "settings.providers.models.favoriteCountOne", { count: 1 })).toBe(
+      "1 favorite",
+    );
+    expect(translate("zh-CN", "settings.providers.variable.sensitive")).toBe("敏感内容，单独存储");
+    expect(translate("zh-CN", "settings.providers.card.updateNow")).toBe("立即更新");
+    expect(translate("zh-CN", "settings.providers.card.driverUnavailableAfter")).toBe(
+      "在当前构建中不可用。其实例配置会保留。",
+    );
+    expect(
+      translate("zh-CN", "settings.providers.summary.authenticatedLabel", {
+        label: "ChatGPT Plus Subscription",
+      }),
+    ).toBe("已通过身份验证 · ChatGPT Plus Subscription");
+  });
+
+  it("translates the new thread hero and composer placeholder", () => {
+    expect(translate("zh-CN", "composer.placeholder.disconnected")).toBe(
+      "输入问题，使用 @ 标记文件/文件夹，使用 $ 调用技能，或输入 / 查看命令",
+    );
+    expect(translate("zh-CN", "composer.hero.buildIn", { project: "Demo" })).toBe(
+      "在 Demo 中构建什么？",
+    );
+    expect(translate("zh-CN", "composer.hero.projectToStart", { project: "Demo" })).toBe(
+      "从 Demo 开始",
+    );
+    expect(translate("zh-CN", "composer.placeholder.approval")).toBe("解决此审批请求后继续");
+    expect(translate("zh-CN", "composer.placeholder.chooseOption")).toBe("请在上方选择一个选项");
+    expect(translate("zh-CN", "composer.placeholder.customAnswer")).toBe(
+      "输入自定义回答；留空则使用所选选项",
+    );
+    expect(translate("zh-CN", "composer.placeholder.planFollowUp")).toBe(
+      "添加反馈以完善计划；留空则直接执行计划",
+    );
+    expect(translate("zh-CN", "settings.providers.dialog.badgeEarlyAccess")).toBe("抢先体验");
+    expect(translate("zh-CN", "settings.providers.auth.deviceCodePrompt", { code: "1234" })).toBe(
+      "请在浏览器中输入代码 1234。",
+    );
+    expect(translate("zh-CN", "settings.providers.card.driverUnavailableBefore")).toBe(
+      "此实例使用",
+    );
+    expect(translate("zh-CN", "composer.hero.projectToStart", { project: "Demo" })).toBe(
+      "从 Demo 开始",
+    );
     expect(Object.entries(ZH_CN_MESSAGES)).toContainEqual([
       "composer.queueMessage",
       "将消息加入队列",

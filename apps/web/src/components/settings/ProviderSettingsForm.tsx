@@ -26,6 +26,9 @@ const PROVIDER_FIELD_LABEL_KEYS: Readonly<Record<string, MessageKey>> = {
   "CODEX_HOME path": "settings.providers.field.homePath",
   "Shadow home path": "settings.providers.field.shadowHomePath",
   "Launch arguments": "settings.providers.field.launchArgs",
+  "Registry agent ID": "settings.providers.field.registryAgentId",
+  "Executable override": "settings.providers.field.executableOverride",
+  "Authentication method": "settings.providers.field.authenticationMethod",
 };
 
 const PROVIDER_FIELD_DESCRIPTION_KEYS: Readonly<Record<string, MessageKey>> = {
@@ -36,6 +39,12 @@ const PROVIDER_FIELD_DESCRIPTION_KEYS: Readonly<Record<string, MessageKey>> = {
     "settings.providers.field.shadowHomePathDescription",
   "Additional CLI arguments passed to codex app-server on session start.":
     "settings.providers.field.launchArgsDescription",
+  "Agent identifier from the official ACP Registry, for example 'devin'.":
+    "settings.providers.field.registryAgentIdDescription",
+  "Optional local executable to use instead of installing the registry distribution. Registry arguments and environment are still applied.":
+    "settings.providers.field.executableOverrideDescription",
+  "Optional ACP authentication method ID. By default, the first agent-managed method is selected.":
+    "settings.providers.field.authenticationMethodDescription",
 };
 
 export interface ProviderSettingsFieldModel {
@@ -442,6 +451,9 @@ export function ProviderSettingsForm({
           ...field,
           label: labelKey ? t(labelKey) : field.label,
           ...(descriptionKey ? { description: t(descriptionKey) } : {}),
+          ...(field.key === "commandPath" && field.placeholder === "Registry default"
+            ? { placeholder: t("settings.providers.field.registryDefault") }
+            : {}),
         };
       }),
     [definition, t],
