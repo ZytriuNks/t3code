@@ -2,6 +2,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import type { DesktopUpdateState } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as PlatformError from "effect/PlatformError";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 
@@ -211,6 +212,17 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
   // disk I/O that would outrun the tests' settle loops.
   const updateRestartMarkers = new Set<string>();
   const fileSystemLayer = FileSystem.layerNoop({
+    readFileString: (path) =>
+      path === "/missing/resources/package-type" && options.packageType !== undefined
+        ? Effect.succeed(options.packageType)
+        : Effect.fail(
+            PlatformError.systemError({
+              module: "FileSystem",
+              method: "readFileString",
+              _tag: "NotFound",
+              pathOrDescriptor: path,
+            }),
+          ),
     makeDirectory: () => Effect.void,
     writeFileString: (path) =>
       Effect.sync(() => {
