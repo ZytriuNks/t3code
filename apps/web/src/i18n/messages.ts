@@ -863,6 +863,7 @@ export const EN_MESSAGES = {
   "settings.search.item.worktree-submodules.title": "Submodules",
   "settings.search.item.worktree-submodules.keywords":
     "git submodule init recursive top-level none worktree t3.json",
+  "settings.search.item.auto-settle-inactive-threads.title": "Auto-settle inactive threads",
   "settings.search.item.auto-settle-inactive-threads.keywords":
     "sidebar inactivity days no activity automatically",
   "settings.search.item.auto-settle-merged-threads.title": "Auto-settle merged threads",
@@ -996,6 +997,12 @@ export const EN_MESSAGES = {
     "preview color scheme light dark system os",
   "settings.search.item.browser-recording-frame-rate.title": "Browser recording frame rate",
   "settings.search.item.browser-recording-frame-rate.keywords": "browser recording fps video",
+  "settings.search.item.browser-recording-key-presses.title": "Show key presses in recordings",
+  "settings.search.item.browser-recording-key-presses.keywords":
+    "browser preview keyboard shortcuts keystrokes overlay capture",
+  "settings.search.item.browser-recording-mouse-presses.title": "Show mouse presses in recordings",
+  "settings.search.item.browser-recording-mouse-presses.keywords":
+    "browser preview clicks buttons drag overlay capture",
   "settings.search.item.browser-link-target.title": "Open links in",
   "settings.search.item.browser-link-target.keywords":
     "links default browser in-app browser external open",
@@ -3252,9 +3259,9 @@ export const ZH_CN_MESSAGES = {
   "settings.header.restoreDeviceDefaults": "恢复设备默认值",
   "settings.scope.environmentAriaLabel": "环境范围",
   "settings.scope.projectAriaLabel": "项目范围",
-  "settings.scope.applyingSettingsFor": "正在应用设置：",
-  "settings.scope.on": "在",
-  "settings.scope.across": "跨",
+  "settings.scope.applyingSettingsFor": "设置应用范围：",
+  "settings.scope.on": "·",
+  "settings.scope.across": "·",
   "settings.scope.allEnvironments": "全部环境",
   "settings.scope.allProjects": "全部项目",
   "settings.scope.unavailableEnvironment": "环境不可用",
@@ -3331,6 +3338,7 @@ export const ZH_CN_MESSAGES = {
   "settings.search.item.worktree-submodules.title": "子模块",
   "settings.search.item.worktree-submodules.keywords":
     "git 子模块 初始化 递归 顶层 none 工作树 t3.json",
+  "settings.search.item.auto-settle-inactive-threads.title": "自动收起不活跃线程",
   "settings.search.item.auto-settle-inactive-threads.keywords": "侧栏 不活跃 天 无活动 自动",
   "settings.search.item.auto-settle-merged-threads.title": "自动收起已合并线程",
   "settings.search.item.auto-settle-merged-threads.keywords": "拉取请求 合并 关闭 自动 侧栏 PR",
@@ -3447,6 +3455,12 @@ export const ZH_CN_MESSAGES = {
   "settings.search.item.browser-default-appearance.keywords": "预览 配色 浅色 深色 系统",
   "settings.search.item.browser-recording-frame-rate.title": "浏览器录制帧率",
   "settings.search.item.browser-recording-frame-rate.keywords": "浏览器 录制 FPS 视频 帧率",
+  "settings.search.item.browser-recording-key-presses.title": "在录屏中显示按键",
+  "settings.search.item.browser-recording-key-presses.keywords":
+    "浏览器 预览 键盘 快捷键 按键 叠加层 录制",
+  "settings.search.item.browser-recording-mouse-presses.title": "在录屏中显示鼠标点击",
+  "settings.search.item.browser-recording-mouse-presses.keywords":
+    "浏览器 预览 点击 按钮 拖拽 叠加层 录制",
   "settings.search.item.browser-link-target.title": "链接打开位置",
   "settings.search.item.browser-link-target.keywords": "链接 默认浏览器 应用内浏览器 外部 打开",
   "settings.search.item.browser-auto-show-floating-preview.title": "自动显示浮动预览",

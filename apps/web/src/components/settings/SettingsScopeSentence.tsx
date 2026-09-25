@@ -69,13 +69,12 @@ export function SettingsScopeSentence() {
         <span className="shrink-0">{t("settings.scope.applyingSettingsFor")}</span>
         <ProjectScopeMenu {...props} t={t} />
       </span>
+      <span className="shrink-0" aria-hidden>
+        {scope.search.machine || scope.scope.kind === "checkout"
+          ? t("settings.scope.on")
+          : t("settings.scope.across")}
+      </span>
       <span className="flex min-w-0 items-center gap-1.5">
-        <span className="shrink-0">
-          {/* A legacy checkout link names one environment without `machine`. */}
-          {scope.search.machine || scope.scope.kind === "checkout"
-            ? t("settings.scope.on")
-            : t("settings.scope.across")}
-        </span>
         <EnvironmentScopeMenu {...props} t={t} />
       </span>
     </p>

@@ -95,9 +95,9 @@ describe("translation messages", () => {
   });
 
   it("translates the settings scope sentence and picker labels", () => {
-    expect(translate("zh-CN", "settings.scope.applyingSettingsFor")).toBe("正在应用设置：");
-    expect(translate("zh-CN", "settings.scope.on")).toBe("在");
-    expect(translate("zh-CN", "settings.scope.across")).toBe("跨");
+    expect(translate("zh-CN", "settings.scope.applyingSettingsFor")).toBe("设置应用范围：");
+    expect(translate("zh-CN", "settings.scope.on")).toBe("·");
+    expect(translate("zh-CN", "settings.scope.across")).toBe("·");
   });
 
   it("translates new general settings and search labels", () => {
@@ -248,6 +248,18 @@ describe("translation messages", () => {
       "settings.search.item.t3-connect.title",
       "T3 Connect",
     ]);
+  });
+
+  it("translates the settings search items for recording inputs and auto-settle", () => {
+    expect(translate("zh-CN", "settings.search.item.browser-recording-key-presses.title")).toBe(
+      "在录屏中显示按键",
+    );
+    expect(translate("zh-CN", "settings.search.item.browser-recording-mouse-presses.title")).toBe(
+      "在录屏中显示鼠标点击",
+    );
+    expect(translate("zh-CN", "settings.search.item.auto-settle-inactive-threads.title")).toBe(
+      "自动收起不活跃线程",
+    );
   });
 
   it("translates settings header and scope copy without changing dynamic names", () => {
