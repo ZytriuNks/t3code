@@ -122,11 +122,8 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [query, setQuery] = useState("");
   const [activeResultIndex, setActiveResultIndex] = useState(0);
-  const searchableItems = useAvailableSettingsSearchItems();
-  const results = useMemo(
-    () => searchSettings(query, searchableItems, t),
-    [query, searchableItems, t],
-  );
+  const searchableItems = useAvailableSettingsSearchItems(scopeSearch);
+  const results = useMemo(() => searchSettings(query, searchableItems), [query, searchableItems]);
   const isSearching = query.trim().length > 0;
   const hasResults = results.length > 0;
 

@@ -219,7 +219,16 @@ export const CursorDriver: ProviderDriver<CursorSettings, CursorDriverEnv> = {
                   }).pipe(Effect.map((usageLimits) => ({ ...snapshot, usageLimits })))
                 : Effect.succeed(snapshot),
             ),
-          ),
+          (snapshot) =>
+            Effect.gen(function* () {
+              const settings = yield* serverSettings.getSettings;
+              const usageLimits = yield* readCursorUsageLimits(
+                effectiveConfig,
+                processEnv,
+                settings.cursorKeychainUsageEnabled,
+              );
+              return { ...snapshot, usageLimits };
+            }),
         ),
         Effect.provideService(HttpClient.HttpClient, httpClient),
         Effect.provideService(FileSystem.FileSystem, fileSystem),
