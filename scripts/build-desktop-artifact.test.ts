@@ -683,7 +683,10 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         iconSize: 120,
         iconTextSize: 12,
       });
-      // Linux must register the Experimental renderer scheme for deep links.
+      // A Linux AppImage build also emits the .deb from the same run.
+      assert.deepStrictEqual((linux.linux as Record<string, unknown>).target, ["AppImage", "deb"]);
+      // Linux must register the renderer schemes so the generated .desktop
+      // entry advertises MimeType=x-scheme-handler/t3code; for OAuth deep links.
       assert.deepStrictEqual((linux.linux as Record<string, unknown>).protocols, [
         { name: "T3 Code (Experimental)", schemes: ["t3code-experimental"] },
       ]);
