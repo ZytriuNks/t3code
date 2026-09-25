@@ -103,7 +103,13 @@ export function UsageRouteScreen() {
   );
   const isFocused = useIsFocused();
   const limits = useRefreshLimits(selectedEnvironmentIds, isFocused && tab === "limits");
+<<<<<<< HEAD
   const cursorAccessEnvironments = cursorKeychainAccessEnvironments(selectedEnvironments);
+=======
+  const cursorAccessEnvironments = selectedEnvironments.filter((environment) =>
+    environment.summary?.sources.some((source) => source.action === "enableCursorKeychain"),
+  );
+>>>>>>> e5a46d6c5d (feat(usage): read cursor, opencode, and antigravity history (#10409))
   const refreshAfterCursorEnable = () => {
     void refresh();
     void limits.refreshAfterEnable();

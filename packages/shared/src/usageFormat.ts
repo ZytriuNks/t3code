@@ -49,6 +49,7 @@ export function formatPercent(share: number, digits = 1): string {
   const smallest = 10 ** -digits;
   if (percent > 0 && percent < smallest) return `<${smallest.toFixed(digits)}%`;
   return `${percent.toFixed(digits)}%`;
+<<<<<<< HEAD
 }
 
 export function formatUsageContractMismatch(
@@ -58,6 +59,8 @@ export function formatUsageContractMismatch(
   return mismatch.direction === "serverBehind"
     ? `${environmentLabel} runs an older server version and is excluded from totals.`
     : `This client is older than the server on ${environmentLabel}; its usage is excluded from totals.`;
+=======
+>>>>>>> e5a46d6c5d (feat(usage): read cursor, opencode, and antigravity history (#10409))
 }
 
 /** `2026-08-07` to `Aug 7`. */
