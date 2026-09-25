@@ -7,6 +7,9 @@ import { assert, describe, it } from "vite-plus/test";
 import {
   makeDevelopmentEnvironmentScript,
   makeDevelopmentLauncherScript,
+  APP_BUNDLE_ID,
+  APP_DISPLAY_NAME,
+  APP_PROTOCOL_SCHEMES,
   resolveElectronBinaryPath,
   resolveMacBundleInfoPlistStrings,
   resolveMacCodeSignArguments,
@@ -16,6 +19,12 @@ import {
 } from "./electron-launcher.mjs";
 
 describe("electron development launcher", () => {
+  it("uses the Experimental identity for packaged launches", () => {
+    assert.equal(APP_DISPLAY_NAME, "T3 Code (Experimental)");
+    assert.equal(APP_BUNDLE_ID, "com.t3tools.t3code.experimental.pi");
+    assert.deepEqual(APP_PROTOCOL_SCHEMES, ["t3code-experimental"]);
+  });
+
   it("uses captured values only as fallbacks for a live runner environment", () => {
     const environmentScript = makeDevelopmentEnvironmentScript({
       VITE_DEV_SERVER_URL: "http://127.0.0.1:8526",
@@ -135,7 +144,9 @@ describe("electron development launcher", () => {
       NodeFS.chmodSync(launcherPath, 0o644);
 
       assert.isFalse(writeDevelopmentLauncherScript(launcherPath, "/runtime/Electron"));
-      assert.equal(NodeFS.statSync(launcherPath).mode & 0o777, 0o755);
+      if (process.platform !== "win32") {
+        assert.equal(NodeFS.statSync(launcherPath).mode & 0o777, 0o755);
+      }
     } finally {
       NodeFS.rmSync(directory, { recursive: true, force: true });
     }

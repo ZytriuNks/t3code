@@ -66,11 +66,13 @@ Enable Clerk's Native API and add the desktop redirects to its SSO redirect allo
 
 ```text
 t3code-dev://app/
+t3code-experimental://app/
 t3code://app/
 ```
 
-Add the corresponding origin to the Clerk instance's Backend API `allowed_origins` array.
-Development uses `t3code-dev://app`; production uses `t3code://app`. Update the array with
+Add the corresponding origins to the Clerk instance's Backend API `allowed_origins` array.
+Development uses `t3code-dev://app`; this Experimental build uses `t3code-experimental://app`.
+Keep the legacy `t3code://app` origin while Alpha installations remain in use. Update the array with
 `PATCH https://api.clerk.com/v1/instance` using the Clerk secret key, preserving existing entries.
 The Clerk Electron integration handles token
 persistence and system-browser callback delivery.
@@ -89,14 +91,14 @@ Preserve existing entries. These callbacks are separate from the `t3code-dev` / 
 
 ## Desktop passkeys
 
-For a production macOS app with bundle ID `com.t3tools.t3code`:
+For this Experimental macOS app, use bundle ID `com.t3tools.t3code.experimental.pi`:
 
 1. Create an explicit macOS App ID in the Apple Developer portal with **Associated Domains**.
 2. Create a provisioning profile for that App ID and the distribution signing certificate.
 3. In Clerk's Native API settings, add an iOS app with the same Apple Team ID and bundle ID.
    This setting also configures Electron/macOS passkeys.
 4. Check `https://<frontend-api>/.well-known/apple-app-site-association`. Its
-   `webcredentials.apps` must include `<TEAM_ID>.com.t3tools.t3code`.
+   `webcredentials.apps` must include `<TEAM_ID>.com.t3tools.t3code.experimental.pi`.
 5. Configure signing as described in the [release runbook](./release.md#2-apple-signing--notarization-setup-macos).
 
 Local signed builds additionally use:
@@ -119,15 +121,15 @@ actual web and server ports. For example, with the default ports:
 ```sh
 VITE_DEV_SERVER_URL=http://127.0.0.1:5733 \
 T3CODE_PORT=13773 \
-  "/Applications/T3 Code (Alpha).app/Contents/MacOS/T3 Code (Alpha)"
+  "/Applications/T3 Code (Experimental).app/Contents/MacOS/T3 Code (Experimental)"
 ```
 
 Rebuild the signed app after native dependency, main-process, preload, entitlement, provisioning,
 or signing changes. Renderer edits can reuse it. Verify the installed bundle before testing:
 
 ```sh
-codesign --verify --deep --strict "/Applications/T3 Code (Alpha).app"
-codesign -d --entitlements :- "/Applications/T3 Code (Alpha).app"
+codesign --verify --deep --strict "/Applications/T3 Code (Experimental).app"
+codesign -d --entitlements :- "/Applications/T3 Code (Experimental).app"
 ```
 
 ## Restricting sign-ups

@@ -1,7 +1,11 @@
 import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 
-import { DesktopEnvironmentBootstrapSchema } from "./ipc.ts";
+import { DesktopAppStageLabelSchema, DesktopEnvironmentBootstrapSchema } from "./ipc.ts";
+
+it("accepts the installed Experimental desktop stage label", () => {
+  expect(Schema.decodeUnknownSync(DesktopAppStageLabelSchema)("Experimental")).toBe("Experimental");
+});
 
 describe("DesktopEnvironmentBootstrapSchema", () => {
   const decode = Schema.decodeUnknownSync(DesktopEnvironmentBootstrapSchema);

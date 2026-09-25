@@ -22,6 +22,10 @@ import * as ElectronProtocol from "./ElectronProtocol.ts";
 const protocolLayer = ElectronProtocol.layer.pipe(Layer.provide(NodeServices.layer));
 
 describe("ElectronProtocol", () => {
+  it("uses the Experimental production scheme", () => {
+    assert.equal(ElectronProtocol.getDesktopScheme(false), "t3code-experimental");
+  });
+
   beforeEach(() => {
     handleMock.mockReset();
     netFetchMock.mockReset();

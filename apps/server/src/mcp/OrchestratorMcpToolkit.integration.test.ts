@@ -36,11 +36,14 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
+import * as References from "effect/References";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { McpSchema, McpServer } from "effect/unstable/ai";
@@ -49,7 +52,11 @@ import { ClaudeProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/Claud
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import { CodexOrchestratorReplayHarness } from "../orchestration-v2/Adapters/CodexAdapterV2.testkit.ts";
 import { EventSinkV2 } from "../orchestration-v2/EventSink.ts";
-import { OrchestratorV2, type OrchestratorV2Shape } from "../orchestration-v2/Orchestrator.ts";
+import {
+  OrchestratorV2,
+  TerminalRunCompletionObserver,
+  type OrchestratorV2Shape,
+} from "../orchestration-v2/Orchestrator.ts";
 import { layer as threadManagementServiceLayer } from "../orchestration-v2/ThreadManagementService.ts";
 import {
   type ProviderAdapterV2Event,
@@ -474,6 +481,26 @@ describe("orchestrator MCP toolkit", () => {
       Effect.scoped(
         Effect.gen(function* () {
           const cwd = yield* checkpointWorkspace("orchestrator-mcp-toolkit");
+          const replayEventId = EventId.make("event:mcp-late-parent:replay-final-terminal");
+          const replayReceipt = yield* Deferred.make<{
+            readonly sequence: number;
+            readonly success: boolean;
+          }>();
+          const reactorWarnings: Array<{ readonly threadId: unknown; readonly sequence: unknown }> =
+            [];
+          const captureReactorWarning = Logger.make(({ message }) => {
+            if (!Array.isArray(message) || message[0] !== "Failed to react to terminal V2 run")
+              return;
+            const detail: unknown = message[1];
+            if (
+              typeof detail !== "object" ||
+              detail === null ||
+              !("threadId" in detail) ||
+              !("sequence" in detail)
+            )
+              return;
+            reactorWarnings.push({ threadId: detail.threadId, sequence: detail.sequence });
+          });
           const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
           const parentTerminalGates = new Map<ThreadId, Deferred.Deferred<void>>();
           const deliveryTerminalGates = new Map<ThreadId, Deferred.Deferred<void>>();
@@ -2813,9 +2840,8 @@ describe("orchestrator MCP toolkit", () => {
               return yield* Effect.die(new Error("Late completion successor delivery missing."));
             }
 
-            // The bounded successor can coalesce a late result only once. A
-            // third terminal after that successor has started remains
-            // inspectable, but cannot recursively create a third parent run.
+            // A third sibling completing during the successor must receive
+            // one final bounded delivery, not remain pending indefinitely.
             const successorGate = yield* Deferred.make<void>();
             deliveryTerminalGates.set(lateParentThreadId, successorGate);
             yield* orchestrator.dispatch({
@@ -2894,7 +2920,7 @@ describe("orchestrator MCP toolkit", () => {
                   ?.completionDelivery?.state === "pending",
             );
             yield* Deferred.succeed(successorGate, undefined);
-            const exhaustedCohort = yield* waitForProjection(
+            const finalReserved = yield* waitForProjection(
               orchestrator,
               lateParentThreadId,
               (projection) => {
@@ -2903,18 +2929,99 @@ describe("orchestrator MCP toolkit", () => {
                 )?.delegatedCompletion;
                 return (
                   cohort?.settledDeliveryCount === 2 &&
-                  cohort.delivery === null &&
+                  cohort.delivery?.taskIds.length === 1 &&
+                  cohort.delivery.taskIds[0] === thirdLateTask.id &&
                   projection.runs.find((run) => run.id === activeSuccessorRun.id)?.status ===
                     "completed" &&
                   projection.subagents.find((task) => task.id === thirdLateTask.id)
-                    ?.completionDelivery?.state === "pending"
+                    ?.completionDelivery?.state === "claimed"
+                );
+              },
+            );
+            const finalDelivery = finalReserved.runs.find((run) => run.id === lateParentRun.id)
+              ?.delegatedCompletion?.delivery;
+            if (finalDelivery === undefined || finalDelivery === null) {
+              return yield* Effect.die(new Error("Final sibling delivery missing."));
+            }
+            expect(yield* waitForContinuationOffers(3)).toHaveLength(3);
+            const finalGate = yield* Deferred.make<void>();
+            deliveryTerminalGates.set(lateParentThreadId, finalGate);
+            yield* orchestrator.dispatch({
+              type: "message.dispatch",
+              createdBy: "agent",
+              creationSource: "server",
+              commandId: CommandId.make("command:mcp-late-parent:dispatch-final-delivery"),
+              threadId: lateParentThreadId,
+              messageId: finalDelivery.messageId,
+              text: "Delegated task reached a terminal state.",
+              attachments: [],
+              modelSelection: codexSelection,
+              dispatchMode: { type: "queue_after_active" },
+              delegatedCompletion: {
+                parentRunId: lateParentRun.id,
+                generation: finalDelivery.generation,
+                taskIds: finalDelivery.taskIds,
+              },
+            });
+            const activeFinal = yield* waitForProjection(
+              orchestrator,
+              lateParentThreadId,
+              (projection) =>
+                projection.runs.some(
+                  (run) =>
+                    run.userMessageId === finalDelivery.messageId && run.status === "running",
+                ),
+            );
+            const finalRun = activeFinal.runs.find(
+              (run) => run.userMessageId === finalDelivery.messageId,
+            );
+            if (finalRun === undefined) {
+              return yield* Effect.die(new Error("Final sibling wake run did not start."));
+            }
+            yield* Deferred.succeed(finalGate, undefined);
+            const exhaustedCohort = yield* waitForProjection(
+              orchestrator,
+              lateParentThreadId,
+              (projection) => {
+                const cohort = projection.runs.find(
+                  (run) => run.id === lateParentRun.id,
+                )?.delegatedCompletion;
+                return (
+                  cohort?.settledDeliveryCount === 3 &&
+                  cohort.delivery === null &&
+                  projection.runs.find((run) => run.id === finalRun.id)?.status === "completed" &&
+                  projection.subagents.find((task) => task.id === thirdLateTask.id)
+                    ?.completionDelivery?.state === "delivered"
                 );
               },
             );
             expect(
               exhaustedCohort.runs.find((run) => run.id === lateParentRun.id)?.delegatedCompletion,
-            ).toMatchObject({ settledDeliveryCount: 2, delivery: null });
-            yield* expectOffersToStay(2);
+            ).toMatchObject({ settledDeliveryCount: 3, delivery: null });
+            yield* orchestrator.dispatch({
+              type: "notification.delivery.accept",
+              commandId: CommandId.make("command:mcp-late-parent:repeat-final-accept"),
+              threadId: lateParentThreadId,
+              messageId: finalDelivery.messageId,
+            });
+            const completedFinalRun = exhaustedCohort.runs.find((run) => run.id === finalRun.id);
+            if (completedFinalRun === undefined) {
+              return yield* Effect.die(new Error("Completed final wake run missing."));
+            }
+            const eventSink = yield* EventSinkV2;
+            const replayed = yield* eventSink.write({
+              events: [
+                {
+                  id: replayEventId,
+                  type: "run.updated",
+                  threadId: lateParentThreadId,
+                  runId: completedFinalRun.id,
+                  providerInstanceId: completedFinalRun.providerInstanceId,
+                  occurredAt: yield* DateTime.now,
+                  payload: completedFinalRun,
+                },
+              ],
+            });
 
             // Queue Remove is a durable disposal action, not a local queue
             // edit. Start a fresh parent-run cohort so removing this delivery
@@ -2984,6 +3091,28 @@ describe("orchestrator MCP toolkit", () => {
                 projection.runs.find((run) => run.id === removeParentRun.id)?.delegatedCompletion
                   ?.delivery !== undefined,
             );
+            // This child's terminal event was appended after the replay. The
+            // run-updated reactor consumes them sequentially; observing its
+            // parent-side reservation proves replay processing has returned.
+            // Match the replay sequence against swallowed reactor warnings as
+            // well, because the reactor logs failures and keeps consuming.
+            const originalOffers = (yield* Ref.get(continuationOffers)).filter(
+              (request) => request.delegatedCompletion?.parentRunId === lateParentRun.id,
+            );
+            expect(originalOffers).toHaveLength(3);
+            expect(replayed).toHaveLength(1);
+            const receipt = yield* Deferred.await(replayReceipt).pipe(Effect.timeout("10 seconds"));
+            expect(receipt).toEqual({ sequence: replayed[0]?.sequence, success: true });
+            expect(
+              reactorWarnings.some(
+                (warning) =>
+                  warning.threadId === lateParentThreadId &&
+                  warning.sequence === replayed[0]?.sequence,
+              ),
+            ).toBe(false);
+            expect(
+              removeReserved.runs.find((run) => run.id === lateParentRun.id)?.delegatedCompletion,
+            ).toMatchObject({ settledDeliveryCount: 3, delivery: null });
             const removeDelivery = removeReserved.runs.find((run) => run.id === removeParentRun.id)
               ?.delegatedCompletion?.delivery;
             if (removeDelivery === undefined || removeDelivery === null) {
@@ -3047,7 +3176,20 @@ describe("orchestrator MCP toolkit", () => {
               removedDelivery.subagents.find((task) => task.id === removeTask.id),
             ).toMatchObject({ result: expect.any(String), status: "completed" });
             yield* expectOffersToStay(0);
-          }).pipe(Effect.provide(testLayer));
+          }).pipe(
+            Effect.provide(testLayer),
+            Effect.provideService(Logger.CurrentLoggers, new Set([captureReactorWarning])),
+            Effect.provideService(References.MinimumLogLevel, "Warn"),
+            Effect.provideService(TerminalRunCompletionObserver, {
+              onCompletion: (stored, result) =>
+                stored.event.id === replayEventId
+                  ? Deferred.succeed(replayReceipt, {
+                      sequence: stored.sequence,
+                      success: Exit.isSuccess(result),
+                    }).pipe(Effect.asVoid)
+                  : Effect.void,
+            }),
+          );
         }),
       ),
   );

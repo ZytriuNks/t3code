@@ -14,8 +14,11 @@ import {
   RunId,
   ThreadId,
 } from "@t3tools/contracts";
+import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
 
@@ -133,7 +136,8 @@ const seedParentWithTerminalTask = (input: {
   readonly runId: RunId;
   readonly rootNodeId: NodeId;
   readonly taskId: NodeId;
-  readonly deliveryState: "delivered" | "claimed" | "acknowledged" | "disposed";
+  readonly deliveryState: "delivered" | "claimed" | "pending" | "acknowledged" | "disposed";
+  readonly settledDeliveryCount?: number;
   readonly completionWake?: "always" | "settled_only";
   readonly deliveryTaskIds?: ReadonlyArray<NodeId>;
   readonly now: DateTime.Utc;
@@ -231,7 +235,7 @@ const seedParentWithTerminalTask = (input: {
             delegatedCompletion: {
               disposition: "open",
               nextGeneration: 2,
-              settledDeliveryCount: 1,
+              settledDeliveryCount: input.settledDeliveryCount ?? 1,
               delivery:
                 input.deliveryTaskIds === undefined
                   ? null
@@ -379,6 +383,281 @@ it.layer(TestLayer)("delegated completion delivery repairs", (it) => {
       const duplicate = yield* orchestrator.getThreadProjection(threadId);
       assert.deepEqual(duplicate.runs.find((row) => row.id === runId)?.delegatedCompletion, cohort);
     }),
+  );
+
+  it.effect("delivers the final sibling after two earlier completion wakes, only once", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* OrchestratorV2;
+      const sink = yield* EventSinkV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("thread:final-delegated-result");
+      const runId = RunId.make("run:final-delegated-result");
+      const taskId = NodeId.make("node:final-delegated-result");
+      yield* seedParentWithTerminalTask({
+        threadId,
+        projectId: ProjectId.make("project:final-delegated-result"),
+        runId,
+        rootNodeId: NodeId.make("node:final-delegated-root"),
+        taskId,
+        deliveryState: "pending",
+        completionWake: "settled_only",
+        settledDeliveryCount: 2,
+        now,
+      });
+      const initial = yield* orchestrator.getThreadProjection(threadId);
+      const task = initial.subagents.find((row) => row.id === taskId)!;
+      yield* sink.write({
+        events: ["first", "second"].map((name) => ({
+          id: EventId.make(`event:final-sibling:${name}`),
+          type: "subagent.updated" as const,
+          threadId,
+          runId,
+          nodeId: NodeId.make(`node:final-sibling:${name}`),
+          occurredAt: now,
+          payload: {
+            ...task,
+            id: NodeId.make(`node:final-sibling:${name}`),
+            completionDelivery: { state: "delivered" as const, observedByRunId: null },
+          },
+        })),
+      });
+      const upgrade = yield* orchestrator.dispatch({
+        type: "delegated_task.wake-policy",
+        commandId: CommandId.make("command:final-delegated-wake"),
+        parentThreadId: threadId,
+        taskId,
+        completionWake: "always",
+      });
+      const projection = yield* orchestrator.getThreadProjection(threadId);
+      const delivery = projection.runs.find((row) => row.id === runId)?.delegatedCompletion;
+      assert.deepEqual(delivery?.delivery?.taskIds, [taskId]);
+      assert.equal(
+        projection.subagents.find((row) => row.id === taskId)?.completionDelivery?.state,
+        "claimed",
+      );
+      assert.equal(
+        upgrade.storedEvents.filter((stored) => stored.event.type === "run.updated").length,
+        1,
+      );
+      assert.equal(delivery?.settledDeliveryCount, 2);
+      const repeated = yield* orchestrator.dispatch({
+        type: "delegated_task.wake-policy",
+        commandId: CommandId.make("command:final-delegated-wake"),
+        parentThreadId: threadId,
+        taskId,
+        completionWake: "always",
+      });
+      assert.deepEqual(repeated.storedEvents, upgrade.storedEvents);
+      const afterRepeat = yield* orchestrator.getThreadProjection(threadId);
+      assert.deepEqual(
+        afterRepeat.runs.find((row) => row.id === runId)?.delegatedCompletion,
+        delivery,
+      );
+    }),
+  );
+
+  it.effect("does not spend a final wake while another original sibling is running", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* OrchestratorV2;
+      const sink = yield* EventSinkV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("thread:nonfinal-delegated-result");
+      const runId = RunId.make("run:nonfinal-delegated-result");
+      const taskId = NodeId.make("node:nonfinal-delegated-result");
+      yield* seedParentWithTerminalTask({
+        threadId,
+        projectId: ProjectId.make("project:nonfinal-delegated-result"),
+        runId,
+        rootNodeId: NodeId.make("node:nonfinal-delegated-root"),
+        taskId,
+        deliveryState: "pending",
+        settledDeliveryCount: 2,
+        now,
+      });
+      const projection = yield* orchestrator.getThreadProjection(threadId);
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make("event:nonfinal-sibling"),
+            type: "subagent.updated",
+            threadId,
+            runId,
+            nodeId: NodeId.make("node:nonfinal-sibling"),
+            occurredAt: now,
+            payload: {
+              ...projection.subagents[0]!,
+              id: NodeId.make("node:nonfinal-sibling"),
+              status: "running",
+              completedAt: null,
+              completionDelivery: { state: "pending", observedByRunId: null },
+            },
+          },
+        ],
+      });
+      yield* orchestrator.dispatch({
+        type: "delegated_task.wake-policy",
+        commandId: CommandId.make("command:nonfinal-delegated-wake"),
+        parentThreadId: threadId,
+        taskId,
+        completionWake: "always",
+      });
+      const updated = yield* orchestrator.getThreadProjection(threadId);
+      assert.isNull(updated.runs.find((row) => row.id === runId)?.delegatedCompletion?.delivery);
+      assert.equal(
+        updated.subagents.find((row) => row.id === taskId)?.completionDelivery?.state,
+        "pending",
+      );
+    }),
+  );
+
+  it.effect("does not rearm a fourth wake after the final-delivery allowance", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* OrchestratorV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("thread:bounded-delegated-result");
+      const runId = RunId.make("run:bounded-delegated-result");
+      const taskId = NodeId.make("node:bounded-delegated-result");
+      yield* seedParentWithTerminalTask({
+        threadId,
+        projectId: ProjectId.make("project:bounded-delegated-result"),
+        runId,
+        rootNodeId: NodeId.make("node:bounded-delegated-root"),
+        taskId,
+        deliveryState: "pending",
+        settledDeliveryCount: 3,
+        now,
+      });
+      yield* orchestrator.dispatch({
+        type: "delegated_task.wake-policy",
+        commandId: CommandId.make("command:bounded-delegated-wake"),
+        parentThreadId: threadId,
+        taskId,
+        completionWake: "always",
+      });
+      const updated = yield* orchestrator.getThreadProjection(threadId);
+      assert.isNull(updated.runs.find((row) => row.id === runId)?.delegatedCompletion?.delivery);
+      assert.equal(
+        updated.subagents.find((row) => row.id === taskId)?.completionDelivery?.state,
+        "pending",
+      );
+    }),
+  );
+
+  it.effect("reserves the final pending sibling when the successor run terminalizes", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const orchestrator = yield* OrchestratorV2;
+        const sink = yield* EventSinkV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("thread:successor-settlement-race");
+        const parentRunId = RunId.make("run:successor-settlement-parent");
+        const deliveryRunId = RunId.make("run:successor-settlement-delivery");
+        const firstTaskId = NodeId.make("node:successor-settlement-first");
+        const finalTaskId = NodeId.make("node:successor-settlement-final");
+        const rootNodeId = NodeId.make("node:successor-settlement-root");
+        const messageId = MessageId.make(`message:delegated-delivery:${threadId}`);
+        yield* seedParentWithTerminalTask({
+          threadId,
+          projectId: ProjectId.make("project:successor-settlement"),
+          runId: parentRunId,
+          rootNodeId,
+          taskId: firstTaskId,
+          deliveryState: "claimed",
+          completionWake: "always",
+          deliveryTaskIds: [firstTaskId],
+          now,
+        });
+        const projection = yield* orchestrator.getThreadProjection(threadId);
+        const parentRun = projection.runs.find((run) => run.id === parentRunId)!;
+        const firstTask = projection.subagents.find((task) => task.id === firstTaskId)!;
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make("event:successor-settlement-final-sibling"),
+              type: "subagent.updated",
+              threadId,
+              runId: parentRunId,
+              nodeId: finalTaskId,
+              occurredAt: now,
+              payload: {
+                ...firstTask,
+                id: finalTaskId,
+                status: "completed",
+                completionDelivery: { state: "pending", observedByRunId: null },
+              },
+            },
+            {
+              id: EventId.make("event:successor-settlement-message"),
+              type: "message.updated",
+              threadId,
+              runId: deliveryRunId,
+              occurredAt: now,
+              payload: {
+                id: messageId,
+                threadId,
+                runId: deliveryRunId,
+                nodeId: rootNodeId,
+                role: "user",
+                text: "Delegated result notification",
+                attachments: [],
+                streaming: false,
+                createdBy: "agent",
+                creationSource: "server",
+                delegatedCompletion: { parentRunId, generation: 1, taskIds: [firstTaskId] },
+                createdAt: now,
+                updatedAt: now,
+              },
+            },
+          ],
+        });
+        const afterSequence = yield* sink.latestSequence({ threadId });
+        const settled = yield* sink.stream({ afterSequence, eventType: "run.updated" }).pipe(
+          Stream.filter(
+            (stored) =>
+              stored.event.type === "run.updated" &&
+              stored.event.payload.id === parentRunId &&
+              stored.event.payload.delegatedCompletion?.settledDeliveryCount === 2,
+          ),
+          Stream.take(1),
+          Stream.runDrain,
+          Effect.forkScoped,
+        );
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make("event:successor-settlement-terminal"),
+              type: "run.updated",
+              threadId,
+              runId: deliveryRunId,
+              nodeId: rootNodeId,
+              providerInstanceId: parentRun.providerInstanceId,
+              occurredAt: now,
+              payload: {
+                ...parentRun,
+                id: deliveryRunId,
+                ordinal: 2,
+                userMessageId: messageId,
+                status: "completed",
+                delegatedCompletion: undefined,
+                completedAt: now,
+              },
+            },
+          ],
+        });
+        yield* Fiber.join(settled).pipe(
+          Effect.timeout(Duration.seconds(10)),
+          Effect.provideService(Clock.Clock, Clock.Clock.defaultValue()),
+        );
+        const after = yield* orchestrator.getThreadProjection(threadId);
+        const cohort = after.runs.find((run) => run.id === parentRunId)?.delegatedCompletion;
+        assert.equal(cohort?.settledDeliveryCount, 2);
+        assert.deepEqual(cohort?.delivery?.taskIds, [finalTaskId]);
+        assert.equal(
+          after.subagents.find((task) => task.id === finalTaskId)?.completionDelivery?.state,
+          "claimed",
+        );
+      }),
+    ),
   );
 
   it.effect("builds completion text and metadata from the same live cohort", () =>

@@ -36,6 +36,43 @@ import {
 } from "./http.ts";
 
 describe("browser API CORS", () => {
+  it("accepts the Experimental renderer in credentialed desktop development", async () => {
+    const routeLayer = Layer.effectDiscard(
+      Effect.gen(function* () {
+        const router = yield* HttpRouter.HttpRouter;
+        yield* router.add("GET", "/api/environment", HttpServerResponse.empty());
+      }),
+    );
+    const config = Layer.effect(
+      ServerConfig.ServerConfig,
+      Effect.gen(function* () {
+        const base = yield* ServerConfig.ServerConfig;
+        return ServerConfig.make({ ...base, devUrl: new URL("http://127.0.0.1:5733/") });
+      }),
+    ).pipe(Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "exp-http-cors-" })));
+    const appLayer = Layer.merge(routeLayer, browserApiCorsLayer).pipe(
+      Layer.provide(config),
+      Layer.provide(NodeServices.layer),
+    );
+    const { handler, dispose } = HttpRouter.toWebHandler(appLayer, { disableLogger: true });
+    try {
+      const response = await handler(
+        new Request("https://backend.example/api/environment", {
+          method: "OPTIONS",
+          headers: {
+            origin: "t3code-experimental://app",
+            "access-control-request-method": "GET",
+          },
+        }),
+      );
+      expect(response.status).toBe(204);
+      expect(response.headers.get("access-control-allow-origin")).toBe("t3code-experimental://app");
+      expect(response.headers.get("access-control-allow-credentials")).toBe("true");
+    } finally {
+      await dispose();
+    }
+  });
+
   it("accepts protocol negotiation with authenticated browser headers", async () => {
     const routeLayer = Layer.effectDiscard(
       Effect.gen(function* () {
