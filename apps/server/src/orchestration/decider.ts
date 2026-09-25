@@ -487,12 +487,10 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command.type === "thread.auto-settle" &&
         (thread.settledOverride !== null || thread.autoSettleDisabledAt != null)
       ) {
-        return yield* Effect.fail(
-          new OrchestrationCommandInvariantError({
-            commandType: command.type,
-            detail: `thread ${command.threadId} changed before automatic settlement`,
-          }),
-        );
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `thread ${command.threadId} changed before automatic settlement`,
+        });
       }
       // The server owns settle eligibility. A stale command must not settle
       // a thread whose session is coming alive or working.

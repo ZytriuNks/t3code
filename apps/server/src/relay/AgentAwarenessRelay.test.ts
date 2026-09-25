@@ -1296,7 +1296,7 @@ describe("AgentAwarenessRelay", () => {
           Layer.succeed(OrchestrationEngineService, {} as OrchestrationEngineShape),
           Layer.succeed(ProjectionSnapshotQuery, {
             getThreadShellById: () => Effect.sync(() => Option.fromNullishOr(currentThread)),
-            getProjectShellById: () => Effect.succeed(Option.some(project)),
+            getProjectShellById: () => Effect.succeedSome(project),
           } as unknown as ProjectionSnapshotQueryShape),
         );
 
