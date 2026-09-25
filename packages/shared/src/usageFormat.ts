@@ -51,15 +51,6 @@ export function formatPercent(share: number, digits = 1): string {
   return `${percent.toFixed(digits)}%`;
 }
 
-export function formatUsageContractMismatch(
-  environmentLabel: string,
-  mismatch: Pick<UsageContractMismatch, "direction">,
-): string {
-  return mismatch.direction === "serverBehind"
-    ? `${environmentLabel} runs an older server version and is excluded from totals.`
-    : `This client is older than the server on ${environmentLabel}; its usage is excluded from totals.`;
-}
-
 /** `2026-08-07` to `Aug 7`. */
 export function formatDayShort(day: string): string {
   const [year, month, dayOfMonth] = day.split("-").map((part) => Number(part));
