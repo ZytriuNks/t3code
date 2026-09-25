@@ -132,6 +132,8 @@ Required `production` environment variables:
 Optional `production` environment variables:
 
 - `RELAY_DOMAIN` when overriding the derived `relay.<RELAY_API_ZONE_NAME>` domain
+- `RELAY_TUNNEL_CLEANUP_MODE` with `off`, `dry-run`, or `enabled`. Missing and blank values use
+  `off`.
 
 Required `production` environment secrets:
 
@@ -166,20 +168,18 @@ because those builds register recovery and replace a deleted tunnel after wake.
 1. Deploy the relay and migration with cleanup `off`.
 2. Release the server build and confirm current hosts register recovery. Older hosts stay marked
    legacy and are never candidates.
-3. Set `dry-run`, run a forced relay deploy, and read the sweep counters (`scanned`, `wouldDelete`,
-   `skippedLegacy`, `skippedOrphan`, `failed`, `truncated`) across several sweeps. Each sweep records
-   them, and the active `mode`, as `relay.managed_endpoint_reaper.*` attributes on its
-   `relay.managed_endpoint_reaper.sweep` span in Axiom.
+3. Set `dry-run`, deploy, and read the sweep counters (`scanned`, `wouldDelete`, `skippedLegacy`,
+   `skippedOrphan`, `failed`, `truncated`) across several sweeps.
 4. Run the disposable-host canary below.
 5. Set `enabled` only after the canary recovers without a server restart.
 
 The job runs every five minutes with a five-minute grace period for tunnels that lost their
 connector, so a candidate is usually removed five to ten minutes after it goes down. Tunnels that
 never connected wait an hour. One sweep attempts at most 100 deletions, so a backlog takes longer.
-Changing `RELAY_TUNNEL_CLEANUP_MODE`, including turning cleanup off during an incident, needs a forced
-relay deploy. Confirm the new `mode` on the next sweep span.
+`RELAY_TUNNEL_CLEANUP_MODE` is read at deploy time. Changing it, including turning cleanup off during
+an incident, needs a relay deploy.
 
-To roll back, set cleanup to `off` and run a forced relay deploy before downgrading any host. Keep the
+To roll back, set cleanup to `off` and deploy the relay before downgrading any host. Keep the
 recovery endpoints deployed while current server builds are in use. The nullable columns can stay.
 
 ### Disposable-host canary
@@ -199,8 +199,8 @@ stage, test Cloudflare account, disposable host, and disposable T3 home. Keep pr
    and pause it with `kill -STOP <first-pid>`. Wait until Cloudflare reports it down for over five
    minutes.
 5. Confirm dry-run counts the first tunnel in `wouldDelete` and the second in `skippedLegacy`.
-6. Set cleanup `enabled` on the disposable stage and deploy it with `--force`. Confirm in the test
-   Cloudflare account that the first tunnel is deleted and the legacy tunnel still exists.
+6. Set cleanup `enabled` on the disposable stage and deploy. Confirm in the test Cloudflare account
+   that the first tunnel is deleted and the legacy tunnel still exists.
 7. Resume the first child with `kill -CONT <first-pid>`. Confirm the running server detects the
    repeated rejection, requests recovery, and becomes reachable at the same hostname without a
    restart.
