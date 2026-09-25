@@ -43,6 +43,7 @@ import { derivePendingBackgroundWork } from "@t3tools/shared/orchestrationV2Pend
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -271,6 +272,16 @@ export interface OrchestratorV2Shape {
 export class OrchestratorV2 extends Context.Service<OrchestratorV2, OrchestratorV2Shape>()(
   "t3/orchestration-v2/Orchestrator/OrchestratorV2",
 ) {}
+
+/** Optional in-process receipt for terminal-run reactor processing. */
+export class TerminalRunCompletionObserver extends Context.Reference<{
+  readonly onCompletion: (
+    stored: OrchestrationV2StoredEvent,
+    result: Exit.Exit<void, unknown>,
+  ) => Effect.Effect<void>;
+}>("t3/orchestration-v2/Orchestrator/TerminalRunCompletionObserver", {
+  defaultValue: () => ({ onCompletion: () => Effect.void }),
+}) {}
 
 function nextRunOrdinal(projection: Pick<OrchestrationV2ThreadProjection, "runs">): number {
   return projection.runs.length + 1;
@@ -646,6 +657,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const runtimePolicy = yield* RuntimePolicyV2;
   const threadForkService = yield* ThreadForkServiceV2;
   const threadDispatch = yield* ThreadCommandExecutor;
+  const terminalRunCompletionObserver = yield* TerminalRunCompletionObserver;
 
   const mapDispatchError =
     (command: OrchestrationV2Command) =>
@@ -8039,10 +8051,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     }
 
     const settledDeliveryCount = cohort?.settledDeliveryCount ?? 0;
-    if (settledDeliveryCount >= 2) {
-      // A cohort permits one initial delivery and one successor. Keep the
-      // result pending and inspectable instead of recursively re-arming the
-      // parent for every child that finishes after that bounded handoff.
+    const finalSiblingFinished =
+      settledDeliveryCount === 2 &&
+      input.parentProjection.subagents
+        .filter((task) => task.origin === "app_owned" && task.runId === input.parentRun?.id)
+        .every((task) =>
+          isTerminalDelegatedTaskStatus(
+            task.id === input.task.id ? input.updatedTask.status : task.status,
+          ),
+        );
+    if (settledDeliveryCount >= 2 && !finalSiblingFinished) {
+      // Allow one final wake only after all original siblings finish. Later
+      // results remain pending and inspectable rather than re-arming forever.
       return {
         task: {
           ...input.updatedTask,
@@ -8448,12 +8468,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         )
         .map((task) => task.id);
       const settledDeliveryCount = (cohort.settledDeliveryCount ?? 0) + 1;
+      const allOriginalSiblingsTerminal = projection.subagents
+        .filter((task) => task.origin === "app_owned" && task.runId === parentRun.id)
+        .every((task) => isTerminalDelegatedTaskStatus(task.status));
       const canReserveFollowUp =
         cohort.disposition === "open" &&
         projection.thread.archivedAt === null &&
         projection.thread.deletedAt === null &&
-        settledDeliveryCount < 2 &&
-        pendingTaskIds.length > 0;
+        pendingTaskIds.length > 0 &&
+        (settledDeliveryCount < 2 || (settledDeliveryCount === 2 && allOriginalSiblingsTerminal));
       const nextDelivery = canReserveFollowUp
         ? {
             generation: cohort.nextGeneration,
@@ -9044,11 +9067,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }
       yield* threadDispatch.withLock(threadId, startNextQueuedRun(threadId));
     }).pipe(
-      Effect.catchCause((cause) =>
-        Effect.logWarning("Failed to react to terminal V2 run", {
-          threadId: stored.event.threadId,
-          sequence: stored.sequence,
-          cause,
+      Effect.exit,
+      Effect.flatMap((result) =>
+        Effect.gen(function* () {
+          if (Exit.isFailure(result)) {
+            yield* Effect.logWarning("Failed to react to terminal V2 run", {
+              threadId: stored.event.threadId,
+              sequence: stored.sequence,
+              cause: result.cause,
+            });
+          }
+          yield* terminalRunCompletionObserver.onCompletion(stored, result);
         }),
       ),
     );
