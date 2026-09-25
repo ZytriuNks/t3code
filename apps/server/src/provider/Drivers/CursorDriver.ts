@@ -148,15 +148,9 @@ export const CursorDriver: ProviderDriver<CursorSettings, CursorDriverEnv> = {
               snapshot.auth.status === "authenticated"
             ),
           (snapshot) =>
-            Effect.gen(function* () {
-              const settings = yield* serverSettings.getSettings;
-              const usageLimits = yield* readCursorUsageLimits(
-                effectiveConfig,
-                processEnv,
-                settings.cursorKeychainUsageEnabled,
-              );
-              return { ...snapshot, usageLimits };
-            }),
+            readCursorUsageLimits(effectiveConfig, processEnv).pipe(
+              Effect.map((usageLimits) => ({ ...snapshot, usageLimits })),
+            ),
         ),
         Effect.map(stampIdentity),
         Effect.provideService(HttpClient.HttpClient, httpClient),

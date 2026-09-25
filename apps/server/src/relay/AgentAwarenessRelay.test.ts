@@ -479,21 +479,193 @@ describe("AgentAwarenessRelay", () => {
     }),
   );
 
-  it.effect("deduplicates state and republishes title changes", () =>
-    Effect.gen(function* () {
-      const { relay, currentShell, publications } = yield* makeTestRelay();
-      yield* relay.publishThread(THREAD_ID);
-      yield* Ref.set(
-        currentShell,
-        shell({ updatedAt: DateTime.makeUnsafe("2026-09-04T13:00:00Z") }),
-      );
-      yield* relay.publishThread(THREAD_ID);
-      assert.equal(publications.length, 1);
-      yield* Ref.set(currentShell, shell({ title: "Renamed thread" }));
-      yield* relay.publishThread(THREAD_ID);
-      assert.equal(publications.length, 2);
-      assert.equal(publications[1]?.state?.threadTitle, "Renamed thread");
-    }),
+  it.effect("keeps the listener armed and skips imported thread work", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const events = yield* Queue.unbounded<OrchestrationEvent>();
+        const threadShellRequested = yield* Deferred.make<void>();
+        const releaseThreadShell = yield* Deferred.make<void>();
+        const threadShellRequests: Array<ThreadId> = [];
+        let fetchCallCount = 0;
+        const secrets = makeMemorySecretStore();
+        const now = "2026-05-25T00:00:00.000Z";
+        const projectId = "project-1" as ProjectId;
+        const threadId = "thread-1" as ThreadId;
+        const importedThreadId = "import:codex:session-1" as ThreadId;
+        const environmentId = "env-1" as EnvironmentId;
+
+        const originalFetch = globalThis.fetch;
+        globalThis.fetch = (() => {
+          fetchCallCount += 1;
+          return Promise.resolve(Response.json({ ok: true, deliveries: [] }));
+        }) as unknown as typeof fetch;
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => {
+            globalThis.fetch = originalFetch;
+          }),
+        );
+
+        const project = {
+          id: projectId,
+          title: "T3 Code",
+          workspaceRoot: "/workspace",
+          repositoryIdentity: null,
+          defaultModelSelection: null,
+          scripts: [],
+          createdAt: now,
+          updatedAt: now,
+        } satisfies OrchestrationProjectShell;
+
+        const thread = {
+          id: threadId,
+          projectId,
+          title: "Run remote agent",
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          pullRequests: [],
+          latestTurn: {
+            turnId: "turn-1" as TurnId,
+            state: "running",
+            requestedAt: now,
+            startedAt: now,
+            completedAt: null,
+            assistantMessageId: null,
+          },
+          createdAt: now,
+          updatedAt: now,
+          archivedAt: null,
+          settledOverride: null,
+          settledAt: null,
+          session: {
+            threadId,
+            status: "running",
+            providerName: "Codex",
+            runtimeMode: "full-access",
+            activeTurnId: "turn-1" as TurnId,
+            lastError: null,
+            updatedAt: now,
+          },
+          latestUserMessageAt: now,
+          hasPendingApprovals: false,
+          hasPendingUserInput: false,
+          hasActionableProposedPlan: false,
+        } satisfies OrchestrationThreadShell;
+
+        const orchestrationEngine = {
+          readEvents: () => Stream.empty,
+          readThreadEvents: () => Stream.empty,
+          getThreadReplayStats: () => Effect.die("unused thread replay stats"),
+          dispatch: () => Effect.succeed({ sequence: 1 }),
+          streamDomainEvents: Stream.fromQueue(events),
+          subscribeDomainEvents: Effect.succeed(Stream.fromQueue(events)),
+          latestSequence: Effect.succeed(0),
+        } satisfies OrchestrationEngineShape;
+
+        const snapshotQuery = {
+          getShellSnapshot: () =>
+            Effect.succeed({
+              snapshotSequence: 1,
+              projects: [],
+              threads: [],
+              updatedAt: now,
+            } satisfies OrchestrationShellSnapshot),
+          getThreadShellById: (requestedThreadId: ThreadId) =>
+            Effect.gen(function* () {
+              threadShellRequests.push(requestedThreadId);
+              if (requestedThreadId !== threadId) return Option.none();
+              yield* Deferred.succeed(threadShellRequested, undefined);
+              yield* Deferred.await(releaseThreadShell);
+              return Option.some(thread);
+            }),
+          getProjectShellById: () => Effect.succeedSome(project),
+        } as unknown as ProjectionSnapshotQueryShape;
+
+        const descriptor = {
+          environmentId,
+          label: "Test Desktop",
+          platform: {
+            os: "darwin",
+            arch: "arm64",
+          },
+          serverVersion: "0.0.0-test",
+          capabilities: {
+            repositoryIdentity: true,
+          },
+        } satisfies ExecutionEnvironmentDescriptor;
+
+        const layer = Layer.mergeAll(
+          Layer.succeed(ServerSecretStore.ServerSecretStore, secrets.store),
+          Layer.succeed(ServerEnvironment.ServerEnvironment, {
+            getEnvironmentId: Effect.succeed(environmentId),
+            getDescriptor: Effect.succeed(descriptor),
+          }),
+          Layer.succeed(OrchestrationEngineService, orchestrationEngine),
+          Layer.succeed(ProjectionSnapshotQuery, snapshotQuery),
+        );
+
+        yield* Effect.gen(function* () {
+          const relay = yield* AgentAwarenessRelay.AgentAwarenessRelay;
+          yield* relay.start();
+          yield* secrets.setString(RELAY_URL_SECRET, "https://relay.example.test");
+          yield* secrets.setString(RELAY_ENVIRONMENT_CREDENTIAL_SECRET, "relay-credential");
+          yield* secrets.setString(PUBLISH_AGENT_ACTIVITY_SECRET, "true");
+          yield* Queue.offer(events, {
+            type: "thread.created",
+            sequence: 1,
+            eventId: "evt-import-created",
+            commandId: CommandId.make("cmd-import-created"),
+            aggregateKind: "thread",
+            aggregateId: importedThreadId,
+            metadata: { historyImport: true },
+            payload: { threadId: importedThreadId },
+            occurredAt: now,
+          } as unknown as OrchestrationEvent);
+          yield* Queue.offer(events, {
+            type: "thread.settled",
+            sequence: 2,
+            eventId: "evt-import-settled",
+            commandId: CommandId.make("cmd-import-settled"),
+            aggregateKind: "thread",
+            aggregateId: importedThreadId,
+            metadata: { historyImport: true },
+            payload: { threadId: importedThreadId },
+            occurredAt: now,
+          } as unknown as OrchestrationEvent);
+          yield* Queue.offer(events, {
+            type: "thread.activity-appended",
+            sequence: 3,
+            eventId: "evt-1",
+            commandId: CommandId.make("cmd-1"),
+            aggregateKind: "thread",
+            aggregateId: threadId,
+            actor: { kind: "server" },
+            metadata: {},
+            payload: {
+              threadId,
+              activity: {
+                kind: "approval.requested",
+              },
+            },
+            occurredAt: now,
+          } as unknown as OrchestrationEvent);
+
+          yield* Deferred.await(threadShellRequested).pipe(Effect.timeout("2 seconds"));
+          expect(threadShellRequests).toEqual([threadId]);
+          expect(fetchCallCount).toBe(0);
+          yield* Deferred.succeed(releaseThreadShell, undefined);
+        }).pipe(
+          Effect.provide(
+            AgentAwarenessRelay.layer.pipe(
+              Layer.provide(layer),
+              Layer.provideMerge(NodeServices.layer),
+            ),
+          ),
+        );
+      }),
+    ),
   );
 
   it.effect("stops before shell reads when disabled and republishes after re-enabling", () =>
@@ -848,8 +1020,15 @@ describe("AgentAwarenessRelay", () => {
           }),
           Layer.succeed(OrchestrationEngineService, {} as OrchestrationEngineShape),
           Layer.succeed(ProjectionSnapshotQuery, {
-            getThreadShellById: () => Effect.sync(() => Option.fromNullishOr(currentThread)),
-            getProjectShellById: () => Effect.succeed(Option.some(project)),
+            getShellSnapshot: () =>
+              Effect.succeed({
+                snapshotSequence: 1,
+                projects: [project],
+                threads: [thread],
+                updatedAt: now,
+              } satisfies OrchestrationShellSnapshot),
+            getThreadShellById: () => Effect.succeedSome(thread),
+            getProjectShellById: () => Effect.succeedSome(project),
           } as unknown as ProjectionSnapshotQueryShape),
         );
 
@@ -983,7 +1162,7 @@ describe("AgentAwarenessRelay", () => {
           Layer.succeed(OrchestrationEngineService, {} as OrchestrationEngineShape),
           Layer.succeed(ProjectionSnapshotQuery, {
             getThreadShellById: () => Effect.sync(() => Option.fromNullishOr(currentThread)),
-            getProjectShellById: () => Effect.succeed(Option.some(project)),
+            getProjectShellById: () => Effect.succeedSome(project),
           } as unknown as ProjectionSnapshotQueryShape),
         );
 
