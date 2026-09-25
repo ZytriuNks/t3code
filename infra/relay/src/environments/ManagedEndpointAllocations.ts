@@ -567,7 +567,9 @@ export const make = Effect.gen(function* () {
               .pipe(
                 Effect.mapError(lockError),
                 Effect.flatMap((rows) =>
-                  rows.length === 0 ? Effect.succeedNone : Effect.asSome(effect),
+                  rows.length === 0
+                    ? Effect.succeed(Option.none())
+                    : effect.pipe(Effect.map(Option.some)),
                 ),
               ),
           )

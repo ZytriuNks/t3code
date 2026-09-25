@@ -1176,20 +1176,14 @@ const buildAppUnderTest = (options?: {
         }),
       ),
       Layer.provide(
-        Layer.mergeAll(
-          Layer.succeed(
-            CloudManagedEndpointRuntime.CloudManagedEndpointRuntime,
-            CloudManagedEndpointRuntime.CloudManagedEndpointRuntime.of({
-              applyConfig: () => Effect.succeed({ status: "disabled" }),
-              recoveryRequests: Stream.empty,
-              requestRecovery: () => Effect.void,
-              withLinkStateLock: (effect) => effect,
-              ...options?.layers?.cloudManagedEndpointRuntime,
-            }),
-          ),
-          Layer.mock(AgentAwarenessRelay.AgentAwarenessRelay)({
-            requestCatchUp: () => Effect.void,
-            ...options?.layers?.agentAwarenessRelay,
+        Layer.succeed(
+          CloudManagedEndpointRuntime.CloudManagedEndpointRuntime,
+          CloudManagedEndpointRuntime.CloudManagedEndpointRuntime.of({
+            applyConfig: () => Effect.succeed({ status: "disabled" }),
+            recoveryRequests: Stream.empty,
+            requestRecovery: () => Effect.void,
+            withLinkStateLock: (effect) => effect,
+            ...options?.layers?.cloudManagedEndpointRuntime,
           }),
         ),
       ),

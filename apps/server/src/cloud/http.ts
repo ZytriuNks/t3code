@@ -116,6 +116,7 @@ const CLOUD_PROOF_MAX_LIFETIME_SECONDS = 5 * 60;
 const CLOUD_PROOF_CLOCK_SKEW_SECONDS = 60;
 // The desktop app stops its backends within seconds of writing the marker.
 const DESKTOP_UPDATE_RESTART_MARKER_TTL = Duration.minutes(1);
+const MANAGED_ENDPOINT_PROVISION_REQUEST_TIMEOUT = Duration.minutes(2);
 const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "::1", "localhost"]);
 const CLOUD_CREDENTIAL_RESPONSE_HEADERS = {
   "cache-control": "no-store",
@@ -670,7 +671,6 @@ const applyCloudRelayConfig = Effect.fn("environment.cloud.applyRelayConfig")(fu
       CLOUD_MINT_PUBLIC_KEY,
       stringToBytes(payload.cloudMintPublicKey),
     );
-    yield* dependencies.awarenessRelay.requestCatchUp();
     if (payload.endpointRuntime) {
       const endpointRuntimeJson = yield* encodeEndpointRuntimeConfigJson(payload.endpointRuntime);
       yield* dependencies.secrets.set(

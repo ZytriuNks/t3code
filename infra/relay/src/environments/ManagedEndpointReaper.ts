@@ -287,20 +287,7 @@ export const make = Effect.gen(function* () {
       failed,
       truncated,
     };
-  }).pipe(
-    // Dry-run rollout reads these counters from the exported span.
-    Effect.tap((result) =>
-      Effect.annotateCurrentSpan(
-        Object.fromEntries(
-          Object.entries(result).map(([key, value]) => [
-            `relay.managed_endpoint_reaper.${key}`,
-            value,
-          ]),
-        ),
-      ),
-    ),
-    Effect.withSpan("relay.managed_endpoint_reaper.sweep"),
-  );
+  }).pipe(Effect.withSpan("relay.managed_endpoint_reaper.sweep"));
 
   return ManagedEndpointReaper.of({ sweep });
 });

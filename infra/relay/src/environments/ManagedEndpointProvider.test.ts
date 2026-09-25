@@ -6,6 +6,7 @@ import * as Alchemy from "alchemy";
 import * as Cloudflare from "alchemy/Cloudflare";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
 
 import * as RelayConfiguration from "../Config.ts";
@@ -301,8 +302,8 @@ function makeAllocations(calls: AllocationCall[] = []) {
       Effect.suspend(() => {
         const current = allocations.get(allocationKey(input));
         return current?.tunnelId === input.tunnelId && current.generation === input.generation
-          ? Effect.asSome(effect)
-          : Effect.succeedNone;
+          ? effect.pipe(Effect.map(Option.some))
+          : Effect.succeed(Option.none());
       }),
     claimDeprovision: (input) =>
       Effect.sync(() => {
@@ -1188,7 +1189,7 @@ describe("ManagedEndpointProvider", () => {
     const changed = ManagedEndpointAllocations.ManagedEndpointAllocations.of({
       ...allocations,
       withClaimedTunnel: (input, effect) =>
-        loseClaim ? Effect.succeedNone : allocations.withClaimedTunnel(input, effect),
+        loseClaim ? Effect.succeed(Option.none()) : allocations.withClaimedTunnel(input, effect),
     });
     const layer = providerLayer(makePersistentTunnelClient(), makeDnsClient(), changed);
 
@@ -1319,7 +1320,7 @@ describe("ManagedEndpointProvider", () => {
     const allocations = makeAllocations();
     const changed = ManagedEndpointAllocations.ManagedEndpointAllocations.of({
       ...allocations,
-      withClaimedTunnel: () => Effect.succeedNone,
+      withClaimedTunnel: () => Effect.succeed(Option.none()),
     });
     const layer = providerLayer(makePersistentTunnelClient(tunnelCalls), makeDnsClient(), changed);
 
@@ -1348,7 +1349,9 @@ describe("ManagedEndpointProvider", () => {
     const changed = ManagedEndpointAllocations.ManagedEndpointAllocations.of({
       ...allocations,
       withClaimedTunnel: (input, effect) =>
-        ++lockCount === 1 ? allocations.withClaimedTunnel(input, effect) : Effect.succeedNone,
+        ++lockCount === 1
+          ? allocations.withClaimedTunnel(input, effect)
+          : Effect.succeed(Option.none()),
     });
     const layer = providerLayer(makePersistentTunnelClient(), makeDnsClient(dnsCalls), changed);
 
