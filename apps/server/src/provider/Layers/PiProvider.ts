@@ -8,6 +8,12 @@
  * `~/.pi/agent` — custom providers, models.json entries, extensions, skills —
  * shows up in T3 without any hardcoded catalog.
  */
+// @effect-diagnostics-next-line nodeBuiltinImport:off - Pi's extension config is read synchronously during RPC discovery.
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+// @effect-diagnostics-next-line nodeBuiltinImport:off - Pi's path resolution must match its extension runtime.
+import * as NodePath from "node:path";
+
 import {
   type CustomModelSetting,
   type PiSettings,
@@ -90,6 +96,121 @@ interface PiDiscovery extends PiDiscoveredCommands {
   readonly authenticated: boolean;
 }
 
+const PI_OPENAI_FAST_CONFIG_FILENAME = "pi-openai-fast.json";
+const PI_OPENAI_FAST_PACKAGE = "@benvargas/pi-openai-fast";
+
+interface PiOpenAIFastFileConfig {
+  readonly persistState?: boolean;
+  readonly active?: boolean;
+  readonly supportedModels?: ReadonlyArray<string>;
+}
+
+export interface PiOpenAIFastConfig {
+  readonly active: boolean;
+  readonly supportedModels: ReadonlySet<string>;
+}
+
+function hasPiOpenAIFastCommand(commandsData: unknown): boolean {
+  const commands = recordField(commandsData, "commands");
+  if (!Array.isArray(commands)) return false;
+  return commands.some((command) => {
+    if (
+      recordString(command, "name") !== "fast" ||
+      recordString(command, "source") !== "extension"
+    ) {
+      return false;
+    }
+    const sourceInfo = recordField(command, "sourceInfo");
+    return [
+      recordString(sourceInfo, "source"),
+      recordString(sourceInfo, "path"),
+      recordString(sourceInfo, "baseDir"),
+    ].some((value) => isPiOpenAIFastPackageSource(value));
+  });
+}
+
+function isPiOpenAIFastPackageSource(value: string | undefined): boolean {
+  if (value === undefined) return false;
+  const normalized = value.replaceAll("\\", "/").replace(/\/+$/, "").toLowerCase();
+  const packageName = PI_OPENAI_FAST_PACKAGE.toLowerCase();
+  return (
+    normalized === packageName ||
+    normalized === `npm:${packageName}` ||
+    normalized.startsWith(`npm:${packageName}@`) ||
+    normalized.includes(`/node_modules/${packageName}/`) ||
+    normalized.endsWith(`/node_modules/${packageName}`)
+  );
+}
+
+function resolvePiAgentDirectory(environment: NodeJS.ProcessEnv, cwd: string): string {
+  const configured = environment.PI_CODING_AGENT_DIR;
+  const path =
+    configured === undefined || configured.length === 0
+      ? NodePath.join(NodeOS.homedir(), ".pi", "agent")
+      : configured === "~"
+        ? NodeOS.homedir()
+        : configured.startsWith("~/") || configured.startsWith("~\\")
+          ? NodePath.join(NodeOS.homedir(), configured.slice(2))
+          : configured;
+  return NodePath.isAbsolute(path) ? path : NodePath.resolve(cwd, path);
+}
+
+function readPiOpenAIFastConfig(path: string): PiOpenAIFastFileConfig {
+  if (!NodeFS.existsSync(path)) return {};
+  try {
+    const parsed: unknown = JSON.parse(NodeFS.readFileSync(path, "utf8"));
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
+    const value = parsed as Record<string, unknown>;
+    return {
+      ...(typeof value.persistState === "boolean" ? { persistState: value.persistState } : {}),
+      ...(typeof value.active === "boolean" ? { active: value.active } : {}),
+      ...(Array.isArray(value.supportedModels)
+        ? { supportedModels: normalizePiOpenAIFastSupportedModels(value.supportedModels) }
+        : {}),
+    };
+  } catch {
+    return {};
+  }
+}
+
+function normalizePiOpenAIFastSupportedModels(
+  values: ReadonlyArray<unknown>,
+): ReadonlyArray<string> {
+  const models: Array<string> = [];
+  for (const value of values) {
+    if (typeof value !== "string") continue;
+    const key = value.trim();
+    const slash = key.indexOf("/");
+    if (slash <= 0 || slash === key.length - 1) continue;
+    const provider = key.slice(0, slash).trim();
+    const id = key.slice(slash + 1).trim();
+    if (provider.length > 0 && id.length > 0) models.push(`${provider}/${id}`);
+  }
+  return models;
+}
+
+export function resolvePiOpenAIFastConfig(input: {
+  readonly commandsData: unknown;
+  readonly environment: NodeJS.ProcessEnv;
+  readonly cwd?: string;
+}): PiOpenAIFastConfig | undefined {
+  if (!hasPiOpenAIFastCommand(input.commandsData)) return undefined;
+  const cwd = input.cwd ?? process.cwd();
+  const agentDirectory = resolvePiAgentDirectory(input.environment, cwd);
+  const globalConfig = readPiOpenAIFastConfig(
+    NodePath.join(agentDirectory, "extensions", PI_OPENAI_FAST_CONFIG_FILENAME),
+  );
+  const projectConfig = readPiOpenAIFastConfig(
+    NodePath.join(cwd, ".pi", "extensions", PI_OPENAI_FAST_CONFIG_FILENAME),
+  );
+  const config = { ...globalConfig, ...projectConfig };
+  if (config.supportedModels === undefined) return undefined;
+  return {
+    active: config.persistState !== false && config.active === true,
+    supportedModels: new Set(config.supportedModels),
+  };
+}
+
 function piModelsFromSettings(
   customModels: ReadonlyArray<CustomModelSetting> | undefined,
   discovered: ReadonlyArray<ServerProviderModel> = [],
@@ -104,6 +225,7 @@ function piModelsFromSettings(
 function parseDiscoveredModels(
   data: unknown,
   defaultThinkingLevel: unknown,
+  fastConfig?: PiOpenAIFastConfig,
 ): ReadonlyArray<ServerProviderModel> {
   const models = recordField(data, "models");
   if (!Array.isArray(models)) return [];
@@ -120,7 +242,11 @@ function parseDiscoveredModels(
       slug,
       name: recordString(model, "name") ?? slug,
       isCustom: false,
-      capabilities: thinkingCapabilitiesForPiModel(model, defaultThinkingLevel),
+      capabilities: thinkingCapabilitiesForPiModel(
+        model,
+        defaultThinkingLevel,
+        fastConfig?.supportedModels.has(slug) ? fastConfig.active : undefined,
+      ),
     });
   }
   return parsed;
@@ -156,9 +282,15 @@ const discoverPiViaRpc = (
     const commandsData = yield* connection
       .request({ type: "get_commands" })
       .pipe(Effect.orElseSucceed(() => undefined));
+    const fastConfig = resolvePiOpenAIFastConfig({
+      commandsData,
+      environment,
+      ...(cwd === undefined ? {} : { cwd }),
+    });
     const discoveredModels = parseDiscoveredModels(
       modelsData,
       recordString(stateData, "thinkingLevel"),
+      fastConfig,
     );
     const { slashCommands, skills } = parsePiDiscoveredCommands(commandsData);
     return {

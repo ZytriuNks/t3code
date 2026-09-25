@@ -49,4 +49,43 @@ describe("thinkingCapabilitiesForPiModel", () => {
       "max",
     );
   });
+
+  it("makes Fast the default service tier after Thinking when fast mode is active", () => {
+    const capabilities = thinkingCapabilitiesForPiModel({ reasoning: true }, "medium", true);
+
+    assert.deepEqual(capabilities.optionDescriptors?.[1], {
+      id: "serviceTier",
+      label: "Service Tier",
+      type: "select",
+      options: [
+        { id: "default", label: "Standard" },
+        { id: "priority", label: "Fast", isDefault: true },
+      ],
+      currentValue: "priority",
+    });
+  });
+
+  it("does not expose a service tier when fast eligibility is unknown", () => {
+    const capabilities = thinkingCapabilitiesForPiModel({ reasoning: true }, "medium");
+
+    assert.equal(
+      capabilities.optionDescriptors?.some((descriptor) => descriptor.id === "serviceTier"),
+      false,
+    );
+  });
+
+  it("makes Standard the default service tier when fast mode is inactive", () => {
+    const capabilities = thinkingCapabilitiesForPiModel({ reasoning: true }, "medium", false);
+
+    assert.deepEqual(capabilities.optionDescriptors?.[1], {
+      id: "serviceTier",
+      label: "Service Tier",
+      type: "select",
+      options: [
+        { id: "default", label: "Standard", isDefault: true },
+        { id: "priority", label: "Fast" },
+      ],
+      currentValue: "default",
+    });
+  });
 });

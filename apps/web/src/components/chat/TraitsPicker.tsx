@@ -475,11 +475,11 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
 
 /**
  * Build the traits trigger's text label plus whether the fast-mode bolt should
- * render. Claude and Cursor expose fast mode as a boolean, while Codex exposes
- * it through the Standard/Fast service tiers. In either form, fast mode is a
- * lightning bolt when on and nothing at all when off. The one exception is when
- * fast mode is the only trait, where a bare bolt (or bare chevron) would leave
- * the trigger unreadable.
+ * render. Claude and Cursor expose fast mode as a boolean, while Codex and Pi
+ * expose it through the Standard/Fast service tiers. In either form, fast
+ * mode is a lightning bolt when on and nothing at all when off. The exception
+ * is when fast mode is the only trait, where a bare bolt (or bare chevron)
+ * would leave the trigger unreadable.
  */
 export function buildTraitsTriggerDisplay(input: {
   provider: ProviderDriverKind;
@@ -497,7 +497,7 @@ export function buildTraitsTriggerDisplay(input: {
       continue;
     }
     if (
-      input.provider === "codex" &&
+      (input.provider === "codex" || input.provider === "pi") &&
       descriptor.id === "serviceTier" &&
       descriptor.type === "select"
     ) {

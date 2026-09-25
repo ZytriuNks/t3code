@@ -10,6 +10,11 @@
  */
 import { T3_CODE_ORCHESTRATION_INSTRUCTIONS } from "../../provider/T3OrchestrationInstructions.ts";
 
+const PI_T3_ORCHESTRATION_INSTRUCTIONS = T3_CODE_ORCHESTRATION_INSTRUCTIONS.replace(
+  "Prefer the current provider's native subagent tools for same-provider parallel work when available. Use `delegate_task` for cross-provider work, when native delegation is unavailable, or when the user explicitly requests T3-owned child tasks.",
+  "Inside Pi, use `mcp__t3-code__delegate_task` by default for delegated child work, including same-provider work. Pi's native asynchronous subagents do not expose resumable T3 child threads or reliable completion delivery; use native `subagent` only for explicitly requested synchronous temporary work. Do not rely on native async subagents for durable tracking, waiting, cancellation, or cross-provider orchestration.",
+);
+
 export const PI_T3_MCP_EXTENSION_FILENAME = "pi-t3-mcp-extension.ts";
 
 export const T3_MCP_URL_ENV = "T3_MCP_URL";
@@ -29,7 +34,7 @@ import { Type } from "typebox";
 const URL_ENV = ${JSON.stringify(T3_MCP_URL_ENV)};
 const TOKEN_ENV = ${JSON.stringify(T3_MCP_BEARER_ENV)};
 const RUNTIME_MODE_ENV = ${JSON.stringify(T3_PI_RUNTIME_MODE_ENV)};
-const ORCHESTRATION_INSTRUCTIONS = ${JSON.stringify(T3_CODE_ORCHESTRATION_INSTRUCTIONS.trim())};
+const ORCHESTRATION_INSTRUCTIONS = ${JSON.stringify(PI_T3_ORCHESTRATION_INSTRUCTIONS.trim())};
 const PROTOCOL = "2025-06-18";
 const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
 const FILE_CHANGE_TOOLS = new Set(${JSON.stringify(PI_FILE_CHANGE_TOOLS)});
@@ -270,7 +275,19 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
       for (const tool of tools) {
         const name = tool.name;
         const registeredName = \`mcp__t3-code__\${name}\`;
-        const description = tool.description ?? name;
+        const description = (tool.description ?? name)
+          .replaceAll(
+            "Prefer native subagent tools for same-provider work when available.",
+            "Inside Pi, use mcp__t3-code__delegate_task by default for delegated child work.",
+          )
+          .replaceAll(
+            "Use this for cross-provider work, when native delegation is unavailable, or when the user explicitly requests T3-owned child tasks.",
+            "Use this for Pi delegated child work, including same-provider and cross-provider tasks.",
+          )
+          .replaceAll(
+            "For delegated work, prefer native subagents within the current provider; call delegate_task for cross-provider or explicitly T3-owned child tasks.",
+            "For delegated child work inside Pi, use mcp__t3-code__delegate_task by default; create_threads is only for explicitly requested top-level conversations.",
+          );
         pi.registerTool({
           name: registeredName,
           label: name,

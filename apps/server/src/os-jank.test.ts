@@ -1,8 +1,18 @@
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import { assert, it } from "@effect/vitest";
+
+import * as Effect from "effect/Effect";
 import * as NodeOS from "node:os";
-import { assert, it } from "vite-plus/test";
+import * as NodePath from "node:path";
 
-import { hydratePosixHome } from "./os-jank.ts";
+import { hydratePosixHome, resolveBaseDir } from "./os-jank.ts";
 
+it.effect("uses the Experimental default home for CLI runtime state", () =>
+  Effect.gen(function* () {
+    const baseDir = yield* resolveBaseDir(undefined);
+    assert.equal(baseDir, NodePath.join(NodeOS.homedir(), ".t3-experimental"));
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
 it("hydrates HOME for minimal service environments from the user account", () => {
   const env: NodeJS.ProcessEnv = {};
 

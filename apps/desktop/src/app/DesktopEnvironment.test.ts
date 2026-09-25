@@ -151,7 +151,7 @@ describe("DesktopEnvironment", () => {
         resourcesPath: "/tmp/.mount_t3code/resources",
       });
 
-      assert.equal(environment.linuxDesktopEntryName, "com.t3tools.T3Code.desktop");
+      assert.equal(environment.linuxDesktopEntryName, "com.t3tools.T3Code.Experimental.desktop");
     }),
   );
 
@@ -163,8 +163,9 @@ describe("DesktopEnvironment", () => {
       );
       const production = yield* makeEnvironment();
 
-      assert.equal(development.stateDir, "/Users/alice/.t3/dev");
-      assert.equal(production.stateDir, "/Users/alice/.t3/userdata");
+      assert.equal(development.stateDir, "/Users/alice/.t3-experimental/dev");
+      assert.equal(production.stateDir, "/Users/alice/.t3-experimental/userdata");
+      assert.equal(production.appUserModelId, "com.t3tools.t3code.experimental.pi");
     }),
   );
 

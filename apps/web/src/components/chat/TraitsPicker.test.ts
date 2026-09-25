@@ -50,10 +50,24 @@ const CONTEXT_WINDOW = selectDescriptor(
 );
 
 const CODEX = ProviderDriverKind.make("codex");
+const PI = ProviderDriverKind.make("pi");
+const THINKING: Extract<ProviderOptionDescriptor, { type: "select" }> = {
+  id: "thinking",
+  label: "Thinking",
+  type: "select",
+  options: [
+    { id: "enabled", label: "Enabled" },
+    { id: "disabled", label: "Disabled" },
+  ],
+  currentValue: "enabled",
+};
 
-function display(descriptors: ReadonlyArray<ProviderOptionDescriptor>) {
+function display(
+  descriptors: ReadonlyArray<ProviderOptionDescriptor>,
+  provider: ProviderDriverKind = CODEX,
+) {
   return buildTraitsTriggerDisplay({
-    provider: CODEX,
+    provider,
     descriptors,
     primarySelectDescriptorId: "reasoningEffort",
     ultrathinkPromptControlled: false,
@@ -82,6 +96,17 @@ describe("buildTraitsTriggerDisplay", () => {
     });
     expect(display([EFFORT, serviceTierDescriptor("priority")])).toEqual({
       label: "High",
+      showFastModeIcon: true,
+    });
+  });
+
+  it("treats Pi service tiers as fast-mode state alongside a separate Thinking select", () => {
+    expect(display([THINKING, serviceTierDescriptor("default")], PI)).toEqual({
+      label: "Enabled",
+      showFastModeIcon: false,
+    });
+    expect(display([THINKING, serviceTierDescriptor("priority")], PI)).toEqual({
+      label: "Enabled",
       showFastModeIcon: true,
     });
   });
