@@ -28,7 +28,10 @@ import {
   type EnvMode,
   type EnvironmentOption,
   resolveContextStripLabelsCompact,
-  resolveEffectiveEnvMode,
+  resolveCurrentWorkspaceLabel,
+  resolveEnvModeLabel,
+  resolveLockedWorkspaceLabel,
+  resolvePreviousWorktreeLabel,
   resolvePreviousWorktreeSeed,
   shouldShowEnvironmentIndicator,
 } from "./BranchToolbar.logic";
@@ -74,7 +77,8 @@ interface BranchToolbarProps {
   showGitControls: boolean;
   draftId?: DraftId;
   onEnvModeChange: (mode: EnvMode) => void;
-  effectiveEnvModeOverride?: EnvMode;
+  /** The thread's env mode as ChatView resolves it. */
+  envMode: EnvMode;
   activeThreadBranchOverride?: string | null;
   onActiveThreadBranchOverrideChange?: (branch: string | null) => void;
   startFromOrigin: boolean;
@@ -142,9 +146,7 @@ const MobileRunContextSelector = memo(function MobileRunContextSelector({
   const workspaceLabel = forceNewWorktree
     ? t("settings.general.workspace.mode.worktree")
     : envModeLocked
-      ? activeWorktreePath
-        ? t("toolbar.workspace.worktree")
-        : t("toolbar.workspace.localCheckout")
+      ? resolveLockedWorkspaceLabel(activeWorktreePath, effectiveEnvMode)
       : effectiveEnvMode === "worktree"
         ? t("settings.general.workspace.mode.worktree")
         : activeWorktreePath
@@ -526,7 +528,7 @@ export const BranchToolbar = memo(function BranchToolbar({
   showGitControls,
   draftId,
   onEnvModeChange,
-  effectiveEnvModeOverride,
+  envMode,
   activeThreadBranchOverride,
   onActiveThreadBranchOverrideChange,
   startFromOrigin,
@@ -562,13 +564,7 @@ export const BranchToolbar = memo(function BranchToolbar({
   const activeWorktreePath = forceNewWorktree
     ? null
     : (serverThread?.worktreePath ?? draftThread?.worktreePath ?? null);
-  const effectiveEnvMode =
-    (forceNewWorktree ? "worktree" : effectiveEnvModeOverride) ??
-    resolveEffectiveEnvMode({
-      activeWorktreePath,
-      hasServerThread: serverThread !== null,
-      draftThreadEnvMode: draftThread?.envMode,
-    });
+  const effectiveEnvMode = forceNewWorktree ? "worktree" : envMode;
   const envModeLocked = envLocked || (serverThread !== null && activeWorktreePath !== null);
 
   // "Previous worktree" hops a draft into the most recently active worktree
@@ -776,11 +772,7 @@ export const BranchToolbar = memo(function BranchToolbar({
           threadId={threadId}
           {...(draftId ? { draftId } : {})}
           envLocked={envLocked}
-          {...(forceNewWorktree
-            ? { effectiveEnvModeOverride: "worktree" }
-            : effectiveEnvModeOverride
-              ? { effectiveEnvModeOverride }
-              : {})}
+          effectiveEnvModeOverride={effectiveEnvMode}
           {...(activeThreadBranchOverride !== undefined ? { activeThreadBranchOverride } : {})}
           {...(onActiveThreadBranchOverrideChange ? { onActiveThreadBranchOverrideChange } : {})}
           startFromOrigin={startFromOrigin}
