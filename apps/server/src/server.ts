@@ -109,6 +109,7 @@ import { ObservabilityLive } from "./observability/Layers/Observability.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as RemoteOpenTargets from "./environment/RemoteOpenTargets.ts";
 import { authHttpApiLayer, environmentAuthenticatedAuthLayer } from "./auth/http.ts";
+import * as ReplayMarkers from "./auth/replayMarkers.ts";
 import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 import {
@@ -485,11 +486,17 @@ const AntigravityInstallationRefreshLive = Layer.effectDiscard(
   }),
 );
 
-const RuntimeCoreDependenciesBaseLive = Layer.mergeAll(
-  AgentAwarenessRelay.layer,
-  ThreadSettlementWorkerLive,
-  Layer.effectDiscard(StorageCleanup.make.pipe(Effect.flatMap((service) => service.start()))).pipe(
-    Layer.provide(ProjectionStoreV2.layer),
+const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
+  Layer.provideMerge(AntigravityInstallationRefreshLive),
+  Layer.provideMerge(ReplayMarkers.layer),
+  Layer.provideMerge(ProviderAuthServiceLive),
+  // Core Services
+  Layer.provideMerge(ServerSettingsLayerLive),
+  Layer.provideMerge(CheckpointingLayerLive),
+  // `GitHubCli` is the registry's own instance, exposed because the asset route fetches
+  // GitHub-hosted pull request media with the repository's credential.
+  Layer.provideMerge(
+    Layer.mergeAll(SourceControlProviderRegistryLayerLive, PullRequestServiceLive, GitHubCli.layer),
   ),
   ThreadPullRequestWorkerLive,
   Layer.effectDiscard(
