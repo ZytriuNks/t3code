@@ -66,10 +66,6 @@ import { SidebarInset } from "../ui/sidebar";
 import { Skeleton } from "../ui/skeleton";
 import { Toggle, ToggleGroup } from "../ui/toggle-group";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
-<<<<<<< HEAD
-import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
-=======
->>>>>>> e5a46d6c5d (feat(usage): read cursor, opencode, and antigravity history (#10409))
 import {
   WorkspaceBreadcrumb,
   WorkspaceBreadcrumbItem,
@@ -138,11 +134,11 @@ export function UsagePage() {
     selectedEnvironmentIds,
   );
   const presentations = useAtomValue(environmentPresentations.presentationsAtom);
-<<<<<<< HEAD
-  const cursorAccessEnvironments = cursorKeychainAccessEnvironments(selectedEnvironments);
-=======
   const cursorAccessEnvironments = selectedEnvironments.filter((environment) =>
     environment.summary?.sources.some((source) => source.action === "enableCursorKeychain"),
+=======
+  const cursorAccessEnvironments = selectedEnvironments.filter(
+    (environment) => environment.needsCursorKeychainAccess,
   );
 >>>>>>> e5a46d6c5d (feat(usage): read cursor, opencode, and antigravity history (#10409))
   const sourceMessages = [
