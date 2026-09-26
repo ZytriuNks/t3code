@@ -31,7 +31,10 @@ import {
   effectiveSnoozed,
   threadWokeAt,
 } from "@t3tools/client-runtime/state/thread-settled";
-import { resolveSettledThreadTimestamp } from "@t3tools/client-runtime/state/thread-sort";
+import {
+  resolveSettledThreadTimestamp,
+  sortSettledThreads,
+} from "@t3tools/client-runtime/state/thread-sort";
 import {
   threadSearchMatchKey,
   type EnvironmentThreadSearchMatch,
@@ -197,8 +200,6 @@ import {
   sidebarListItemId,
   sidebarMarkerId,
   sortPinnedThreadsForSidebar,
-  sortSettledThreadsForSidebar,
-  sortSidebarV2ProjectGroups,
   sortThreadsForSidebar,
   useThreadJumpHintVisibility,
   useRetainedValue,
@@ -2678,7 +2679,7 @@ export default function Sidebar() {
           firstValidTimestampMs(left.snoozedUntil ?? null) -
           firstValidTimestampMs(right.snoozedUntil ?? null),
       ),
-      settledThreads: sortSettledThreadsForSidebar(settled),
+      settledThreads: sortSettledThreads(settled),
       snoozeNow: preciseNow,
     };
   }, [nowMinute, optimisticDrop, scopedProjectKeys, serverConfigs, snoozeWakeTick, threads]);
@@ -3537,7 +3538,7 @@ export default function Sidebar() {
     if (dragState === null || thread === undefined) return [];
     const key = (candidate: EnvironmentThreadShell) =>
       scopedThreadKey(scopeThreadRef(candidate.environmentId, candidate.id));
-    return sortSettledThreadsForSidebar([
+    return sortSettledThreads([
       ...settledThreads.filter((candidate) => key(candidate) !== dragState.activeKey),
       applySidebarThreadDrop(thread, "settled", dragState.occurredAt),
     ]).map(key);
