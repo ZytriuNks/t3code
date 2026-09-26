@@ -208,10 +208,27 @@ export const make = Effect.gen(function* () {
       (group) =>
         Effect.gen(function* () {
           const first = group[0]!;
+<<<<<<< HEAD:apps/server/src/orchestration-v2/ThreadPullRequestService.ts
           const project = projects.get(first.projectId);
           if (project === undefined) return finishBackfill(group);
           const { project: resolvedProject, repository } =
             yield* resolveProjectForPullRequestDiscovery(project, repositoryIdentities);
+=======
+          const snapshotProject = projects.get(first.projectId);
+          if (snapshotProject === undefined) return finishBackfill(group);
+          // A finished turn may have added the remote this PR lives on. A failed
+          // refresh resolves to null, so keep the snapshot's identity then.
+          const project = request.refresh
+            ? {
+                ...snapshotProject,
+                repositoryIdentity:
+                  (yield* repositoryIdentities.resolve(snapshotProject.workspaceRoot, {
+                    refresh: true,
+                  })) ?? snapshotProject.repositoryIdentity,
+              }
+            : snapshotProject;
+          const repository = sourceControlRepositorySelector(project.repositoryIdentity);
+>>>>>>> 999161ef84 (perf(server): stop re-running git for every project each minute (#13689)):apps/server/src/orchestration/ThreadPullRequestReactor.ts
           if (first.branch !== null && repository === null) return finishBackfill(group);
           const worktreeExists =
             first.worktreePath !== null && (yield* fileSystem.exists(first.worktreePath));
