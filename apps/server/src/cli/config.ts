@@ -436,7 +436,6 @@ export const resolveServerConfig = (
       otlpTracesExport: traces?.export ?? signalExport,
       otlpMetricsExport: metrics?.export ?? signalExport,
       otlpLogsExport: logs?.export ?? signalExport,
-      otlpServiceName: env.otlpServiceName,
       otelEnvironment: otel,
       mode,
       port,
