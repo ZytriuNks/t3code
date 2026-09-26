@@ -28,6 +28,7 @@ import {
   reduceSidebarProjectScopeMenuState,
   resolveAdjacentThreadId,
   resolveProjectStatusIndicator,
+  resolveSidebarRowAccessibility,
   resolveSidebarThreadStatus,
   resolveSidebarV2TopStatus,
   resolveThreadLastVisitedAt,
