@@ -529,11 +529,98 @@ describe("resolveAssistantMessageCopyState", () => {
 });
 
 describe("deriveMessagesTimelineRows", () => {
-  it("presents project MCP calls and summarizes successful clones through the web timeline", () => {
-    const fixture = makeStreamingTimelineFixture();
-    const source = fixture.visibleTurnItems.find((row) => row.item.type === "dynamic_tool")!;
-    if (source.item.type !== "dynamic_tool") throw new Error("Expected tool fixture");
-    const items: OrchestrationV2ProjectedTurnItem["item"][] = [
+  const queuedMessage = (id: string, prompt: string) => ({
+    id,
+    prompt,
+    images: [],
+    files: [],
+    terminalContexts: [],
+    previewAnnotations: [],
+    reviewComments: [],
+    sendSettings: {
+      modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+      runtimeMode: "full-access" as const,
+      interactionMode: "default" as const,
+      promptEffort: null,
+    },
+    queuedAfterToolActivityId: null,
+    createdAt: "2026-01-01T00:00:01Z",
+  });
+
+  it("appends queued messages after the live rows, marking the oldest as next", () => {
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries: [],
+      isWorking: true,
+      activeTurnStartedAt: "2026-01-01T00:00:00Z",
+      turnDiffSummaries: [],
+      supportsConversationRollback: false,
+      queuedMessages: [queuedMessage("q1", "first"), queuedMessage("q2", "second")],
+    });
+
+    expect(rows.map((row) => row.kind)).toEqual([
+      "working",
+      "thinking",
+      "queued-message",
+      "queued-message",
+    ]);
+    expect(rows.slice(2)).toMatchObject([
+      { id: "queued-message:q1", isNext: true, queuedMessage: { prompt: "first" } },
+      { id: "queued-message:q2", isNext: false, queuedMessage: { prompt: "second" } },
+    ]);
+  });
+
+  it("leads the worktree setup card with the working header", () => {
+    const snapshot: WorktreeSetupSnapshot = {
+      threadId: ThreadId.make("thread-setup"),
+      phase: "running",
+      startedAt: "2026-01-01T00:00:00Z",
+      endedAt: null,
+      branch: "feature",
+      baseRef: "main",
+      worktreePath: null,
+      setupScript: null,
+      stages: [],
+      error: null,
+      sequence: 3,
+    };
+    const userEntry = {
+      id: "user-entry",
+      kind: "message",
+      createdAt: "2026-01-01T00:00:00Z",
+      message: {
+        id: "user-1" as never,
+        role: "user",
+        text: "Build it",
+        turnId: null,
+        createdAt: "2026-01-01T00:00:00Z",
+        updatedAt: "2026-01-01T00:00:00Z",
+        streaming: false,
+      },
+    } as const;
+    const assistantEntry = {
+      id: "assistant-entry",
+      kind: "message",
+      createdAt: "2026-01-01T00:00:30Z",
+      message: {
+        id: "assistant-1" as never,
+        role: "assistant",
+        text: "On it",
+        turnId: "turn-1" as never,
+        createdAt: "2026-01-01T00:00:30Z",
+        updatedAt: "2026-01-01T00:00:30Z",
+        streaming: true,
+      },
+    } as const;
+    const withoutMessages = deriveMessagesTimelineRows({
+      timelineEntries: [],
+      isWorking: true,
+      activeTurnStartedAt: "2026-01-01T00:00:00Z",
+      turnDiffSummaries: [],
+      supportsConversationRollback: false,
+      worktreeSetup: snapshot,
+    });
+    expect(withoutMessages).toEqual([
+      { kind: "working", id: "working-indicator-row", createdAt: "2026-01-01T00:00:00Z" },
       {
         ...source.item,
         type: "dynamic_tool",
