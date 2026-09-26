@@ -591,8 +591,9 @@ const telemetryLayer = Layer.unwrap(
     const headers = Option.getOrUndefined(environment.otlpHeaders);
     const serializationLayer = otlpSerializationLayer(environment.otlpProtocol);
     const resource = {
-      serviceName: "desktop",
+      serviceName: "t3code-desktop",
       attributes: {
+        "service.namespace": "t3code",
         "service.runtime": "desktop",
         "service.mode": environment.isDevelopment ? "development" : "packaged",
       },
