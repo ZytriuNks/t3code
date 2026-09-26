@@ -10442,10 +10442,6 @@ packages:
     resolution: {integrity: sha512-exgYmnmL/sJpR3upZfXG5PoatXQii55xAiXGXzY+sROLZ/Y+SLcp9PgJNI9Vz37HpQ74WvDcLT8eqm+kV3FzrA==}
     engines: {node: '>=16'}
 
-  tough-cookie@6.0.2:
-    resolution: {integrity: sha512-exgYmnmL/sJpR3upZfXG5PoatXQii55xAiXGXzY+sROLZ/Y+SLcp9PgJNI9Vz37HpQ74WvDcLT8eqm+kV3FzrA==}
-    engines: {node: '>=16'}
-
   tr46@0.0.3:
     resolution: {integrity: sha512-N3WMsuqV66lT30CrXNbEjx4GEwlow3v6rr4mCcv6prnfwhS01rkgyFdjPNBYd9br7LpXV1+Emh01fHnq2Gdgrw==}
 
@@ -18908,11 +18904,10 @@ snapshots:
       decimal.js: 10.6.0
       html-encoding-sniffer: 6.0.0(@noble/hashes@1.8.0)
       is-potential-custom-element-name: 1.0.1
-<<<<<<< HEAD
-      lru-cache: 11.5.3
-=======
       lru-cache: 11.5.2
->>>>>>> daafcc4a97 (feat(web): add keyboard navigation for usage (#10158))
+=======
+      lru-cache: 11.5.3
+>>>>>>> ea7d46ac10 (fix(build): validate Linux node-pty prebuilds in Windows artifacts (#13867))
       parse5: 8.0.1
       saxes: 6.0.0
       tough-cookie: 6.0.2
@@ -21956,10 +21951,6 @@ snapshots:
   toqr@0.1.1: {}
 
   totalist@3.0.1: {}
-
-  tough-cookie@6.0.2:
-    dependencies:
-      tldts: 7.4.2
 
   tough-cookie@6.0.2:
     dependencies:
