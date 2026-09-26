@@ -50,24 +50,10 @@ import {
 import { compactDynamicToolOutput } from "@t3tools/shared/toolOutput";
 import { formatWorkspaceRelativePath } from "../../filePathDisplay";
 
-function timelineEntryRunId(entry: TimelineEntry): RunId | null {
-  if (entry.kind === "message") {
-    return entry.message.role === "assistant" ? (entry.message.runId ?? null) : null;
-  }
-  if (entry.kind === "proposed-plan") {
-    return entry.proposedPlan.runId;
-  }
-  return entry.kind === "work" ? (entry.entry.runId ?? null) : null;
-}
-
-/** Whether the entry still represents live activity, not a settled result. */
-function workEntryIsActiveTurnActivity(entry: WorkLogEntry): boolean {
-  return (
-    entry.toolLifecycleStatus === "inProgress" ||
-    (entry.toolLifecycleStatus === undefined &&
-      (entry.sourceActivityKind === "task.progress" || workLogEntryIsToolLike(entry)))
-  );
-}
+const TIMELINE_MINIMAP_ITEM_SPACING = 8;
+export const TIMELINE_MINIMAP_MIN_ITEMS = 2;
+const TIMELINE_MINIMAP_MAX_HEIGHT_CSS = "calc(100vh - 18rem)";
+const TIMELINE_MINIMAP_PERSISTENT_GUTTER = 48;
 
 function singleToolCallLabel(entry: WorkLogEntry): string {
   if (entry.itemType === "reasoning") return entry.detail?.trim().replace(/\s+/g, " ") || "Thought";
@@ -274,14 +260,25 @@ export function resolveTimelineMinimapCurrentIndex(input: {
   return precedingIndex;
 }
 
-export function resolveTimelineMinimapHasPersistentGutter(viewportWidth: number): boolean {
-  if (!Number.isFinite(viewportWidth) || viewportWidth <= 0) {
-    return false;
+/**
+ * Side gutter between the viewport edge and the centered content column.
+ * `contentWidth` is the rendered column width, which follows the Chat width
+ * setting, so callers measure it rather than assume a fixed maximum.
+ */
+function resolveTimelineSideGutter(viewportWidth: number, contentWidth: number): number {
+  if (!Number.isFinite(viewportWidth) || viewportWidth <= 0 || !Number.isFinite(contentWidth)) {
+    return 0;
   }
+  return Math.max(0, (viewportWidth - Math.min(viewportWidth, contentWidth)) / 2);
+}
 
-  const contentWidth = Math.min(viewportWidth, TIMELINE_CONTENT_MAX_WIDTH);
-  const sideGutter = Math.max(0, (viewportWidth - contentWidth) / 2);
-  return sideGutter >= TIMELINE_MINIMAP_PERSISTENT_GUTTER;
+export function resolveTimelineMinimapHasPersistentGutter(
+  viewportWidth: number,
+  contentWidth: number,
+): boolean {
+  return (
+    resolveTimelineSideGutter(viewportWidth, contentWidth) >= TIMELINE_MINIMAP_PERSISTENT_GUTTER
+  );
 }
 
 const TIMELINE_MINIMAP_HIT_STRIP_LEFT = 12;
@@ -290,18 +287,16 @@ const TIMELINE_MINIMAP_EXPANDED_HIT_STRIP_WIDTH = "22rem";
 
 /**
  * The minimap overlays the viewport's left edge while the content column is
- * centered, so the side gutter between them shrinks under browser zoom or a
- * narrow pane. A fixed-width hover strip would then sit on top of the message
+ * centered, so the side gutter between them shrinks under browser zoom, a
+ * narrow pane, or a wider Chat width setting. A fixed-width hover strip would then sit on top of the message
  * text and swallow its pointer events. Cap the strip's width so it never
  * extends past the gutter into the content column; 0 disables the strip.
  */
-export function resolveTimelineMinimapHitStripWidth(viewportWidth: number): number {
-  if (!Number.isFinite(viewportWidth) || viewportWidth <= 0) {
-    return 0;
-  }
-
-  const contentWidth = Math.min(viewportWidth, TIMELINE_CONTENT_MAX_WIDTH);
-  const sideGutter = Math.max(0, (viewportWidth - contentWidth) / 2);
+export function resolveTimelineMinimapHitStripWidth(
+  viewportWidth: number,
+  contentWidth: number,
+): number {
+  const sideGutter = resolveTimelineSideGutter(viewportWidth, contentWidth);
   return Math.max(
     0,
     Math.min(
@@ -309,6 +304,19 @@ export function resolveTimelineMinimapHitStripWidth(viewportWidth: number): numb
       Math.floor(sideGutter) - TIMELINE_MINIMAP_HIT_STRIP_LEFT,
     ),
   );
+}
+
+// The prev/next buttons are centered 4px into the strip and 20px wide, so
+// their hitbox reaches 14px past the strip's left edge.
+const TIMELINE_MINIMAP_NAVIGATION_REACH = 14;
+
+/**
+ * The prev/next buttons hang outside the strip's height, so the strip's own
+ * width cap does not cover them. Keep them inert to the pointer unless the
+ * gutter can hold them; keyboard focus still reaches them.
+ */
+export function resolveTimelineMinimapNavigationInteractive(collapsedWidth: number): boolean {
+  return collapsedWidth >= TIMELINE_MINIMAP_NAVIGATION_REACH;
 }
 
 /**
