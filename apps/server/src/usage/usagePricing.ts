@@ -165,6 +165,12 @@ export function lookupRate(table: RateTable, model: string): ModelRate | null {
   return table.get(key) ?? null;
 }
 
+/** The parts of a transcript record that decide its price. */
+export type PricedRecord = Pick<
+  UsageRecord,
+  "model" | "rateModel" | "totals" | "fast" | "reportedCostUsd"
+>;
+
 export interface PricedUsage {
   readonly costUsd: number;
   readonly costSource: UsageCostSource;
@@ -188,7 +194,7 @@ export function priceUsage(
     return { costUsd: reportedCostUsd, costSource: "providerReported" };
   }
 
-  const rate = override ?? lookupRate(table, model);
+  const rate = override ?? lookupRate(table, record.rateModel ?? model);
   if (rate === null) return { costUsd: 0, costSource: "unpriced" };
 
   const costUsd =
@@ -210,7 +216,12 @@ export function cacheSavingsUsd(
   totals: UsageTokenTotals,
   overrides?: RateTable,
 ): number {
+<<<<<<< HEAD
   const rate = overrides?.get(model.trim()) ?? lookupRate(table, model);
+=======
+  const rate =
+    overrides?.get(record.model.trim()) ?? lookupRate(table, record.rateModel ?? record.model);
+>>>>>>> aade3a69a8 (fix(usage): price Cursor cache savings by base model (#13731))
   if (rate === null) return 0;
   return totals.cachedInputTokens * (rate.inputCostPerToken - rate.cacheReadCostPerToken);
 }
