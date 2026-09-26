@@ -21,30 +21,6 @@ import {
 // cold-open load. Older turn pages wait for this deadline.
 const DEFAULT_THREAD_SNAPSHOT_TIMEOUT_MS = 20_000;
 
-/** Progressive history metadata returned by a bounded snapshot loader. */
-export type ThreadSnapshotHistoryMeta = {
-  readonly historyCursor: string | null;
-  readonly hasMoreHistory: boolean;
-  /** Max local turn ordinal from the full projection; optional on older servers. */
-  readonly latestLocalTurnOrdinal?: number | null;
-};
-
-/**
- * Outcome of an HTTP thread-detail snapshot load.
- *
- * - `present`: snapshot body is available (seed projection, resume via socket).
- * - `missing`: server definitively reported the thread does not exist (404).
- * - `unavailable`: transport/timeout/5xx/etc.; fall back to the socket path.
- */
-export type ThreadSnapshotLoadResult =
-  | {
-      readonly _tag: "present";
-      readonly snapshot: OrchestrationV2ThreadDetailSnapshot;
-      readonly history?: ThreadSnapshotHistoryMeta;
-    }
-  | { readonly _tag: "missing" }
-  | { readonly _tag: "unavailable" };
-
 /**
  * Load a thread's detail snapshot over HTTP instead of embedding it in the
  * WebSocket subscription's first frame. The response is gzip-compressible by
