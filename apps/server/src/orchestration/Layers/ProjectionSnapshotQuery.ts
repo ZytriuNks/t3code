@@ -2710,6 +2710,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           ),
         ),
       );
+  };
 
   const listThreadsWithPullRequests: ProjectionSnapshotQueryShape["listThreadsWithPullRequests"] =
     () =>
