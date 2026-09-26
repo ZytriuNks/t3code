@@ -5,14 +5,7 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeTimersPromises from "node:timers/promises";
 
 import type { UsageRecord } from "./usageTranscripts.ts";
-<<<<<<< HEAD
-import {
-  CursorKeychainTimeoutError,
-  readMacCursorAccessToken,
-} from "../provider/cursorCredentialStore.ts";
-=======
 import { readMacCursorAccessToken } from "../provider/cursorCredentialStore.ts";
->>>>>>> e5a46d6c5d (feat(usage): read cursor, opencode, and antigravity history (#10409))
 
 function object(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -24,7 +17,6 @@ function tokens(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.trunc(value) : 0;
 }
 
-<<<<<<< HEAD
 /**
  * Maps Cursor's tiered names (`cursor-grok-4.6-high-fast`,
  * `claude-fable-5-1-thinking-high`) to the base model's rate-table key.
@@ -38,7 +30,7 @@ export function cursorRateModel(model: string): string {
 }
 
 =======
->>>>>>> e5a46d6c5d (feat(usage): read cursor, opencode, and antigravity history (#10409))
+>>>>>>> aade3a69a8 (fix(usage): price Cursor cache savings by base model (#13731))
 export interface CursorAccountUsageReadResult {
   readonly accountKey: string | null;
   readonly records: readonly UsageRecord[];
@@ -96,13 +88,7 @@ export async function readCursorAccountUsage(
         ? null
         : typeof credentialSource === "string"
           ? "Cursor credentials could not be read."
-<<<<<<< HEAD
-          : cause instanceof CursorKeychainTimeoutError
-            ? "Allow Keychain access on the Mac running T3 Code, then refresh."
-            : "Cursor Keychain credentials could not be read.",
-=======
           : "Cursor Keychain credentials could not be read.",
->>>>>>> e5a46d6c5d (feat(usage): read cursor, opencode, and antigravity history (#10409))
     };
   }
   if (typeof accessToken !== "string" || !accessToken) {
@@ -260,10 +246,9 @@ export async function readCursorAccountUsage(
           provider: "cursor",
           timestampMs,
           model: event.model,
-<<<<<<< HEAD
-          rateModel: cursorRateModel(event.model),
 =======
->>>>>>> e5a46d6c5d (feat(usage): read cursor, opencode, and antigravity history (#10409))
+          rateModel: cursorRateModel(event.model),
+>>>>>>> aade3a69a8 (fix(usage): price Cursor cache savings by base model (#13731))
           sessionId,
           totals,
           reportedCostUsd,
