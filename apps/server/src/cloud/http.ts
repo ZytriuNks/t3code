@@ -60,6 +60,7 @@ import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import { requireEnvironmentScope } from "../auth/http.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import * as AgentAwarenessRelay from "../relay/AgentAwarenessRelay.ts";
 import * as ManagedEndpointRuntime from "./ManagedEndpointRuntime.ts";
 import {
   SERVICE_STATE_FILE,
@@ -361,6 +362,7 @@ interface CloudHttpDependencies {
   readonly environmentAuth: EnvironmentAuth.EnvironmentAuth["Service"];
   readonly cliTokenManager: CliTokenManager.CloudCliTokenManager["Service"];
   readonly httpClient: HttpClient.HttpClient;
+  readonly awarenessRelay: AgentAwarenessRelay.AgentAwarenessRelay["Service"];
 }
 
 const cloudHttpDependencies = Effect.gen(function* () {
@@ -371,6 +373,7 @@ const cloudHttpDependencies = Effect.gen(function* () {
     environmentAuth: yield* EnvironmentAuth.EnvironmentAuth,
     cliTokenManager: yield* CliTokenManager.CloudCliTokenManager,
     httpClient: yield* HttpClient.HttpClient,
+    awarenessRelay: yield* AgentAwarenessRelay.AgentAwarenessRelay,
   } satisfies CloudHttpDependencies;
 });
 
@@ -455,10 +458,75 @@ const applyCloudRelayConfig = Effect.fn("environment.cloud.applyRelayConfig")(fu
   dependencies: CloudHttpDependencies,
   payload: RelayEnvironmentConfigRequest,
 ) {
-  yield* validateRelayConfigPayload(payload);
-  yield* validateLinkedCloudUser({
-    secrets: dependencies.secrets,
-    cloudUserId: payload.cloudUserId,
+  const apply = Effect.gen(function* () {
+    yield* validateRelayConfigPayload(payload);
+    yield* validateLinkedCloudUser({
+      secrets: dependencies.secrets,
+      cloudUserId: payload.cloudUserId,
+    });
+    yield* validateCloudMintPublicKey(payload.cloudMintPublicKey);
+    // Reject unsupported runtimes before touching the connector so a bad
+    // payload cannot stop a healthy tunnel on its way to a 503.
+    if (
+      payload.endpointRuntime !== null &&
+      payload.endpointRuntime.providerKind !== "cloudflare_tunnel"
+    ) {
+      return yield* new EnvironmentCloudEndpointUnavailableError({
+        message: "Managed endpoint runtime could not be started.",
+        endpointRuntimeStatus: {
+          status: "unsupported",
+          providerKind: payload.endpointRuntime.providerKind,
+        },
+      });
+    }
+    yield* dependencies.endpointRuntime.applyConfig(null);
+    yield* dependencies.secrets.remove(CLOUD_ENDPOINT_CONFIRMED_ORIGIN);
+
+    yield* dependencies.secrets.set(RELAY_URL_SECRET, stringToBytes(payload.relayUrl));
+    yield* dependencies.secrets.set(
+      RELAY_ISSUER_SECRET,
+      stringToBytes(payload.relayIssuer ?? payload.relayUrl),
+    );
+    yield* dependencies.secrets.set(CLOUD_LINKED_USER_ID, stringToBytes(payload.cloudUserId));
+    yield* dependencies.secrets.set(
+      RELAY_ENVIRONMENT_CREDENTIAL_SECRET,
+      stringToBytes(payload.environmentCredential),
+    );
+    yield* dependencies.secrets.set(
+      CLOUD_MINT_PUBLIC_KEY,
+      stringToBytes(payload.cloudMintPublicKey),
+    );
+    yield* dependencies.awarenessRelay.requestCatchUp();
+    if (payload.endpointRuntime) {
+      const endpointRuntimeJson = yield* encodeEndpointRuntimeConfigJson(payload.endpointRuntime);
+      yield* dependencies.secrets.set(
+        CLOUD_ENDPOINT_RUNTIME_CONFIG,
+        stringToBytes(endpointRuntimeJson),
+      );
+    } else {
+      yield* dependencies.secrets.remove(CLOUD_ENDPOINT_RUNTIME_CONFIG);
+    }
+    if (payload.endpointRuntime === null || options?.confirmedOrigin === undefined) {
+      return {
+        ok: true,
+        endpointRuntimeStatus: { status: "disabled" },
+      } satisfies EnvironmentCloudRelayConfigResult;
+    }
+    const endpointRuntimeStatus = yield* dependencies.endpointRuntime.applyConfig(
+      payload.endpointRuntime,
+    );
+    if (endpointRuntimeStatus.status !== "running") {
+      return yield* new EnvironmentCloudEndpointUnavailableError({
+        message: "Managed endpoint runtime could not be started.",
+        endpointRuntimeStatus,
+      });
+    }
+    const marker = yield* encodeConfirmedOriginJson({
+      config: payload.endpointRuntime,
+      origin: options.confirmedOrigin,
+    });
+    yield* dependencies.secrets.set(CLOUD_ENDPOINT_CONFIRMED_ORIGIN, stringToBytes(marker));
+    return { ok: true, endpointRuntimeStatus } satisfies EnvironmentCloudRelayConfigResult;
   });
   yield* validateCloudMintPublicKey(payload.cloudMintPublicKey);
   const endpointRuntimeStatus = yield* dependencies.endpointRuntime.applyConfig(
@@ -816,6 +884,7 @@ const cloudPreferencesHandler = Effect.fn("environment.cloud.preferences")(
       PUBLISH_AGENT_ACTIVITY_SECRET,
       stringToBytes(String(payload.publishAgentActivity)),
     );
+    yield* dependencies.awarenessRelay.requestCatchUp();
     return yield* readCloudLinkState(dependencies);
   },
   Effect.catchIf(
