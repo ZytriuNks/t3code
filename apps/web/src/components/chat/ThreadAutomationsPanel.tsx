@@ -11,6 +11,7 @@ import {
 import { ThreadDetailsSection } from "./ThreadDetailsSection";
 import { cn } from "../../lib/utils";
 import { relativeLabel, scheduleLabel } from "../settings/ScheduledTasksSettings";
+import { useI18n } from "../../i18n/I18nProvider";
 import { useEnvironmentQuery } from "../../state/query";
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -37,6 +38,7 @@ export function ThreadAutomationsPanel(props: {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
 }) {
+  const { t } = useI18n();
   const tasksQuery = useEnvironmentQuery(
     serverEnvironment.scheduledTasksLive({ environmentId: props.environmentId, input: {} }),
   );
@@ -148,12 +150,16 @@ export function ThreadAutomationsPanel(props: {
                 </span>
               </div>
               <p className="truncate text-[11px] text-muted-foreground">
-                {scheduleLabel(task.schedule)}
+                {scheduleLabel(task.schedule, t)}
                 {task.enabled && task.nextRunAt !== null
-                  ? ` · next ${relativeLabel(task.nextRunAt)}`
+                  ? t("settings.scheduledTasks.relative.withNext", {
+                      label: relativeLabel(task.nextRunAt, t),
+                    })
                   : task.enabled
                     ? ""
-                    : " · paused"}
+                    : t("settings.scheduledTasks.relative.withNext", {
+                        label: t("settings.scheduledTasks.status.paused").toLowerCase(),
+                      })}
               </p>
             </div>
             <Tooltip>

@@ -81,17 +81,24 @@ import {
   SETTINGS_PICKER_TRIGGER_CLASSNAME,
   useRelativeTimeTick,
 } from "./settingsLayout";
+import { useI18n } from "../../i18n/I18nProvider";
+import type { SettingsTranslator } from "./settingsSearch";
 
 /** JS day-of-week (0 = Sunday) rendered Monday-first, matching how people read a week. */
 const WEEKDAY_ORDER = [1, 2, 3, 4, 5, 6, 0] as const;
 const WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
 const WEEKDAY_SHORT = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"] as const;
 
-const WORKSPACE_MODE_LABELS: Record<WorkspaceMode, string> = {
-  worktree: "Create a new worktree",
-  root: "Use the project checkout",
-  existing_worktree: "Use a specific checkout",
-};
+function workspaceModeLabel(t: SettingsTranslator, mode: WorkspaceMode): string {
+  switch (mode) {
+    case "worktree":
+      return t("settings.scheduledTasks.field.workspace.worktree");
+    case "root":
+      return t("settings.scheduledTasks.field.workspace.root");
+    case "existing_worktree":
+      return t("settings.scheduledTasks.field.workspace.existing_worktree");
+  }
+}
 
 const EMPTY_DRAFT: DraftState = {
   editingId: null,
@@ -161,21 +168,24 @@ function scheduleFromDraft(draft: DraftState): ScheduledTaskSchedule {
   };
 }
 
-export function scheduleLabel(schedule: ScheduledTaskSchedule): string {
+export function scheduleLabel(schedule: ScheduledTaskSchedule, t?: SettingsTranslator): string {
+  const tr: SettingsTranslator = t ?? ((key) => key);
   if (schedule.type === "interval") {
     const minutes = schedule.everyMs / 60_000;
     return Number.isInteger(minutes)
-      ? `Every ${minutes} min`
-      : `Every ${Math.round(schedule.everyMs / 1000)} sec`;
+      ? tr("settings.scheduledTasks.schedule.everyMinutes", { minutes })
+      : tr("settings.scheduledTasks.schedule.everySeconds", {
+          seconds: Math.round(schedule.everyMs / 1000),
+        });
   }
   const weekdays = schedule.weekdays ?? [];
   const days =
     weekdays.length === 0
-      ? "Daily"
+      ? tr("settings.scheduledTasks.schedule.daily")
       : weekdays.length === 5 && weekdays.every((day) => day >= 1 && day <= 5)
-        ? "Weekdays"
+        ? tr("settings.scheduledTasks.schedule.weekdays")
         : weekdays.map((day) => WEEKDAY_LABELS[day]).join(", ");
-  return `${days} at ${schedule.timeOfDay}`;
+  return tr("settings.scheduledTasks.schedule.atTime", { days, time: schedule.timeOfDay });
 }
 
 /**
@@ -183,20 +193,21 @@ export function scheduleLabel(schedule: ScheduledTaskSchedule): string {
  * past, and `nextRunAt` is a future instant — render "in 5m" style labels
  * for upcoming runs instead of a misleading "just now".
  */
-export function relativeLabel(value: string | null): string {
-  if (!value) return "Not scheduled";
+export function relativeLabel(value: string | null, t?: SettingsTranslator): string {
+  const tr: SettingsTranslator = t ?? ((key) => key);
+  if (!value) return tr("settings.scheduledTasks.status.notScheduled");
   const diffMs = new Date(value).getTime() - Date.now();
   if (diffMs <= 0) {
     const relative = formatRelativeTime(value);
-    if (!relative) return "Not scheduled";
+    if (!relative) return tr("settings.scheduledTasks.status.notScheduled");
     return relative.suffix ? `${relative.value} ${relative.suffix}` : relative.value;
   }
   const minutes = Math.ceil(diffMs / 60_000);
-  if (minutes < 2) return "in under a minute";
-  if (minutes < 60) return `in ${minutes}m`;
+  if (minutes < 2) return tr("settings.scheduledTasks.relative.inUnderMinute");
+  if (minutes < 60) return tr("settings.scheduledTasks.relative.inMinutes", { minutes });
   const hours = Math.round(minutes / 60);
-  if (hours < 24) return `in ${hours}h`;
-  return `in ${Math.round(hours / 24)}d`;
+  if (hours < 24) return tr("settings.scheduledTasks.relative.inHours", { hours });
+  return tr("settings.scheduledTasks.relative.inDays", { days: Math.round(hours / 24) });
 }
 
 function statusVariant(status: ScheduledTask["lastRunStatus"]) {
@@ -210,6 +221,7 @@ export function ScheduledTasksSettings(target: {
   readonly environmentId?: EnvironmentId;
   readonly taskId?: ScheduledTaskId | undefined;
 }) {
+  const { t } = useI18n();
   const { scope, environments, connectedEnvironments, environment } = useSettingsScope();
   const [editor, setEditor] = useState<{
     environmentId: EnvironmentId;
@@ -222,7 +234,7 @@ export function ScheduledTasksSettings(target: {
   return (
     <SettingsPageContainer>
       <SettingsSection
-        title="Scheduled tasks"
+        title={t("settings.scheduledTasks.panel.title")}
         variant="plain"
         headerAction={
           <Button
@@ -235,12 +247,12 @@ export function ScheduledTasksSettings(target: {
             }
           >
             <PlusIcon className="size-3" />
-            New task
+            {t("settings.scheduledTasks.dialog.title.create")}
           </Button>
         }
       >
         {scope.kind === "unavailable" ? (
-          <SettingsSection title="Unavailable selection">
+          <SettingsSection title={t("settings.scheduledTasks.panel.unavailableSelection")}>
             <SettingsRow title={scope.message} />
           </SettingsSection>
         ) : environments.length === 0 ? (
@@ -249,8 +261,10 @@ export function ScheduledTasksSettings(target: {
               <EmptyMedia variant="icon">
                 <Clock3Icon />
               </EmptyMedia>
-              <EmptyTitle>No environments available</EmptyTitle>
-              <EmptyDescription>Connect an environment to manage scheduled tasks.</EmptyDescription>
+              <EmptyTitle>{t("settings.scheduledTasks.panel.noEnvironments.title")}</EmptyTitle>
+              <EmptyDescription>
+                {t("settings.scheduledTasks.panel.noEnvironments.description")}
+              </EmptyDescription>
             </EmptyHeader>
           </Empty>
         ) : (
@@ -295,6 +309,7 @@ function ScheduledTaskEnvironmentSection({
   readonly taskId?: ScheduledTaskId | undefined;
   readonly onEdit: (environmentId: EnvironmentId, task: ScheduledTask) => void;
 }) {
+  const { t } = useI18n();
   const { scope } = useSettingsScope();
   const connected =
     environment.connection.phase === "connected" && environment.serverConfig !== null;
@@ -331,26 +346,31 @@ function ScheduledTaskEnvironmentSection({
     >
       {!connected ? (
         <SettingsRow
-          title="Environment disconnected"
-          description={`Reconnect ${environment.label} to view its scheduled tasks.`}
+          title={t("settings.scheduledTasks.panel.environmentDisconnected.title")}
+          description={t("settings.scheduledTasks.panel.environmentDisconnected.description", {
+            label: environment.label,
+          })}
         />
       ) : tasksQuery.error ? (
-        <SettingsRow title="Could not load scheduled tasks" description={tasksQuery.error} />
+        <SettingsRow
+          title={t("settings.scheduledTasks.panel.loadError.title")}
+          description={tasksQuery.error}
+        />
       ) : !tasks ? (
-        <SettingsRow title="Loading scheduled tasks…" role="status" />
+        <SettingsRow title={t("settings.scheduledTasks.panel.loading.title")} role="status" />
       ) : (
         <>
           {taskId && !linkedTask ? (
             <SettingsRow
-              title="Task unavailable"
-              description="This task no longer exists or is outside the selected project scope."
+              title={t("settings.scheduledTasks.panel.taskUnavailable.title")}
+              description={t("settings.scheduledTasks.panel.taskUnavailable.description")}
               role="status"
             />
           ) : null}
           {tasks.length === 0 ? (
             <SettingsRow
-              title="No scheduled tasks"
-              description="No tasks match this environment and project selection."
+              title={t("settings.scheduledTasks.panel.empty.title")}
+              description={t("settings.scheduledTasks.panel.empty.description")}
             />
           ) : (
             tasks.map((task) => (
@@ -377,6 +397,7 @@ function ScheduledTaskRow({
   readonly task: ScheduledTask;
   readonly onEdit: () => void;
 }) {
+  const { t } = useI18n();
   const [busy, setBusy] = useState(false);
   const toggle = useAtomCommand(serverEnvironment.setScheduledTaskEnabled, {
     label: "scheduled task enabled",
@@ -401,7 +422,7 @@ function ScheduledTaskRow({
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Could not update scheduled task",
+          title: t("settings.scheduledTasks.panel.updateError.title"),
           description: String(squashAtomCommandFailure(result)),
         }),
       );
@@ -414,12 +435,14 @@ function ScheduledTaskRow({
       status={
         <div className="flex flex-wrap items-center gap-2">
           <span>
-            {scheduleLabel(task.schedule)} ·{" "}
+            {scheduleLabel(task.schedule, t)} ·{" "}
             {task.enabled
               ? task.nextRunAt
-                ? `Next run ${relativeLabel(task.nextRunAt)}`
-                : "Not scheduled"
-              : "Paused"}
+                ? t("settings.scheduledTasks.relative.nextRun", {
+                    label: relativeLabel(task.nextRunAt, t),
+                  })
+                : t("settings.scheduledTasks.status.notScheduled")
+              : t("settings.scheduledTasks.status.paused")}
           </span>
           {task.lastRunStatus !== "never" ? (
             <Badge variant={statusVariant(task.lastRunStatus)}>{task.lastRunStatus}</Badge>
@@ -432,7 +455,7 @@ function ScheduledTaskRow({
           <Switch
             checked={task.enabled}
             disabled={busy}
-            aria-label={`Enable ${task.title}`}
+            aria-label={t("settings.scheduledTasks.actions.enable", { title: task.title })}
             onCheckedChange={() => void act("toggle")}
           />
           <Menu>
@@ -442,7 +465,7 @@ function ScheduledTaskRow({
                   size="icon-sm"
                   variant="ghost"
                   disabled={busy}
-                  aria-label={`Actions for ${task.title}`}
+                  aria-label={t("settings.scheduledTasks.actions.aria", { title: task.title })}
                 />
               }
             >
@@ -451,16 +474,16 @@ function ScheduledTaskRow({
             <MenuPopup align="end">
               <MenuItem onClick={onEdit}>
                 <PencilIcon />
-                Edit
+                {t("settings.scheduledTasks.actions.edit")}
               </MenuItem>
               <MenuItem onClick={() => void act("run")}>
                 <PlayIcon />
-                Run now
+                {t("settings.scheduledTasks.actions.runNow")}
               </MenuItem>
               <MenuSeparator />
               <MenuItem onClick={() => void act("delete")}>
                 <Trash2Icon />
-                Delete
+                {t("settings.scheduledTasks.actions.delete")}
               </MenuItem>
             </MenuPopup>
           </Menu>
@@ -479,6 +502,7 @@ function ScheduledTaskEditorDialog({
   readonly task: ScheduledTask | null;
   readonly onClose: () => void;
 }) {
+  const { t } = useI18n();
   const { scope, connectedEnvironments } = useSettingsScope();
   const [environmentId, setEnvironmentId] = useState(initialEnvironmentId);
   const environment = useEnvironment(environmentId);
@@ -562,7 +586,10 @@ function ScheduledTaskEditorDialog({
       !projects.some((project) => project.id === selectedProjectId) ||
       selection === null
     ) {
-      reportFailure("Scheduled task is incomplete", "Add a title, prompt, project, and model.");
+      reportFailure(
+        t("settings.scheduledTasks.validation.incomplete.title"),
+        t("settings.scheduledTasks.validation.incomplete.description"),
+      );
       return;
     }
     const schedule = scheduleFromDraft(draft);
@@ -570,11 +597,17 @@ function ScheduledTaskEditorDialog({
       schedule.type === "interval" &&
       (!Number.isSafeInteger(schedule.everyMs) || schedule.everyMs < MIN_SCHEDULED_TASK_INTERVAL_MS)
     ) {
-      reportFailure("Invalid interval", "Enter an interval of at least one minute.");
+      reportFailure(
+        t("settings.scheduledTasks.validation.interval.title"),
+        t("settings.scheduledTasks.validation.interval.description"),
+      );
       return;
     }
     if (draft.workspaceMode === "existing_worktree" && !draft.existingWorktreePath.trim()) {
-      reportFailure("Checkout path is required", "Enter the path of the checkout to run in.");
+      reportFailure(
+        t("settings.scheduledTasks.validation.checkout.title"),
+        t("settings.scheduledTasks.validation.checkout.description"),
+      );
       return;
     }
     // Keep the original selection object (with provider options) when the
@@ -617,7 +650,10 @@ function ScheduledTaskEditorDialog({
     if (result._tag === "Failure") {
       submissionPending.current = false;
       if (!isAtomCommandInterrupted(result)) {
-        reportFailure("Could not save scheduled task", squashAtomCommandFailure(result));
+        reportFailure(
+          t("settings.scheduledTasks.saveError.title"),
+          squashAtomCommandFailure(result),
+        );
       }
       return;
     }
@@ -633,18 +669,25 @@ function ScheduledTaskEditorDialog({
     >
       <DialogPopup className="max-w-xl">
         <DialogHeader>
-          <DialogTitle>{draft.editingId ? "Edit task" : "New task"}</DialogTitle>
-          <DialogDescription>
-            Run a prompt automatically — on an interval or at a fixed time.
-          </DialogDescription>
+          <DialogTitle>
+            {draft.editingId
+              ? t("settings.scheduledTasks.dialog.title.edit")
+              : t("settings.scheduledTasks.dialog.title.create")}
+          </DialogTitle>
+          <DialogDescription>{t("settings.scheduledTasks.dialog.description")}</DialogDescription>
         </DialogHeader>
 
         <DialogPanel>
           <fieldset disabled={saving} className="space-y-5">
             {!connected ? (
-              <p className="text-sm text-destructive">Reconnect this environment before saving.</p>
+              <p className="text-sm text-destructive">
+                {t("settings.scheduledTasks.dialog.reconnectRequired")}
+              </p>
             ) : null}
-            <Field label="Runs on" htmlFor="scheduled-task-environment">
+            <Field
+              label={t("settings.scheduledTasks.field.runsOn")}
+              htmlFor="scheduled-task-environment"
+            >
               <Select
                 value={environmentId}
                 disabled={task !== null || saving}
@@ -670,7 +713,8 @@ function ScheduledTaskEditorDialog({
                         kind={resolveEnvironmentMachineKind(environment?.serverConfig ?? null)}
                         className="size-4"
                       />
-                      {environment?.label ?? "Unavailable environment"}
+                      {environment?.label ??
+                        t("settings.scheduledTasks.field.environmentUnavailable")}
                     </span>
                   </SelectValue>
                 </SelectTrigger>
@@ -694,13 +738,13 @@ function ScheduledTaskEditorDialog({
             ) : null}
             {editingTaskMissing ? (
               <p className="text-xs text-destructive" role="status">
-                This scheduled task no longer exists.
+                {t("settings.scheduledTasks.dialog.editingTaskMissing")}
               </p>
             ) : null}
-            <Field label="Name" htmlFor="scheduled-task-title">
+            <Field label={t("settings.scheduledTasks.field.name")} htmlFor="scheduled-task-title">
               <Input
                 id="scheduled-task-title"
-                placeholder="e.g. Check for Sentry issues"
+                placeholder={t("settings.scheduledTasks.field.namePlaceholder")}
                 value={draft.title}
                 onChange={(event) =>
                   setDraft((current) => ({ ...current, title: event.target.value }))
@@ -709,7 +753,10 @@ function ScheduledTaskEditorDialog({
             </Field>
 
             <div className="grid gap-3 sm:grid-cols-2">
-              <Field label="Project" htmlFor="scheduled-task-project">
+              <Field
+                label={t("settings.scheduledTasks.field.project")}
+                htmlFor="scheduled-task-project"
+              >
                 <Select
                   value={selectedProjectId}
                   onValueChange={(projectId) =>
@@ -717,7 +764,9 @@ function ScheduledTaskEditorDialog({
                   }
                 >
                   <SelectTrigger size="sm" id="scheduled-task-project">
-                    <SelectValue placeholder="Select a project">
+                    <SelectValue
+                      placeholder={t("settings.scheduledTasks.field.projectPlaceholder")}
+                    >
                       {selectedProject?.title}
                     </SelectValue>
                   </SelectTrigger>
@@ -731,7 +780,10 @@ function ScheduledTaskEditorDialog({
                 </Select>
               </Field>
 
-              <Field label="Workspace" htmlFor="scheduled-task-workspace">
+              <Field
+                label={t("settings.scheduledTasks.field.workspace")}
+                htmlFor="scheduled-task-workspace"
+              >
                 <Select
                   value={draft.workspaceMode}
                   onValueChange={(value) =>
@@ -739,7 +791,7 @@ function ScheduledTaskEditorDialog({
                   }
                 >
                   <SelectTrigger size="sm" id="scheduled-task-workspace">
-                    <SelectValue>{WORKSPACE_MODE_LABELS[draft.workspaceMode]}</SelectValue>
+                    <SelectValue>{workspaceModeLabel(t, draft.workspaceMode)}</SelectValue>
                   </SelectTrigger>
                   <SelectPopup>
                     <SelectItem value="worktree">Create a new worktree</SelectItem>
@@ -751,7 +803,10 @@ function ScheduledTaskEditorDialog({
             </div>
 
             {draft.workspaceMode === "worktree" ? (
-              <Field label="Base branch" htmlFor="scheduled-task-base-ref">
+              <Field
+                label={t("settings.scheduledTasks.field.baseBranch")}
+                htmlFor="scheduled-task-base-ref"
+              >
                 <WorktreeBaseBranchPicker
                   key={`${environmentId}:${selectedProjectId}`}
                   id="scheduled-task-base-ref"
@@ -768,11 +823,14 @@ function ScheduledTaskEditorDialog({
               </Field>
             ) : null}
             {draft.workspaceMode === "existing_worktree" ? (
-              <Field label="Checkout path" htmlFor="scheduled-task-checkout">
+              <Field
+                label={t("settings.scheduledTasks.field.checkoutPath")}
+                htmlFor="scheduled-task-checkout"
+              >
                 <Input
                   id="scheduled-task-checkout"
                   value={draft.existingWorktreePath}
-                  placeholder="/path/to/checkout"
+                  placeholder={t("settings.scheduledTasks.field.checkoutPathPlaceholder")}
                   onChange={(event) =>
                     setDraft((current) => ({
                       ...current,
@@ -783,11 +841,14 @@ function ScheduledTaskEditorDialog({
               </Field>
             ) : null}
 
-            <Field label="Prompt" htmlFor="scheduled-task-prompt">
+            <Field
+              label={t("settings.scheduledTasks.field.prompt")}
+              htmlFor="scheduled-task-prompt"
+            >
               <Textarea
                 id="scheduled-task-prompt"
                 className="max-h-64 overflow-y-auto"
-                placeholder="What should the agent do each time this runs?"
+                placeholder={t("settings.scheduledTasks.field.promptPlaceholder")}
                 value={draft.prompt}
                 onChange={(event) =>
                   setDraft((current) => ({ ...current, prompt: event.target.value }))
@@ -795,7 +856,7 @@ function ScheduledTaskEditorDialog({
               />
             </Field>
 
-            <Field label="Model">
+            <Field label={t("settings.scheduledTasks.field.model")}>
               <ProviderModelPicker
                 disabled={saving || !connected}
                 activeInstanceId={activeInstanceId}
@@ -815,14 +876,13 @@ function ScheduledTaskEditorDialog({
               {task?.schedule.type === "interval" &&
               task.schedule.everyMs < MIN_SCHEDULED_TASK_INTERVAL_MS ? (
                 <p className="text-sm text-muted-foreground" role="status">
-                  This task uses a legacy interval below one minute. Saving updates it to at least
-                  one minute.
+                  {t("settings.scheduledTasks.legacyIntervalWarning")}
                 </p>
               ) : null}
               <div className="flex items-center justify-between gap-2">
-                <Label>Schedule</Label>
+                <Label>{t("settings.scheduledTasks.field.schedule")}</Label>
                 <ToggleGroup
-                  aria-label="Schedule type"
+                  aria-label={t("settings.scheduledTasks.field.scheduleAriaLabel")}
                   value={[draft.scheduleMode]}
                   onValueChange={(values) => {
                     const mode = values[0];
@@ -830,15 +890,21 @@ function ScheduledTaskEditorDialog({
                       setDraft((current) => ({ ...current, scheduleMode: mode }));
                   }}
                 >
-                  <Toggle value="fixed">At a time</Toggle>
-                  <Toggle value="interval">Every interval</Toggle>
+                  <Toggle value="fixed">
+                    {t("settings.scheduledTasks.schedule.toggle.atTime")}
+                  </Toggle>
+                  <Toggle value="interval">
+                    {t("settings.scheduledTasks.schedule.toggle.interval")}
+                  </Toggle>
                 </ToggleGroup>
               </div>
 
               {draft.scheduleMode === "fixed" ? (
                 <div className="flex flex-wrap items-center gap-3">
                   <div className="flex items-center gap-2">
-                    <Label htmlFor="scheduled-task-time">Run at</Label>
+                    <Label htmlFor="scheduled-task-time">
+                      {t("settings.scheduledTasks.field.runAt")}
+                    </Label>
                     <Input
                       type="time"
                       id="scheduled-task-time"
@@ -855,7 +921,7 @@ function ScheduledTaskEditorDialog({
                     multiple
                     variant="outline"
                     size="sm"
-                    aria-label="Days to run"
+                    aria-label={t("settings.scheduledTasks.field.daysToRun")}
                     value={[...draft.weekdays].map(String)}
                     onValueChange={(values) => {
                       if (values.length === 0) return;
@@ -874,7 +940,9 @@ function ScheduledTaskEditorDialog({
                 </div>
               ) : (
                 <div className="flex items-center gap-2">
-                  <Label htmlFor="scheduled-task-interval">Run every</Label>
+                  <Label htmlFor="scheduled-task-interval">
+                    {t("settings.scheduledTasks.field.runEvery")}
+                  </Label>
                   <Input
                     type="number"
                     id="scheduled-task-interval"
@@ -887,19 +955,23 @@ function ScheduledTaskEditorDialog({
                       setDraft((current) => ({ ...current, intervalMinutes: event.target.value }))
                     }
                   />
-                  <span className="text-xs text-muted-foreground">minutes</span>
+                  <span className="text-xs text-muted-foreground">
+                    {t("settings.scheduledTasks.field.minutes")}
+                  </span>
                 </div>
               )}
             </div>
 
             <div className="flex items-center justify-between gap-4">
               <div className="min-w-0 space-y-1">
-                <Label htmlFor="scheduled-task-enabled">Enabled</Label>
+                <Label htmlFor="scheduled-task-enabled">
+                  {t("settings.scheduledTasks.field.enabled")}
+                </Label>
                 <p
                   id="scheduled-task-enabled-description"
                   className="text-sm text-muted-foreground"
                 >
-                  Disabled tasks stay saved but do not run.
+                  {t("settings.scheduledTasks.field.enabledHint")}
                 </p>
               </div>
               <Switch
@@ -914,14 +986,16 @@ function ScheduledTaskEditorDialog({
 
         <DialogFooter>
           <DialogClose render={<Button variant="outline" size="sm" disabled={saving} />}>
-            Cancel
+            {t("settings.scheduledTasks.dialog.cancel")}
           </DialogClose>
           <Button
             size="sm"
             disabled={saving || editingTaskMissing || !connected || !tasksQuery.data}
             onClick={() => void submit()}
           >
-            {draft.editingId ? "Save task" : "Create task"}
+            {draft.editingId
+              ? t("settings.scheduledTasks.field.save.edit")
+              : t("settings.scheduledTasks.field.save.create")}
           </Button>
         </DialogFooter>
       </DialogPopup>

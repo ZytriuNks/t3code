@@ -7,6 +7,7 @@ import { useCallback, useMemo } from "react";
 
 import { openCommandPalette } from "~/commandPaletteBus";
 import { useClientSettings } from "~/hooks/useSettings";
+import { useI18n } from "~/i18n/I18nProvider";
 import { hasExplicitComposerModelSelection } from "~/lib/chatThreadActions";
 import { selectProjectGroupingSettings } from "~/logicalProject";
 import {
@@ -43,6 +44,7 @@ export function DraftHeroHeadline({
   activeProjectRef,
   activeProjectTitle,
 }: DraftHeroHeadlineProps) {
+  const { language, t } = useI18n();
   const projects = useProjects();
   const threads = useThreadShells();
   const { environments } = useEnvironments();
@@ -147,7 +149,9 @@ export function DraftHeroHeadline({
             />
           }
         >
-          <span className="min-w-0 truncate">{activeProjectDisplayName ?? "Choose a project"}</span>
+          <span className="min-w-0 truncate">
+            {activeProjectDisplayName ?? t("composer.hero.chooseProject")}
+          </span>
         </TooltipTrigger>
         {activeProjectDisplayName ? (
           <TooltipPopup side="top">{activeProjectDisplayName}</TooltipPopup>
@@ -217,7 +221,7 @@ export function DraftHeroHeadline({
         <MenuSeparator />
         <MenuItem onClick={openAddProject}>
           <FolderPlusIcon />
-          New project
+          {t("composer.hero.newProject")}
         </MenuItem>
       </MenuPopup>
     </Menu>
@@ -227,7 +231,7 @@ export function DraftHeroHeadline({
       onClick={openAddProject}
       className="pointer-events-auto inline cursor-pointer border-muted-foreground/35 border-b border-dotted text-muted-foreground/60 transition-colors hover:border-muted-foreground/60 hover:text-muted-foreground/80 focus-visible:rounded-sm focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
     >
-      {activeProjectTitle ?? "Add a project"}
+      {activeProjectTitle ?? t("composer.hero.addProject")}
     </button>
   );
 
@@ -236,10 +240,12 @@ export function DraftHeroHeadline({
   // in the h1; without an explicit label its widget state bleeds into the
   // announced phrase.
   const headingLabel = hasResolvedProject
-    ? `What should we build in ${activeProjectDisplayName}?`
+    ? t("composer.hero.buildIn", { project: activeProjectDisplayName ?? "" })
     : canChooseProject
-      ? `${activeProjectDisplayName ?? "Choose a project"} to start`
-      : "Add a project to start";
+      ? t("composer.hero.projectToStart", {
+          project: activeProjectDisplayName ?? t("composer.hero.chooseProject"),
+        })
+      : t("composer.hero.addProjectToStart");
 
   return (
     <h1
@@ -247,11 +253,24 @@ export function DraftHeroHeadline({
       className="mx-auto w-full max-w-5xl text-center font-normal text-2xl text-foreground tracking-tight sm:text-3xl"
     >
       {hasResolvedProject ? (
-        <>What should we build in {projectSelector}?</>
+        <>
+          {t("composer.hero.buildPrefix")}
+          {language === "en" ? " " : null}
+          {projectSelector}
+          {t("composer.hero.buildSuffix")}
+        </>
       ) : canChooseProject ? (
-        <>{projectSelector} to start</>
+        activeProjectDisplayName ? (
+          language === "zh-CN" ? (
+            <>从 {projectSelector} 开始</>
+          ) : (
+            <>{projectSelector} to start</>
+          )
+        ) : (
+          <>{t("composer.hero.chooseProjectToStart")}</>
+        )
       ) : (
-        <>Add a project to start</>
+        <>{t("composer.hero.addProjectToStart")}</>
       )}
     </h1>
   );

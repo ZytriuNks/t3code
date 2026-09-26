@@ -100,7 +100,7 @@ import { ensureLocalApi, readLocalApi } from "../../localApi";
 import { isMacPlatform } from "../../lib/utils";
 import { EMPTY_SERVER_PROVIDERS } from "../../state/server";
 import { useArchivedThreadSnapshots } from "../../lib/archivedThreadsState";
-import { formatRelativeTimeLabel } from "../../timestampFormat";
+import { getRelativeTimeState } from "../../timestampFormat";
 import { Button } from "../ui/button";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
 import {
@@ -251,6 +251,12 @@ const INHERITED_RESPONSE_STREAMING_MODE_LABEL_KEYS: Readonly<Record<string, Mess
   token: "settings.row.copy.settingValue.streamingMode.token",
 };
 
+const INHERITED_WORKTREE_SUBMODULE_LABEL_KEYS: Readonly<Record<string, MessageKey>> = {
+  recursive: "settings.general.submodules.recursive",
+  "top-level": "settings.general.submodules.topLevel",
+  none: "settings.general.submodules.none",
+};
+
 function inheritedSettingValueLabel(
   key: keyof ServerSettings,
   value: string,
@@ -261,7 +267,9 @@ function inheritedSettingValueLabel(
       ? INHERITED_RUNTIME_MODE_LABEL_KEYS[value]
       : key === "responseStreamingMode"
         ? INHERITED_RESPONSE_STREAMING_MODE_LABEL_KEYS[value]
-        : undefined;
+        : key === "worktreeSubmodules"
+          ? INHERITED_WORKTREE_SUBMODULE_LABEL_KEYS[value]
+          : undefined;
   return messageKey === undefined ? value : t(messageKey);
 }
 
@@ -711,17 +719,17 @@ export function useSettingsRestore(onRestored?: () => void) {
         ? [t("settings.restore.label.autoSettleMerged")]
         : []),
       ...(settings.autoResumeLimitedThreads !== DEFAULT_UNIFIED_SETTINGS.autoResumeLimitedThreads
-        ? ["Auto-resume limited threads"]
+        ? [t("settings.restore.label.autoResumeLimitedThreads")]
         : []),
       ...(settings.snoozeLimitedThreads !== DEFAULT_UNIFIED_SETTINGS.snoozeLimitedThreads
-        ? ["Snooze limited threads"]
+        ? [t("settings.restore.label.snoozeLimitedThreads")]
         : []),
       ...(settings.wordWrap !== DEFAULT_UNIFIED_SETTINGS.wordWrap
         ? [t("settings.restore.label.wordWrap")]
         : []),
       ...(settings.persistComposerContextStrip !==
       DEFAULT_UNIFIED_SETTINGS.persistComposerContextStrip
-        ? ["Composer context"]
+        ? [t("settings.search.item.composer-context.title")]
         : []),
       ...localizeRestoreLabels(getChangedTypographySettingLabels(settings), t),
       ...(settings.diffFilesCollapsed !== DEFAULT_UNIFIED_SETTINGS.diffFilesCollapsed
@@ -743,9 +751,11 @@ export function useSettingsRestore(onRestored?: () => void) {
         ? [t("settings.restore.label.composerCollapse")]
         : []),
       ...(settings.composerRichTextEnabled !== DEFAULT_UNIFIED_SETTINGS.composerRichTextEnabled
-        ? ["Rich text composer"]
+        ? [t("settings.search.item.composer-rich-text.title")]
         : []),
-      ...(settings.sendShortcut !== DEFAULT_UNIFIED_SETTINGS.sendShortcut ? ["Send shortcut"] : []),
+      ...(settings.sendShortcut !== DEFAULT_UNIFIED_SETTINGS.sendShortcut
+        ? [t("settings.search.item.send-shortcut.title")]
+        : []),
       ...(settings.followUpBehavior !== DEFAULT_UNIFIED_SETTINGS.followUpBehavior
         ? [t("settings.restore.label.followUpBehavior")]
         : []),
@@ -1688,13 +1698,13 @@ function AppearanceSettingsRows() {
         />
 
         <SettingsRow
-          {...searchableSetting("composer-context")}
-          description="Keep branch and worktree controls below the composer after a thread starts."
+          {...searchableSetting("composer-context", t)}
+          description={t("settings.general.composerContext.description")}
           resetAction={
             settings.persistComposerContextStrip !==
             DEFAULT_UNIFIED_SETTINGS.persistComposerContextStrip ? (
               <SettingResetButton
-                label="composer context"
+                label={t("settings.general.composerContext.resetLabel")}
                 onClick={() =>
                   updateSettings({
                     persistComposerContextStrip:
@@ -1710,7 +1720,7 @@ function AppearanceSettingsRows() {
               onCheckedChange={(checked) =>
                 updateSettings({ persistComposerContextStrip: Boolean(checked) })
               }
-              aria-label="Keep composer context visible in active threads"
+              aria-label={t("settings.general.composerContext.ariaLabel")}
             />
           }
         />
@@ -2461,9 +2471,15 @@ function GeneralSettingsRows() {
   const { t } = useI18n();
   const modifierLabel = isMacPlatform(navigator.platform) ? "⌘" : "Ctrl";
   const sendShortcutOptions = [
-    { value: "enter", label: "Enter" },
-    { value: "mod-enter-multiline", label: `${modifierLabel} + Enter for multiline prompts` },
-    { value: "mod-enter", label: `${modifierLabel} + Enter always` },
+    { value: "enter", label: t("settings.general.sendShortcut.enter") },
+    {
+      value: "mod-enter-multiline",
+      label: t("settings.general.sendShortcut.multiline", { modifier: modifierLabel }),
+    },
+    {
+      value: "mod-enter",
+      label: t("settings.general.sendShortcut.always", { modifier: modifierLabel }),
+    },
   ] as const;
   const settings = useScopedSettings();
   const updateSettings = useUpdateScopedSettings();
@@ -2592,8 +2608,8 @@ function GeneralSettingsRows() {
 
         <SettingsRow
           serverScoped
-          {...searchableSetting("auto-resume-limited-threads")}
-          description="Resume usage-limit stops at the reported reset time. Each thread can cancel its scheduled continuation."
+          {...searchableSetting("auto-resume-limited-threads", t)}
+          description={t("settings.general.autoResumeLimitedThreads.description")}
           settingKeys={["autoResumeLimitedThreads"]}
           control={
             <ScopedSwitch
@@ -2602,14 +2618,14 @@ function GeneralSettingsRows() {
               onCheckedChange={(checked) =>
                 updateSettings({ autoResumeLimitedThreads: Boolean(checked) })
               }
-              aria-label="Auto-resume limited threads"
+              aria-label={t("settings.general.autoResumeLimitedThreads.ariaLabel")}
             />
           }
         />
         <SettingsRow
           serverScoped
-          {...searchableSetting("snooze-limited-threads")}
-          description="Snooze usage-limit stops until the reported reset time. Combine with auto-resume to continue when they wake."
+          {...searchableSetting("snooze-limited-threads", t)}
+          description={t("settings.general.snoozeLimitedThreads.description")}
           settingKeys={["snoozeLimitedThreads"]}
           control={
             <ScopedSwitch
@@ -2618,7 +2634,7 @@ function GeneralSettingsRows() {
               onCheckedChange={(checked) =>
                 updateSettings({ snoozeLimitedThreads: Boolean(checked) })
               }
-              aria-label="Snooze limited threads"
+              aria-label={t("settings.general.snoozeLimitedThreads.ariaLabel")}
             />
           }
         />
@@ -3023,13 +3039,13 @@ function GeneralSettingsRows() {
         />
 
         <SettingsRow
-          {...searchableSetting("composer-rich-text")}
-          description="Show formatted Markdown as you type."
+          {...searchableSetting("composer-rich-text", t)}
+          description={t("settings.general.richText.description")}
           resetAction={
             settings.composerRichTextEnabled !==
             DEFAULT_UNIFIED_SETTINGS.composerRichTextEnabled ? (
               <SettingResetButton
-                label="rich text composer"
+                label={t("settings.general.richText.resetLabel")}
                 onClick={() =>
                   updateSettings({
                     composerRichTextEnabled: DEFAULT_UNIFIED_SETTINGS.composerRichTextEnabled,
@@ -3044,7 +3060,7 @@ function GeneralSettingsRows() {
               onCheckedChange={(checked) =>
                 updateSettings({ composerRichTextEnabled: Boolean(checked) })
               }
-              aria-label="Rich text composer"
+              aria-label={t("settings.general.richText.ariaLabel")}
             />
           }
         />
@@ -3077,12 +3093,12 @@ function GeneralSettingsRows() {
         />
 
         <SettingsRow
-          {...searchableSetting("send-shortcut")}
-          description="Choose when Enter sends a prompt or inserts a new line"
+          {...searchableSetting("send-shortcut", t)}
+          description={t("settings.general.sendShortcut.description")}
           resetAction={
             settings.sendShortcut !== DEFAULT_UNIFIED_SETTINGS.sendShortcut ? (
               <SettingResetButton
-                label="send shortcut"
+                label={t("settings.general.sendShortcut.resetLabel")}
                 onClick={() =>
                   updateSettings({ sendShortcut: DEFAULT_UNIFIED_SETTINGS.sendShortcut })
                 }
@@ -3100,7 +3116,7 @@ function GeneralSettingsRows() {
               <SelectTrigger
                 size="sm"
                 className="w-auto min-w-0 max-w-full"
-                aria-label="Send shortcut"
+                aria-label={t("settings.general.sendShortcut.ariaLabel")}
               >
                 <SelectValue>
                   {
@@ -3125,12 +3141,16 @@ function GeneralSettingsRows() {
 
         <SettingsRow
           {...searchableSetting("follow-up-behavior", t)}
-          description={
-            "Queue follow-ups while the agent runs or steer the current run. " +
-            (settings.sendShortcut === "mod-enter-multiline"
-              ? `Press ${modifierLabel} + Enter for single-line prompts or ${modifierLabel} + Shift + Enter for multiline prompts to do the opposite for one message.`
-              : `Press ${modifierLabel}${settings.sendShortcut === "mod-enter" ? " + Shift" : ""} + Enter to do the opposite for one message.`)
-          }
+          description={`${t("settings.general.followUpBehavior.description")} ${
+            settings.sendShortcut === "mod-enter-multiline"
+              ? t("settings.general.followUpBehavior.oppositeSingleAndMultiline", {
+                  modifier: modifierLabel,
+                })
+              : t("settings.general.followUpBehavior.opposite", {
+                  modifier: modifierLabel,
+                  shift: settings.sendShortcut === "mod-enter" ? " + Shift" : "",
+                })
+          }`}
           resetAction={
             settings.followUpBehavior !== DEFAULT_UNIFIED_SETTINGS.followUpBehavior ? (
               <SettingResetButton
@@ -3694,6 +3714,20 @@ function GeneralSettingsRows() {
   );
 }
 
+function formatArchivedRelativeTime(isoDate: string, t: ReturnType<typeof useI18n>["t"]): string {
+  const relative = getRelativeTimeState(isoDate);
+  if (relative.status !== "relative") return "";
+  const match = /^(\d+)([mhd])$/.exec(relative.value);
+  if (!match) return t("settings.archive.relative.justNow");
+  const key =
+    match[2] === "m"
+      ? "settings.archive.relative.minutes"
+      : match[2] === "h"
+        ? "settings.archive.relative.hours"
+        : "settings.archive.relative.days";
+  return t(key, { count: Number(match[1]) });
+}
+
 export function ArchivedThreadsPanel() {
   const { t } = useI18n();
   const { scope } = useSettingsScope();
@@ -3873,9 +3907,13 @@ export function ArchivedThreadsPanel() {
                 title={thread.title}
                 description={
                   <>
-                    Archived {formatRelativeTimeLabel(thread.archivedAt ?? thread.createdAt)}
-                    {" \u00b7 Created "}
-                    {formatRelativeTimeLabel(thread.createdAt)}
+                    {t("settings.archive.archivedAt", {
+                      value: formatArchivedRelativeTime(thread.archivedAt ?? thread.createdAt, t),
+                    })}
+                    {" \u00b7 "}
+                    {t("settings.archive.createdAt", {
+                      value: formatArchivedRelativeTime(thread.createdAt, t),
+                    })}
                   </>
                 }
                 control={

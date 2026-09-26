@@ -1,6 +1,7 @@
 import { ProviderDriverKind, ProviderInstanceId, type ServerProvider } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
+import { translate, type MessageKey, type MessageValues } from "../../i18n/messages";
 import { getProviderSummary, getProviderVersionAdvisoryPresentation } from "./providerStatus";
 
 const provider: ServerProvider = {
@@ -67,6 +68,38 @@ describe("getProviderSummary", () => {
 
   it("treats a disabled provider status as disabled even before its enabled flag updates", () => {
     expect(getProviderSummary({ ...provider, status: "disabled" }).headline).toBe("Disabled");
+  });
+});
+
+it("localizes compatibility and update advisory defaults", () => {
+  const zhT = (key: MessageKey, values?: MessageValues) => translate("zh-CN", key, values);
+  const advisory = {
+    status: "behind_latest" as const,
+    currentVersion: "1.0.0",
+    latestVersion: "2.0.0",
+    updateCommand: "npm install -g fixture@latest",
+    canUpdate: true,
+    checkedAt: provider.checkedAt,
+    message: null,
+  };
+  const compatibility = {
+    status: "graceful" as const,
+    latestVersionStatus: "supported" as const,
+    message: null,
+    recommendedRange: ">=1.9.0",
+    recommendedVersion: null,
+  };
+
+  expect(getProviderVersionAdvisoryPresentation(advisory, compatibility, true, zhT)).toEqual({
+    title: "支持受限",
+    detail: "为获得完整支持，请使用 >=1.9.0。",
+    updateCommand: "npm install -g fixture@latest",
+    emphasis: "normal",
+    targetVersion: null,
+  });
+  expect(getProviderVersionAdvisoryPresentation(advisory, undefined, true, zhT)).toMatchObject({
+    title: "有可用更新",
+    detail: "有可用更新：安装 v2.0.0。",
   });
 });
 

@@ -81,7 +81,6 @@ import {
   formatAssistantCitationForComposer,
   replaceTextRange,
 } from "../../composer-logic";
-import { DISCONNECTED_COMPOSER_PLACEHOLDER } from "../../composerPlaceholder";
 import { useI18n } from "../../i18n/I18nProvider";
 import { listContinuationForEnter, listIndentForTab } from "../../composer-list-continuation";
 import {
@@ -7284,19 +7283,19 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     onPaste={onComposerPaste}
                     placeholder={
                       isComposerApprovalState
-                        ? "Resolve this approval request to continue"
+                        ? t("composer.placeholder.approval")
                         : activePendingProgress
                           ? isChoiceOnlyPendingQuestion
-                            ? "Choose an option above"
-                            : "Type your own answer, or leave this blank to use the selected option"
+                            ? t("composer.placeholder.chooseOption")
+                            : t("composer.placeholder.customAnswer")
                           : showPlanFollowUpPrompt && activeProposedPlan
-                            ? "Add feedback to refine the plan, or leave this blank to implement it"
+                            ? t("composer.placeholder.planFollowUp")
                             : projectSelectionRequired
                               ? t("composer.placeholder.chooseProject")
                               : showProviderUnavailable
                                 ? t("composer.placeholder.enableProvider")
                                 : phase === "disconnected"
-                                  ? DISCONNECTED_COMPOSER_PLACEHOLDER
+                                  ? t("composer.placeholder.disconnected")
                                   : t("composer.placeholder.default")
                     }
                     disabled={

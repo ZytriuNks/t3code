@@ -66,7 +66,6 @@ import {
   type WhenVariableOption,
   unknownWhenVariables,
   whenAstToExpression,
-  whenNodeRemoveLabel,
 } from "./KeybindingsSettings.logic";
 import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
 import { keybindingSearchAnchorId, searchableSetting } from "./settingsSearch";
@@ -84,15 +83,98 @@ const LOCALIZED_COMMAND_LABEL_KEYS: Readonly<Record<string, MessageKey>> = {
   "composer.previousWorktree": "settings.keybindings.command.composerPreviousWorktree",
   "composer.stash": "settings.keybindings.command.composerStash",
   "composer.workspace": "settings.keybindings.command.composerWorkspace",
+  "composer.sendAlternate": "settings.keybindings.command.composerSendAlternate",
+  "composer.sendBackground": "settings.keybindings.command.composerSendBackground",
   "diff.toggle": "settings.keybindings.command.diffToggle",
+  "editor.openFavorite": "settings.keybindings.command.editorOpenFavorite",
+  "filePicker.toggle": "settings.keybindings.command.filePickerToggle",
+  "modelPicker.previousProvider": "settings.keybindings.command.modelPickerPreviousProvider",
+  "modelPicker.nextProvider": "settings.keybindings.command.modelPickerNextProvider",
+  "thread.steerQueuedMessage": "settings.keybindings.command.queueSteer",
+  "thread.editQueuedMessage": "settings.keybindings.command.queueEdit",
+  "thread.copyReference": "settings.keybindings.command.copyReference",
+};
+
+const COMMAND_GROUP_LABEL_KEYS: Readonly<Record<string, MessageKey>> = {
+  sidebar: "settings.keybindings.group.sidebar",
+  terminal: "settings.keybindings.group.terminal",
+  rightPanel: "settings.keybindings.group.rightPanel",
+  threadPanel: "settings.keybindings.group.threadPanel",
+  pullRequest: "settings.keybindings.group.pullRequest",
+  diff: "settings.keybindings.group.diff",
+  preview: "settings.keybindings.group.preview",
+  commandPalette: "settings.keybindings.group.commandPalette",
+  filePicker: "settings.keybindings.group.filePicker",
+  projectSearch: "settings.keybindings.group.projectSearch",
+  theme: "settings.keybindings.group.theme",
+  appearance: "settings.keybindings.group.appearance",
+  themeEditor: "settings.keybindings.group.themeEditor",
+  composer: "settings.keybindings.group.composer",
+  chat: "settings.keybindings.group.chat",
+  editor: "settings.keybindings.group.editor",
+  modelPicker: "settings.keybindings.group.modelPicker",
+  thread: "settings.keybindings.group.thread",
+};
+
+const COMMAND_ACTION_LABEL_KEYS: Readonly<Record<string, MessageKey>> = {
+  toggle: "settings.keybindings.action.toggle",
+  split: "settings.keybindings.action.split",
+  splitVertical: "settings.keybindings.action.splitVertical",
+  new: "settings.keybindings.action.new",
+  close: "settings.keybindings.action.close",
+  toggleMaximized: "settings.keybindings.action.toggleMaximized",
+  copyNumber: "settings.keybindings.action.copyNumber",
+  refresh: "settings.keybindings.action.refresh",
+  focusUrl: "settings.keybindings.action.focusUrl",
+  zoomIn: "settings.keybindings.action.zoomIn",
+  zoomOut: "settings.keybindings.action.zoomOut",
+  resetZoom: "settings.keybindings.action.resetZoom",
+  select: "settings.keybindings.action.select",
+  cycle: "settings.keybindings.action.cycle",
+  stash: "settings.keybindings.action.stash",
+  host: "settings.keybindings.action.host",
+  effort: "settings.keybindings.action.effort",
+  mode: "settings.keybindings.action.mode",
+  workspace: "settings.keybindings.action.workspace",
+  previousWorktree: "settings.keybindings.action.previousWorktree",
+  branch: "settings.keybindings.action.branch",
+  newLocal: "settings.keybindings.action.newLocal",
+  openFavorite: "settings.keybindings.action.openFavorite",
+  previousProvider: "settings.keybindings.action.previousProvider",
+  nextProvider: "settings.keybindings.action.nextProvider",
+  stop: "settings.keybindings.action.stop",
+  previous: "settings.keybindings.action.previous",
+  next: "settings.keybindings.action.next",
+  settle: "settings.keybindings.action.settle",
+  pin: "settings.keybindings.action.pin",
+  undo: "settings.keybindings.action.undo",
 };
 
 function localizedCommandLabel(
   command: KeybindingCommand,
   t: ReturnType<typeof useI18n>["t"],
 ): string {
-  const key = LOCALIZED_COMMAND_LABEL_KEYS[String(command)];
-  return key ? t(key) : commandLabel(command);
+  const raw = String(command);
+  const jump = /^(modelPicker|thread)\.jump\.(\d+)$/.exec(raw);
+  if (jump) {
+    return t(
+      jump[1] === "thread"
+        ? "settings.keybindings.command.threadJump"
+        : "settings.keybindings.command.modelPickerJump",
+      { index: jump[2] ?? "" },
+    );
+  }
+  if (raw.startsWith("script.") && raw.endsWith(".run")) {
+    return t("settings.keybindings.command.runScript", {
+      name: commandLabel(command).slice("Run Script: ".length),
+    });
+  }
+  const key = LOCALIZED_COMMAND_LABEL_KEYS[raw];
+  if (key) return t(key);
+  const [group, action] = raw.split(".");
+  const groupKey = group ? COMMAND_GROUP_LABEL_KEYS[group] : undefined;
+  const actionKey = action ? COMMAND_ACTION_LABEL_KEYS[action] : undefined;
+  return groupKey && actionKey ? `${t(groupKey)}: ${t(actionKey)}` : commandLabel(command);
 }
 
 function KeybindingPill({ value }: { value: string }) {
@@ -200,6 +282,17 @@ function ExpandableHeaderSearch({
 
 type BooleanOperator = "and" | "or";
 
+function localizedWhenNodeRemoveLabel(
+  node: KeybindingWhenNode,
+  depth: number,
+  t: ReturnType<typeof useI18n>["t"],
+): string {
+  if (depth === 0) return t("settings.keybindings.clearConditions");
+  return node.type === "identifier" || (node.type === "not" && node.node.type === "identifier")
+    ? t("settings.keybindings.removeCondition")
+    : t("settings.keybindings.removeGroup");
+}
+
 function flattenWhenChildren(
   node: KeybindingWhenNode,
   operator: BooleanOperator,
@@ -301,30 +394,35 @@ function UnknownWhenVariableWarning({
   identifiers: ReadonlyArray<string>;
   focusable?: boolean;
 }) {
+  const { t } = useI18n();
   if (identifiers.length === 0) return null;
   const label =
     identifiers.length === 1
-      ? `Unknown condition: ${identifiers[0]}`
-      : `Unknown conditions: ${identifiers.join(", ")}`;
+      ? t("settings.keybindings.unknownConditionOne", { identifier: identifiers[0] ?? "" })
+      : t("settings.keybindings.unknownConditionOther", {
+          identifiers: identifiers.join(", "),
+        });
 
   return (
     <WarningTooltipIcon label={label} focusable={focusable} className="size-4.5">
-      T3 Code does not recognize this condition yet. It can still be saved, but it may not match
-      unless the runtime provides it.
+      {t("settings.keybindings.unknownConditionDescription")}
     </WarningTooltipIcon>
   );
 }
 
 function KeybindingConflictWarning({ labels }: { labels: ReadonlyArray<string> }) {
+  const { t } = useI18n();
   if (labels.length === 0) return null;
   const description =
     labels.length === 1
-      ? `Conflicts with ${labels[0]}.`
-      : `Conflicts with ${labels.slice(0, 3).join(", ")}${labels.length > 3 ? ", and more" : ""}.`;
+      ? t("settings.keybindings.conflictOne", { label: labels[0] ?? "" })
+      : t("settings.keybindings.conflictOther", {
+          labels: `${labels.slice(0, 3).join(", ")}${labels.length > 3 ? t("settings.keybindings.andMore") : ""}`,
+        });
 
   return (
     <WarningTooltipIcon label={description}>
-      {description} The most recent matching binding wins when both conditions can apply.
+      {description} {t("settings.keybindings.conflictDescription")}
     </WarningTooltipIcon>
   );
 }
@@ -340,6 +438,7 @@ function WhenVariableSelect({
   unknownIdentifiers?: ReadonlyArray<string>;
   onChange: (value: string) => void;
 }) {
+  const { t } = useI18n();
   const selected = variables.find((option) => option === value);
   const options =
     selected || variables.some((option) => option === value) ? variables : [value, ...variables];
@@ -347,7 +446,7 @@ function WhenVariableSelect({
   return (
     <Select value={value} onValueChange={(nextValue) => nextValue && onChange(nextValue)}>
       <SelectTrigger size="compact" className="min-w-0 flex-1">
-        <SelectValue placeholder="Condition" />
+        <SelectValue placeholder={t("settings.keybindings.condition")} />
         {unknownIdentifiers && unknownIdentifiers.length > 0 ? (
           <UnknownWhenVariableWarning identifiers={unknownIdentifiers} focusable={false} />
         ) : null}
@@ -407,6 +506,7 @@ function WhenExpressionNodeEditor({
   onChange: (node: KeybindingWhenNode) => void;
   onRemove?: () => void;
 }) {
+  const { t } = useI18n();
   const condition = conditionParts(node);
 
   if (condition) {
@@ -419,12 +519,14 @@ function WhenExpressionNodeEditor({
         <Toggle
           pressed={condition.negated}
           onPressedChange={(pressed) => onChange(setConditionNegated(node, pressed))}
-          aria-label={`Negate ${condition.identifier}`}
+          aria-label={t("settings.keybindings.negateCondition", {
+            identifier: condition.identifier,
+          })}
           variant="outline"
           size="compact"
           className="min-w-10"
         >
-          Not
+          {t("settings.keybindings.negate")}
         </Toggle>
         <WhenVariableSelect
           value={condition.identifier}
@@ -434,7 +536,7 @@ function WhenExpressionNodeEditor({
         />
         {onRemove ? (
           <WhenExpressionRemoveButton
-            label={whenNodeRemoveLabel(node, depth)}
+            label={localizedWhenNodeRemoveLabel(node, depth, t)}
             onRemove={onRemove}
           />
         ) : null}
@@ -454,16 +556,16 @@ function WhenExpressionNodeEditor({
           <Toggle
             pressed
             onPressedChange={(pressed) => onChange(pressed ? node : node.node)}
-            aria-label="Negate group"
+            aria-label={t("settings.keybindings.negateGroup")}
             variant="outline"
             size="compact"
             className="min-w-10"
           >
-            Not
+            {t("settings.keybindings.negate")}
           </Toggle>
           {onRemove ? (
             <WhenExpressionRemoveButton
-              label={whenNodeRemoveLabel(node, depth)}
+              label={localizedWhenNodeRemoveLabel(node, depth, t)}
               className="ml-auto"
               onRemove={onRemove}
             />
@@ -558,21 +660,21 @@ function WhenExpressionNodeEditor({
             <SelectValue />
           </SelectTrigger>
           <SelectContent alignItemWithTrigger={false} matchTriggerWidth={false}>
-            <SelectItem value="and">and</SelectItem>
-            <SelectItem value="or">or</SelectItem>
+            <SelectItem value="and">{t("settings.keybindings.operator.and")}</SelectItem>
+            <SelectItem value="or">{t("settings.keybindings.operator.or")}</SelectItem>
           </SelectContent>
         </Select>
         <Button type="button" variant="outline" size="compact" onClick={addCondition}>
           <PlusIcon className="size-3.5" />
-          Condition
+          {t("settings.keybindings.addCondition")}
         </Button>
         <Button type="button" variant="outline" size="compact" onClick={addGroup}>
           <PlusIcon className="size-3.5" />
-          Group
+          {t("settings.keybindings.addGroup")}
         </Button>
         {onRemove ? (
           <WhenExpressionRemoveButton
-            label={whenNodeRemoveLabel(node, depth)}
+            label={localizedWhenNodeRemoveLabel(node, depth, t)}
             className="ml-auto"
             onRemove={onRemove}
           />
@@ -620,10 +722,15 @@ function WhenExpressionBuilder({
   onChange: (value: KeybindingWhenNode | undefined) => void;
   onValidityChange?: (valid: boolean) => void;
 }) {
+  const { t } = useI18n();
   const expression = whenAstToExpression(value);
   const [expressionDraft, setExpressionDraft] = useState(expression);
   const parseResult = useMemo(() => parseWhenExpressionDraft(expressionDraft), [expressionDraft]);
-  const parseError = parseResult.ok ? null : parseResult.message;
+  const parseError = parseResult.ok
+    ? null
+    : parseResult.message === "Use variables with !, &&, ||, and parentheses."
+      ? t("settings.keybindings.parseError")
+      : parseResult.message;
   const unknownIdentifiers = parseResult.ok ? unknownWhenVariables(parseResult.value) : [];
 
   const updateExpressionDraft = (nextExpression: string) => {
@@ -662,16 +769,18 @@ function WhenExpressionBuilder({
     <div className="w-[min(34rem,calc(100vw-2rem))] space-y-3">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="text-sm font-medium text-foreground">When</div>
+          <div className="text-sm font-medium text-foreground">
+            {t("settings.keybindings.when")}
+          </div>
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <Button type="button" variant="outline" size="compact" onClick={addRootCondition}>
             <PlusIcon className="size-3.5" />
-            Condition
+            {t("settings.keybindings.addCondition")}
           </Button>
           <Button type="button" variant="outline" size="compact" onClick={addRootGroup}>
             <PlusIcon className="size-3.5" />
-            Group
+            {t("settings.keybindings.addGroup")}
           </Button>
         </div>
       </div>
@@ -681,9 +790,9 @@ function WhenExpressionBuilder({
           <InputGroupInput
             value={expressionDraft}
             onChange={(event) => updateExpressionDraft(event.currentTarget.value)}
-            placeholder="Always"
+            placeholder={t("settings.keybindings.always")}
             aria-invalid={Boolean(parseError)}
-            aria-label="When expression"
+            aria-label={t("settings.keybindings.whenExpression")}
             size="compact"
             font="mono"
           />
@@ -774,15 +883,20 @@ function useKeybindingRowEditor({
   allRows: ReadonlyArray<KeybindingRow>;
   onSave: (input: ServerUpsertKeybindingInput) => void;
 }) {
+  const { t } = useI18n();
   const [draft, setDraft] = useReducer(keybindingRowDraftReducer, row, createKeybindingRowDraft);
   const { keyDraft, whenDraft, isRecording, isWhenDraftValid } = draft;
   const whenDraftExpression = whenAstToExpression(whenDraft);
   const isDirty = keyDraft !== row.key || whenDraftExpression !== row.when;
-  const conflictLabels = keybindingConflictLabels(allRows, {
-    rowId: row.id,
-    key: keyDraft,
-    when: whenDraftExpression,
-  });
+  const conflictLabels = keybindingConflictLabels(
+    allRows,
+    {
+      rowId: row.id,
+      key: keyDraft,
+      when: whenDraftExpression,
+    },
+    (command) => localizedCommandLabel(command, t),
+  );
 
   const save = () => {
     onSave({
@@ -955,6 +1069,7 @@ function KeybindingRowMenu({
   onReset: (row: KeybindingRow) => void;
   onRemove: (row: KeybindingRow) => void;
 }) {
+  const { t } = useI18n();
   const canReset = row.source === "Custom" && row.defaultKey !== null;
   const canRemove = row.source !== "Default";
   if (!canReset && !canRemove) return null;
@@ -968,7 +1083,9 @@ function KeybindingRowMenu({
             variant="ghost-muted"
             size="icon-sm"
             disabled={isSaving}
-            aria-label={`Actions for ${commandLabel(row.command)}`}
+            aria-label={t("settings.keybindings.actionsFor", {
+              label: localizedCommandLabel(row.command, t),
+            })}
           />
         }
       >
@@ -977,12 +1094,12 @@ function KeybindingRowMenu({
       <MenuPopup align="end">
         {canReset ? (
           <MenuItem disabled={isSaving} onClick={() => onReset(row)}>
-            Reset to default
+            {t("settings.keybindings.resetToDefault")}
           </MenuItem>
         ) : null}
         {canRemove ? (
           <MenuItem variant="destructive" disabled={isSaving} onClick={() => onRemove(row)}>
-            Remove
+            {t("settings.keybindings.remove")}
           </MenuItem>
         ) : null}
       </MenuPopup>
@@ -991,10 +1108,15 @@ function KeybindingRowMenu({
 }
 
 function KeybindingSourceBadge({ source }: { source: KeybindingRow["source"] }) {
+  const { t } = useI18n();
   if (source === "Default") return null;
+  const label =
+    source === "Custom"
+      ? t("settings.keybindings.source.custom")
+      : t("settings.keybindings.source.project");
   return (
     <Badge variant="outline" size="sm">
-      {source}
+      {label}
     </Badge>
   );
 }
@@ -1103,11 +1225,15 @@ function useNewKeybindingDraft({
   });
   const { keyDraft, whenDraft, isRecording, isWhenDraftValid } = draft;
   const whenDraftExpression = whenAstToExpression(whenDraft);
-  const conflictLabels = keybindingConflictLabels(allRows, {
-    rowId: "new",
-    key: keyDraft,
-    when: whenDraftExpression,
-  });
+  const conflictLabels = keybindingConflictLabels(
+    allRows,
+    {
+      rowId: "new",
+      key: keyDraft,
+      when: whenDraftExpression,
+    },
+    (command) => localizedCommandLabel(command, t),
+  );
   const commandLabelText = commandDraft
     ? localizedCommandLabel(commandDraft, t)
     : t("settings.keybindings.new");
@@ -1399,7 +1525,10 @@ export function KeybindingsSettingsPanel() {
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [savingCommand, setSavingCommand] = useState<KeybindingCommand | null>(null);
   const [isAddingBinding, setIsAddingBinding] = useState(false);
-  const rows = useMemo(() => buildKeybindingRows(keybindings, query), [keybindings, query]);
+  const rows = useMemo(
+    () => buildKeybindingRows(keybindings, query, (command) => localizedCommandLabel(command, t)),
+    [keybindings, query, t],
+  );
   // The search-target context is provided by this panel's own page container,
   // so the jump target is read from the route hash here.
   const searchTargetId = useLocation({ select: (location) => location.hash.replace(/^#/, "") });
@@ -1447,13 +1576,13 @@ export function KeybindingsSettingsPanel() {
       }
       const error = squashAtomCommandFailure(result);
       toastManager.add({
-        title: "Unable to open keybindings file",
+        title: t("settings.keybindings.openFailed"),
         description:
-          error instanceof Error ? error.message : "The keybindings file was not opened.",
+          error instanceof Error ? error.message : t("settings.keybindings.openFailedDescription"),
         type: "error",
       });
     })();
-  }, [keybindingsConfigPath, openInPreferredEditor]);
+  }, [keybindingsConfigPath, openInPreferredEditor, t]);
 
   const saveKeybinding = useCallback(
     (input: ServerUpsertKeybindingInput) => {
@@ -1480,14 +1609,17 @@ export function KeybindingsSettingsPanel() {
         if (!isAtomCommandInterrupted(failed)) {
           const error = squashAtomCommandFailure(failed);
           toastManager.add({
-            title: "Unable to save keybinding",
-            description: error instanceof Error ? error.message : "The keybinding was not saved.",
+            title: t("settings.keybindings.saveFailed"),
+            description:
+              error instanceof Error
+                ? error.message
+                : t("settings.keybindings.saveFailedDescription"),
             type: "error",
           });
         }
       })();
     },
-    [connectedEnvironments, primaryEnvironment, upsertKeybinding],
+    [connectedEnvironments, primaryEnvironment, t, upsertKeybinding],
   );
 
   const removeKeybinding = useCallback(
@@ -1508,14 +1640,17 @@ export function KeybindingsSettingsPanel() {
         if (result?._tag === "Failure" && !isAtomCommandInterrupted(result)) {
           const error = squashAtomCommandFailure(result);
           toastManager.add({
-            title: "Unable to remove keybinding",
-            description: error instanceof Error ? error.message : "The keybinding was not removed.",
+            title: t("settings.keybindings.removeFailed"),
+            description:
+              error instanceof Error
+                ? error.message
+                : t("settings.keybindings.removeFailedDescription"),
             type: "error",
           });
         }
       })();
     },
-    [connectedEnvironments, primaryEnvironment, removeKeybindingMutation],
+    [connectedEnvironments, primaryEnvironment, removeKeybindingMutation, t],
   );
 
   const resetKeybinding = useCallback(

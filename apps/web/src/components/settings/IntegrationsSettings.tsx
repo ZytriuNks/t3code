@@ -493,19 +493,20 @@ function BrowserAppearanceSetting({ disabled }: { readonly disabled: boolean }) 
 }
 
 function BrowserRecordingInputSettings({ disabled }: { readonly disabled: boolean }) {
+  const { t } = useI18n();
   const showKeys = useClientSettings((settings) => settings.browserRecordingShowKeyPresses);
   const showMouse = useClientSettings((settings) => settings.browserRecordingShowMousePresses);
   const updateSettings = useUpdatePrimarySettings();
   return (
     <>
       <SettingsRow
-        {...searchableSetting("browser-recording-key-presses")}
-        description="Show pressed keys and shortcuts in new recordings. Password fields are excluded."
+        {...searchableSetting("browser-recording-key-presses", t)}
+        description={t("settings.integrations.recording.keyPresses.description")}
         control={
           <Switch
             disabled={disabled}
             checked={showKeys}
-            aria-label="Show key presses in recordings"
+            aria-label={t("settings.integrations.recording.keyPresses.ariaLabel")}
             onCheckedChange={(checked) =>
               updateSettings({ browserRecordingShowKeyPresses: Boolean(checked) })
             }
@@ -513,13 +514,13 @@ function BrowserRecordingInputSettings({ disabled }: { readonly disabled: boolea
         }
       />
       <SettingsRow
-        {...searchableSetting("browser-recording-mouse-presses")}
-        description="Highlight mouse presses and held buttons in new recordings."
+        {...searchableSetting("browser-recording-mouse-presses", t)}
+        description={t("settings.integrations.recording.mousePresses.description")}
         control={
           <Switch
             disabled={disabled}
             checked={showMouse}
-            aria-label="Show mouse presses in recordings"
+            aria-label={t("settings.integrations.recording.mousePresses.ariaLabel")}
             onCheckedChange={(checked) =>
               updateSettings({ browserRecordingShowMousePresses: Boolean(checked) })
             }
