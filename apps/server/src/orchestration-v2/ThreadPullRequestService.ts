@@ -271,11 +271,14 @@ export const make = Effect.gen(function* () {
         Effect.gen(function* () {
           const first = group[0]!;
 <<<<<<< HEAD:apps/server/src/orchestration-v2/ThreadPullRequestService.ts
+<<<<<<< HEAD:apps/server/src/orchestration-v2/ThreadPullRequestService.ts
           const project = projects.get(first.projectId);
           if (project === undefined) return finishBackfill(group);
           const { project: resolvedProject, repository } =
             yield* resolveProjectForPullRequestDiscovery(project, repositoryIdentities);
 =======
+=======
+>>>>>>> 999161ef84 (perf(server): stop re-running git for every project each minute (#13689)):apps/server/src/orchestration/ThreadPullRequestReactor.ts
           const snapshotProject = projects.get(first.projectId);
           if (snapshotProject === undefined) return finishBackfill(group);
           // A finished turn may have added the remote this PR lives on. A failed

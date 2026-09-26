@@ -146,6 +146,16 @@ export const make = Effect.fn("RepositoryIdentityResolver.make")(function* (
   const processRunner = yield* ProcessRunner.ProcessRunner;
   const cacheCapacity = options.cacheCapacity ?? DEFAULT_REPOSITORY_IDENTITY_CACHE_CAPACITY;
   const refine = options.refine ?? Effect.succeed;
+  // Git errors and timeouts resolve to null, so they use the negative TTL like
+  // "no repository" or "no remote". Only interrupts and defects skip the cache.
+  const timeToLive = (exit: Exit.Exit<unknown>) =>
+    Exit.match(exit, {
+      onSuccess: (value) =>
+        value === null
+          ? (options.negativeCacheTtl ?? DEFAULT_NEGATIVE_CACHE_TTL)
+          : (options.positiveCacheTtl ?? DEFAULT_POSITIVE_CACHE_TTL),
+      onFailure: () => Duration.zero,
+    });
 
   const repositoryRootCache = yield* Cache.makeWith<string, string | null>(
     (cwd) =>
