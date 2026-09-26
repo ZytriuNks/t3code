@@ -20,6 +20,7 @@ export class CursorKeychainTimeoutError extends Error {
  * flight: the next call reuses it instead of stacking a second prompt, and picks
  * up the token once someone allows access.
  */
+<<<<<<< HEAD
 export function makeCachedCursorAccessTokenReader(
   read: () => Promise<string | null>,
   now: () => number = Date.now,
@@ -32,17 +33,27 @@ export function makeCachedCursorAccessTokenReader(
   read: () => Promise<string | null>,
   now: () => number = Date.now,
 >>>>>>> e5a46d6c5d (feat(usage): read cursor, opencode, and antigravity history (#10409))
+=======
+export function makeCachedCursorAccessTokenReader(
+  read: () => Promise<string | null>,
+  now: () => number = Date.now,
+  timeoutMs = 30_000,
+>>>>>>> 679c34c096 (fix(clients): hide duplicate Cursor Keychain prompts (#13870))
 ): () => Promise<string | null> {
   let cached: { token: string; until: number } | null = null;
   let pending: Promise<string | null> | null = null;
   return () => {
     if (cached && cached.until > now()) return Promise.resolve(cached.token);
 <<<<<<< HEAD
+<<<<<<< HEAD
     pending ??= read()
 =======
     if (pending) return pending;
     pending = read()
 >>>>>>> e5a46d6c5d (feat(usage): read cursor, opencode, and antigravity history (#10409))
+=======
+    pending ??= read()
+>>>>>>> 679c34c096 (fix(clients): hide duplicate Cursor Keychain prompts (#13870))
       .then((token) => {
         cached = token ? { token, until: now() + CACHE_MS } : null;
         return token;
@@ -51,6 +62,9 @@ export function makeCachedCursorAccessTokenReader(
         pending = null;
       });
 <<<<<<< HEAD
+<<<<<<< HEAD
+=======
+>>>>>>> 679c34c096 (fix(clients): hide duplicate Cursor Keychain prompts (#13870))
     const deadline = AbortSignal.timeout(timeoutMs);
     return Promise.race([
       pending,
@@ -60,9 +74,12 @@ export function makeCachedCursorAccessTokenReader(
         });
       }),
     ]);
+<<<<<<< HEAD
 =======
     return pending;
 >>>>>>> e5a46d6c5d (feat(usage): read cursor, opencode, and antigravity history (#10409))
+=======
+>>>>>>> 679c34c096 (fix(clients): hide duplicate Cursor Keychain prompts (#13870))
   };
 }
 

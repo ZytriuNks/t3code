@@ -1,13 +1,19 @@
 import { assert, describe, it } from "@effect/vitest";
 
 <<<<<<< HEAD
+<<<<<<< HEAD
+=======
+>>>>>>> 679c34c096 (fix(clients): hide duplicate Cursor Keychain prompts (#13870))
 import {
   CursorKeychainTimeoutError,
   makeCachedCursorAccessTokenReader,
 } from "./cursorCredentialStore.ts";
+<<<<<<< HEAD
 =======
 import { makeCachedCursorAccessTokenReader } from "./cursorCredentialStore.ts";
 >>>>>>> e5a46d6c5d (feat(usage): read cursor, opencode, and antigravity history (#10409))
+=======
+>>>>>>> 679c34c096 (fix(clients): hide duplicate Cursor Keychain prompts (#13870))
 
 describe("Cursor Keychain reader", () => {
   it("shares concurrent reads and rechecks after the cache expires", async () => {
@@ -27,6 +33,9 @@ describe("Cursor Keychain reader", () => {
     assert.strictEqual(await read(), "token-2");
   });
 <<<<<<< HEAD
+<<<<<<< HEAD
+=======
+>>>>>>> 679c34c096 (fix(clients): hide duplicate Cursor Keychain prompts (#13870))
 
   it("gives up on an unanswered prompt and reuses it on the next read", async () => {
     let reads = 0;
@@ -48,6 +57,9 @@ describe("Cursor Keychain reader", () => {
     assert.strictEqual(await retry, "token");
     assert.strictEqual(reads, 1);
   });
+<<<<<<< HEAD
 =======
 >>>>>>> e5a46d6c5d (feat(usage): read cursor, opencode, and antigravity history (#10409))
+=======
+>>>>>>> 679c34c096 (fix(clients): hide duplicate Cursor Keychain prompts (#13870))
 });

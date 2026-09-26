@@ -103,13 +103,12 @@ export function UsageRouteScreen() {
   );
   const isFocused = useIsFocused();
   const limits = useRefreshLimits(selectedEnvironmentIds, isFocused && tab === "limits");
-  const cursorAccessEnvironments = selectedEnvironments.filter((environment) =>
-    environment.summary?.sources.some((source) => source.action === "enableCursorKeychain"),
-=======
   const cursorAccessEnvironments = selectedEnvironments.filter(
     (environment) => environment.needsCursorKeychainAccess,
   );
->>>>>>> e5a46d6c5d (feat(usage): read cursor, opencode, and antigravity history (#10409))
+=======
+  const cursorAccessEnvironments = cursorKeychainAccessEnvironments(selectedEnvironments);
+>>>>>>> 679c34c096 (fix(clients): hide duplicate Cursor Keychain prompts (#13870))
   const refreshAfterCursorEnable = () => {
     void refresh();
     void limits.refreshAfterEnable();
