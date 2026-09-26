@@ -82,6 +82,12 @@ const storeFailure = (tag: "AlreadyExists" | "PermissionDenied") =>
   });
 
 const unusedSecretStoreOperation = () => Effect.die("unused secret-store operation");
+// Linking wakes the awareness relay; these tests do not run it.
+const idleAwarenessRelay = AgentAwarenessRelay.AgentAwarenessRelay.of({
+  publishThread: () => Effect.void,
+  requestCatchUp: () => Effect.void,
+  start: () => Effect.void,
+});
 const decodeManagedTunnelRecoveryRegistration = Schema.decodeUnknownEffect(
   Schema.fromJsonString(RelayManagedEndpointRecoveryRegistrationRequest),
 );

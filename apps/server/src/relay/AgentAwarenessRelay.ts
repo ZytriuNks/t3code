@@ -53,10 +53,8 @@ export class AgentAwarenessRelay extends Context.Service<
   AgentAwarenessRelay,
   {
     readonly publishThread: (threadId: ThreadId) => Effect.Effect<void>;
-    readonly drain: Effect.Effect<void>;
-        /** Retries a pending catch-up publish now. Call after this process links or enables publishing. */
+    /** Retries a pending catch-up publish now. Call after this process links or enables publishing. */
     readonly requestCatchUp: () => Effect.Effect<void>;
-
     readonly start: () => Effect.Effect<void, never, Scope.Scope>;
   }
 >()("t3/relay/AgentAwarenessRelay") {}
@@ -635,43 +633,6 @@ export const make = Effect.gen(function* () {
     );
   });
 
-  const worker = yield* makeAgentAwarenessPublishWorker(processThreadPublish);
-  const enqueueThreadPublish = (threadId: ThreadId) =>
-    cancelPublishRetry(threadId).pipe(Effect.andThen(worker.enqueue(threadId)));
-  const publishThread: AgentAwarenessRelay["Service"]["publishThread"] = (threadId) =>
-    enqueueThreadPublish(threadId).pipe(Effect.andThen(worker.drain));
-
-  schedulePublishRetry = Effect.fnUntraced(function* (threadId: ThreadId) {
-    const attempts = publishRetries.get(threadId)?.attempts ?? 0;
-    const delayMs = RELAY_AGENT_ACTIVITY_RETRY_DELAYS_MS[attempts];
-    if (delayMs === undefined) {
-      // Keep the exhausted budget until fresh activity or a successful publish
-      // clears it; an old confirmation timer must not start another retry series.
-      yield* Effect.logWarning("agent activity publish retry budget exhausted", { threadId });
-      return;
-    }
-    const retry = {
-      attempts: attempts + 1,
-      timer: undefined as Fiber.Fiber<void> | undefined,
-    };
-    publishRetries.set(threadId, retry);
-    const timer = yield* Effect.sleep(delayMs).pipe(
-      Effect.andThen(
-        Effect.suspend(() => {
-          if (publishRetries.get(threadId) !== retry) return Effect.void;
-          retry.timer = undefined;
-          return worker.enqueue(threadId);
-        }),
-      ),
-      Effect.forkIn(scope),
-    );
-    if (publishRetries.get(threadId) !== retry) {
-      yield* Fiber.interrupt(timer);
-    } else {
-      retry.timer = timer;
-    }
-  });
-
   // Publishes the active threads once. Returns why it did not, so the retry
   // knows whether it is waiting on a link or on the publish setting.
   const publishActiveThreadsUnsafe = Effect.gen(function* () {
@@ -714,12 +675,8 @@ export const make = Effect.gen(function* () {
     yield* Effect.logInfo("publishing active agent activity snapshot", {
       count: activeThreadIds.length,
     });
-    yield* Effect.forEach(activeThreadIds, enqueueThreadPublish, { discard: true });
-    yield* worker.drain;
-    return true;
-        yield* Effect.forEach(activeThreadIds, publishThread, { concurrency: 4, discard: true });
+    yield* Effect.forEach(activeThreadIds, publishThread, { concurrency: 4, discard: true });
     return "published" as const;
-
   });
 
   // Publishes the catch-up snapshot of active threads once the environment is
@@ -814,9 +771,7 @@ export const make = Effect.gen(function* () {
 
   return AgentAwarenessRelay.of({
     publishThread,
-    drain: worker.drain,
-        requestCatchUp: () => Queue.offer(catchUpRequests, undefined).pipe(Effect.asVoid),
-
+    requestCatchUp: () => Queue.offer(catchUpRequests, undefined).pipe(Effect.asVoid),
     start,
   });
 });
