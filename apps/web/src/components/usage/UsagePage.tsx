@@ -13,7 +13,10 @@ import {
   SlidersHorizontalIcon,
 } from "lucide-react";
 import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
-import { refreshUsageLimits } from "@t3tools/client-runtime/state/usage";
+import {
+  cursorKeychainAccessEnvironments,
+  refreshUsageLimits,
+} from "@t3tools/client-runtime/state/usage";
 
 import {
   isCompatibleUsageContractVersion,
@@ -119,6 +122,23 @@ export function UsagePage() {
     selectedEnvironmentIds,
   );
   const presentations = useAtomValue(environmentPresentations.presentationsAtom);
+  const cursorAccessEnvironments = cursorKeychainAccessEnvironments(selectedEnvironments);
+  const sourceMessages = [
+    ...new Set(
+      selectedEnvironments.flatMap(
+        (environment) =>
+          environment.summary?.sources.flatMap((source) =>
+            source.message &&
+            !source.action &&
+            (source.status === "partial" ||
+              source.status === "failed" ||
+              source.fingerprint.provider === "cursor")
+              ? [source.message]
+              : [],
+          ) ?? [],
+      ),
+    ),
+  ];
   const refreshProviders = useAtomCommand(serverEnvironment.refreshProviders, {
     reportFailure: false,
   });

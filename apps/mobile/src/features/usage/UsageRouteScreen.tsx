@@ -1,6 +1,7 @@
 import { ScreenScrollView as ScrollView } from "../../components/ScreenScrollView";
 import { EnvironmentId, USAGE_CONTRACT_VERSION } from "@t3tools/contracts";
 import { type RouteProp, useIsFocused, useNavigation, useRoute } from "@react-navigation/native";
+import { cursorKeychainAccessEnvironments } from "@t3tools/client-runtime/state/usage";
 import {
   isCompatibleUsageContractVersion,
   isModelCostUnknown,
@@ -97,6 +98,27 @@ export function UsageRouteScreen() {
   );
   const isFocused = useIsFocused();
   const limits = useRefreshLimits(selectedEnvironmentIds, isFocused && tab === "limits");
+  const cursorAccessEnvironments = cursorKeychainAccessEnvironments(selectedEnvironments);
+  const refreshAfterCursorEnable = () => {
+    void refresh();
+    void limits.refreshAfterEnable();
+  };
+  const sourceMessages = [
+    ...new Set(
+      selectedEnvironments.flatMap(
+        (environment) =>
+          environment.summary?.sources.flatMap((source) =>
+            source.message &&
+            !source.action &&
+            (source.status === "partial" ||
+              source.status === "failed" ||
+              source.fingerprint.provider === "cursor")
+              ? [source.message]
+              : [],
+          ) ?? [],
+      ),
+    ),
+  ];
 
   const days = useMemo(
     () => enumerateDays(window.sinceDay, window.untilDay),
