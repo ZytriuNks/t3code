@@ -4,11 +4,15 @@ import {
   type UsageBucket,
   type UsageDay,
   type UsageProviderKind,
-  type UsageSummary,
+  UsageSummary,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
+import * as Schema from "effect/Schema";
 
 import { isModelCostUnknown, mergeUsage, type EnvironmentUsage } from "./usageMerge.ts";
+
+const decodeSummary = Schema.decodeUnknownSync(UsageSummary);
+const encodeSummary = Schema.encodeSync(UsageSummary);
 
 function bucket(overrides: Partial<UsageBucket> = {}): UsageBucket {
   return {
