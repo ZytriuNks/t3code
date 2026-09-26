@@ -671,6 +671,7 @@ const applyCloudRelayConfig = Effect.fn("environment.cloud.applyRelayConfig")(fu
       CLOUD_MINT_PUBLIC_KEY,
       stringToBytes(payload.cloudMintPublicKey),
     );
+    yield* dependencies.awarenessRelay.requestCatchUp();
     if (payload.endpointRuntime) {
       const endpointRuntimeJson = yield* encodeEndpointRuntimeConfigJson(payload.endpointRuntime);
       yield* dependencies.secrets.set(
