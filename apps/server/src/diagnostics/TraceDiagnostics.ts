@@ -424,10 +424,11 @@ export const make = Effect.gen(function* () {
       const readAt = options.readAt ?? (yield* DateTime.now);
       const slowSpanThresholdMs = options.slowSpanThresholdMs ?? DEFAULT_SLOW_SPAN_THRESHOLD_MS;
       const paths = toRotatedTracePaths(options.traceFilePath, options.maxFiles);
+      const aggregator = makeTraceDiagnosticsAggregator(slowSpanThresholdMs);
       const results = yield* Effect.forEach(
         paths,
         (path) =>
-          readTraceFile(fileSystem, path).pipe(
+          streamTraceFileLines(fileSystem, path, aggregator.addLine).pipe(
             Effect.tapError((cause) =>
               Effect.logWarning("Failed to read local trace file.").pipe(
                 Effect.annotateLogs({
@@ -439,14 +440,8 @@ export const make = Effect.gen(function* () {
             ),
             Effect.result,
           ),
-        {
-          concurrency: 1,
-        },
-      );
-      const files = results.flatMap((result) =>
-        Result.isSuccess(result) && result.success._tag === "Loaded"
-          ? [{ path: result.success.path, text: result.success.text }]
-          : [],
+        // Every file feeds one aggregator, so read them one at a time, oldest first.
+        { concurrency: 1 },
 =======
         // Every file feeds one aggregator, so read them one at a time, oldest first.
         { concurrency: 1 },
