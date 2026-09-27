@@ -232,16 +232,8 @@ export function cacheSavingsUsd(
   record: PricedRecord,
   overrides?: RateTable,
 ): number {
-<<<<<<< HEAD
-<<<<<<< HEAD
-  const rate = overrides?.get(model.trim()) ?? lookupRate(table, model);
-=======
   const rate =
     overrides?.get(record.model.trim()) ?? lookupRate(table, record.rateModel ?? record.model);
->>>>>>> aade3a69a8 (fix(usage): price Cursor cache savings by base model (#13731))
-=======
-  const rate = overrides?.get(record.model.trim()) ?? lookupRate(table, record.model);
->>>>>>> e3e7cc3fc2 (fix(usage): price Claude fast-mode requests at the fast rate (#13599))
   if (rate === null) return 0;
   return (
     record.totals.cachedInputTokens *

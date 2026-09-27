@@ -330,6 +330,30 @@ describe("mergeUsage", () => {
   });
 
   it("excludes an environment reporting an older contract version", () => {
+    const merged = mergeUsage(
+      [
+        environment(
+          "env-a",
+          summary(
+            [bucket({ costUsd: 10 })],
+            [{ provider: "claude", hostId: "mac", homePath: "/a" }],
+          ),
+        ),
+        environment(
+          "env-b",
+          summary(
+            [bucket({ costUsd: 4, provider: "codex", model: "gpt-5.6-sol" })],
+            [{ provider: "codex", hostId: "linux", homePath: "/b" }],
+            USAGE_CONTRACT_VERSION - 1,
+          ),
+        ),
+      ],
+      USAGE_CONTRACT_VERSION,
+    );
+
+    expect(merged.costUsd).toBe(14);
+    expect(merged.contractMismatches).toEqual([]);
+  });
 
   it("prefers a complete scan over a newer partial scan of the same directory", () => {
     const source = { provider: "claude" as const, hostId: "mac", homePath: "/home/theo/.claude" };
@@ -509,10 +533,6 @@ describe("mergeUsage", () => {
     expect(merged.contractMismatches).toEqual([]);
   });
 
-
-    expect(merged.staleEnvironments).toEqual([]);
-  });
-
   it("keeps known usage when newer providers and bucket variants cannot be decoded", () => {
     const known = summary([bucket()], [{ provider: "claude", hostId: "mac", homePath: "/a" }]);
     const decoded = decodeSummary({
@@ -537,7 +557,7 @@ describe("mergeUsage", () => {
     const merged = mergeUsage([environment("env-a", decoded)], USAGE_CONTRACT_VERSION);
     expect(merged.costUsd).toBe(10);
     expect(merged.totalTokens).toBe(1160);
-    expect(merged.staleEnvironments).toEqual([]);
+    expect(merged.contractMismatches).toEqual([]);
   });
 
   it("normalizes model names during decoding before grouping usage", () => {
@@ -583,7 +603,7 @@ describe("mergeUsage", () => {
     );
     const merged = mergeUsage([environment("env-a", decoded)], USAGE_CONTRACT_VERSION);
     expect(merged.costUsd).toBe(0);
-    expect(merged.staleEnvironments).toEqual([
+    expect(merged.contractMismatches).toEqual([
       {
         environmentId: "env-a",
         direction: "clientBehind",
