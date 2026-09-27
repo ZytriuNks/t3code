@@ -85,9 +85,12 @@ export const make = Effect.gen(function* () {
     return commitHash;
   });
 
-  const userDataPath = DesktopUserData.resolveUserDataPath(environment).pipe(
-    Effect.provide(userDataContext),
-  );
+  const userDataPath = DesktopUserData.resolveUserDataPath({
+    appDataDirectory: environment.appDataDirectory,
+    isDevelopment: environment.isDevelopment,
+    platform: environment.platform,
+    appName: environment.appName ?? "T3 Code (Experimental)",
+  }).pipe(Effect.provide(userDataContext));
 
   const configure = Effect.gen(function* () {
     const commitHash = yield* resolveAboutCommitHash;

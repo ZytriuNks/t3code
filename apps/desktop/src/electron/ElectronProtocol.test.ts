@@ -22,8 +22,28 @@ import * as ElectronProtocol from "./ElectronProtocol.ts";
 const protocolLayer = ElectronProtocol.layer.pipe(Layer.provide(NodeServices.layer));
 
 describe("ElectronProtocol", () => {
-  it("uses the Experimental production scheme", () => {
-    assert.equal(ElectronProtocol.getDesktopScheme(false), "t3code-experimental");
+  it("derives the Experimental production scheme from appName", () => {
+    assert.equal(
+      ElectronProtocol.getDesktopScheme({
+        isDevelopment: false,
+        appName: "T3 Code (Experimental)",
+      }),
+      "t3code-experimental",
+    );
+  });
+
+  it("derives the Alpha production scheme from appName", () => {
+    assert.equal(
+      ElectronProtocol.getDesktopScheme({ isDevelopment: false, appName: "T3 Code (Alpha)" }),
+      "t3code",
+    );
+  });
+
+  it("uses the development scheme when in development", () => {
+    assert.equal(
+      ElectronProtocol.getDesktopScheme({ isDevelopment: true, appName: "T3 Code (Alpha)" }),
+      "t3code-dev",
+    );
   });
 
   beforeEach(() => {

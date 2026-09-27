@@ -38,7 +38,29 @@ export const resolveEarlyLinuxElectronOptionsFromProcess =
       homeDirectory: NodeOS.homedir(),
       joinPath: NodePath.posix.join,
       readFileString: (path) => NodeFS.readFileSync(path, "utf8"),
+      appName: resolvePackagedProductName(),
     });
+
+function resolvePackagedProductName(): string {
+  // In packaged Linux builds the productName from `package.json` decides the
+  // XDG WM class and desktop entry name; reading it before Electron fully
+  // boots avoids a race where the .desktop entry resolves before the runtime
+  // identity is set. Dev mode always uses the "T3 Code (Dev)" identity.
+  if (Electron.app.isPackaged) {
+    try {
+      const packageJsonPath = NodePath.join(Electron.app.getAppPath(), "package.json");
+      const parsed = JSON.parse(NodeFS.readFileSync(packageJsonPath, "utf8")) as {
+        productName?: unknown;
+      };
+      if (typeof parsed.productName === "string") {
+        return parsed.productName;
+      }
+    } catch {
+      // Fall through to the default below.
+    }
+  }
+  return "T3 Code (Experimental)";
+}
 
 export class DesktopPreReadyElectronOptions extends Context.Service<
   DesktopPreReadyElectronOptions,
@@ -73,10 +95,14 @@ export const make = Effect.gen(function* () {
           renderUrlHandlerDesktopEntry({
             displayName: resolveDesktopAppBranding({
               isDevelopment: linux.isDevelopment,
+              appName: resolvePackagedProductName(),
               appVersion: Electron.app.getVersion(),
             }).displayName,
             execTarget: process.env.APPIMAGE?.trim() || process.execPath,
-            scheme: ElectronProtocol.getDesktopScheme(linux.isDevelopment),
+            scheme: ElectronProtocol.getDesktopScheme({
+              isDevelopment: linux.isDevelopment,
+              appName: resolvePackagedProductName(),
+            }),
           }),
           "utf8",
         );

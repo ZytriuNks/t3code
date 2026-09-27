@@ -85,6 +85,13 @@ const desktopEnvironmentLayer = Layer.unwrap(
   }),
 );
 
+// Note: ElectronAppMetadata now exposes `appName` (Electron.app.getName()),
+// which on packaged builds equals `productName` from package.json. This lets
+// the layered DesktopEnvironment derive the Alpha / Experimental runtime
+// identity (appUserModelId, Linux WM class, userData path) from a single
+// source of truth — the `productName` field that build-desktop-artifact
+// stages into apps/desktop/package.json at build time.
+
 // The remote runs the exact release this app is on, from its self-contained
 // archive, so it needs neither Node nor npm. Development points the remote at
 // a source checkout instead so the two sides can be iterated together.

@@ -23,6 +23,7 @@ it.effect("keeps the installed Experimental browser profile without importing Al
         appDataDirectory: root,
         isDevelopment: false,
         platform: "win32",
+        appName: "T3 Code (Experimental)",
       }),
       experimental,
     );
@@ -43,6 +44,7 @@ it.effect("does not create an Experimental profile from the Alpha profile on fir
         appDataDirectory: root,
         isDevelopment: false,
         platform: "win32",
+        appName: "T3 Code (Experimental)",
       }),
       experimental,
     );

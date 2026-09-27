@@ -21,7 +21,7 @@ import {
 describe("electron development launcher", () => {
   it("uses the Experimental identity for packaged launches", () => {
     assert.equal(APP_DISPLAY_NAME, "T3 Code (Experimental)");
-    assert.equal(APP_BUNDLE_ID, "com.t3tools.t3code.experimental.pi");
+    assert.equal(APP_BUNDLE_ID, "com.t3tools.t3code.experimental");
     assert.deepEqual(APP_PROTOCOL_SCHEMES, ["t3code-experimental"]);
   });
 

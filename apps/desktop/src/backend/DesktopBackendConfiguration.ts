@@ -595,12 +595,22 @@ const resolveWslStartConfig = Effect.fn("desktop.backendConfiguration.resolveWsl
   // LAN; the primary owns LAN exposure when the user opts in.
   const wslBindHost = "0.0.0.0";
 
+  // Derive the WSL-side t3Home from the packaged productName so the Alpha
+  // and Experimental installers point at distinct server state. The value
+  // is a `~/...` path that WSL expands inside the Linux user's home.
+  const wslT3HomeByAppName: Record<string, string> = {
+    "T3 Code (Alpha)": "~/.t3-alpha",
+    "T3 Code (Experimental)": "~/.t3-experimental",
+    "T3 Code (Dev)": "~/.t3-dev",
+  };
+  const wslT3Home =
+    wslT3HomeByAppName[environment.appName ?? "T3 Code (Experimental)"] ?? "~/.t3-experimental";
+
   const bootstrap = {
     mode: "desktop" as const,
     noBrowser: true,
     port: input.port,
-    // The Linux backend expands ~ in WSL and keeps Experimental state separate.
-    t3Home: "~/.t3-experimental",
+    t3Home: wslT3Home,
     host: wslBindHost,
     desktopBootstrapToken: input.bootstrapToken,
     // PortSchema rejects 0, so when tailscale serve is disabled we still

@@ -8,6 +8,7 @@ const {
   autoUpdaterRemoveListenerMock,
   exitMock,
   getAppPathMock,
+  getNameMock,
   getSystemLocaleMock,
   getVersionMock,
   onMock,
@@ -29,6 +30,7 @@ const {
   autoUpdaterRemoveListenerMock: vi.fn(),
   exitMock: vi.fn(),
   getAppPathMock: vi.fn(() => "/app"),
+  getNameMock: vi.fn(() => "T3 Code (Experimental)"),
   getSystemLocaleMock: vi.fn(() => "en-GB"),
   getVersionMock: vi.fn(() => "1.2.3"),
   onMock: vi.fn(),
@@ -60,6 +62,7 @@ vi.mock("electron", () => ({
       setIcon: setDockIconMock,
     },
     getAppPath: getAppPathMock,
+    getName: getNameMock,
     getSystemLocale: getSystemLocaleMock,
     getVersion: getVersionMock,
     isPackaged: true,
@@ -103,6 +106,7 @@ describe("ElectronApp", () => {
 
       assert.deepEqual(metadata, {
         appVersion: "1.2.3",
+        appName: "T3 Code (Experimental)",
         appPath: "/app",
         isPackaged: true,
         resourcesPath: process.resourcesPath,
