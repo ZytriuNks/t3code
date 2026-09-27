@@ -54,10 +54,57 @@ import { Command, Flag } from "effect/unstable/cli";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 const LINUX_ICON_SIZES = [16, 22, 24, 32, 48, 64, 128, 256, 512] as const;
-// Preserve the installed Experimental NSIS identity without touching Alpha.
-const DESKTOP_APP_ID = "com.t3tools.t3code.experimental.pi";
-const DESKTOP_PACKAGE_NAME = "t3code-experimental";
+// Desktop identity is derived from productName so the Alpha and Experimental
+// installers can coexist on the same machine without colliding on app id,
+// protocol scheme, NSIS package name, or userData path. The mapping table
+// below is the single source of truth.
+const DESKTOP_IDENTITY_BY_PRODUCT_NAME = {
+  "T3 Code (Alpha)": {
+    appId: "com.t3tools.t3code",
+    packageName: "t3code",
+    scheme: "t3code",
+    wmClass: "t3code",
+    executableName: "t3code",
+    installDir: "D:\\t3code\\alpha",
+    userDataCurrent: "t3code-v2",
+    userDataLegacy: "t3code",
+    linuxDesktopEntryName: "com.t3tools.T3Code.desktop",
+  },
+  "T3 Code (Experimental)": {
+    appId: "com.t3tools.t3code.experimental",
+    packageName: "t3code-experimental",
+    scheme: "t3code-experimental",
+    wmClass: "t3code-experimental",
+    executableName: "t3code-experimental",
+    installDir: "D:\\t3code\\experimental",
+    userDataCurrent: "t3code-experimental",
+    userDataLegacy: "t3code-experimental",
+    linuxDesktopEntryName: "com.t3tools.T3Code.Experimental.desktop",
+  },
+  "T3 Code (Dev)": {
+    appId: "com.t3tools.t3code.dev",
+    packageName: "t3code-dev",
+    scheme: "t3code-dev",
+    wmClass: "t3code-dev",
+    executableName: "t3code-dev",
+    installDir: "D:\\t3code\\dev",
+    userDataCurrent: "t3code-dev",
+    userDataLegacy: "T3 Code (Dev)",
+    linuxDesktopEntryName: "com.t3tools.T3Code.Development.desktop",
+  },
+} as const;
+type DesktopIdentity =
+  (typeof DESKTOP_IDENTITY_BY_PRODUCT_NAME)[keyof typeof DESKTOP_IDENTITY_BY_PRODUCT_NAME];
+const FALLBACK_DESKTOP_IDENTITY: DesktopIdentity =
+  DESKTOP_IDENTITY_BY_PRODUCT_NAME["T3 Code (Experimental)"];
 const APPLE_TEAM_ID_PATTERN = /^[A-Z0-9]{10}$/u;
+
+export function resolveDesktopIdentity(productName: string): DesktopIdentity {
+  return (
+    (DESKTOP_IDENTITY_BY_PRODUCT_NAME as Record<string, DesktopIdentity>)[productName] ??
+    FALLBACK_DESKTOP_IDENTITY
+  );
+}
 
 const BuildPlatform = Schema.Literals(["mac", "linux", "win"]);
 const BuildArch = Schema.Literals(["arm64", "x64", "universal"]);
@@ -925,9 +972,11 @@ interface ResolvedBuildOptions {
 
 interface StagePackageJson {
   readonly name: string;
+  readonly productName: string;
   readonly version: string;
   readonly buildVersion: string;
   readonly t3codeCommitHash: string;
+  readonly t3codeBuildStage?: string;
   readonly private: true;
   readonly packageManager: string;
   readonly description: string;
@@ -1273,7 +1322,7 @@ export function resolveMacPasskeySigningConfiguration(
   }
 
   return {
-    appId: DESKTOP_APP_ID,
+    appId: resolveDesktopIdentity(resolveDesktopProductName("")).appId,
     teamId,
     rpDomains: uniqueRpDomains,
     provisioningProfilePath,
@@ -2666,10 +2715,13 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   wslRuntimeBundled = false,
   arch?: typeof BuildArch.Type,
 ) {
+  const productName = resolveDesktopProductName(version);
+  const identity = resolveDesktopIdentity(productName);
+  const productNameSlug = productName.replaceAll(/[^A-Za-z0-9]+/g, "");
   const buildConfig: Record<string, unknown> = {
-    appId: DESKTOP_APP_ID,
-    productName: resolveDesktopProductName(version),
-    artifactName: "T3-Code-Experimental-${version}-${arch}.${ext}",
+    appId: identity.appId,
+    productName,
+    artifactName: `T3-Code-${productNameSlug}-` + "${version}-${arch}.${ext}",
     electronLanguages: [...DESKTOP_ELECTRON_LANGUAGES],
     files: [
       ...DESKTOP_FILE_EXCLUSIONS,
@@ -2724,8 +2776,8 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       },
       protocols: [
         {
-          name: "T3 Code",
-          schemes: ["t3code-experimental"],
+          name: productName,
+          schemes: [identity.scheme],
         },
       ],
       ...(signed ? { sign: path.join(repoRoot, "scripts/sign-macos.ts") } : {}),
@@ -2763,21 +2815,21 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   if (platform === "linux") {
     buildConfig.linux = {
       target: [target],
-      executableName: "t3code-experimental",
+      executableName: identity.executableName,
       icon: "icons",
       category: "Development",
       // electron-builder turns these into MimeType=x-scheme-handler/<scheme>;
       // in the .desktop entry (Exec already gets %U), so browsers can hand
-      // t3code-experimental:// OAuth callbacks to the app.
+      // `${identity.scheme}://` OAuth callbacks to the app.
       protocols: [
         {
-          name: "T3 Code",
-          schemes: ["t3code-experimental"],
+          name: productName,
+          schemes: [identity.scheme],
         },
       ],
       desktop: {
         entry: {
-          StartupWMClass: "t3code-experimental",
+          StartupWMClass: identity.wmClass,
         },
       },
     };
@@ -2788,7 +2840,14 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     // Keep blockmap-based differential downloads enabled while changing the
     // installed file topology. The optimization is in the payload shape, not
     // in trading update bandwidth for install speed.
-    buildConfig.nsis = { differentialPackage: true };
+    // The `nsis.include` hook rewrites `$INSTDIR` to the per-stage fixed path
+    // (D:\t3code\alpha vs D:\t3code\experimental) so the Alpha and
+    // Experimental installers can coexist without colliding on the default
+    // %LOCALAPPDATA%\Programs\<productName>\ layout.
+    buildConfig.nsis = {
+      differentialPackage: true,
+      include: "apps/desktop/resources/install-dir-override.nsh",
+    };
     const winConfig: Record<string, unknown> = {
       target: [target],
       icon: "icon.ico",
@@ -3425,6 +3484,8 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   });
 
   const appVersion = options.version ?? serverPackageJson.version;
+  const stageProductName = resolveDesktopProductName(appVersion);
+  const stageIdentity = resolveDesktopIdentity(stageProductName);
   const iconAssets = resolveDesktopBuildIconAssets(appVersion);
   const commitHash = yield* resolveGitCommitHash(repoRoot);
   const mkdir = options.keepStage ? fs.makeTempDirectory : fs.makeTempDirectoryScoped;
@@ -3551,6 +3612,32 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   yield* Effect.log("[desktop-artifact] Staging release app...");
   yield* fs.copy(distDirs.desktopDist, path.join(stageAppDir, "apps/desktop/dist-electron"));
   yield* fs.copy(distDirs.desktopResources, stageResourcesDir);
+  // Emit the per-stage NSIS include that forces INSTALLDIR to the fixed
+  // D:\t3code\<stage>\<productName>\ path so Alpha and Experimental
+  // installers coexist instead of sharing %LOCALAPPDATA%\Programs\<productName>\.
+  // The trailing APP_FILENAME keeps `instFilesPre` from appending another
+  // product-name segment on top of the fixed path.
+  //
+  // The two `customUnInstallCheck*` hooks skip the prior-version uninstall
+  // step entirely. Without them NSIS runs the previous build's uninstaller
+  // first; if the previous build was uninstalled, relocated, or broken the
+  // hook sees a non-zero exit code, surfaces the `Uninstall was not
+  // successful` dialog, and aborts with `SetErrorLevel 2 / Quit` — which is
+  // what blocks repeat installs on the same fork. Returning here means
+  // the new payload overwrites the existing install directory in-place,
+  // and `statev2.sqlite`, `client-settings.json`, and `keybindings.json`
+  // in the per-stage T3 home are preserved.
+  if (options.platform === "win") {
+    const installDirBase = stageIdentity.installDir.replaceAll("\\", "\\\\");
+    const installDirOverrideNsh =
+      `!macro customInit\n  StrCpy $INSTDIR "${installDirBase}\\\\${stageProductName}"\n!macroend\n` +
+      `!macro customUnInstallCheck\n  ClearErrors\n!macroend\n` +
+      `!macro customUnInstallCheckCurrentUser\n  ClearErrors\n!macroend\n`;
+    yield* fs.writeFileString(
+      path.join(stageResourcesDir, "install-dir-override.nsh"),
+      installDirOverrideNsh,
+    );
+  }
   if (options.platform === "linux") {
     const extensionDir = path.join(stageAppDir, "apps/desktop/gnome-extension");
     yield* fs.makeDirectory(extensionDir, { recursive: true });
@@ -3665,7 +3752,14 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
       : undefined;
   const stagePackageJson: StagePackageJson = {
     // NSIS install directory derives from package name, not productName.
-    name: DESKTOP_PACKAGE_NAME,
+    // Override the default %LOCALAPPDATA%\Programs\<productName>\ location
+    // with a per-stage fixed path so Alpha and Experimental can coexist.
+    // `productName` is preserved as a top-level field so Electron's
+    // `app.getName()` resolves to the stage-specific value at runtime and
+    // the userData derivation picks the matching profile.
+    name: stageIdentity.packageName,
+    productName: stageProductName,
+    t3codeBuildStage: stageIdentity.packageName,
     version: appVersion,
     buildVersion: appVersion,
     t3codeCommitHash: commitHash,

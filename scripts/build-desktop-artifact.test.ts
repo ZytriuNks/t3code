@@ -646,10 +646,13 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         ...DESKTOP_EXTRA_RESOURCES,
         ...WINDOWS_SERVER_EXTRA_RESOURCES,
       ]);
-      assert.deepStrictEqual(win.nsis, { differentialPackage: true });
-      assert.equal(win.appId, "com.t3tools.t3code.experimental.pi");
+      assert.deepStrictEqual(win.nsis, {
+        differentialPackage: true,
+        include: "apps/desktop/resources/install-dir-override.nsh",
+      });
+      assert.equal(win.appId, "com.t3tools.t3code.experimental");
       assert.equal(win.productName, "T3 Code (Experimental)");
-      assert.equal(win.artifactName, "T3-Code-Experimental-${version}-${arch}.${ext}");
+      assert.equal(win.artifactName, "T3-Code-T3CodeExperimental-${version}-${arch}.${ext}");
       // The Claude SDK platform packages and .bin shims never ship.
       assert.deepStrictEqual(WINDOWS_SERVER_ASAR_IGNORE_GLOBS, [
         "**/node_modules/@cursor/sdk-*",
@@ -673,7 +676,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       });
       // Linux must register the Experimental renderer scheme for deep links.
       assert.deepStrictEqual((linux.linux as Record<string, unknown>).protocols, [
-        { name: "T3 Code", schemes: ["t3code-experimental"] },
+        { name: "T3 Code (Experimental)", schemes: ["t3code-experimental"] },
       ]);
       assert.deepStrictEqual(mac.files, [...DESKTOP_FILE_EXCLUSIONS, ...MAC_FILE_EXCLUSIONS]);
       assert.deepStrictEqual(linux.files, [...DESKTOP_FILE_EXCLUSIONS, ...LINUX_FILE_EXCLUSIONS]);
@@ -1818,7 +1821,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     });
 
     assert.deepStrictEqual(configuration, {
-      appId: "com.t3tools.t3code.experimental.pi",
+      appId: "com.t3tools.t3code.experimental",
       teamId: "ABC1234567",
       rpDomains: ["example.clerk.accounts.dev"],
       provisioningProfilePath: "/tmp/t3code.provisionprofile",
@@ -1838,7 +1841,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       "clerk.example.com",
       "example.clerk.accounts.dev",
     ]);
-    assert.include(entitlements, "<string>ABC1234567.com.t3tools.t3code.experimental.pi</string>");
+    assert.include(entitlements, "<string>ABC1234567.com.t3tools.t3code.experimental</string>");
     assert.include(entitlements, "<string>webcredentials:clerk.example.com</string>");
     assert.include(entitlements, "<string>webcredentials:example.clerk.accounts.dev</string>");
     assert.include(entitlements, "<key>com.apple.security.cs.allow-jit</key>");
@@ -1933,12 +1936,12 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       });
 
       const mac = config.mac as Record<string, unknown>;
-      assert.equal(config.appId, "com.t3tools.t3code.experimental.pi");
+      assert.equal(config.appId, "com.t3tools.t3code.experimental");
       assert.equal(mac.entitlements, "/tmp/entitlements.mac.plist");
       assert.equal(mac.provisioningProfile, "/tmp/t3code.provisionprofile");
       assert.match(String(mac.sign), /[\\/]scripts[\\/]sign-macos\.ts$/);
       assert.deepStrictEqual(mac.protocols, [
-        { name: "T3 Code", schemes: ["t3code-experimental"] },
+        { name: "T3 Code (Experimental)", schemes: ["t3code-experimental"] },
       ]);
     }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
   );

@@ -22,7 +22,9 @@ interface EarlyDesktopSettingsInput {
   readonly readFileString: (path: string) => string;
 }
 
-type EarlyLinuxElectronOptionsInput = EarlyDesktopSettingsInput;
+interface EarlyLinuxElectronOptionsInput extends EarlyDesktopSettingsInput {
+  readonly appName?: string;
+}
 
 export interface EarlyLinuxElectronOptions {
   readonly isDevelopment: boolean;
@@ -31,10 +33,12 @@ export interface EarlyLinuxElectronOptions {
   readonly passwordStore: LinuxPasswordStoreSwitch | null;
 }
 
-export const resolveLinuxDesktopEntryName = (isDevelopment: boolean): string =>
+export const resolveLinuxDesktopEntryName = (isDevelopment: boolean, appName?: string): string =>
   isDevelopment
     ? "com.t3tools.T3Code.Development.desktop"
-    : "com.t3tools.T3Code.Experimental.desktop";
+    : appName === "T3 Code (Alpha)"
+      ? "com.t3tools.T3Code.desktop"
+      : "com.t3tools.T3Code.Experimental.desktop";
 
 const trimNonEmpty = (value: string | undefined): string | null => {
   const trimmed = value?.trim();
@@ -55,12 +59,14 @@ function resolveEarlyDesktopSettingsPath(input: {
   readonly env: NodeJS.ProcessEnv;
   readonly homeDirectory: string;
   readonly joinPath: JoinPath;
+  readonly appName?: string;
 }): string {
   const t3Home = Option.fromUndefinedOr(input.env.T3CODE_HOME);
   const baseDir = resolveDesktopBaseDir({
     homeDirectory: input.homeDirectory,
     joinPath: input.joinPath,
     t3Home,
+    appName: input.appName,
   });
   const stateDir = resolveDesktopStateDir({
     baseDir,
@@ -90,8 +96,12 @@ export function resolveEarlyLinuxElectronOptions(
   const isDevelopment = isDevelopmentEnvironment(input.env);
   return {
     isDevelopment,
-    linuxWmClass: isDevelopment ? "t3code-dev" : "t3code-experimental",
-    linuxDesktopEntryName: resolveLinuxDesktopEntryName(isDevelopment),
+    linuxWmClass: isDevelopment
+      ? "t3code-dev"
+      : input.appName === "T3 Code (Alpha)"
+        ? "t3code"
+        : "t3code-experimental",
+    linuxDesktopEntryName: resolveLinuxDesktopEntryName(isDevelopment, input.appName),
     passwordStore: resolveLinuxPasswordStoreSwitch({
       preference,
       env: input.env,

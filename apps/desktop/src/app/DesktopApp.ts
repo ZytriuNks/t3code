@@ -171,7 +171,10 @@ const bootstrap = Effect.gen(function* () {
   // rather than through the local backend, so the window can open without one.
   const electronProtocol = yield* ElectronProtocol.ElectronProtocol;
   yield* electronProtocol.registerDesktopProtocol({
-    scheme: ElectronProtocol.getDesktopScheme(environment.isDevelopment),
+    scheme: ElectronProtocol.getDesktopScheme({
+      isDevelopment: environment.isDevelopment,
+      appName: environment.appName ?? "T3 Code (Experimental)",
+    }),
     ...(environment.isDevelopment
       ? { targetOrigin: Option.getOrThrow(environment.devServerUrl) }
       : { assetDirectory: environment.clientAssetsDir }),

@@ -15,11 +15,31 @@ const repoRoot = NodePath.resolve(desktopDir, "..", "..");
 const devBundleIdSuffix = NodePath.basename(repoRoot)
   .toLowerCase()
   .replaceAll(/[^a-z0-9]+/g, "");
-export const APP_DISPLAY_NAME = isDevelopment ? "T3 Code (Dev)" : "T3 Code (Experimental)";
+// Build stage identity is derived from apps/desktop/package.json's productName
+// so the Alpha and Experimental launchers do not collide on protocol scheme
+// or app bundle id when both are installed on the same machine.
+import * as NodeFS from "node:fs";
+import * as NodePath from "node:path";
+const packageJsonPath = NodePath.join(desktopDir, "package.json");
+const packageJson = JSON.parse(NodeFS.readFileSync(packageJsonPath, "utf8"));
+const stageProductName = isDevelopment
+  ? "T3 Code (Dev)"
+  : (packageJson.productName ?? "T3 Code (Experimental)");
+const STAGE_IDENTITY =
+  stageProductName === "T3 Code (Alpha)"
+    ? {
+        appBundleId: "com.t3tools.t3code",
+        protocolSchemes: ["t3code"],
+      }
+    : {
+        appBundleId: "com.t3tools.t3code.experimental",
+        protocolSchemes: ["t3code-experimental"],
+      };
+export const APP_DISPLAY_NAME = stageProductName;
 export const APP_BUNDLE_ID = isDevelopment
   ? `com.t3tools.t3code.dev.${devBundleIdSuffix || "local"}`
-  : "com.t3tools.t3code.experimental.pi";
-export const APP_PROTOCOL_SCHEMES = isDevelopment ? ["t3code-dev"] : ["t3code-experimental"];
+  : STAGE_IDENTITY.appBundleId;
+export const APP_PROTOCOL_SCHEMES = isDevelopment ? ["t3code-dev"] : STAGE_IDENTITY.protocolSchemes;
 const LAUNCHER_VERSION = 19;
 const developmentMacIconPngPath = NodePath.join(
   repoRoot,

@@ -4,6 +4,8 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as NodeTimersPromises from "node:timers/promises";
+import * as NodeFS from "node:fs";
+import * as NodePath from "node:path";
 import * as Path from "effect/Path";
 import * as Mime from "effect/unstable/http/Mime";
 import * as Ref from "effect/Ref";
@@ -13,19 +15,61 @@ import * as Scope from "effect/Scope";
 import * as Electron from "electron";
 
 export const DESKTOP_HOST = "app";
-const DESKTOP_PRODUCTION_SCHEME = "t3code-experimental";
+// Scheme is derived from `appName` so the Alpha and Experimental installers
+// register distinct privileged protocols. Without this Chromium would launch
+// the renderer with `--standard-schemes=t3code-experimental` for every
+// packaged build and the two installers would share registered schemes.
+const PRODUCTION_SCHEMES_BY_APP_NAME: Record<string, string> = {
+  "T3 Code (Alpha)": "t3code",
+  "T3 Code (Experimental)": "t3code-experimental",
+  "T3 Code (Dev)": "t3code-dev",
+};
+const PRODUCTION_SCHEME_FALLBACK = "t3code-experimental";
 const DESKTOP_DEVELOPMENT_SCHEME = "t3code-dev";
 
-export function getDesktopScheme(isDevelopment: boolean): string {
-  return isDevelopment ? DESKTOP_DEVELOPMENT_SCHEME : DESKTOP_PRODUCTION_SCHEME;
+/**
+ * Resolve the production scheme synchronously from the packaged
+ * `app.asar/package.json` so the privileged protocol registration (which
+ * must run before `app.ready`) matches the staged productName. In dev mode
+ * the development scheme is always returned.
+ */
+export function resolveProductionScheme(): string {
+  const productName = readPackagedProductName();
+  if (productName === undefined) return PRODUCTION_SCHEME_FALLBACK;
+  return PRODUCTION_SCHEMES_BY_APP_NAME[productName] ?? PRODUCTION_SCHEME_FALLBACK;
 }
 
-function getDesktopOrigin(isDevelopment: boolean): string {
-  return `${getDesktopScheme(isDevelopment)}://${DESKTOP_HOST}`;
+function readPackagedProductName(): string | undefined {
+  // Packaged: Electron.app.getAppPath() points at the unpacked asar location;
+  // the real `package.json` lives inside `resources/app.asar` at that path.
+  try {
+    const appPath = Electron.app.getAppPath();
+    const packageJsonPath = NodePath.join(appPath, "package.json");
+    const parsed = JSON.parse(NodeFS.readFileSync(packageJsonPath, "utf8")) as {
+      productName?: unknown;
+    };
+    if (typeof parsed.productName === "string") {
+      return parsed.productName;
+    }
+  } catch {
+    // Fall through to the fallback below.
+  }
+  return undefined;
 }
 
-export function getDesktopUrl(isDevelopment: boolean): string {
-  return `${getDesktopOrigin(isDevelopment)}/`;
+export function getDesktopScheme(input: { isDevelopment: boolean; appName: string }): string {
+  if (input.isDevelopment) {
+    return DESKTOP_DEVELOPMENT_SCHEME;
+  }
+  return PRODUCTION_SCHEMES_BY_APP_NAME[input.appName] ?? PRODUCTION_SCHEME_FALLBACK;
+}
+
+function getDesktopOrigin(isDevelopment: boolean, appName: string): string {
+  return `${getDesktopScheme({ isDevelopment, appName })}://${DESKTOP_HOST}`;
+}
+
+export function getDesktopUrl(isDevelopment: boolean, appName: string): string {
+  return `${getDesktopOrigin(isDevelopment, appName)}/`;
 }
 
 export class ElectronProtocolRegistrationError extends Schema.TaggedError<ElectronProtocolRegistrationError>()(
@@ -118,7 +162,7 @@ function withContentSecurityPolicy(response: Response, policy: string): Response
 function registerDesktopSchemePrivilegesSync(): void {
   Electron.protocol.registerSchemesAsPrivileged([
     {
-      scheme: DESKTOP_PRODUCTION_SCHEME,
+      scheme: resolveProductionScheme(),
       privileges: {
         standard: true,
         secure: true,

@@ -72,12 +72,12 @@ export const desktopClerkFrontendApiHostname = resolveDesktopClerkFrontendApiHos
     : __T3CODE_BUILD_CLERK_PUBLISHABLE_KEY__,
 );
 
-function createDesktopClerkBridge(stateDir: string, isDevelopment: boolean) {
+function createDesktopClerkBridge(stateDir: string, isDevelopment: boolean, appName: string) {
   return createClerkBridge({
     storage: storage({ path: stateDir }),
     passkeys: true,
     renderer: {
-      scheme: ElectronProtocol.getDesktopScheme(isDevelopment),
+      scheme: ElectronProtocol.getDesktopScheme({ isDevelopment, appName }),
       host: ElectronProtocol.DESKTOP_HOST,
     },
   });
@@ -89,12 +89,22 @@ export const make = Effect.gen(function* () {
   const electronApp = yield* ElectronApp.ElectronApp;
 
   // The SDK bridge acquires Electron's profile-scoped single-instance lock.
-  const userDataPath = yield* DesktopUserData.resolveUserDataPath(environment);
+  const userDataPath = yield* DesktopUserData.resolveUserDataPath({
+    appDataDirectory: environment.appDataDirectory,
+    isDevelopment: environment.isDevelopment,
+    platform: environment.platform,
+    appName: environment.appName ?? "T3 Code (Experimental)",
+  });
   yield* electronApp.setPath("userData", userDataPath);
 
   const bridge = yield* Effect.acquireRelease(
     Effect.try({
-      try: () => createDesktopClerkBridge(environment.stateDir, environment.isDevelopment),
+      try: () =>
+        createDesktopClerkBridge(
+          environment.stateDir,
+          environment.isDevelopment,
+          environment.appName ?? "T3 Code (Experimental)",
+        ),
       catch: (cause) =>
         new DesktopClerkBridgeInitializationError({
           stateDir: environment.stateDir,

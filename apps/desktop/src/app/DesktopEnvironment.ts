@@ -23,6 +23,7 @@ export interface MakeDesktopEnvironmentInput {
   readonly platform: NodeJS.Platform;
   readonly processArch: string;
   readonly appVersion: string;
+  readonly appName?: string;
   readonly appPath: string;
   readonly isPackaged: boolean;
   readonly resourcesPath: string;
@@ -39,6 +40,7 @@ export class DesktopEnvironment extends Context.Service<
     readonly isPackaged: boolean;
     readonly isDevelopment: boolean;
     readonly appVersion: string;
+    readonly appName?: string;
     readonly appPath: string;
     readonly resourcesPath: string;
     readonly homeDirectory: string;
@@ -94,18 +96,25 @@ const APP_BASE_NAME = "T3 Code";
 
 function resolveDesktopAppStageLabel(input: {
   readonly isDevelopment: boolean;
-  readonly appVersion: string;
+  readonly appName: string;
 }): DesktopAppStageLabel {
   if (input.isDevelopment) {
     return "Dev";
   }
-
+  // Derive the stage from Electron's reported app name (which on packaged
+  // builds equals `productName` from package.json). Alpha and Experimental
+  // builds both stage as themselves; any unrecognized name falls back to
+  // Experimental to preserve the historical default.
+  if (input.appName === "T3 Code (Alpha)") {
+    return "Alpha";
+  }
   return "Experimental";
 }
 
 export function resolveDesktopAppBranding(input: {
   readonly isDevelopment: boolean;
   readonly appVersion: string;
+  readonly appName: string;
 }): DesktopAppBranding {
   const stageLabel = resolveDesktopAppStageLabel(input);
   return {
@@ -153,6 +162,12 @@ const make = Effect.fn("desktop.environment.make")(function* (
   const homeDirectory = input.homeDirectory;
   const devServerUrl = config.devServerUrl;
   const isDevelopment = Option.isSome(devServerUrl);
+  // Tests and dev wiring rarely know the packaged productName; defaulting to
+  // Experimental keeps the historical behavior intact. The packaged launcher
+  // always sets `appName` from Electron.app.getName() (which on packaged
+  // builds is the staged `productName`), so production code never relies on
+  // this fallback.
+  const appName = input.appName ?? "T3 Code (Experimental)";
   const appDataDirectory =
     input.platform === "win32"
       ? Option.getOrElse(config.appDataDirectory, () =>
@@ -165,6 +180,7 @@ const make = Effect.fn("desktop.environment.make")(function* (
     homeDirectory,
     joinPath: path.join,
     t3Home: config.t3Home,
+    appName: input.appName,
   });
   const rootDir = path.resolve(input.dirname, "../../..");
   const appRoot = input.isPackaged ? input.appPath : rootDir;
@@ -175,6 +191,7 @@ const make = Effect.fn("desktop.environment.make")(function* (
   const branding = resolveDesktopAppBranding({
     isDevelopment,
     appVersion: input.appVersion,
+    appName,
   });
   const displayName = branding.displayName;
   const stateDir = resolveDesktopStateDir({
@@ -197,6 +214,7 @@ const make = Effect.fn("desktop.environment.make")(function* (
     isPackaged: input.isPackaged,
     isDevelopment,
     appVersion: input.appVersion,
+    appName,
     appPath: input.appPath,
     resourcesPath,
     homeDirectory,
@@ -232,10 +250,18 @@ const make = Effect.fn("desktop.environment.make")(function* (
     branding,
     displayName,
     appUserModelId: Option.getOrElse(config.appUserModelIdOverride, () =>
-      isDevelopment ? "com.t3tools.t3code.dev" : "com.t3tools.t3code.experimental.pi",
+      isDevelopment
+        ? "com.t3tools.t3code.dev"
+        : appName === "T3 Code (Alpha)"
+          ? "com.t3tools.t3code"
+          : "com.t3tools.t3code.experimental",
     ),
-    linuxDesktopEntryName: resolveLinuxDesktopEntryName(isDevelopment),
-    linuxWmClass: isDevelopment ? "t3code-dev" : "t3code-experimental",
+    linuxDesktopEntryName: resolveLinuxDesktopEntryName(isDevelopment, appName),
+    linuxWmClass: isDevelopment
+      ? "t3code-dev"
+      : appName === "T3 Code (Alpha)"
+        ? "t3code"
+        : "t3code-experimental",
     linuxApplicationsDir,
     appImagePath: config.appImagePath,
     defaultDesktopSettings: DesktopAppSettings.resolveDefaultDesktopSettings(input.appVersion),
