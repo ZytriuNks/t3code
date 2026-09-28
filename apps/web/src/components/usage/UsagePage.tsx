@@ -135,7 +135,17 @@ export function UsagePage() {
     selectedEnvironmentIds,
   );
   const presentations = useAtomValue(environmentPresentations.presentationsAtom);
+<<<<<<< HEAD
+  const cursorAccessEnvironments = selectedEnvironments.filter((environment) =>
+    environment.summary?.sources.some((source) => source.action === "enableCursorKeychain"),
+=======
+  const cursorAccessEnvironments = selectedEnvironments.filter(
+    (environment) => environment.needsCursorKeychainAccess,
+  );
+>>>>>>> e5a46d6c5d (feat(usage): read cursor, opencode, and antigravity history (#10409))
+=======
   const cursorAccessEnvironments = cursorKeychainAccessEnvironments(selectedEnvironments);
+>>>>>>> 679c34c096 (fix(clients): hide duplicate Cursor Keychain prompts (#13870))
   const sourceMessages = [
     ...new Set(
       selectedEnvironments.flatMap(

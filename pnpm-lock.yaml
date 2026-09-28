@@ -18904,7 +18904,10 @@ snapshots:
       decimal.js: 10.6.0
       html-encoding-sniffer: 6.0.0(@noble/hashes@1.8.0)
       is-potential-custom-element-name: 1.0.1
+      lru-cache: 11.5.2
+=======
       lru-cache: 11.5.3
+>>>>>>> ea7d46ac10 (fix(build): validate Linux node-pty prebuilds in Windows artifacts (#13867))
       parse5: 8.0.1
       saxes: 6.0.0
       tough-cookie: 6.0.2

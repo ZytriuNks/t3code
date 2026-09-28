@@ -203,19 +203,32 @@ export function readEnvironmentSupportsSettlement(environmentId: EnvironmentId):
   );
 }
 
+/** Whether the environment's server understands thread.snooze/unsnooze.
+    Same version-skew contract as settlement. */
+export function readEnvironmentSupportsSnooze(environmentId: EnvironmentId): boolean {
+  return (
+    appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities
+      .threadSnooze === true
+  );
+}
+
+/** Whether the environment's server understands thread.visit/mark-unread and
+    projects lastVisitedAt on thread shells. Same version-skew contract as
+    settlement: against older servers, clients keep the browser-local visited
+    state instead. */
+export function readEnvironmentSupportsVisitedTracking(environmentId: EnvironmentId): boolean {
+  return (
+    appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities
+      .threadPinning === true
+  );
+}
+
+/** Whether the environment's server understands thread title regeneration.
+    Same version-skew contract as settlement. */
 export function readEnvironmentSupportsTitleRegeneration(environmentId: EnvironmentId): boolean {
   return (
     appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities
       .threadTitleRegeneration === true
-  );
-}
-
-/** Whether the environment's server understands thread.pin/unpin.
-    Same version-skew contract as settlement. */
-export function readEnvironmentSupportsPinning(environmentId: EnvironmentId): boolean {
-  return (
-    appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities
-      .threadPinning === true
   );
 }
 
@@ -241,36 +254,6 @@ export function readEnvironmentSupportsActiveReorder(environmentId: EnvironmentI
   return (
     appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities
       .threadActiveReorder === true
-  );
-}
-
-/** Whether the environment's server understands thread.settle/unsettle.
-    False for pre-settlement servers (capability defaults false on decode),
-    so clients under version skew fall back instead of erroring. */
-export function readEnvironmentSupportsSettlement(environmentId: EnvironmentId): boolean {
-  return (
-    appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities
-      .threadSettlement === true
-  );
-}
-
-/** Whether the environment's server understands thread.snooze/unsnooze.
-    Same version-skew contract as settlement. */
-export function readEnvironmentSupportsSnooze(environmentId: EnvironmentId): boolean {
-  return (
-    appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities
-      .threadSnooze === true
-  );
-}
-
-/** Whether the environment's server understands thread.visit/mark-unread and
-    projects lastVisitedAt on thread shells. Same version-skew contract as
-    settlement: against older servers, clients keep the browser-local visited
-    state instead. */
-export function readEnvironmentSupportsVisitedTracking(environmentId: EnvironmentId): boolean {
-  return (
-    appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities
-      .threadVisitedTracking === true
   );
 }
 

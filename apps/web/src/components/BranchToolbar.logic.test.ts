@@ -601,18 +601,6 @@ describe("resolveLockedWorkspaceLabel", () => {
   });
 });
 
-describe("resolveWorkspaceDisplayName", () => {
-  it("returns the final folder for POSIX and Windows paths", () => {
-    expect(resolveWorkspaceDisplayName("/repo/.t3/worktrees/feature-a")).toBe("feature-a");
-    expect(resolveWorkspaceDisplayName("C:\\code\\project\\feature-b\\")).toBe("feature-b");
-  });
-
-  it("handles missing and root paths", () => {
-    expect(resolveWorkspaceDisplayName(null)).toBeNull();
-    expect(resolveWorkspaceDisplayName("/")).toBe("/");
-  });
-});
-
 describe("deriveLocalBranchNameFromRemoteRef", () => {
   it("strips the remote prefix from a remote ref", () => {
     expect(deriveLocalBranchNameFromRemoteRef("origin/feature/demo")).toBe("feature/demo");

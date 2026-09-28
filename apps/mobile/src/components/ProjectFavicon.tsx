@@ -78,6 +78,10 @@ export const ProjectFavicon = memo(function ProjectFavicon(props: {
     return <ProjectIconGlyphView glyph={glyph} size={size} />;
   }
 
+  if (glyph !== null) {
+    return <ProjectIconGlyphView glyph={glyph} size={size} />;
+  }
+
   return (
     <ProjectFaviconImage
       key={cacheKey}
@@ -89,6 +93,56 @@ export const ProjectFavicon = memo(function ProjectFavicon(props: {
     />
   );
 });
+
+function ProjectIconGlyphView(props: { readonly glyph: ProjectIconGlyph; readonly size: number }) {
+  const { glyph, size } = props;
+  if (glyph.kind === "emoji") {
+    return (
+      <View style={{ width: size, height: size, alignItems: "center", justifyContent: "center" }}>
+        <AppText
+          allowFontScaling={false}
+          style={{
+            fontSize: size * 0.8,
+            lineHeight: size,
+            textAlign: "center",
+            includeFontPadding: false,
+          }}
+        >
+          {glyph.emoji}
+        </AppText>
+      </View>
+    );
+  }
+
+  const colors = projectIconColorClassNames(glyph.color);
+  return (
+    <View
+      className={colors.background}
+      style={{
+        width: size,
+        height: size,
+        borderRadius: size * 0.25,
+        alignItems: "center",
+        justifyContent: "center",
+      }}
+    >
+      <AppText
+        allowFontScaling={false}
+        numberOfLines={1}
+        className={`font-mono ${colors.text}`}
+        style={{
+          fontWeight: "700",
+          fontSize: size * (countGlyphs(glyph.text) === 1 ? 0.6 : 0.515625),
+          lineHeight: size,
+          textAlign: "center",
+          includeFontPadding: false,
+        }}
+      >
+        {glyph.text}
+      </AppText>
+    </View>
+  );
+}
 
 function ProjectIconGlyphView(props: { readonly glyph: ProjectIconGlyph; readonly size: number }) {
   const { glyph, size } = props;

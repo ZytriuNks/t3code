@@ -376,6 +376,10 @@ const resolveOtlpEndpoints = Effect.gen(function* () {
     exportIntervalMs: environment.otlpExportIntervalMs,
   };
   return {
+    traces: Option.getOrUndefined(environment.otlpTracesUrl) ?? persisted.otlpTracesUrl,
+    metrics: Option.getOrUndefined(environment.otlpMetricsUrl) ?? persisted.otlpMetricsUrl,
+    logs: Option.getOrUndefined(environment.otlpLogsUrl) ?? persisted.otlpLogsUrl,
+=======
     traces: OtelEnvironment.resolveSignalEndpoint(
       otel,
       "traces",
@@ -395,9 +399,7 @@ const resolveOtlpEndpoints = Effect.gen(function* () {
       persisted.otlpLogsUrl,
     ),
     warnings: otel.warnings,
-=======
     resourceAttributes: otel.resourceAttributes,
->>>>>>> 87d8428019 (fix(observability): a malformed OTEL_RESOURCE_ATTRIBUTES no longer stops startup (#13469))
   };
 });
 
