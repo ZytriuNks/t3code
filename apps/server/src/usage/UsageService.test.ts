@@ -161,8 +161,6 @@ describe("UsageService", () => {
     }).pipe(Effect.scoped),
   );
 
-=======
->>>>>>> d6802b4acf (fix(usage): omit Cursor warning when no login is saved (#13820))
   it.live("does not read the macOS Cursor Keychain before account usage is enabled", () =>
     Effect.gen(function* () {
       const { settings, home } = yield* setup;
@@ -275,13 +273,7 @@ describe("UsageService", () => {
         const summary = yield* service.readSummary(WINDOW);
         assert.strictEqual(summary.buckets[0]?.provider, "opencode");
         assert.isFalse(summary.buckets.some((bucket) => bucket.provider === "cursor"));
-        assert.strictEqual(
-          summary.sources.find((source) => source.fingerprint.provider === "cursor")?.status,
-          "missing",
-        );
-=======
         assert.isFalse(summary.sources.some((source) => source.fingerprint.provider === "cursor"));
->>>>>>> d6802b4acf (fix(usage): omit Cursor warning when no login is saved (#13820))
         assert.strictEqual(
           summary.buckets[0]?.sourcePath,
           yield* Effect.promise(() => NodeFSP.realpath(root)),
@@ -292,12 +284,6 @@ describe("UsageService", () => {
             ?.distinctSessions,
           1,
         );
-        assert.include(
-          summary.sources.find((source) => source.fingerprint.provider === "cursor")?.message ?? "",
-          "Cursor account history needs a Cursor CLI login",
-        );
-=======
->>>>>>> d6802b4acf (fix(usage): omit Cursor warning when no login is saved (#13820))
       }).pipe(Effect.scoped),
   );
 

@@ -329,10 +329,7 @@ describe("mergeUsage", () => {
     expect(merged.contributingEnvironments).toEqual(["old"]);
   });
 
-  it("excludes an environment reporting an older contract version", () => {
-=======
   it("identifies an environment reporting an older contract version", () => {
->>>>>>> 3dae78f33b (fix(usage): identify client version mismatches (#8208))
     const merged = mergeUsage(
       [
         environment(

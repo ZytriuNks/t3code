@@ -635,10 +635,8 @@ export const make = Effect.gen(function* () {
             cursorUntilMs,
           ),
         );
-=======
     // No saved login means there is no account source to report, not a setup error.
     if (account.missing && account.error === null) return scanned;
->>>>>>> d6802b4acf (fix(usage): omit Cursor warning when no login is saved (#13820))
     if (account.accountKey !== null && account.error === null && !account.missing) {
       // The same account includes CLI and desktop history from every machine.
       // A stable remote fingerprint prevents connected environments counting it twice.
