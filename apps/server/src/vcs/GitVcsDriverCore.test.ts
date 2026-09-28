@@ -1449,6 +1449,51 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
       }),
     );
 
+    for (const [timestamp, splitIndex] of [
+      [1_700_000_000, false],
+      [1_700_000_000.9999, false],
+      [1_700_000_000, true],
+      [1_700_000_000.9999, true],
+    ] as const) {
+      it.effect(
+        `preserves same-size edits with a racy review index (${timestamp}, split: ${splitIndex})`,
+        () =>
+          Effect.gen(function* () {
+            const cwd = yield* makeTmpDir();
+            yield* initRepoWithCommit(cwd);
+            const driver = yield* GitVcsDriver.GitVcsDriver;
+            const fileSystem = yield* FileSystem.FileSystem;
+            const path = yield* Path.Path;
+            const filePath = path.join(cwd, "tracked.txt");
+            const indexPath = path.join(cwd, ".git", "index");
+            // Reproduce a same-timestamp edit without relying on filesystem clock resolution.
+            yield* git(cwd, ["config", "core.trustctime", "false"]);
+            yield* writeTextFile(cwd, "tracked.txt", "before\n");
+            yield* fileSystem.utimes(filePath, timestamp, timestamp);
+            yield* git(cwd, ["add", "tracked.txt"]);
+            yield* git(cwd, ["commit", "-m", "record racy file"]);
+            if (splitIndex) yield* git(cwd, ["update-index", "--split-index"]);
+            yield* fileSystem.utimes(indexPath, timestamp, timestamp);
+            const originalIndex = yield* fileSystem.readFile(indexPath);
+            const originalIndexMtime = (yield* fileSystem.stat(indexPath)).mtime;
+            yield* writeTextFile(cwd, "tracked.txt", "after!\n");
+            yield* fileSystem.utimes(filePath, timestamp, timestamp);
+            yield* writeTextFile(cwd, "untracked.txt", "new\n");
+
+            const preview = yield* driver.getReviewDiffPreview({ cwd });
+            const dirty = preview.sources.find((source) => source.kind === "working-tree")!;
+            assert.deepStrictEqual(dirty.files, [
+              { path: "tracked.txt", previousPath: null, additions: 1, deletions: 1 },
+              { path: "untracked.txt", previousPath: null, additions: 1, deletions: 0 },
+            ]);
+            assert.include(dirty.diff, "-before");
+            assert.include(dirty.diff, "+after!");
+            assert.deepStrictEqual(yield* fileSystem.readFile(indexPath), originalIndex);
+            assert.deepStrictEqual((yield* fileSystem.stat(indexPath)).mtime, originalIndexMtime);
+          }),
+      );
+    }
+
     it.effect("keeps complete stats for files beyond the combined patch limit", () =>
       Effect.gen(function* () {
         const cwd = yield* makeTmpDir();
@@ -1893,6 +1938,35 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
 
         assert.equal(cachedStatus.behindCount, 0);
         assert.equal(refreshedStatus.behindCount, 1);
+      }),
+    );
+
+    it.effect("does not start Git auto-maintenance from background upstream fetches", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const remote = yield* makeTmpDir("git-vcs-driver-remote-");
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        yield* git(remote, ["init", "--bare"]);
+        yield* git(cwd, ["remote", "add", "origin", remote]);
+        yield* git(cwd, ["push", "-u", "origin", initialBranch]);
+        yield* git(cwd, ["repack", "-d"]);
+        yield* writeTextFile(cwd, "second.txt", "second\n");
+        yield* git(cwd, ["add", "second.txt"]);
+        yield* git(cwd, ["commit", "-m", "second commit"]);
+        yield* git(cwd, ["push"]);
+        yield* git(cwd, ["repack", "-d"]);
+        // Two packs make `git gc --auto` due, and without detaching it would run inside the fetch.
+        yield* git(cwd, ["config", "gc.autoPackLimit", "1"]);
+        yield* git(cwd, ["config", "gc.autoDetach", "false"]);
+        yield* git(cwd, ["config", "maintenance.autoDetach", "false"]);
+        const packCount = git(cwd, ["count-objects", "-v"]).pipe(
+          Effect.map((stdout) => stdout.match(/^packs: (\d+)$/m)?.[1]),
+        );
+        assert.equal(yield* packCount, "2");
+
+        yield* (yield* GitVcsDriver.GitVcsDriver).statusDetailsRemote(cwd);
+
+        assert.equal(yield* packCount, "2");
       }),
     );
 

@@ -25,10 +25,8 @@ const emitInterleavedAssistantToolCalls =
 const emitV2Fidelity = process.env.T3_ACP_EMIT_V2_FIDELITY === "1";
 const vibeRetryOutcome = process.env.T3_ACP_VIBE_RETRY_OUTCOME;
 const emitGenericToolPlaceholders = process.env.T3_ACP_EMIT_GENERIC_TOOL_PLACEHOLDERS === "1";
-const emitPostSettleMonitorFlow = process.env.T3_ACP_EMIT_POST_SETTLE_MONITOR_FLOW === "1";
-const emitInTurnTaskOutputThenLateDuplicate =
-  process.env.T3_ACP_EMIT_IN_TURN_TASKOUTPUT_THEN_LATE_DUPLICATE === "1";
-const injectedReportTriggerPath = process.env.T3_ACP_INJECTED_REPORT_TRIGGER_PATH;
+const emitBackgroundToolDuringAnswer =
+  process.env.T3_ACP_EMIT_BACKGROUND_TOOL_DURING_ANSWER === "1";
 const emitAskQuestion = process.env.T3_ACP_EMIT_ASK_QUESTION === "1";
 const emitElicitation = process.env.T3_ACP_EMIT_ELICITATION === "1";
 const emitMcpToolApprovalElicitation =
@@ -1563,6 +1561,47 @@ const program = Effect.gen(function* () {
           agentResult: null,
         });
         return yield* Effect.never;
+      }
+
+      if (emitBackgroundToolDuringAnswer) {
+        // A command backgrounded earlier reports progress and then finishes
+        // while the next answer is still streaming.
+        const toolCallId = "background-1";
+        const say = (text: string) =>
+          agent.client.sessionUpdate({
+            sessionId: requestedSessionId,
+            update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text } },
+          });
+        const progress = (status: "in_progress" | "completed", stdout: string) =>
+          agent.client.sessionUpdate({
+            sessionId: requestedSessionId,
+            update: {
+              sessionUpdate: "tool_call_update",
+              toolCallId,
+              status,
+              rawOutput: { stdout },
+            },
+          });
+        yield* agent.client.sessionUpdate({
+          sessionId: requestedSessionId,
+          update: {
+            sessionUpdate: "tool_call",
+            toolCallId,
+            title: "Terminal",
+            kind: "execute",
+            status: "in_progress",
+            rawInput: { command: "sleep 3 && echo done" },
+          },
+        });
+        yield* say("| a | b |\n|---|---|\n| 1 ");
+        yield* progress("in_progress", ".");
+        yield* say("| x |\n");
+        yield* progress("completed", "done");
+        yield* say("| 2 | y |\n");
+        // Agents can repeat a terminal update after the call finished.
+        yield* progress("completed", "done");
+        yield* say("| 3 | z |");
+        return { stopReason: "end_turn" };
       }
 
       if (emitInterleavedAssistantToolCalls) {

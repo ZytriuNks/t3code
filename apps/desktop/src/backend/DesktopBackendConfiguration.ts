@@ -96,8 +96,32 @@ const DESKTOP_BACKEND_ENV_NAMES = [
 const WSL_FORWARDED_ENV_NAMES = [
   "OPENAI_API_KEY",
   "ANTHROPIC_API_KEY",
+  // Otherwise the WSL server keeps exporting to endpoints from the bootstrap.
+  "T3CODE_OTEL_SDK_DISABLED",
+  "OTEL_SDK_DISABLED",
   "T3CODE_OTLP_HEADERS",
   "T3CODE_OTLP_PROTOCOL",
+  // Forwarded without a WSLENV flag, so the values arrive untranslated. The
+  // server prefers an OTEL endpoint over the bootstrap envelope, so the T3 URLs
+  // travel as variables to keep winning inside the distro as they do on Windows.
+  "T3CODE_OTLP_TRACES_URL",
+  "T3CODE_OTLP_METRICS_URL",
+  "T3CODE_OTLP_LOGS_URL",
+  "OTEL_EXPORTER_OTLP_ENDPOINT",
+  "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+  "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+  "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+  "OTEL_EXPORTER_OTLP_HEADERS",
+  "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+  "OTEL_EXPORTER_OTLP_METRICS_HEADERS",
+  "OTEL_EXPORTER_OTLP_LOGS_HEADERS",
+  "OTEL_EXPORTER_OTLP_PROTOCOL",
+  "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
+  "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL",
+  "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL",
+  "OTEL_TRACES_EXPORTER",
+  "OTEL_METRICS_EXPORTER",
+  "OTEL_LOGS_EXPORTER",
 ] as const;
 
 const WSL_SERVER_SYSTEM_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";

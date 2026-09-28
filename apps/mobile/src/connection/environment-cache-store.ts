@@ -1,9 +1,7 @@
 import {
   ConnectionPersistenceError,
   EnvironmentCacheStore,
-  ORCHESTRATION_CACHE_SCHEMA_VERSION,
-  StoredOrchestrationShellSnapshot,
-  StoredOrchestrationThreadSnapshot,
+  encodeShellSnapshotForCache,
 } from "@t3tools/client-runtime/platform";
 import { type EnvironmentId, ServerConfig, VcsListRefsResult } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -117,11 +115,26 @@ export const make = Effect.fn("MobileEnvironmentCacheStore.make")(function* () {
       }).pipe(Effect.tap(() => Effect.promise(() => projectFaviconDatabaseCache.hydrate()))),
     ),
     saveShell: Effect.fn("MobileEnvironmentCache.saveShell")(function* (environmentId, snapshot) {
+<<<<<<< HEAD
       const payload = yield* encodeStoredShellSnapshot({
         schemaVersion: ORCHESTRATION_CACHE_SCHEMA_VERSION,
         environmentId,
         snapshot,
       }).pipe(Effect.mapError((cause) => persistenceError("save-shell", cause)));
+=======
+      const encodedSnapshot = yield* encodeShellSnapshotForCache(snapshot).pipe(
+        Effect.mapError((cause) => persistenceError("save-shell", cause)),
+      );
+      const payload = yield* Effect.try({
+        try: () =>
+          JSON.stringify({
+            schemaVersion: SHELL_SNAPSHOT_CACHE_SCHEMA_VERSION,
+            environmentId,
+            snapshot: encodedSnapshot,
+          } satisfies typeof StoredShellSnapshot.Encoded),
+        catch: (cause) => persistenceError("save-shell", cause),
+      });
+>>>>>>> 9151ea407a (perf(clients): saving the thread list cache no longer freezes the UI (#13767))
       yield* database
         .saveCache(environmentId, "shell", "snapshot", ORCHESTRATION_CACHE_SCHEMA_VERSION, payload)
         .pipe(Effect.mapError(mapDatabaseError("save-shell")));

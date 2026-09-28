@@ -5,8 +5,12 @@ import {
 import {
   CommandId,
   type OrchestrationProjectShell,
+<<<<<<< HEAD:apps/server/src/orchestration-v2/ThreadPullRequestService.ts
   type OrchestrationV2DomainEvent,
   type OrchestrationV2ThreadShell,
+=======
+  type OrchestrationShellSnapshot,
+>>>>>>> 3b0a495b0e (perf(server): per-thread settlement and PR checks no longer rebuild the whole thread list (#13691)):apps/server/src/orchestration/ThreadPullRequestReactor.ts
   type ThreadId,
   type ThreadLinkedPullRequest,
 } from "@t3tools/contracts";
@@ -23,7 +27,11 @@ import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
 import * as GitManager from "../git/GitManager.ts";
+<<<<<<< HEAD:apps/server/src/orchestration-v2/ThreadPullRequestService.ts
 import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+=======
+import type { ProjectionRepositoryError } from "../persistence/Errors.ts";
+>>>>>>> 3b0a495b0e (perf(server): per-thread settlement and PR checks no longer rebuild the whole thread list (#13691)):apps/server/src/orchestration/ThreadPullRequestReactor.ts
 import * as PullRequestService from "../pullRequest/PullRequestService.ts";
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
 import { forkParked } from "../serverActivation.ts";
@@ -62,6 +70,8 @@ function pullRequestMatchesProject(
   );
 }
 
+<<<<<<< HEAD:apps/server/src/orchestration-v2/ThreadPullRequestService.ts
+<<<<<<< HEAD:apps/server/src/orchestration-v2/ThreadPullRequestService.ts
 export const resolveProjectForPullRequestDiscovery = Effect.fn(
   "ThreadPullRequestServiceV2.resolveProject",
 )(function* (
@@ -91,7 +101,53 @@ interface RefreshRequest {
   readonly refresh: boolean;
   readonly backfill?: boolean;
 }
+=======
+/**
+ * Read the shell state for a discovery or settlement sweep. A sweep for one
+ * thread reads that thread and the projects it names, not every thread. A
+ * sweep over all threads reads only unsettled threads, since both sweeps skip
+ * settled ones. Discovery's backfill does its own full read.
+=======
+/**
+ * Read the shell state for a discovery or settlement sweep. A sweep for one
+ * thread reads that thread and the projects it names, not every thread.
+>>>>>>> 3b0a495b0e (perf(server): per-thread settlement and PR checks no longer rebuild the whole thread list (#13691)):apps/server/src/orchestration/ThreadPullRequestReactor.ts
+ */
+export const readSweepSnapshot = (
+  snapshots: ProjectionSnapshotQuery.ProjectionSnapshotQueryShape,
+  threadId: ThreadId | null,
+): Effect.Effect<
+  Pick<OrchestrationShellSnapshot, "snapshotSequence" | "projects" | "threads">,
+  ProjectionRepositoryError
+> =>
+  threadId === null
+<<<<<<< HEAD:apps/server/src/orchestration-v2/ThreadPullRequestService.ts
+    ? snapshots.getShellSnapshot({ unsettledOnly: true })
+=======
+    ? snapshots.getShellSnapshot()
+>>>>>>> 3b0a495b0e (perf(server): per-thread settlement and PR checks no longer rebuild the whole thread list (#13691)):apps/server/src/orchestration/ThreadPullRequestReactor.ts
+    : Effect.gen(function* () {
+        // Read the sequence first. The thread is then at least this new, so a
+        // command guarded by the sequence is rejected rather than missing a change.
+        const { snapshotSequence } = yield* snapshots.getSnapshotSequence();
+        const thread = yield* snapshots.getThreadShellById(threadId);
+        if (Option.isNone(thread)) return { snapshotSequence, projects: [], threads: [] };
+        // Settlement also checks the project a saved pull request names.
+        const reference = thread.value.linkedPullRequest ?? thread.value.branchPullRequest;
+        const projects = yield* snapshots.getProjectShells(
+          reference == null
+            ? [thread.value.projectId]
+            : [thread.value.projectId, reference.projectId],
+        );
+        return { snapshotSequence, projects, threads: [thread.value] };
+      });
+<<<<<<< HEAD:apps/server/src/orchestration-v2/ThreadPullRequestService.ts
+>>>>>>> 1d6f23b519 (perf(server): background sweeps only read threads that can still settle (#13765)):apps/server/src/orchestration/ThreadPullRequestReactor.ts
 
+=======
+
+/** @public Service construction is part of the canonical Effect module API. */
+>>>>>>> 3b0a495b0e (perf(server): per-thread settlement and PR checks no longer rebuild the whole thread list (#13691)):apps/server/src/orchestration/ThreadPullRequestReactor.ts
 export const make = Effect.gen(function* () {
   const orchestrator = yield* OrchestratorV2;
   const snapshots = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
@@ -117,11 +173,24 @@ export const make = Effect.gen(function* () {
   const synchronize = Effect.fn("ThreadPullRequestServiceV2.synchronize")(function* (
     request: RefreshRequest,
   ) {
+<<<<<<< HEAD:apps/server/src/orchestration-v2/ThreadPullRequestService.ts
+<<<<<<< HEAD:apps/server/src/orchestration-v2/ThreadPullRequestService.ts
     const [threadSnapshot, projectShells] = yield* Effect.all([
       orchestrator.getShellSnapshot(),
       snapshots.getProjectShellsWithoutEnrichment(),
     ]);
     const projects = new Map(projectShells.map((project) => [project.id, project]));
+=======
+    // Backfill looks up settled threads, so its passes read every thread.
+    const snapshot =
+      request.threadId === null && (request.backfill || pendingBackfill.size > 0)
+        ? yield* snapshots.getShellSnapshot()
+        : yield* readSweepSnapshot(snapshots, request.threadId);
+=======
+    const snapshot = yield* readSweepSnapshot(snapshots, request.threadId);
+>>>>>>> 3b0a495b0e (perf(server): per-thread settlement and PR checks no longer rebuild the whole thread list (#13691)):apps/server/src/orchestration/ThreadPullRequestReactor.ts
+    const projects = new Map(snapshot.projects.map((project) => [project.id, project]));
+>>>>>>> 1d6f23b519 (perf(server): background sweeps only read threads that can still settle (#13765)):apps/server/src/orchestration/ThreadPullRequestReactor.ts
     if (request.backfill) {
       for (const thread of threadSnapshot.threads) {
         if (
@@ -132,14 +201,33 @@ export const make = Effect.gen(function* () {
         }
       }
     }
+<<<<<<< HEAD:apps/server/src/orchestration-v2/ThreadPullRequestService.ts
+<<<<<<< HEAD:apps/server/src/orchestration-v2/ThreadPullRequestService.ts
     const visibleThreadIds = new Set(threadSnapshot.threads.map((thread) => thread.id));
     for (const threadId of pendingBackfill.keys()) {
       if (!visibleThreadIds.has(threadId)) pendingBackfill.delete(threadId);
+=======
+    // A single-thread read only shows whether its own thread is gone. A thread
+    // with no branch has nothing to look up, and its entry would keep every
+    // periodic pass on the full read.
+    const branchThreadIds = new Set(
+      snapshot.threads.filter((thread) => thread.branch !== null).map((thread) => thread.id),
+    );
+    const checkedIds = request.threadId === null ? pendingBackfill.keys() : [request.threadId];
+    for (const threadId of checkedIds) {
+      if (!branchThreadIds.has(threadId)) pendingBackfill.delete(threadId);
+>>>>>>> 1d6f23b519 (perf(server): background sweeps only read threads that can still settle (#13765)):apps/server/src/orchestration/ThreadPullRequestReactor.ts
+=======
+    // A single-thread read only shows whether its own thread is gone.
+    const threadIds = new Set(snapshot.threads.map((thread) => thread.id));
+    const checkedIds = request.threadId === null ? pendingBackfill.keys() : [request.threadId];
+    for (const threadId of checkedIds) {
+      if (!threadIds.has(threadId)) pendingBackfill.delete(threadId);
+>>>>>>> 3b0a495b0e (perf(server): per-thread settlement and PR checks no longer rebuild the whole thread list (#13691)):apps/server/src/orchestration/ThreadPullRequestReactor.ts
     }
     const threads = threadSnapshot.threads.filter(
       (thread) =>
         thread.archivedAt === null &&
-        (request.threadId === null || thread.id === request.threadId) &&
         ((thread.settledOverride !== "settled" && thread.settledAt === null) ||
           request.threadId !== null ||
           pendingBackfill.has(thread.id)) &&
@@ -154,10 +242,27 @@ export const make = Effect.gen(function* () {
       (group) =>
         Effect.gen(function* () {
           const first = group[0]!;
+<<<<<<< HEAD:apps/server/src/orchestration-v2/ThreadPullRequestService.ts
           const project = projects.get(first.projectId);
           if (project === undefined) return finishBackfill(group);
           const { project: resolvedProject, repository } =
             yield* resolveProjectForPullRequestDiscovery(project, repositoryIdentities);
+=======
+          const snapshotProject = projects.get(first.projectId);
+          if (snapshotProject === undefined) return finishBackfill(group);
+          // A finished turn may have added the remote this PR lives on. A failed
+          // refresh resolves to null, so keep the snapshot's identity then.
+          const project = request.refresh
+            ? {
+                ...snapshotProject,
+                repositoryIdentity:
+                  (yield* repositoryIdentities.resolve(snapshotProject.workspaceRoot, {
+                    refresh: true,
+                  })) ?? snapshotProject.repositoryIdentity,
+              }
+            : snapshotProject;
+          const repository = sourceControlRepositorySelector(project.repositoryIdentity);
+>>>>>>> 999161ef84 (perf(server): stop re-running git for every project each minute (#13689)):apps/server/src/orchestration/ThreadPullRequestReactor.ts
           if (first.branch !== null && repository === null) return finishBackfill(group);
           const worktreeExists =
             first.worktreePath !== null && (yield* fileSystem.exists(first.worktreePath));
