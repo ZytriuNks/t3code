@@ -376,10 +376,6 @@ const resolveOtlpEndpoints = Effect.gen(function* () {
     exportIntervalMs: environment.otlpExportIntervalMs,
   };
   return {
-    traces: Option.getOrUndefined(environment.otlpTracesUrl) ?? persisted.otlpTracesUrl,
-    metrics: Option.getOrUndefined(environment.otlpMetricsUrl) ?? persisted.otlpMetricsUrl,
-    logs: Option.getOrUndefined(environment.otlpLogsUrl) ?? persisted.otlpLogsUrl,
-=======
     traces: OtelEnvironment.resolveSignalEndpoint(
       otel,
       "traces",
@@ -716,7 +712,6 @@ const telemetryLayer = Layer.unwrap(
     //         resource,
     //       }).pipe(Layer.provide(otlpSerializationLayer(endpoints.metrics.export.protocol)));
 
-=======
     // Logged once the loggers above are installed, so the warnings use them.
     const otelWarningsLayer = Layer.effectDiscard(
       Effect.forEach(endpoints.warnings, (warning) => Effect.logWarning(warning)),

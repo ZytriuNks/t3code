@@ -9779,14 +9779,6 @@ export const V2ThreadListParams__SortDirection = Schema.Literals(["asc", "desc"]
   identifier: "V2ThreadListParams__SortDirection",
 });
 
-<<<<<<< HEAD
-export type V2ThreadListParams__SortDirection = "asc" | "desc";
-export const V2ThreadListParams__SortDirection = Schema.Literals(["asc", "desc"]).annotate({
-  identifier: "V2ThreadListParams__SortDirection",
-});
-
-=======
->>>>>>> d5d48742c9 (feat(codex): require Codex 0.156 and regenerate its protocol (#13481))
 export type V2ThreadListParams__ThreadSortKey =
   | "created_at"
   | "updated_at"
@@ -12153,63 +12145,6 @@ export const V2ThreadResumeResponse__TurnStatus = Schema.Literals([
   "inProgress",
 ]).annotate({ identifier: "V2ThreadResumeResponse__TurnStatus" });
 
-<<<<<<< HEAD
-export type V2ThreadResumeResponse__ImageGenerationFailure = {
-  readonly limitId: string;
-  readonly resetsAt?: number | null;
-  readonly type: "usageLimitExceeded";
-};
-export const V2ThreadResumeResponse__ImageGenerationFailure = Schema.Union(
-  [
-    Schema.Struct({
-      limitId: Schema.String,
-      resetsAt: Schema.optionalKey(
-        Schema.Union([
-          Schema.Number.annotate({ format: "int64" }).check(
-            Schema.isInt().annotate({ expected: "an integer" }),
-          ),
-          Schema.Null,
-        ]),
-      ),
-      type: Schema.Literal("usageLimitExceeded").annotate({
-        title: "UsageLimitExceededImageGenerationFailureType",
-      }),
-    }).annotate({ title: "UsageLimitExceededImageGenerationFailure" }),
-  ],
-  { mode: "oneOf" },
-).annotate({ identifier: "V2ThreadResumeResponse__ImageGenerationFailure" });
-
-export type V2ThreadResumeResponse__TurnItemsView = "notLoaded" | "summary" | "full";
-export const V2ThreadResumeResponse__TurnItemsView = Schema.Union(
-  [
-    Schema.Literal("notLoaded").annotate({
-      description: "`items` was not loaded for this turn. The field is intentionally empty.",
-    }),
-    Schema.Literal("summary").annotate({
-      description: "`items` contains only a display summary for this turn.",
-    }),
-    Schema.Literal("full").annotate({
-      description:
-        "`items` contains every ThreadItem available from persisted app-server history for this turn.",
-    }),
-  ],
-  { mode: "oneOf" },
-).annotate({ identifier: "V2ThreadResumeResponse__TurnItemsView" });
-
-export type V2ThreadResumeResponse__TurnStatus =
-  | "completed"
-  | "interrupted"
-  | "failed"
-  | "inProgress";
-export const V2ThreadResumeResponse__TurnStatus = Schema.Literals([
-  "completed",
-  "interrupted",
-  "failed",
-  "inProgress",
-]).annotate({ identifier: "V2ThreadResumeResponse__TurnStatus" });
-
-=======
->>>>>>> d5d48742c9 (feat(codex): require Codex 0.156 and regenerate its protocol (#13481))
 export type V2ThreadRevertResponse__AbsolutePathBuf = string;
 export const V2ThreadRevertResponse__AbsolutePathBuf = Schema.String.annotate({
   description:
@@ -12389,164 +12324,6 @@ export const V2ThreadRevertResponse__CommandExecutionSource = Schema.Literals([
   "unifiedExecInteraction",
 ]).annotate({ identifier: "V2ThreadRevertResponse__CommandExecutionSource" });
 
-<<<<<<< HEAD
-export type V2ThreadRevertResponse__ReasoningEffort = string;
-export const V2ThreadRevertResponse__ReasoningEffort = Schema.String.annotate({
-  description: "A non-empty reasoning effort value advertised by the model.",
-}).check(
-  Schema.isMinLength(1).annotate({
-    expected: "a value with a length of at least 1",
-    identifier: "V2ThreadRevertResponse__ReasoningEffort",
-  }),
-);
-
-export type V2ThreadRevertResponse__ThreadSectionAppearance = {
-  readonly color?: string | null;
-  readonly icon?: string | null;
-};
-export const V2ThreadRevertResponse__ThreadSectionAppearance = Schema.Struct({
-  color: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])),
-  icon: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])),
-}).annotate({
-  description: "Extensible visual presentation for a custom thread section.",
-  identifier: "V2ThreadRevertResponse__ThreadSectionAppearance",
-});
-
-export type V2ThreadRevertResponse__AgentPath = string;
-export const V2ThreadRevertResponse__AgentPath = Schema.String.annotate({
-  identifier: "V2ThreadRevertResponse__AgentPath",
-});
-
-export type V2ThreadRevertResponse__ThreadId = string;
-export const V2ThreadRevertResponse__ThreadId = Schema.String.annotate({
-  identifier: "V2ThreadRevertResponse__ThreadId",
-});
-
-export type V2ThreadRevertResponse__ThreadActiveFlag = "waitingOnApproval" | "waitingOnUserInput";
-export const V2ThreadRevertResponse__ThreadActiveFlag = Schema.Literals([
-  "waitingOnApproval",
-  "waitingOnUserInput",
-]).annotate({ identifier: "V2ThreadRevertResponse__ThreadActiveFlag" });
-
-export type V2ThreadRevertResponse__ThreadSource = string;
-export const V2ThreadRevertResponse__ThreadSource = Schema.String.annotate({
-  identifier: "V2ThreadRevertResponse__ThreadSource",
-});
-
-export type V2ThreadRevertResponse__NonSteerableTurnKind = "review" | "compact";
-export const V2ThreadRevertResponse__NonSteerableTurnKind = Schema.Literals([
-  "review",
-  "compact",
-]).annotate({ identifier: "V2ThreadRevertResponse__NonSteerableTurnKind" });
-
-export type V2ThreadRevertResponse__MisalignmentSteer = { readonly message: string };
-export const V2ThreadRevertResponse__MisalignmentSteer = Schema.Struct({
-  message: Schema.String,
-}).annotate({ identifier: "V2ThreadRevertResponse__MisalignmentSteer" });
-
-export type V2ThreadRevertResponse__ByteRange = { readonly end: number; readonly start: number };
-export const V2ThreadRevertResponse__ByteRange = Schema.Struct({
-  end: Schema.Number.annotate({ format: "uint" })
-    .check(Schema.isInt().annotate({ expected: "an integer" }))
-    .check(
-      Schema.isGreaterThanOrEqualTo(0).annotate({ expected: "a value greater than or equal to 0" }),
-    ),
-  start: Schema.Number.annotate({ format: "uint" })
-    .check(Schema.isInt().annotate({ expected: "an integer" }))
-    .check(
-      Schema.isGreaterThanOrEqualTo(0).annotate({ expected: "a value greater than or equal to 0" }),
-    ),
-}).annotate({ identifier: "V2ThreadRevertResponse__ByteRange" });
-
-export type V2ThreadRevertResponse__ImageDetail = "auto" | "low" | "high" | "original";
-export const V2ThreadRevertResponse__ImageDetail = Schema.Literals([
-  "auto",
-  "low",
-  "high",
-  "original",
-]).annotate({ identifier: "V2ThreadRevertResponse__ImageDetail" });
-
-export type V2ThreadRevertResponse__HookPromptFragment = {
-  readonly hookRunId: string;
-  readonly text: string;
-};
-export const V2ThreadRevertResponse__HookPromptFragment = Schema.Struct({
-  hookRunId: Schema.String,
-  text: Schema.String,
-}).annotate({ identifier: "V2ThreadRevertResponse__HookPromptFragment" });
-
-export type V2ThreadRevertResponse__AgentMessageDelivery = "async";
-export const V2ThreadRevertResponse__AgentMessageDelivery = Schema.Literal("async").annotate({
-  identifier: "V2ThreadRevertResponse__AgentMessageDelivery",
-});
-
-export type V2ThreadRevertResponse__MemoryCitationEntry = {
-  readonly lineEnd: number;
-  readonly lineStart: number;
-  readonly note: string;
-  readonly path: string;
-};
-export const V2ThreadRevertResponse__MemoryCitationEntry = Schema.Struct({
-  lineEnd: Schema.Number.annotate({ format: "uint32" })
-    .check(Schema.isInt().annotate({ expected: "an integer" }))
-    .check(
-      Schema.isGreaterThanOrEqualTo(0).annotate({ expected: "a value greater than or equal to 0" }),
-    ),
-  lineStart: Schema.Number.annotate({ format: "uint32" })
-    .check(Schema.isInt().annotate({ expected: "an integer" }))
-    .check(
-      Schema.isGreaterThanOrEqualTo(0).annotate({ expected: "a value greater than or equal to 0" }),
-    ),
-  note: Schema.String,
-  path: Schema.String,
-}).annotate({ identifier: "V2ThreadRevertResponse__MemoryCitationEntry" });
-
-export type V2ThreadRevertResponse__MessagePhase = "commentary" | "final_answer";
-export const V2ThreadRevertResponse__MessagePhase = Schema.Union(
-  [
-    Schema.Literal("commentary").annotate({
-      description:
-        "Mid-turn assistant text (for example preamble/progress narration).\n\nAdditional tool calls or assistant output may follow before turn completion.",
-    }),
-    Schema.Literal("final_answer").annotate({
-      description: "The assistant's terminal answer text for the current turn.",
-    }),
-  ],
-  { mode: "oneOf" },
-).annotate({
-  description:
-    'Classifies an assistant message as interim commentary or final answer text.\n\nProviders do not emit this consistently, so callers must treat `None` as "phase unknown" and keep compatibility behavior for legacy models.',
-  identifier: "V2ThreadRevertResponse__MessagePhase",
-});
-
-export type V2ThreadRevertResponse__AsyncUserInputQuestion = {
-  readonly options?: ReadonlyArray<string> | null;
-  readonly title: string;
-};
-export const V2ThreadRevertResponse__AsyncUserInputQuestion = Schema.Struct({
-  options: Schema.optionalKey(Schema.Union([Schema.Array(Schema.String), Schema.Null])),
-  title: Schema.String,
-}).annotate({ identifier: "V2ThreadRevertResponse__AsyncUserInputQuestion" });
-
-export type V2ThreadRevertResponse__LegacyAppPathString = string;
-export const V2ThreadRevertResponse__LegacyAppPathString = Schema.String.annotate({
-  identifier: "V2ThreadRevertResponse__LegacyAppPathString",
-});
-
-export type V2ThreadRevertResponse__CommandExecutionSource =
-  | "agent"
-  | "userShell"
-  | "unifiedExecStartup"
-  | "unifiedExecInteraction";
-export const V2ThreadRevertResponse__CommandExecutionSource = Schema.Literals([
-  "agent",
-  "userShell",
-  "unifiedExecStartup",
-  "unifiedExecInteraction",
-]).annotate({ identifier: "V2ThreadRevertResponse__CommandExecutionSource" });
-
-=======
->>>>>>> d5d48742c9 (feat(codex): require Codex 0.156 and regenerate its protocol (#13481))
 export type V2ThreadRevertResponse__CommandExecutionStatus =
   | "inProgress"
   | "completed"
@@ -12635,85 +12412,6 @@ export const V2ThreadRevertResponse__McpToolCallStatus = Schema.Literals([
   "failed",
 ]).annotate({ identifier: "V2ThreadRevertResponse__McpToolCallStatus" });
 
-<<<<<<< HEAD
-export type V2ThreadRevertResponse__PatchChangeKind =
-  | { readonly type: "add" }
-  | { readonly type: "delete" }
-  | { readonly move_path?: string | null; readonly type: "update" };
-export const V2ThreadRevertResponse__PatchChangeKind = Schema.Union(
-  [
-    Schema.Struct({
-      type: Schema.Literal("add").annotate({ title: "AddPatchChangeKindType" }),
-    }).annotate({ title: "AddPatchChangeKind" }),
-    Schema.Struct({
-      type: Schema.Literal("delete").annotate({ title: "DeletePatchChangeKindType" }),
-    }).annotate({ title: "DeletePatchChangeKind" }),
-    Schema.Struct({
-      move_path: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])),
-      type: Schema.Literal("update").annotate({ title: "UpdatePatchChangeKindType" }),
-    }).annotate({ title: "UpdatePatchChangeKind" }),
-  ],
-  { mode: "oneOf" },
-).annotate({ identifier: "V2ThreadRevertResponse__PatchChangeKind" });
-
-export type V2ThreadRevertResponse__PatchApplyStatus =
-  | "inProgress"
-  | "completed"
-  | "failed"
-  | "declined";
-export const V2ThreadRevertResponse__PatchApplyStatus = Schema.Literals([
-  "inProgress",
-  "completed",
-  "failed",
-  "declined",
-]).annotate({ identifier: "V2ThreadRevertResponse__PatchApplyStatus" });
-
-export type V2ThreadRevertResponse__McpToolCallAppContext = {
-  readonly actionName?: string | null;
-  readonly appName?: string | null;
-  readonly connectorId: string;
-  readonly linkId?: string | null;
-  readonly resourceUri?: string | null;
-};
-export const V2ThreadRevertResponse__McpToolCallAppContext = Schema.Struct({
-  actionName: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])),
-  appName: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])),
-  connectorId: Schema.String,
-  linkId: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])),
-  resourceUri: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])),
-}).annotate({ identifier: "V2ThreadRevertResponse__McpToolCallAppContext" });
-
-export type V2ThreadRevertResponse__McpToolCallError = { readonly message: string };
-export const V2ThreadRevertResponse__McpToolCallError = Schema.Struct({
-  message: Schema.String,
-}).annotate({ identifier: "V2ThreadRevertResponse__McpToolCallError" });
-
-export type V2ThreadRevertResponse__McpAppDisplayMode = "inline" | "fullscreen";
-export const V2ThreadRevertResponse__McpAppDisplayMode = Schema.Literals([
-  "inline",
-  "fullscreen",
-]).annotate({ identifier: "V2ThreadRevertResponse__McpAppDisplayMode" });
-
-export type V2ThreadRevertResponse__McpToolCallResult = {
-  readonly _meta?: Schema.Json;
-  readonly content: ReadonlyArray<Schema.Json>;
-  readonly structuredContent?: Schema.Json;
-};
-export const V2ThreadRevertResponse__McpToolCallResult = Schema.Struct({
-  _meta: Schema.optionalKey(Schema.Json.annotate({ expected: "JSON value" })),
-  content: Schema.Array(Schema.Json.annotate({ expected: "JSON value" })),
-  structuredContent: Schema.optionalKey(Schema.Json.annotate({ expected: "JSON value" })),
-}).annotate({ identifier: "V2ThreadRevertResponse__McpToolCallResult" });
-
-export type V2ThreadRevertResponse__McpToolCallStatus = "inProgress" | "completed" | "failed";
-export const V2ThreadRevertResponse__McpToolCallStatus = Schema.Literals([
-  "inProgress",
-  "completed",
-  "failed",
-]).annotate({ identifier: "V2ThreadRevertResponse__McpToolCallStatus" });
-
-=======
->>>>>>> d5d48742c9 (feat(codex): require Codex 0.156 and regenerate its protocol (#13481))
 export type V2ThreadRevertResponse__DynamicToolCallOutputContentItem =
   | { readonly text: string; readonly type: "inputText" }
   | { readonly imageUrl: string; readonly type: "inputImage" }
@@ -14200,8 +13898,6 @@ export const V2ThreadTokenUsageUpdatedNotification__TokenUsageBreakdown = Schema
   ),
 }).annotate({ identifier: "V2ThreadTokenUsageUpdatedNotification__TokenUsageBreakdown" });
 
-<<<<<<< HEAD
-=======
 export type V2ThreadTurnsListParams__TurnItemsView = "notLoaded" | "summary" | "full";
 export const V2ThreadTurnsListParams__TurnItemsView = Schema.Union(
   [
@@ -14224,7 +13920,6 @@ export const V2ThreadTurnsListParams__SortDirection = Schema.Literals(["asc", "d
   identifier: "V2ThreadTurnsListParams__SortDirection",
 });
 
->>>>>>> d5d48742c9 (feat(codex): require Codex 0.156 and regenerate its protocol (#13481))
 export type V2ThreadTurnsListResponse__NonSteerableTurnKind = "review" | "compact";
 export const V2ThreadTurnsListResponse__NonSteerableTurnKind = Schema.Literals([
   "review",
@@ -14306,8 +14001,6 @@ export const V2ThreadTurnsListResponse__MessagePhase = Schema.Union(
   ],
   { mode: "oneOf" },
 ).annotate({
-<<<<<<< HEAD
-=======
   description:
     'Classifies an assistant message as interim commentary or final answer text.\n\nProviders do not emit this consistently, so callers must treat `None` as "phase unknown" and keep compatibility behavior for legacy models.',
   identifier: "V2ThreadTurnsListResponse__MessagePhase",
@@ -14634,7 +14327,6 @@ export const V2ThreadTurnsListResponse__TurnStatus = Schema.Literals([
 
 export type V2ThreadUnarchiveResponse__AbsolutePathBuf = string;
 export const V2ThreadUnarchiveResponse__AbsolutePathBuf = Schema.String.annotate({
->>>>>>> d5d48742c9 (feat(codex): require Codex 0.156 and regenerate its protocol (#13481))
   description:
     "A path that is guaranteed to be absolute and normalized (though it is not guaranteed to be canonicalized or exist on the filesystem).\n\nIMPORTANT: When deserializing an `AbsolutePathBuf`, a base path must be set using [AbsolutePathBufGuard::new]. If no base path is set, the deserialization will fail unless the path being deserialized is already absolute.",
   identifier: "V2ThreadUnarchiveResponse__AbsolutePathBuf",
@@ -16133,46 +15825,6 @@ export const V2TurnStartResponse__MessagePhase = Schema.Union(
   identifier: "V2TurnStartResponse__MessagePhase",
 });
 
-<<<<<<< HEAD
-export type V2TurnStartResponse__MemoryCitationEntry = {
-  readonly lineEnd: number;
-  readonly lineStart: number;
-  readonly note: string;
-  readonly path: string;
-};
-export const V2TurnStartResponse__MemoryCitationEntry = Schema.Struct({
-  lineEnd: Schema.Number.annotate({ format: "uint32" })
-    .check(Schema.isInt().annotate({ expected: "an integer" }))
-    .check(
-      Schema.isGreaterThanOrEqualTo(0).annotate({ expected: "a value greater than or equal to 0" }),
-    ),
-  lineStart: Schema.Number.annotate({ format: "uint32" })
-    .check(Schema.isInt().annotate({ expected: "an integer" }))
-    .check(
-      Schema.isGreaterThanOrEqualTo(0).annotate({ expected: "a value greater than or equal to 0" }),
-    ),
-  note: Schema.String,
-  path: Schema.String,
-}).annotate({ identifier: "V2TurnStartResponse__MemoryCitationEntry" });
-
-export type V2TurnStartResponse__MessagePhase = "commentary" | "final_answer";
-export const V2TurnStartResponse__MessagePhase = Schema.Union(
-  [
-    Schema.Literal("commentary").annotate({
-      description:
-        "Mid-turn assistant text (for example preamble/progress narration).\n\nAdditional tool calls or assistant output may follow before turn completion.",
-    }),
-    Schema.Literal("final_answer").annotate({
-      description: "The assistant's terminal answer text for the current turn.",
-    }),
-  ],
-  { mode: "oneOf" },
-).annotate({
-  description:
-    "A path that is guaranteed to be absolute and normalized (though it is not guaranteed to be canonicalized or exist on the filesystem).\n\nIMPORTANT: When deserializing an `AbsolutePathBuf`, a base path must be set using [AbsolutePathBufGuard::new]. If no base path is set, the deserialization will fail unless the path being deserialized is already absolute.",
-  identifier: "V2TurnStartResponse__AbsolutePathBuf",
-});
-=======
 export type V2TurnStartResponse__AsyncUserInputQuestion = {
   readonly options?: ReadonlyArray<string> | null;
   readonly title: string;
@@ -16181,7 +15833,6 @@ export const V2TurnStartResponse__AsyncUserInputQuestion = Schema.Struct({
   options: Schema.optionalKey(Schema.Union([Schema.Array(Schema.String), Schema.Null])),
   title: Schema.String,
 }).annotate({ identifier: "V2TurnStartResponse__AsyncUserInputQuestion" });
->>>>>>> d5d48742c9 (feat(codex): require Codex 0.156 and regenerate its protocol (#13481))
 
 export type V2TurnStartResponse__LegacyAppPathString = string;
 export const V2TurnStartResponse__LegacyAppPathString = Schema.String.annotate({
@@ -17202,16 +16853,19 @@ export const ClientRequest__FsWatchParams = Schema.Struct({
   identifier: "ClientRequest__FsWatchParams",
 });
 
-export type ClientRequest__ReviewStartParams = {
-  readonly delivery?: ClientRequest__ReviewDelivery | null;
-  readonly target: ClientRequest__ReviewTarget;
-  readonly threadId: string;
+export type ClientRequest__SkillsConfigWriteParams = {
+  readonly enabled: boolean;
+  readonly name?: string | null;
+  readonly path?: ClientRequest__AbsolutePathBuf | null;
 };
-export const ClientRequest__ReviewStartParams = Schema.Struct({
-  delivery: Schema.optionalKey(
-    Schema.Union([ClientRequest__ReviewDelivery, Schema.Null]).annotate({
-      description:
-        "Where to run the review: inline (default) on the current thread or detached on a new thread (returned in `reviewThreadId`). Detached delivery is deprecated and emits `deprecationNotice`. Use `thread/start` followed by an inline review for a separate review thread.",
+export const ClientRequest__SkillsConfigWriteParams = Schema.Struct({
+  enabled: Schema.Boolean,
+  name: Schema.optionalKey(
+    Schema.Union([Schema.String.annotate({ description: "Name-based selector." }), Schema.Null]),
+  ),
+  path: Schema.optionalKey(
+    Schema.Union([ClientRequest__AbsolutePathBuf, Schema.Null]).annotate({
+      description: "Path-based selector.",
     }),
   ),
 }).annotate({ identifier: "ClientRequest__SkillsConfigWriteParams" });
@@ -18406,49 +18060,6 @@ export const ServerNotification__CodexErrorInfo = Schema.Union(
   identifier: "ServerNotification__CodexErrorInfo",
 });
 
-<<<<<<< HEAD
-export type ServerNotification__CommandAction =
-  | {
-      readonly command: string;
-      readonly name: string;
-      readonly path: ServerNotification__LegacyAppPathString;
-      readonly type: "read";
-    }
-  | { readonly command: string; readonly path?: string | null; readonly type: "listFiles" }
-  | {
-      readonly command: string;
-      readonly path?: string | null;
-      readonly query?: string | null;
-      readonly type: "search";
-    }
-  | { readonly command: string; readonly type: "unknown" };
-export const ServerNotification__CommandAction = Schema.Union(
-  [
-    Schema.Struct({
-      command: Schema.String,
-      name: Schema.String,
-      path: ServerNotification__LegacyAppPathString,
-      type: Schema.Literal("read").annotate({ title: "ReadCommandActionType" }),
-    }).annotate({ title: "ReadCommandAction" }),
-    Schema.Struct({
-      command: Schema.String,
-      path: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])),
-      type: Schema.Literal("listFiles").annotate({ title: "ListFilesCommandActionType" }),
-    }).annotate({ title: "ListFilesCommandAction" }),
-    Schema.Struct({
-      command: Schema.String,
-      path: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])),
-      query: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])),
-      type: Schema.Literal("search").annotate({ title: "SearchCommandActionType" }),
-    }).annotate({ title: "SearchCommandAction" }),
-    Schema.Struct({
-      command: Schema.String,
-      type: Schema.Literal("unknown").annotate({ title: "UnknownCommandActionType" }),
-    }).annotate({ title: "UnknownCommandAction" }),
-  ],
-  { mode: "oneOf" },
-).annotate({ identifier: "ServerNotification__CommandAction" });
-=======
 export type ServerNotification__MisalignmentErrorDetails = {
   readonly detailedExplanation?: string | null;
   readonly errorType?: string | null;
@@ -18480,7 +18091,6 @@ export const ServerNotification__MisalignmentErrorDetails = Schema.Struct({
     }),
   ),
 }).annotate({ identifier: "ServerNotification__MisalignmentErrorDetails" });
->>>>>>> d5d48742c9 (feat(codex): require Codex 0.156 and regenerate its protocol (#13481))
 
 export type ServerNotification__FsChangedNotification = {
   readonly changedPaths: ReadonlyArray<ServerNotification__AbsolutePathBuf>;
@@ -21458,15 +21068,6 @@ export const V2ItemCompletedNotification__MemoryCitation = Schema.Struct({
   threadIds: Schema.Array(Schema.String),
 }).annotate({ identifier: "V2ItemCompletedNotification__MemoryCitation" });
 
-export type V2ItemCompletedNotification__MemoryCitation = {
-  readonly entries: ReadonlyArray<V2ItemCompletedNotification__MemoryCitationEntry>;
-  readonly threadIds: ReadonlyArray<string>;
-};
-export const V2ItemCompletedNotification__MemoryCitation = Schema.Struct({
-  entries: Schema.Array(V2ItemCompletedNotification__MemoryCitationEntry),
-  threadIds: Schema.Array(Schema.String),
-}).annotate({ identifier: "V2ItemCompletedNotification__MemoryCitation" });
-
 export type V2ItemCompletedNotification__CommandAction =
   | {
       readonly command: string;
@@ -23381,18 +22982,6 @@ export type V2ThreadForkResponse__CodexErrorInfo =
   | "badRequest"
   | "threadRollbackFailed"
   | "sandboxError"
-<<<<<<< HEAD
-  | "rateLimitExceeded"
-  | "serverOverloaded"
-  | "cyberPolicy"
-  | "misalignmentPolicyViolation"
-  | "internalServerError"
-  | "unauthorized"
-  | "badRequest"
-  | "threadRollbackFailed"
-  | "sandboxError"
-=======
->>>>>>> d5d48742c9 (feat(codex): require Codex 0.156 and regenerate its protocol (#13481))
   | "other"
   | { readonly httpConnectionFailed: { readonly httpStatusCode?: number | null } }
   | { readonly responseStreamConnectionFailed: { readonly httpStatusCode?: number | null } }
@@ -23769,8 +23358,6 @@ export const V2ThreadGoalUpdatedNotification__ThreadGoal = Schema.Struct({
   ),
 }).annotate({ identifier: "V2ThreadGoalUpdatedNotification__ThreadGoal" });
 
-<<<<<<< HEAD
-=======
 export type V2ThreadItemsListResponse__TextElement = {
   readonly byteRange: V2ThreadItemsListResponse__ByteRange;
   readonly placeholder?: string | null;
@@ -23851,7 +23438,6 @@ export const V2ThreadItemsListResponse__FunctionCallOutputContentItem = Schema.U
   identifier: "V2ThreadItemsListResponse__FunctionCallOutputContentItem",
 });
 
->>>>>>> d5d48742c9 (feat(codex): require Codex 0.156 and regenerate its protocol (#13481))
 export type V2ThreadItemsListResponse__MemoryCitation = {
   readonly entries: ReadonlyArray<V2ThreadItemsListResponse__MemoryCitationEntry>;
   readonly threadIds: ReadonlyArray<string>;
@@ -24266,304 +23852,6 @@ export const V2ThreadListResponse__MemoryCitation = Schema.Struct({
   threadIds: Schema.Array(Schema.String),
 }).annotate({ identifier: "V2ThreadListResponse__MemoryCitation" });
 
-<<<<<<< HEAD
-export type V2ThreadListResponse__FileUpdateChange = {
-  readonly diff: string;
-  readonly kind: V2ThreadItemsListResponse__PatchChangeKind;
-  readonly path: string;
-};
-export const V2ThreadItemsListResponse__FileUpdateChange = Schema.Struct({
-  diff: Schema.String,
-  kind: V2ThreadItemsListResponse__PatchChangeKind,
-  path: Schema.String,
-}).annotate({ identifier: "V2ThreadListResponse__FileUpdateChange" });
-
-export type V2ThreadListResponse__CollabAgentState = {
-  readonly message?: string | null;
-  readonly status: V2ThreadListResponse__CollabAgentStatus;
-};
-export const V2ThreadListResponse__CollabAgentState = Schema.Struct({
-  message: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])),
-  status: V2ThreadListResponse__CollabAgentStatus,
-}).annotate({ identifier: "V2ThreadListResponse__CollabAgentState" });
-
-export type V2ThreadListResponse__ThreadStatus =
-  | { readonly type: "notLoaded" }
-  | { readonly type: "idle" }
-  | { readonly type: "systemError" }
-  | {
-      readonly activeFlags: ReadonlyArray<V2ThreadListResponse__ThreadActiveFlag>;
-      readonly type: "active";
-    };
-export const V2ThreadListResponse__ThreadStatus = Schema.Union(
-  [
-    Schema.Struct({
-      type: Schema.Literal("notLoaded").annotate({ title: "NotLoadedThreadStatusType" }),
-    }).annotate({ title: "NotLoadedThreadStatus" }),
-    Schema.Struct({
-      type: Schema.Literal("idle").annotate({ title: "IdleThreadStatusType" }),
-    }).annotate({ title: "IdleThreadStatus" }),
-    Schema.Struct({
-      type: Schema.Literal("systemError").annotate({ title: "SystemErrorThreadStatusType" }),
-    }).annotate({ title: "SystemErrorThreadStatus" }),
-    Schema.Struct({
-      activeFlags: Schema.Array(V2ThreadListResponse__ThreadActiveFlag),
-      type: Schema.Literal("active").annotate({ title: "ActiveThreadStatusType" }),
-    }).annotate({ title: "ActiveThreadStatus" }),
-  ],
-  { mode: "oneOf" },
-).annotate({ identifier: "V2ThreadListResponse__ThreadStatus" });
-
-export type V2ThreadListResponse__CodexErrorInfo =
-  | "contextWindowExceeded"
-  | "sessionBudgetExceeded"
-  | "usageLimitExceeded"
-  | "rateLimitExceeded"
-  | "serverOverloaded"
-  | "cyberPolicy"
-  | "misalignmentPolicyViolation"
-  | "internalServerError"
-  | "unauthorized"
-  | "badRequest"
-  | "threadRollbackFailed"
-  | "sandboxError"
-  | "other"
-  | { readonly httpConnectionFailed: { readonly httpStatusCode?: number | null } }
-  | { readonly responseStreamConnectionFailed: { readonly httpStatusCode?: number | null } }
-  | { readonly responseStreamDisconnected: { readonly httpStatusCode?: number | null } }
-  | { readonly responseTooManyFailedAttempts: { readonly httpStatusCode?: number | null } }
-  | {
-      readonly activeTurnNotSteerable: {
-        readonly turnKind: V2ThreadListResponse__NonSteerableTurnKind;
-      };
-    };
-export const V2ThreadListResponse__CodexErrorInfo = Schema.Union(
-  [
-    Schema.Literals([
-      "contextWindowExceeded",
-      "sessionBudgetExceeded",
-      "usageLimitExceeded",
-      "rateLimitExceeded",
-      "serverOverloaded",
-      "cyberPolicy",
-      "misalignmentPolicyViolation",
-      "internalServerError",
-      "unauthorized",
-      "badRequest",
-      "threadRollbackFailed",
-      "sandboxError",
-      "other",
-    ]),
-    Schema.Struct({
-      httpConnectionFailed: Schema.Struct({
-        httpStatusCode: Schema.optionalKey(
-          Schema.Union([
-            Schema.Number.annotate({ format: "uint16" })
-              .check(Schema.isInt().annotate({ expected: "an integer" }))
-              .check(
-                Schema.isGreaterThanOrEqualTo(0).annotate({
-                  expected: "a value greater than or equal to 0",
-                }),
-              ),
-            Schema.Null,
-          ]),
-        ),
-      }),
-    }).annotate({ title: "HttpConnectionFailedCodexErrorInfo" }),
-    Schema.Struct({
-      responseStreamConnectionFailed: Schema.Struct({
-        httpStatusCode: Schema.optionalKey(
-          Schema.Union([
-            Schema.Number.annotate({ format: "uint16" })
-              .check(Schema.isInt().annotate({ expected: "an integer" }))
-              .check(
-                Schema.isGreaterThanOrEqualTo(0).annotate({
-                  expected: "a value greater than or equal to 0",
-                }),
-              ),
-            Schema.Null,
-          ]),
-        ),
-      }),
-    }).annotate({
-      title: "ResponseStreamConnectionFailedCodexErrorInfo",
-      description: "Failed to connect to the response SSE stream.",
-    }),
-    Schema.Struct({
-      responseStreamDisconnected: Schema.Struct({
-        httpStatusCode: Schema.optionalKey(
-          Schema.Union([
-            Schema.Number.annotate({ format: "uint16" })
-              .check(Schema.isInt().annotate({ expected: "an integer" }))
-              .check(
-                Schema.isGreaterThanOrEqualTo(0).annotate({
-                  expected: "a value greater than or equal to 0",
-                }),
-              ),
-            Schema.Null,
-          ]),
-        ),
-      }),
-    }).annotate({
-      title: "ResponseStreamDisconnectedCodexErrorInfo",
-      description:
-        "The response SSE stream disconnected in the middle of a turn before completion.",
-    }),
-    Schema.Struct({
-      responseTooManyFailedAttempts: Schema.Struct({
-        httpStatusCode: Schema.optionalKey(
-          Schema.Union([
-            Schema.Number.annotate({ format: "uint16" })
-              .check(Schema.isInt().annotate({ expected: "an integer" }))
-              .check(
-                Schema.isGreaterThanOrEqualTo(0).annotate({
-                  expected: "a value greater than or equal to 0",
-                }),
-              ),
-            Schema.Null,
-          ]),
-        ),
-      }),
-    }).annotate({
-      title: "ResponseTooManyFailedAttemptsCodexErrorInfo",
-      description: "Reached the retry limit for responses.",
-    }),
-    Schema.Struct({
-      activeTurnNotSteerable: Schema.Struct({
-        turnKind: V2ThreadListResponse__NonSteerableTurnKind,
-      }),
-    }).annotate({
-      title: "ActiveTurnNotSteerableCodexErrorInfo",
-      description:
-        "Returned when `turn/start` or `turn/steer` is submitted while the current active turn cannot accept same-turn steering, for example `/review` or manual `/compact`.",
-    }),
-  ],
-  { mode: "oneOf" },
-).annotate({
-  description:
-    "This translation layer make sure that we expose codex error code in camel case.\n\nWhen an upstream HTTP status is available (for example, from the Responses API or a provider), it is forwarded in `httpStatusCode` on the relevant `codexErrorInfo` variant.",
-  identifier: "V2ThreadListResponse__CodexErrorInfo",
-});
-
-export type V2ThreadListResponse__MisalignmentErrorDetails = {
-  readonly detailedExplanation?: string | null;
-  readonly errorType?: string | null;
-  readonly steer?: V2ThreadListResponse__MisalignmentSteer | null;
-};
-export const V2ThreadListResponse__MisalignmentErrorDetails = Schema.Struct({
-  detailedExplanation: Schema.optionalKey(
-    Schema.Union([
-      Schema.String.annotate({
-        description:
-          "A substantive localized explanation is required before offering continuation.",
-      }),
-      Schema.Null,
-    ]),
-  ),
-  errorType: Schema.optionalKey(
-    Schema.Union([
-      Schema.String.annotate({
-        description:
-          "Open-ended classification; clients must accept categories added by Responses.",
-      }),
-      Schema.Null,
-    ]),
-  ),
-  steer: Schema.optionalKey(
-    Schema.Union([V2ThreadListResponse__MisalignmentSteer, Schema.Null]).annotate({
-      description:
-        "Instruction to submit as the next turn's user input if continuation is confirmed.",
-    }),
-  ),
-}).annotate({ identifier: "V2ThreadListResponse__MisalignmentErrorDetails" });
-
-export type V2ThreadListResponse__TextElement = {
-  readonly byteRange: V2ThreadListResponse__ByteRange;
-  readonly placeholder?: string | null;
-};
-export const V2ThreadListResponse__TextElement = Schema.Struct({
-  byteRange: Schema.suspend(
-    (): Schema.Codec<V2ThreadListResponse__ByteRange> => V2ThreadListResponse__ByteRange,
-  ).annotate({ description: "Byte range in the parent `text` buffer that this element occupies." }),
-  placeholder: Schema.optionalKey(
-    Schema.Union([
-      Schema.String.annotate({
-        description: "Optional human-readable placeholder for the element, displayed in the UI.",
-      }),
-      Schema.Null,
-    ]),
-  ),
-}).annotate({ identifier: "V2ThreadListResponse__TextElement" });
-
-export type V2ThreadListResponse__FunctionCallOutputContentItem =
-  | { readonly text: string; readonly type: "input_text" }
-  | {
-      readonly detail?: V2ThreadListResponse__ImageDetail | null;
-      readonly type: "input_image";
-      readonly image_url: string;
-    }
-  | {
-      readonly detail?: V2ThreadListResponse__ImageDetail | null;
-      readonly type: "input_image";
-      readonly file_id: string;
-    }
-  | { readonly audio_url: string; readonly type: "input_audio" }
-  | { readonly encrypted_content: string; readonly type: "encrypted_content" };
-export const V2ThreadListResponse__FunctionCallOutputContentItem = Schema.Union(
-  [
-    Schema.Struct({
-      text: Schema.String,
-      type: Schema.Literal("input_text").annotate({
-        title: "InputTextFunctionCallOutputContentItemType",
-      }),
-    }).annotate({ title: "InputTextFunctionCallOutputContentItem" }),
-    Schema.Union([
-      Schema.Struct({
-        detail: Schema.optionalKey(Schema.Union([V2ThreadListResponse__ImageDetail, Schema.Null])),
-        type: Schema.Literal("input_image").annotate({
-          title: "InputImageFunctionCallOutputContentItemType",
-        }),
-        image_url: Schema.String,
-      }).annotate({ title: "ImageUrlFunctionCallOutputContentItem" }),
-      Schema.Struct({
-        detail: Schema.optionalKey(Schema.Union([V2ThreadListResponse__ImageDetail, Schema.Null])),
-        type: Schema.Literal("input_image").annotate({
-          title: "InputImageFunctionCallOutputContentItemType",
-        }),
-        file_id: Schema.String,
-      }).annotate({ title: "FileIdFunctionCallOutputContentItem" }),
-    ]).annotate({ title: "InputImageFunctionCallOutputContentItem" }),
-    Schema.Struct({
-      audio_url: Schema.String,
-      type: Schema.Literal("input_audio").annotate({
-        title: "InputAudioFunctionCallOutputContentItemType",
-      }),
-    }).annotate({ title: "InputAudioFunctionCallOutputContentItem" }),
-    Schema.Struct({
-      encrypted_content: Schema.String,
-      type: Schema.Literal("encrypted_content").annotate({
-        title: "EncryptedContentFunctionCallOutputContentItemType",
-      }),
-    }).annotate({ title: "EncryptedContentFunctionCallOutputContentItem" }),
-  ],
-  { mode: "oneOf" },
-).annotate({
-  description:
-    "Responses API compatible content items that can be returned by a tool call. This is a subset of ContentItem with the types we support as function call outputs.",
-  identifier: "V2ThreadListResponse__FunctionCallOutputContentItem",
-});
-
-export type V2ThreadListResponse__MemoryCitation = {
-  readonly entries: ReadonlyArray<V2ThreadListResponse__MemoryCitationEntry>;
-  readonly threadIds: ReadonlyArray<string>;
-};
-export const V2ThreadListResponse__MemoryCitation = Schema.Struct({
-  entries: Schema.Array(V2ThreadListResponse__MemoryCitationEntry),
-  threadIds: Schema.Array(Schema.String),
-}).annotate({ identifier: "V2ThreadListResponse__MemoryCitation" });
-
-=======
->>>>>>> d5d48742c9 (feat(codex): require Codex 0.156 and regenerate its protocol (#13481))
 export type V2ThreadListResponse__CommandAction =
   | {
       readonly command: string;
@@ -24974,309 +24262,6 @@ export const V2ThreadMetadataUpdateResponse__MemoryCitation = Schema.Struct({
   threadIds: Schema.Array(Schema.String),
 }).annotate({ identifier: "V2ThreadMetadataUpdateResponse__MemoryCitation" });
 
-<<<<<<< HEAD
-export type V2ThreadMetadataUpdateResponse__FileUpdateChange = {
-  readonly diff: string;
-  readonly kind: V2ThreadListResponse__PatchChangeKind;
-  readonly path: string;
-};
-export const V2ThreadListResponse__FileUpdateChange = Schema.Struct({
-  diff: Schema.String,
-  kind: V2ThreadListResponse__PatchChangeKind,
-  path: Schema.String,
-}).annotate({ identifier: "V2ThreadMetadataUpdateResponse__FileUpdateChange" });
-
-export type V2ThreadMetadataUpdateResponse__CollabAgentState = {
-  readonly message?: string | null;
-  readonly status: V2ThreadMetadataUpdateResponse__CollabAgentStatus;
-};
-export const V2ThreadMetadataUpdateResponse__CollabAgentState = Schema.Struct({
-  message: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])),
-  status: V2ThreadMetadataUpdateResponse__CollabAgentStatus,
-}).annotate({ identifier: "V2ThreadMetadataUpdateResponse__CollabAgentState" });
-
-export type V2ThreadMetadataUpdateResponse__ThreadStatus =
-  | { readonly type: "notLoaded" }
-  | { readonly type: "idle" }
-  | { readonly type: "systemError" }
-  | {
-      readonly activeFlags: ReadonlyArray<V2ThreadMetadataUpdateResponse__ThreadActiveFlag>;
-      readonly type: "active";
-    };
-export const V2ThreadMetadataUpdateResponse__ThreadStatus = Schema.Union(
-  [
-    Schema.Struct({
-      type: Schema.Literal("notLoaded").annotate({ title: "NotLoadedThreadStatusType" }),
-    }).annotate({ title: "NotLoadedThreadStatus" }),
-    Schema.Struct({
-      type: Schema.Literal("idle").annotate({ title: "IdleThreadStatusType" }),
-    }).annotate({ title: "IdleThreadStatus" }),
-    Schema.Struct({
-      type: Schema.Literal("systemError").annotate({ title: "SystemErrorThreadStatusType" }),
-    }).annotate({ title: "SystemErrorThreadStatus" }),
-    Schema.Struct({
-      activeFlags: Schema.Array(V2ThreadMetadataUpdateResponse__ThreadActiveFlag),
-      type: Schema.Literal("active").annotate({ title: "ActiveThreadStatusType" }),
-    }).annotate({ title: "ActiveThreadStatus" }),
-  ],
-  { mode: "oneOf" },
-).annotate({ identifier: "V2ThreadMetadataUpdateResponse__ThreadStatus" });
-
-export type V2ThreadMetadataUpdateResponse__CodexErrorInfo =
-  | "contextWindowExceeded"
-  | "sessionBudgetExceeded"
-  | "usageLimitExceeded"
-  | "rateLimitExceeded"
-  | "serverOverloaded"
-  | "cyberPolicy"
-  | "misalignmentPolicyViolation"
-  | "internalServerError"
-  | "unauthorized"
-  | "badRequest"
-  | "threadRollbackFailed"
-  | "sandboxError"
-  | "other"
-  | { readonly httpConnectionFailed: { readonly httpStatusCode?: number | null } }
-  | { readonly responseStreamConnectionFailed: { readonly httpStatusCode?: number | null } }
-  | { readonly responseStreamDisconnected: { readonly httpStatusCode?: number | null } }
-  | { readonly responseTooManyFailedAttempts: { readonly httpStatusCode?: number | null } }
-  | {
-      readonly activeTurnNotSteerable: {
-        readonly turnKind: V2ThreadMetadataUpdateResponse__NonSteerableTurnKind;
-      };
-    };
-export const V2ThreadMetadataUpdateResponse__CodexErrorInfo = Schema.Union(
-  [
-    Schema.Literals([
-      "contextWindowExceeded",
-      "sessionBudgetExceeded",
-      "usageLimitExceeded",
-      "rateLimitExceeded",
-      "serverOverloaded",
-      "cyberPolicy",
-      "misalignmentPolicyViolation",
-      "internalServerError",
-      "unauthorized",
-      "badRequest",
-      "threadRollbackFailed",
-      "sandboxError",
-      "other",
-    ]),
-    Schema.Struct({
-      httpConnectionFailed: Schema.Struct({
-        httpStatusCode: Schema.optionalKey(
-          Schema.Union([
-            Schema.Number.annotate({ format: "uint16" })
-              .check(Schema.isInt().annotate({ expected: "an integer" }))
-              .check(
-                Schema.isGreaterThanOrEqualTo(0).annotate({
-                  expected: "a value greater than or equal to 0",
-                }),
-              ),
-            Schema.Null,
-          ]),
-        ),
-      }),
-    }).annotate({ title: "HttpConnectionFailedCodexErrorInfo" }),
-    Schema.Struct({
-      responseStreamConnectionFailed: Schema.Struct({
-        httpStatusCode: Schema.optionalKey(
-          Schema.Union([
-            Schema.Number.annotate({ format: "uint16" })
-              .check(Schema.isInt().annotate({ expected: "an integer" }))
-              .check(
-                Schema.isGreaterThanOrEqualTo(0).annotate({
-                  expected: "a value greater than or equal to 0",
-                }),
-              ),
-            Schema.Null,
-          ]),
-        ),
-      }),
-    }).annotate({
-      title: "ResponseStreamConnectionFailedCodexErrorInfo",
-      description: "Failed to connect to the response SSE stream.",
-    }),
-    Schema.Struct({
-      responseStreamDisconnected: Schema.Struct({
-        httpStatusCode: Schema.optionalKey(
-          Schema.Union([
-            Schema.Number.annotate({ format: "uint16" })
-              .check(Schema.isInt().annotate({ expected: "an integer" }))
-              .check(
-                Schema.isGreaterThanOrEqualTo(0).annotate({
-                  expected: "a value greater than or equal to 0",
-                }),
-              ),
-            Schema.Null,
-          ]),
-        ),
-      }),
-    }).annotate({
-      title: "ResponseStreamDisconnectedCodexErrorInfo",
-      description:
-        "The response SSE stream disconnected in the middle of a turn before completion.",
-    }),
-    Schema.Struct({
-      responseTooManyFailedAttempts: Schema.Struct({
-        httpStatusCode: Schema.optionalKey(
-          Schema.Union([
-            Schema.Number.annotate({ format: "uint16" })
-              .check(Schema.isInt().annotate({ expected: "an integer" }))
-              .check(
-                Schema.isGreaterThanOrEqualTo(0).annotate({
-                  expected: "a value greater than or equal to 0",
-                }),
-              ),
-            Schema.Null,
-          ]),
-        ),
-      }),
-    }).annotate({
-      title: "ResponseTooManyFailedAttemptsCodexErrorInfo",
-      description: "Reached the retry limit for responses.",
-    }),
-    Schema.Struct({
-      activeTurnNotSteerable: Schema.Struct({
-        turnKind: V2ThreadMetadataUpdateResponse__NonSteerableTurnKind,
-      }),
-    }).annotate({
-      title: "ActiveTurnNotSteerableCodexErrorInfo",
-      description:
-        "Returned when `turn/start` or `turn/steer` is submitted while the current active turn cannot accept same-turn steering, for example `/review` or manual `/compact`.",
-    }),
-  ],
-  { mode: "oneOf" },
-).annotate({
-  description:
-    "This translation layer make sure that we expose codex error code in camel case.\n\nWhen an upstream HTTP status is available (for example, from the Responses API or a provider), it is forwarded in `httpStatusCode` on the relevant `codexErrorInfo` variant.",
-  identifier: "V2ThreadMetadataUpdateResponse__CodexErrorInfo",
-});
-
-export type V2ThreadMetadataUpdateResponse__MisalignmentErrorDetails = {
-  readonly detailedExplanation?: string | null;
-  readonly errorType?: string | null;
-  readonly steer?: V2ThreadMetadataUpdateResponse__MisalignmentSteer | null;
-};
-export const V2ThreadMetadataUpdateResponse__MisalignmentErrorDetails = Schema.Struct({
-  detailedExplanation: Schema.optionalKey(
-    Schema.Union([
-      Schema.String.annotate({
-        description:
-          "A substantive localized explanation is required before offering continuation.",
-      }),
-      Schema.Null,
-    ]),
-  ),
-  errorType: Schema.optionalKey(
-    Schema.Union([
-      Schema.String.annotate({
-        description:
-          "Open-ended classification; clients must accept categories added by Responses.",
-      }),
-      Schema.Null,
-    ]),
-  ),
-  steer: Schema.optionalKey(
-    Schema.Union([V2ThreadMetadataUpdateResponse__MisalignmentSteer, Schema.Null]).annotate({
-      description:
-        "Instruction to submit as the next turn's user input if continuation is confirmed.",
-    }),
-  ),
-}).annotate({ identifier: "V2ThreadMetadataUpdateResponse__MisalignmentErrorDetails" });
-
-export type V2ThreadMetadataUpdateResponse__TextElement = {
-  readonly byteRange: V2ThreadMetadataUpdateResponse__ByteRange;
-  readonly placeholder?: string | null;
-};
-export const V2ThreadMetadataUpdateResponse__TextElement = Schema.Struct({
-  byteRange: Schema.suspend(
-    (): Schema.Codec<V2ThreadMetadataUpdateResponse__ByteRange> =>
-      V2ThreadMetadataUpdateResponse__ByteRange,
-  ).annotate({ description: "Byte range in the parent `text` buffer that this element occupies." }),
-  placeholder: Schema.optionalKey(
-    Schema.Union([
-      Schema.String.annotate({
-        description: "Optional human-readable placeholder for the element, displayed in the UI.",
-      }),
-      Schema.Null,
-    ]),
-  ),
-}).annotate({ identifier: "V2ThreadMetadataUpdateResponse__TextElement" });
-
-export type V2ThreadMetadataUpdateResponse__FunctionCallOutputContentItem =
-  | { readonly text: string; readonly type: "input_text" }
-  | {
-      readonly detail?: V2ThreadMetadataUpdateResponse__ImageDetail | null;
-      readonly type: "input_image";
-      readonly image_url: string;
-    }
-  | {
-      readonly detail?: V2ThreadMetadataUpdateResponse__ImageDetail | null;
-      readonly type: "input_image";
-      readonly file_id: string;
-    }
-  | { readonly audio_url: string; readonly type: "input_audio" }
-  | { readonly encrypted_content: string; readonly type: "encrypted_content" };
-export const V2ThreadMetadataUpdateResponse__FunctionCallOutputContentItem = Schema.Union(
-  [
-    Schema.Struct({
-      text: Schema.String,
-      type: Schema.Literal("input_text").annotate({
-        title: "InputTextFunctionCallOutputContentItemType",
-      }),
-    }).annotate({ title: "InputTextFunctionCallOutputContentItem" }),
-    Schema.Union([
-      Schema.Struct({
-        detail: Schema.optionalKey(
-          Schema.Union([V2ThreadMetadataUpdateResponse__ImageDetail, Schema.Null]),
-        ),
-        type: Schema.Literal("input_image").annotate({
-          title: "InputImageFunctionCallOutputContentItemType",
-        }),
-        image_url: Schema.String,
-      }).annotate({ title: "ImageUrlFunctionCallOutputContentItem" }),
-      Schema.Struct({
-        detail: Schema.optionalKey(
-          Schema.Union([V2ThreadMetadataUpdateResponse__ImageDetail, Schema.Null]),
-        ),
-        type: Schema.Literal("input_image").annotate({
-          title: "InputImageFunctionCallOutputContentItemType",
-        }),
-        file_id: Schema.String,
-      }).annotate({ title: "FileIdFunctionCallOutputContentItem" }),
-    ]).annotate({ title: "InputImageFunctionCallOutputContentItem" }),
-    Schema.Struct({
-      audio_url: Schema.String,
-      type: Schema.Literal("input_audio").annotate({
-        title: "InputAudioFunctionCallOutputContentItemType",
-      }),
-    }).annotate({ title: "InputAudioFunctionCallOutputContentItem" }),
-    Schema.Struct({
-      encrypted_content: Schema.String,
-      type: Schema.Literal("encrypted_content").annotate({
-        title: "EncryptedContentFunctionCallOutputContentItemType",
-      }),
-    }).annotate({ title: "EncryptedContentFunctionCallOutputContentItem" }),
-  ],
-  { mode: "oneOf" },
-).annotate({
-  description:
-    "Responses API compatible content items that can be returned by a tool call. This is a subset of ContentItem with the types we support as function call outputs.",
-  identifier: "V2ThreadMetadataUpdateResponse__FunctionCallOutputContentItem",
-});
-
-export type V2ThreadMetadataUpdateResponse__MemoryCitation = {
-  readonly entries: ReadonlyArray<V2ThreadMetadataUpdateResponse__MemoryCitationEntry>;
-  readonly threadIds: ReadonlyArray<string>;
-};
-export const V2ThreadMetadataUpdateResponse__MemoryCitation = Schema.Struct({
-  entries: Schema.Array(V2ThreadMetadataUpdateResponse__MemoryCitationEntry),
-  threadIds: Schema.Array(Schema.String),
-}).annotate({ identifier: "V2ThreadMetadataUpdateResponse__MemoryCitation" });
-
-=======
->>>>>>> d5d48742c9 (feat(codex): require Codex 0.156 and regenerate its protocol (#13481))
 export type V2ThreadMetadataUpdateResponse__CommandAction =
   | {
       readonly command: string;
@@ -25726,12 +24711,12 @@ export const V2ThreadReadResponse__CommandAction = Schema.Union(
 
 export type V2ThreadReadResponse__FileUpdateChange = {
   readonly diff: string;
-  readonly kind: V2ThreadMetadataUpdateResponse__PatchChangeKind;
+  readonly kind: V2ThreadReadResponse__PatchChangeKind;
   readonly path: string;
 };
-export const V2ThreadMetadataUpdateResponse__FileUpdateChange = Schema.Struct({
+export const V2ThreadReadResponse__FileUpdateChange = Schema.Struct({
   diff: Schema.String,
-  kind: V2ThreadMetadataUpdateResponse__PatchChangeKind,
+  kind: V2ThreadReadResponse__PatchChangeKind,
   path: Schema.String,
 }).annotate({ identifier: "V2ThreadReadResponse__FileUpdateChange" });
 
@@ -25757,193 +24742,6 @@ export const V2ThreadReadResponse__CollabAgentState = Schema.Struct({
   status: V2ThreadReadResponse__CollabAgentStatus,
 }).annotate({ identifier: "V2ThreadReadResponse__CollabAgentState" });
 
-<<<<<<< HEAD
-export type V2ThreadReadResponse__CodexErrorInfo =
-  | "contextWindowExceeded"
-  | "sessionBudgetExceeded"
-  | "usageLimitExceeded"
-  | "rateLimitExceeded"
-  | "serverOverloaded"
-  | "cyberPolicy"
-  | "misalignmentPolicyViolation"
-  | "internalServerError"
-  | "unauthorized"
-  | "badRequest"
-  | "threadRollbackFailed"
-  | "sandboxError"
-  | "other"
-  | { readonly httpConnectionFailed: { readonly httpStatusCode?: number | null } }
-  | { readonly responseStreamConnectionFailed: { readonly httpStatusCode?: number | null } }
-  | { readonly responseStreamDisconnected: { readonly httpStatusCode?: number | null } }
-  | { readonly responseTooManyFailedAttempts: { readonly httpStatusCode?: number | null } }
-  | {
-      readonly activeTurnNotSteerable: {
-        readonly turnKind: V2ThreadReadResponse__NonSteerableTurnKind;
-      };
-    };
-export const V2ThreadReadResponse__CodexErrorInfo = Schema.Union(
-  [
-    Schema.Literals([
-      "contextWindowExceeded",
-      "sessionBudgetExceeded",
-      "usageLimitExceeded",
-      "rateLimitExceeded",
-      "serverOverloaded",
-      "cyberPolicy",
-      "misalignmentPolicyViolation",
-      "internalServerError",
-      "unauthorized",
-      "badRequest",
-      "threadRollbackFailed",
-      "sandboxError",
-      "other",
-    ]),
-    Schema.Struct({
-      httpConnectionFailed: Schema.Struct({
-        httpStatusCode: Schema.optionalKey(
-          Schema.Union([
-            Schema.Number.annotate({ format: "uint16" })
-              .check(Schema.isInt().annotate({ expected: "an integer" }))
-              .check(
-                Schema.isGreaterThanOrEqualTo(0).annotate({
-                  expected: "a value greater than or equal to 0",
-                }),
-              ),
-            Schema.Null,
-          ]),
-        ),
-      }),
-    }).annotate({ title: "HttpConnectionFailedCodexErrorInfo" }),
-    Schema.Struct({
-      responseStreamConnectionFailed: Schema.Struct({
-        httpStatusCode: Schema.optionalKey(
-          Schema.Union([
-            Schema.Number.annotate({ format: "uint16" })
-              .check(Schema.isInt().annotate({ expected: "an integer" }))
-              .check(
-                Schema.isGreaterThanOrEqualTo(0).annotate({
-                  expected: "a value greater than or equal to 0",
-                }),
-              ),
-            Schema.Null,
-          ]),
-        ),
-      }),
-    }).annotate({
-      title: "ResponseStreamConnectionFailedCodexErrorInfo",
-      description: "Failed to connect to the response SSE stream.",
-    }),
-    Schema.Struct({
-      responseStreamDisconnected: Schema.Struct({
-        httpStatusCode: Schema.optionalKey(
-          Schema.Union([
-            Schema.Number.annotate({ format: "uint16" })
-              .check(Schema.isInt().annotate({ expected: "an integer" }))
-              .check(
-                Schema.isGreaterThanOrEqualTo(0).annotate({
-                  expected: "a value greater than or equal to 0",
-                }),
-              ),
-            Schema.Null,
-          ]),
-        ),
-      }),
-    }).annotate({
-      title: "ResponseStreamDisconnectedCodexErrorInfo",
-      description:
-        "The response SSE stream disconnected in the middle of a turn before completion.",
-    }),
-    Schema.Struct({
-      responseTooManyFailedAttempts: Schema.Struct({
-        httpStatusCode: Schema.optionalKey(
-          Schema.Union([
-            Schema.Number.annotate({ format: "uint16" })
-              .check(Schema.isInt().annotate({ expected: "an integer" }))
-              .check(
-                Schema.isGreaterThanOrEqualTo(0).annotate({
-                  expected: "a value greater than or equal to 0",
-                }),
-              ),
-            Schema.Null,
-          ]),
-        ),
-      }),
-    }).annotate({
-      title: "ResponseTooManyFailedAttemptsCodexErrorInfo",
-      description: "Reached the retry limit for responses.",
-    }),
-    Schema.Struct({
-      activeTurnNotSteerable: Schema.Struct({
-        turnKind: V2ThreadReadResponse__NonSteerableTurnKind,
-      }),
-    }).annotate({
-      title: "ActiveTurnNotSteerableCodexErrorInfo",
-      description:
-        "Returned when `turn/start` or `turn/steer` is submitted while the current active turn cannot accept same-turn steering, for example `/review` or manual `/compact`.",
-    }),
-  ],
-  { mode: "oneOf" },
-).annotate({
-  description:
-    "This translation layer make sure that we expose codex error code in camel case.\n\nWhen an upstream HTTP status is available (for example, from the Responses API or a provider), it is forwarded in `httpStatusCode` on the relevant `codexErrorInfo` variant.",
-  identifier: "V2ThreadReadResponse__CodexErrorInfo",
-});
-
-export type V2ThreadReadResponse__MisalignmentErrorDetails = {
-  readonly detailedExplanation?: string | null;
-  readonly errorType?: string | null;
-  readonly steer?: V2ThreadReadResponse__MisalignmentSteer | null;
-};
-export const V2ThreadReadResponse__MisalignmentErrorDetails = Schema.Struct({
-  detailedExplanation: Schema.optionalKey(
-    Schema.Union([
-      Schema.String.annotate({
-        description:
-          "A substantive localized explanation is required before offering continuation.",
-      }),
-      Schema.Null,
-    ]),
-  ),
-  errorType: Schema.optionalKey(
-    Schema.Union([
-      Schema.String.annotate({
-        description:
-          "Open-ended classification; clients must accept categories added by Responses.",
-      }),
-      Schema.Null,
-    ]),
-  ),
-  steer: Schema.optionalKey(
-    Schema.Union([V2ThreadReadResponse__MisalignmentSteer, Schema.Null]).annotate({
-      description:
-        "Instruction to submit as the next turn's user input if continuation is confirmed.",
-    }),
-  ),
-}).annotate({ identifier: "V2ThreadReadResponse__MisalignmentErrorDetails" });
-
-export type V2ThreadReadResponse__TextElement = {
-  readonly byteRange: V2ThreadReadResponse__ByteRange;
-  readonly placeholder?: string | null;
-};
-export const V2ThreadReadResponse__TextElement = Schema.Struct({
-  byteRange: Schema.suspend(
-    (): Schema.Codec<V2ThreadReadResponse__ByteRange> => V2ThreadReadResponse__ByteRange,
-  ).annotate({ description: "Byte range in the parent `text` buffer that this element occupies." }),
-  placeholder: Schema.optionalKey(
-    Schema.Union([
-      Schema.String.annotate({
-        description: "Optional human-readable placeholder for the element, displayed in the UI.",
-      }),
-      Schema.Null,
-    ]),
-  ),
-}).annotate({ identifier: "V2ThreadReadResponse__TextElement" });
-
-export type V2ThreadReadResponse__FunctionCallOutputContentItem =
-  | { readonly text: string; readonly type: "input_text" }
-  | {
-      readonly detail?: V2ThreadReadResponse__ImageDetail | null;
-=======
 export type V2ThreadRealtimeItemCompletedNotification__ThreadRealtimeItem =
   | {
       readonly id: string;
@@ -26098,22 +24896,17 @@ export type V2ThreadResumeParams__FunctionCallOutputContentItem =
   | { readonly text: string; readonly type: "input_text" }
   | {
       readonly detail?: V2ThreadResumeParams__ImageDetail | null;
->>>>>>> d5d48742c9 (feat(codex): require Codex 0.156 and regenerate its protocol (#13481))
       readonly type: "input_image";
       readonly image_url: string;
     }
   | {
-<<<<<<< HEAD
-      readonly detail?: V2ThreadReadResponse__ImageDetail | null;
-=======
       readonly detail?: V2ThreadResumeParams__ImageDetail | null;
->>>>>>> d5d48742c9 (feat(codex): require Codex 0.156 and regenerate its protocol (#13481))
       readonly type: "input_image";
       readonly file_id: string;
     }
   | { readonly audio_url: string; readonly type: "input_audio" }
   | { readonly encrypted_content: string; readonly type: "encrypted_content" };
-export const V2ThreadReadResponse__FunctionCallOutputContentItem = Schema.Union(
+export const V2ThreadResumeParams__FunctionCallOutputContentItem = Schema.Union(
   [
     Schema.Struct({
       text: Schema.String,
@@ -26123,22 +24916,14 @@ export const V2ThreadReadResponse__FunctionCallOutputContentItem = Schema.Union(
     }).annotate({ title: "InputTextFunctionCallOutputContentItem" }),
     Schema.Union([
       Schema.Struct({
-<<<<<<< HEAD
-        detail: Schema.optionalKey(Schema.Union([V2ThreadReadResponse__ImageDetail, Schema.Null])),
-=======
         detail: Schema.optionalKey(Schema.Union([V2ThreadResumeParams__ImageDetail, Schema.Null])),
->>>>>>> d5d48742c9 (feat(codex): require Codex 0.156 and regenerate its protocol (#13481))
         type: Schema.Literal("input_image").annotate({
           title: "InputImageFunctionCallOutputContentItemType",
         }),
         image_url: Schema.String,
       }).annotate({ title: "ImageUrlFunctionCallOutputContentItem" }),
       Schema.Struct({
-<<<<<<< HEAD
-        detail: Schema.optionalKey(Schema.Union([V2ThreadReadResponse__ImageDetail, Schema.Null])),
-=======
         detail: Schema.optionalKey(Schema.Union([V2ThreadResumeParams__ImageDetail, Schema.Null])),
->>>>>>> d5d48742c9 (feat(codex): require Codex 0.156 and regenerate its protocol (#13481))
         type: Schema.Literal("input_image").annotate({
           title: "InputImageFunctionCallOutputContentItemType",
         }),
@@ -26229,11 +25014,7 @@ export type V2ThreadResumeResponse__CommandAction =
   | {
       readonly command: string;
       readonly name: string;
-<<<<<<< HEAD
-      readonly path: V2ThreadReadResponse__LegacyAppPathString;
-=======
       readonly path: V2ThreadResumeResponse__LegacyAppPathString;
->>>>>>> d5d48742c9 (feat(codex): require Codex 0.156 and regenerate its protocol (#13481))
       readonly type: "read";
     }
   | { readonly command: string; readonly path?: string | null; readonly type: "listFiles" }
@@ -26244,16 +25025,12 @@ export type V2ThreadResumeResponse__CommandAction =
       readonly type: "search";
     }
   | { readonly command: string; readonly type: "unknown" };
-export const V2ThreadReadResponse__CommandAction = Schema.Union(
+export const V2ThreadResumeResponse__CommandAction = Schema.Union(
   [
     Schema.Struct({
       command: Schema.String,
       name: Schema.String,
-<<<<<<< HEAD
-      path: V2ThreadReadResponse__LegacyAppPathString,
-=======
       path: V2ThreadResumeResponse__LegacyAppPathString,
->>>>>>> d5d48742c9 (feat(codex): require Codex 0.156 and regenerate its protocol (#13481))
       type: Schema.Literal("read").annotate({ title: "ReadCommandActionType" }),
     }).annotate({ title: "ReadCommandAction" }),
     Schema.Struct({
@@ -26378,335 +25155,6 @@ export const V2ThreadResumeResponse__SubAgentSource = Schema.Union(
   ],
   { mode: "oneOf" },
 ).annotate({ identifier: "V2ThreadResumeResponse__SubAgentSource" });
-
-export type V2ThreadResumeResponse__ThreadStatus =
-  | { readonly type: "notLoaded" }
-  | { readonly type: "idle" }
-  | { readonly type: "systemError" }
-  | {
-      readonly activeFlags: ReadonlyArray<V2ThreadResumeResponse__ThreadActiveFlag>;
-      readonly type: "active";
-    };
-export const V2ThreadResumeResponse__ThreadStatus = Schema.Union(
-  [
-    Schema.Struct({
-      type: Schema.Literal("notLoaded").annotate({ title: "NotLoadedThreadStatusType" }),
-    }).annotate({ title: "NotLoadedThreadStatus" }),
-    Schema.Struct({
-      type: Schema.Literal("idle").annotate({ title: "IdleThreadStatusType" }),
-    }).annotate({ title: "IdleThreadStatus" }),
-    Schema.Struct({
-      type: Schema.Literal("systemError").annotate({ title: "SystemErrorThreadStatusType" }),
-    }).annotate({ title: "SystemErrorThreadStatus" }),
-    Schema.Struct({
-      activeFlags: Schema.Array(V2ThreadResumeResponse__ThreadActiveFlag),
-      type: Schema.Literal("active").annotate({ title: "ActiveThreadStatusType" }),
-    }).annotate({ title: "ActiveThreadStatus" }),
-  ],
-  { mode: "oneOf" },
-).annotate({ identifier: "V2ThreadResumeResponse__ThreadStatus" });
-
-export type V2ThreadResumeResponse__CodexErrorInfo =
-  | "contextWindowExceeded"
-  | "sessionBudgetExceeded"
-  | "usageLimitExceeded"
-  | "rateLimitExceeded"
-  | "serverOverloaded"
-  | "cyberPolicy"
-  | "misalignmentPolicyViolation"
-  | "internalServerError"
-  | "unauthorized"
-  | "badRequest"
-  | "threadRollbackFailed"
-  | "sandboxError"
-  | "other"
-  | { readonly httpConnectionFailed: { readonly httpStatusCode?: number | null } }
-  | { readonly responseStreamConnectionFailed: { readonly httpStatusCode?: number | null } }
-  | { readonly responseStreamDisconnected: { readonly httpStatusCode?: number | null } }
-  | { readonly responseTooManyFailedAttempts: { readonly httpStatusCode?: number | null } }
-  | {
-      readonly id: string;
-      readonly realtimeSessionId: string;
-      readonly type: "realtimeSessionStarted";
-    }
-  | {
-      readonly id: string;
-      readonly realtimeSessionId: string;
-      readonly role: V2ThreadRealtimeItemCompletedNotification__ThreadRealtimeTranscriptRole;
-      readonly text: string;
-      readonly type: "transcriptSegment";
-    }
-  | {
-      readonly id: string;
-      readonly realtimeSessionId: string;
-      readonly item_id: string;
-      readonly presentation: V2ThreadRealtimeItemCompletedNotification__ThreadRealtimeBemItemPresentation;
-      readonly turn_id: string;
-      readonly type: "bemItemPromoted";
-    }
-  | {
-      readonly id: string;
-      readonly realtimeSessionId: string;
-      readonly outcome: V2ThreadRealtimeItemCompletedNotification__ThreadRealtimeSessionOutcome;
-      readonly type: "realtimeSessionClosed";
-    };
-export const V2ThreadRealtimeItemCompletedNotification__ThreadRealtimeItem = Schema.Union(
-  [
-    Schema.Struct({
-      httpConnectionFailed: Schema.Struct({
-        httpStatusCode: Schema.optionalKey(
-          Schema.Union([
-            Schema.Number.annotate({ format: "uint16" })
-              .check(Schema.isInt().annotate({ expected: "an integer" }))
-              .check(
-                Schema.isGreaterThanOrEqualTo(0).annotate({
-                  expected: "a value greater than or equal to 0",
-                }),
-              ),
-            Schema.Null,
-          ]),
-        ),
-      }),
-    }).annotate({ title: "RealtimeSessionStartedThreadRealtimeItem" }),
-    Schema.Struct({
-      responseStreamConnectionFailed: Schema.Struct({
-        httpStatusCode: Schema.optionalKey(
-          Schema.Union([
-            Schema.Number.annotate({ format: "uint16" })
-              .check(Schema.isInt().annotate({ expected: "an integer" }))
-              .check(
-                Schema.isGreaterThanOrEqualTo(0).annotate({
-                  expected: "a value greater than or equal to 0",
-                }),
-              ),
-            Schema.Null,
-          ]),
-        ),
-      }),
-    }).annotate({ title: "TranscriptSegmentThreadRealtimeItem" }),
-    Schema.Struct({
-      responseStreamDisconnected: Schema.Struct({
-        httpStatusCode: Schema.optionalKey(
-          Schema.Union([
-            Schema.Number.annotate({ format: "uint16" })
-              .check(Schema.isInt().annotate({ expected: "an integer" }))
-              .check(
-                Schema.isGreaterThanOrEqualTo(0).annotate({
-                  expected: "a value greater than or equal to 0",
-                }),
-              ),
-            Schema.Null,
-          ]),
-        ),
-      }),
-    }).annotate({ title: "BemItemPromotedThreadRealtimeItem" }),
-    Schema.Struct({
-      responseTooManyFailedAttempts: Schema.Struct({
-        httpStatusCode: Schema.optionalKey(
-          Schema.Union([
-            Schema.Number.annotate({ format: "uint16" })
-              .check(Schema.isInt().annotate({ expected: "an integer" }))
-              .check(
-                Schema.isGreaterThanOrEqualTo(0).annotate({
-                  expected: "a value greater than or equal to 0",
-                }),
-              ),
-            Schema.Null,
-          ]),
-        ),
-      }),
-    }).annotate({ title: "RealtimeSessionClosedThreadRealtimeItem" }),
-  ],
-  { mode: "oneOf" },
-).annotate({
-  description: "EXPERIMENTAL - a thread-scoped realtime item in the canonical timeline.",
-  identifier: "V2ThreadRealtimeItemCompletedNotification__ThreadRealtimeItem",
-});
-
-export type V2ThreadRealtimeItemStartedNotification__ThreadRealtimeItem =
-  | {
-      readonly id: string;
-      readonly realtimeSessionId: string;
-      readonly type: "realtimeSessionStarted";
-    }
-  | {
-      readonly id: string;
-      readonly realtimeSessionId: string;
-      readonly role: V2ThreadRealtimeItemStartedNotification__ThreadRealtimeTranscriptRole;
-      readonly text: string;
-      readonly type: "transcriptSegment";
-    }
-  | {
-      readonly id: string;
-      readonly realtimeSessionId: string;
-      readonly item_id: string;
-      readonly presentation: V2ThreadRealtimeItemStartedNotification__ThreadRealtimeBemItemPresentation;
-      readonly turn_id: string;
-      readonly type: "bemItemPromoted";
-    }
-  | {
-      readonly id: string;
-      readonly realtimeSessionId: string;
-      readonly outcome: V2ThreadRealtimeItemStartedNotification__ThreadRealtimeSessionOutcome;
-      readonly type: "realtimeSessionClosed";
-    };
-export const V2ThreadRealtimeItemStartedNotification__ThreadRealtimeItem = Schema.Union(
-  [
-    Schema.Struct({
-      id: Schema.String,
-      realtimeSessionId: Schema.String,
-      type: Schema.Literal("realtimeSessionStarted").annotate({
-        title: "RealtimeSessionStartedThreadRealtimeItemType",
-      }),
-    }).annotate({ title: "RealtimeSessionStartedThreadRealtimeItem" }),
-    Schema.Struct({
-      id: Schema.String,
-      realtimeSessionId: Schema.String,
-      role: V2ThreadRealtimeItemStartedNotification__ThreadRealtimeTranscriptRole,
-      text: Schema.String,
-      type: Schema.Literal("transcriptSegment").annotate({
-        title: "TranscriptSegmentThreadRealtimeItemType",
-      }),
-    }).annotate({ title: "TranscriptSegmentThreadRealtimeItem" }),
-    Schema.Struct({
-      id: Schema.String,
-      realtimeSessionId: Schema.String,
-      item_id: Schema.String,
-      presentation: V2ThreadRealtimeItemStartedNotification__ThreadRealtimeBemItemPresentation,
-      turn_id: Schema.String,
-      type: Schema.Literal("bemItemPromoted").annotate({
-        title: "BemItemPromotedThreadRealtimeItemType",
-      }),
-    }).annotate({ title: "BemItemPromotedThreadRealtimeItem" }),
-    Schema.Struct({
-      id: Schema.String,
-      realtimeSessionId: Schema.String,
-      outcome: V2ThreadRealtimeItemStartedNotification__ThreadRealtimeSessionOutcome,
-      type: Schema.Literal("realtimeSessionClosed").annotate({
-        title: "RealtimeSessionClosedThreadRealtimeItemType",
-      }),
-    }).annotate({ title: "RealtimeSessionClosedThreadRealtimeItem" }),
-  ],
-  { mode: "oneOf" },
-).annotate({
-  description: "EXPERIMENTAL - a thread-scoped realtime item in the canonical timeline.",
-  identifier: "V2ThreadRealtimeItemStartedNotification__ThreadRealtimeItem",
-});
-
-export type V2ThreadResumeParams__ConfigurationReasoning = {
-  readonly effort: V2ThreadResumeParams__ReasoningEffort;
-};
-export const V2ThreadResumeParams__ConfigurationReasoning = Schema.Struct({
-  effort: V2ThreadResumeParams__ReasoningEffort,
-}).annotate({
-  description: "Reasoning settings interpreted by the backend for the routed model.",
-  identifier: "V2ThreadResumeParams__ConfigurationReasoning",
-});
-
-export type V2ThreadResumeParams__FunctionCallOutputContentItem =
-  | { readonly text: string; readonly type: "input_text" }
-  | {
-      readonly detail?: V2ThreadResumeParams__ImageDetail | null;
-      readonly type: "input_image";
-      readonly image_url: string;
-    }
-  | {
-      readonly detail?: V2ThreadResumeParams__ImageDetail | null;
-      readonly type: "input_image";
-      readonly file_id: string;
-    }
-  | { readonly audio_url: string; readonly type: "input_audio" }
-  | { readonly encrypted_content: string; readonly type: "encrypted_content" };
-export const V2ThreadResumeParams__FunctionCallOutputContentItem = Schema.Union(
-  [
-    Schema.Struct({
-      text: Schema.String,
-      type: Schema.Literal("input_text").annotate({
-        title: "InputTextFunctionCallOutputContentItemType",
-      }),
-    }).annotate({ title: "InputTextFunctionCallOutputContentItem" }),
-    Schema.Union([
-      Schema.Struct({
-        detail: Schema.optionalKey(Schema.Union([V2ThreadResumeParams__ImageDetail, Schema.Null])),
-        type: Schema.Literal("input_image").annotate({
-          title: "InputImageFunctionCallOutputContentItemType",
-        }),
-        image_url: Schema.String,
-      }).annotate({ title: "ImageUrlFunctionCallOutputContentItem" }),
-      Schema.Struct({
-        detail: Schema.optionalKey(Schema.Union([V2ThreadResumeParams__ImageDetail, Schema.Null])),
-        type: Schema.Literal("input_image").annotate({
-          title: "InputImageFunctionCallOutputContentItemType",
-        }),
-        file_id: Schema.String,
-      }).annotate({ title: "FileIdFunctionCallOutputContentItem" }),
-    ]).annotate({ title: "InputImageFunctionCallOutputContentItem" }),
-    Schema.Struct({
-      audio_url: Schema.String,
-      type: Schema.Literal("input_audio").annotate({
-        title: "InputAudioFunctionCallOutputContentItemType",
-      }),
-    }).annotate({ title: "InputAudioFunctionCallOutputContentItem" }),
-    Schema.Struct({
-      encrypted_content: Schema.String,
-      type: Schema.Literal("encrypted_content").annotate({
-        title: "EncryptedContentFunctionCallOutputContentItemType",
-      }),
-    }).annotate({ title: "EncryptedContentFunctionCallOutputContentItem" }),
-  ],
-  { mode: "oneOf" },
-).annotate({
-  description:
-    "This translation layer make sure that we expose codex error code in camel case.\n\nWhen an upstream HTTP status is available (for example, from the Responses API or a provider), it is forwarded in `httpStatusCode` on the relevant `codexErrorInfo` variant.",
-  identifier: "V2ThreadResumeResponse__CodexErrorInfo",
-});
-
-export type V2ThreadResumeResponse__TextElement = {
-  readonly byteRange: V2ThreadResumeResponse__ByteRange;
-  readonly placeholder?: string | null;
-};
-export const V2ThreadResumeResponse__TextElement = Schema.Struct({
-  byteRange: Schema.suspend(
-    (): Schema.Codec<V2ThreadResumeResponse__ByteRange> => V2ThreadResumeResponse__ByteRange,
-  ).annotate({ description: "Byte range in the parent `text` buffer that this element occupies." }),
-  placeholder: Schema.optionalKey(
-    Schema.Union([
-      Schema.String.annotate({
-        description: "Optional human-readable placeholder for the element, displayed in the UI.",
-      }),
-      Schema.Null,
-    ]),
-  ),
-}).annotate({ identifier: "V2ThreadResumeResponse__TextElement" });
-
-export type V2ThreadResumeResponse__MemoryCitation = {
-  readonly entries: ReadonlyArray<V2ThreadResumeResponse__MemoryCitationEntry>;
-  readonly threadIds: ReadonlyArray<string>;
-};
-export const V2ThreadResumeResponse__MemoryCitation = Schema.Struct({
-  entries: Schema.Array(V2ThreadResumeResponse__MemoryCitationEntry),
-  threadIds: Schema.Array(Schema.String),
-}).annotate({ identifier: "V2ThreadResumeResponse__MemoryCitation" });
-
-export type V2ThreadResumeResponse__FileUpdateChange = {
-  readonly diff: string;
-  readonly kind: V2ThreadResumeResponse__PatchChangeKind;
-  readonly path: string;
-};
-export const V2ThreadResumeResponse__FileUpdateChange = Schema.Struct({
-  diff: Schema.String,
-  kind: V2ThreadResumeResponse__PatchChangeKind,
-  path: Schema.String,
-}).annotate({ identifier: "V2ThreadResumeResponse__FileUpdateChange" });
-
-export type V2ThreadResumeResponse__CollabAgentState = {
-  readonly message?: string | null;
-  readonly status: V2ThreadResumeResponse__CollabAgentStatus;
-};
-export const V2ThreadResumeResponse__CollabAgentState = Schema.Struct({
-  message: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])),
-  status: V2ThreadResumeResponse__CollabAgentStatus,
-}).annotate({ identifier: "V2ThreadResumeResponse__CollabAgentState" });
 
 export type V2ThreadResumeResponse__ThreadStatus =
   | { readonly type: "notLoaded" }
@@ -27039,365 +25487,6 @@ export const V2ThreadRevertResponse__ThreadSection = Schema.Struct({
   description: "An independently persisted, user-visible thread section.",
   identifier: "V2ThreadRevertResponse__ThreadSection",
 });
-<<<<<<< HEAD
-
-export type V2ThreadRevertResponse__SubAgentSource =
-  | "review"
-  | "compact"
-  | "memory_consolidation"
-  | {
-      readonly thread_spawn: {
-        readonly agent_nickname?: string | null;
-        readonly agent_path?: V2ThreadRevertResponse__AgentPath | null;
-        readonly agent_role?: string | null;
-        readonly depth: number;
-        readonly parent_thread_id: V2ThreadRevertResponse__ThreadId;
-      };
-    }
-  | { readonly other: string };
-export const V2ThreadRevertResponse__SubAgentSource = Schema.Union(
-  [
-    Schema.Literals(["review", "compact", "memory_consolidation"]),
-    Schema.Struct({
-      thread_spawn: Schema.Struct({
-        agent_nickname: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])),
-        agent_path: Schema.optionalKey(
-          Schema.Union([V2ThreadRevertResponse__AgentPath, Schema.Null]),
-        ),
-        agent_role: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])),
-        depth: Schema.Number.annotate({ format: "int32" }).check(
-          Schema.isInt().annotate({ expected: "an integer" }),
-        ),
-        parent_thread_id: V2ThreadRevertResponse__ThreadId,
-      }),
-    }).annotate({ title: "ThreadSpawnSubAgentSource" }),
-    Schema.Struct({ other: Schema.String }).annotate({ title: "OtherSubAgentSource" }),
-  ],
-  { mode: "oneOf" },
-).annotate({ identifier: "V2ThreadRevertResponse__SubAgentSource" });
-
-export type V2ThreadRevertResponse__ThreadStatus =
-  | { readonly type: "notLoaded" }
-  | { readonly type: "idle" }
-  | { readonly type: "systemError" }
-  | {
-      readonly activeFlags: ReadonlyArray<V2ThreadRevertResponse__ThreadActiveFlag>;
-      readonly type: "active";
-    };
-export const V2ThreadRevertResponse__ThreadStatus = Schema.Union(
-  [
-    Schema.Struct({
-      type: Schema.Literal("notLoaded").annotate({ title: "NotLoadedThreadStatusType" }),
-    }).annotate({ title: "NotLoadedThreadStatus" }),
-    Schema.Struct({
-      type: Schema.Literal("idle").annotate({ title: "IdleThreadStatusType" }),
-    }).annotate({ title: "IdleThreadStatus" }),
-    Schema.Struct({
-      type: Schema.Literal("systemError").annotate({ title: "SystemErrorThreadStatusType" }),
-    }).annotate({ title: "SystemErrorThreadStatus" }),
-    Schema.Struct({
-      activeFlags: Schema.Array(V2ThreadRevertResponse__ThreadActiveFlag),
-      type: Schema.Literal("active").annotate({ title: "ActiveThreadStatusType" }),
-    }).annotate({ title: "ActiveThreadStatus" }),
-  ],
-  { mode: "oneOf" },
-).annotate({ identifier: "V2ThreadRevertResponse__ThreadStatus" });
-
-export type V2ThreadRevertResponse__CodexErrorInfo =
-  | "contextWindowExceeded"
-  | "sessionBudgetExceeded"
-  | "usageLimitExceeded"
-  | "rateLimitExceeded"
-  | "serverOverloaded"
-  | "cyberPolicy"
-  | "misalignmentPolicyViolation"
-  | "internalServerError"
-  | "unauthorized"
-  | "badRequest"
-  | "threadRollbackFailed"
-  | "sandboxError"
-  | "other"
-  | { readonly httpConnectionFailed: { readonly httpStatusCode?: number | null } }
-  | { readonly responseStreamConnectionFailed: { readonly httpStatusCode?: number | null } }
-  | { readonly responseStreamDisconnected: { readonly httpStatusCode?: number | null } }
-  | { readonly responseTooManyFailedAttempts: { readonly httpStatusCode?: number | null } }
-  | {
-      readonly activeTurnNotSteerable: {
-        readonly turnKind: V2ThreadRevertResponse__NonSteerableTurnKind;
-      };
-    };
-export const V2ThreadRevertResponse__CodexErrorInfo = Schema.Union(
-  [
-    Schema.Literals([
-      "contextWindowExceeded",
-      "sessionBudgetExceeded",
-      "usageLimitExceeded",
-      "rateLimitExceeded",
-      "serverOverloaded",
-      "cyberPolicy",
-      "misalignmentPolicyViolation",
-      "internalServerError",
-      "unauthorized",
-      "badRequest",
-      "threadRollbackFailed",
-      "sandboxError",
-      "other",
-    ]),
-    Schema.Struct({
-      httpConnectionFailed: Schema.Struct({
-        httpStatusCode: Schema.optionalKey(
-          Schema.Union([
-            Schema.Number.annotate({ format: "uint16" })
-              .check(Schema.isInt().annotate({ expected: "an integer" }))
-              .check(
-                Schema.isGreaterThanOrEqualTo(0).annotate({
-                  expected: "a value greater than or equal to 0",
-                }),
-              ),
-            Schema.Null,
-          ]),
-        ),
-      }),
-    }).annotate({ title: "HttpConnectionFailedCodexErrorInfo" }),
-    Schema.Struct({
-      responseStreamConnectionFailed: Schema.Struct({
-        httpStatusCode: Schema.optionalKey(
-          Schema.Union([
-            Schema.Number.annotate({ format: "uint16" })
-              .check(Schema.isInt().annotate({ expected: "an integer" }))
-              .check(
-                Schema.isGreaterThanOrEqualTo(0).annotate({
-                  expected: "a value greater than or equal to 0",
-                }),
-              ),
-            Schema.Null,
-          ]),
-        ),
-      }),
-    }).annotate({
-      title: "ResponseStreamConnectionFailedCodexErrorInfo",
-      description: "Failed to connect to the response SSE stream.",
-    }),
-    Schema.Struct({
-      responseStreamDisconnected: Schema.Struct({
-        httpStatusCode: Schema.optionalKey(
-          Schema.Union([
-            Schema.Number.annotate({ format: "uint16" })
-              .check(Schema.isInt().annotate({ expected: "an integer" }))
-              .check(
-                Schema.isGreaterThanOrEqualTo(0).annotate({
-                  expected: "a value greater than or equal to 0",
-                }),
-              ),
-            Schema.Null,
-          ]),
-        ),
-      }),
-    }).annotate({
-      title: "ResponseStreamDisconnectedCodexErrorInfo",
-      description:
-        "The response SSE stream disconnected in the middle of a turn before completion.",
-    }),
-    Schema.Struct({
-      responseTooManyFailedAttempts: Schema.Struct({
-        httpStatusCode: Schema.optionalKey(
-          Schema.Union([
-            Schema.Number.annotate({ format: "uint16" })
-              .check(Schema.isInt().annotate({ expected: "an integer" }))
-              .check(
-                Schema.isGreaterThanOrEqualTo(0).annotate({
-                  expected: "a value greater than or equal to 0",
-                }),
-              ),
-            Schema.Null,
-          ]),
-        ),
-      }),
-    }).annotate({
-      title: "ResponseTooManyFailedAttemptsCodexErrorInfo",
-      description: "Reached the retry limit for responses.",
-    }),
-    Schema.Struct({
-      activeTurnNotSteerable: Schema.Struct({
-        turnKind: V2ThreadRevertResponse__NonSteerableTurnKind,
-      }),
-    }).annotate({
-      title: "ActiveTurnNotSteerableCodexErrorInfo",
-      description:
-        "Returned when `turn/start` or `turn/steer` is submitted while the current active turn cannot accept same-turn steering, for example `/review` or manual `/compact`.",
-    }),
-  ],
-  { mode: "oneOf" },
-).annotate({
-  description:
-    "This translation layer make sure that we expose codex error code in camel case.\n\nWhen an upstream HTTP status is available (for example, from the Responses API or a provider), it is forwarded in `httpStatusCode` on the relevant `codexErrorInfo` variant.",
-  identifier: "V2ThreadRevertResponse__CodexErrorInfo",
-});
-
-export type V2ThreadRevertResponse__MisalignmentErrorDetails = {
-  readonly detailedExplanation?: string | null;
-  readonly errorType?: string | null;
-  readonly steer?: V2ThreadRevertResponse__MisalignmentSteer | null;
-};
-export const V2ThreadRevertResponse__MisalignmentErrorDetails = Schema.Struct({
-  detailedExplanation: Schema.optionalKey(
-    Schema.Union([
-      Schema.String.annotate({
-        description:
-          "A substantive localized explanation is required before offering continuation.",
-      }),
-      Schema.Null,
-    ]),
-  ),
-  errorType: Schema.optionalKey(
-    Schema.Union([
-      Schema.String.annotate({
-        description:
-          "Open-ended classification; clients must accept categories added by Responses.",
-      }),
-      Schema.Null,
-    ]),
-  ),
-  steer: Schema.optionalKey(
-    Schema.Union([V2ThreadRevertResponse__MisalignmentSteer, Schema.Null]).annotate({
-      description:
-        "Instruction to submit as the next turn's user input if continuation is confirmed.",
-    }),
-  ),
-}).annotate({ identifier: "V2ThreadRevertResponse__MisalignmentErrorDetails" });
-
-export type V2ThreadRevertResponse__TextElement = {
-  readonly byteRange: V2ThreadRevertResponse__ByteRange;
-  readonly placeholder?: string | null;
-};
-export const V2ThreadRevertResponse__TextElement = Schema.Struct({
-  byteRange: Schema.suspend(
-    (): Schema.Codec<V2ThreadRevertResponse__ByteRange> => V2ThreadRevertResponse__ByteRange,
-  ).annotate({ description: "Byte range in the parent `text` buffer that this element occupies." }),
-  placeholder: Schema.optionalKey(
-    Schema.Union([
-      Schema.String.annotate({
-        description: "Optional human-readable placeholder for the element, displayed in the UI.",
-      }),
-      Schema.Null,
-    ]),
-  ),
-}).annotate({ identifier: "V2ThreadRevertResponse__TextElement" });
-
-export type V2ThreadRevertResponse__FunctionCallOutputContentItem =
-  | { readonly text: string; readonly type: "input_text" }
-  | {
-      readonly detail?: V2ThreadRevertResponse__ImageDetail | null;
-      readonly type: "input_image";
-      readonly image_url: string;
-    }
-  | {
-      readonly detail?: V2ThreadRevertResponse__ImageDetail | null;
-      readonly type: "input_image";
-      readonly file_id: string;
-    }
-  | { readonly audio_url: string; readonly type: "input_audio" }
-  | { readonly encrypted_content: string; readonly type: "encrypted_content" };
-export const V2ThreadRevertResponse__FunctionCallOutputContentItem = Schema.Union(
-  [
-    Schema.Struct({
-      text: Schema.String,
-      type: Schema.Literal("input_text").annotate({
-        title: "InputTextFunctionCallOutputContentItemType",
-      }),
-    }).annotate({ title: "InputTextFunctionCallOutputContentItem" }),
-    Schema.Union([
-      Schema.Struct({
-        detail: Schema.optionalKey(
-          Schema.Union([V2ThreadRevertResponse__ImageDetail, Schema.Null]),
-        ),
-        type: Schema.Literal("input_image").annotate({
-          title: "InputImageFunctionCallOutputContentItemType",
-        }),
-        image_url: Schema.String,
-      }).annotate({ title: "ImageUrlFunctionCallOutputContentItem" }),
-      Schema.Struct({
-        detail: Schema.optionalKey(
-          Schema.Union([V2ThreadRevertResponse__ImageDetail, Schema.Null]),
-        ),
-        type: Schema.Literal("input_image").annotate({
-          title: "InputImageFunctionCallOutputContentItemType",
-        }),
-        file_id: Schema.String,
-      }).annotate({ title: "FileIdFunctionCallOutputContentItem" }),
-    ]).annotate({ title: "InputImageFunctionCallOutputContentItem" }),
-    Schema.Struct({
-      audio_url: Schema.String,
-      type: Schema.Literal("input_audio").annotate({
-        title: "InputAudioFunctionCallOutputContentItemType",
-      }),
-    }).annotate({ title: "InputAudioFunctionCallOutputContentItem" }),
-    Schema.Struct({
-      encrypted_content: Schema.String,
-      type: Schema.Literal("encrypted_content").annotate({
-        title: "EncryptedContentFunctionCallOutputContentItemType",
-      }),
-    }).annotate({ title: "EncryptedContentFunctionCallOutputContentItem" }),
-  ],
-  { mode: "oneOf" },
-).annotate({
-  description:
-    "Responses API compatible content items that can be returned by a tool call. This is a subset of ContentItem with the types we support as function call outputs.",
-  identifier: "V2ThreadRevertResponse__FunctionCallOutputContentItem",
-});
-
-export type V2ThreadRevertResponse__MemoryCitation = {
-  readonly entries: ReadonlyArray<V2ThreadRevertResponse__MemoryCitationEntry>;
-  readonly threadIds: ReadonlyArray<string>;
-};
-export const V2ThreadRevertResponse__MemoryCitation = Schema.Struct({
-  entries: Schema.Array(V2ThreadRevertResponse__MemoryCitationEntry),
-  threadIds: Schema.Array(Schema.String),
-}).annotate({ identifier: "V2ThreadRevertResponse__MemoryCitation" });
-
-export type V2ThreadRevertResponse__CommandAction =
-  | {
-      readonly command: string;
-      readonly name: string;
-      readonly path: V2ThreadRevertResponse__LegacyAppPathString;
-      readonly type: "read";
-    }
-  | { readonly command: string; readonly path?: string | null; readonly type: "listFiles" }
-  | {
-      readonly command: string;
-      readonly path?: string | null;
-      readonly query?: string | null;
-      readonly type: "search";
-    }
-  | { readonly command: string; readonly type: "unknown" };
-export const V2ThreadRevertResponse__CommandAction = Schema.Union(
-  [
-    Schema.Struct({
-      command: Schema.String,
-      name: Schema.String,
-      path: V2ThreadRevertResponse__LegacyAppPathString,
-      type: Schema.Literal("read").annotate({ title: "ReadCommandActionType" }),
-    }).annotate({ title: "ReadCommandAction" }),
-    Schema.Struct({
-      command: Schema.String,
-      path: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])),
-      type: Schema.Literal("listFiles").annotate({ title: "ListFilesCommandActionType" }),
-    }).annotate({ title: "ListFilesCommandAction" }),
-    Schema.Struct({
-      command: Schema.String,
-      path: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])),
-      query: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])),
-      type: Schema.Literal("search").annotate({ title: "SearchCommandActionType" }),
-    }).annotate({ title: "SearchCommandAction" }),
-    Schema.Struct({
-      command: Schema.String,
-      type: Schema.Literal("unknown").annotate({ title: "UnknownCommandActionType" }),
-    }).annotate({ title: "UnknownCommandAction" }),
-  ],
-  { mode: "oneOf" },
-).annotate({ identifier: "V2ThreadRollbackResponse__CommandAction" });
-=======
->>>>>>> d5d48742c9 (feat(codex): require Codex 0.156 and regenerate its protocol (#13481))
 
 export type V2ThreadRevertResponse__SubAgentSource =
   | "review"
@@ -28325,295 +26414,11 @@ export const V2ThreadStartedNotification__CollabAgentState = Schema.Struct({
   status: V2ThreadStartedNotification__CollabAgentStatus,
 }).annotate({ identifier: "V2ThreadStartedNotification__CollabAgentState" });
 
-export type V2ThreadStartedNotification__ThreadStatus =
-  | { readonly type: "notLoaded" }
-  | { readonly type: "idle" }
-  | { readonly type: "systemError" }
-  | {
-      readonly activeFlags: ReadonlyArray<V2ThreadStartedNotification__ThreadActiveFlag>;
-      readonly type: "active";
-    };
-export const V2ThreadStartedNotification__ThreadStatus = Schema.Union(
-  [
-    Schema.Struct({
-      type: Schema.Literal("notLoaded").annotate({ title: "NotLoadedThreadStatusType" }),
-    }).annotate({ title: "NotLoadedThreadStatus" }),
-    Schema.Struct({
-      type: Schema.Literal("idle").annotate({ title: "IdleThreadStatusType" }),
-    }).annotate({ title: "IdleThreadStatus" }),
-    Schema.Struct({
-      type: Schema.Literal("systemError").annotate({ title: "SystemErrorThreadStatusType" }),
-    }).annotate({ title: "SystemErrorThreadStatus" }),
-    Schema.Struct({
-      activeFlags: Schema.Array(V2ThreadStartedNotification__ThreadActiveFlag),
-      type: Schema.Literal("active").annotate({ title: "ActiveThreadStatusType" }),
-    }).annotate({ title: "ActiveThreadStatus" }),
-  ],
-  { mode: "oneOf" },
-).annotate({ identifier: "V2ThreadStartedNotification__ThreadStatus" });
-
-export type V2ThreadStartedNotification__CodexErrorInfo =
-  | "contextWindowExceeded"
-  | "sessionBudgetExceeded"
-  | "usageLimitExceeded"
-  | "rateLimitExceeded"
-  | "serverOverloaded"
-  | "cyberPolicy"
-  | "misalignmentPolicyViolation"
-  | "internalServerError"
-  | "unauthorized"
-  | "badRequest"
-  | "threadRollbackFailed"
-  | "sandboxError"
-  | "other"
-  | { readonly httpConnectionFailed: { readonly httpStatusCode?: number | null } }
-  | { readonly responseStreamConnectionFailed: { readonly httpStatusCode?: number | null } }
-  | { readonly responseStreamDisconnected: { readonly httpStatusCode?: number | null } }
-  | { readonly responseTooManyFailedAttempts: { readonly httpStatusCode?: number | null } }
-  | {
-      readonly activeTurnNotSteerable: {
-        readonly turnKind: V2ThreadStartedNotification__NonSteerableTurnKind;
-      };
-    };
-export const V2ThreadStartedNotification__CodexErrorInfo = Schema.Union(
-  [
-    Schema.Literals([
-      "contextWindowExceeded",
-      "sessionBudgetExceeded",
-      "usageLimitExceeded",
-      "rateLimitExceeded",
-      "serverOverloaded",
-      "cyberPolicy",
-      "misalignmentPolicyViolation",
-      "internalServerError",
-      "unauthorized",
-      "badRequest",
-      "threadRollbackFailed",
-      "sandboxError",
-      "other",
-    ]),
-    Schema.Struct({
-      httpConnectionFailed: Schema.Struct({
-        httpStatusCode: Schema.optionalKey(
-          Schema.Union([
-            Schema.Number.annotate({ format: "uint16" })
-              .check(Schema.isInt().annotate({ expected: "an integer" }))
-              .check(
-                Schema.isGreaterThanOrEqualTo(0).annotate({
-                  expected: "a value greater than or equal to 0",
-                }),
-              ),
-            Schema.Null,
-          ]),
-        ),
-      }),
-    }).annotate({ title: "HttpConnectionFailedCodexErrorInfo" }),
-    Schema.Struct({
-      responseStreamConnectionFailed: Schema.Struct({
-        httpStatusCode: Schema.optionalKey(
-          Schema.Union([
-            Schema.Number.annotate({ format: "uint16" })
-              .check(Schema.isInt().annotate({ expected: "an integer" }))
-              .check(
-                Schema.isGreaterThanOrEqualTo(0).annotate({
-                  expected: "a value greater than or equal to 0",
-                }),
-              ),
-            Schema.Null,
-          ]),
-        ),
-      }),
-    }).annotate({
-      title: "ResponseStreamConnectionFailedCodexErrorInfo",
-      description: "Failed to connect to the response SSE stream.",
-    }),
-    Schema.Struct({
-      responseStreamDisconnected: Schema.Struct({
-        httpStatusCode: Schema.optionalKey(
-          Schema.Union([
-            Schema.Number.annotate({ format: "uint16" })
-              .check(Schema.isInt().annotate({ expected: "an integer" }))
-              .check(
-                Schema.isGreaterThanOrEqualTo(0).annotate({
-                  expected: "a value greater than or equal to 0",
-                }),
-              ),
-            Schema.Null,
-          ]),
-        ),
-      }),
-    }).annotate({
-      title: "ResponseStreamDisconnectedCodexErrorInfo",
-      description:
-        "The response SSE stream disconnected in the middle of a turn before completion.",
-    }),
-    Schema.Struct({
-      responseTooManyFailedAttempts: Schema.Struct({
-        httpStatusCode: Schema.optionalKey(
-          Schema.Union([
-            Schema.Number.annotate({ format: "uint16" })
-              .check(Schema.isInt().annotate({ expected: "an integer" }))
-              .check(
-                Schema.isGreaterThanOrEqualTo(0).annotate({
-                  expected: "a value greater than or equal to 0",
-                }),
-              ),
-            Schema.Null,
-          ]),
-        ),
-      }),
-    }).annotate({
-      title: "ResponseTooManyFailedAttemptsCodexErrorInfo",
-      description: "Reached the retry limit for responses.",
-    }),
-    Schema.Struct({
-      activeTurnNotSteerable: Schema.Struct({
-        turnKind: V2ThreadStartedNotification__NonSteerableTurnKind,
-      }),
-    }).annotate({
-      title: "ActiveTurnNotSteerableCodexErrorInfo",
-      description:
-        "Returned when `turn/start` or `turn/steer` is submitted while the current active turn cannot accept same-turn steering, for example `/review` or manual `/compact`.",
-    }),
-  ],
-  { mode: "oneOf" },
-).annotate({
-  description:
-    "This translation layer make sure that we expose codex error code in camel case.\n\nWhen an upstream HTTP status is available (for example, from the Responses API or a provider), it is forwarded in `httpStatusCode` on the relevant `codexErrorInfo` variant.",
-  identifier: "V2ThreadStartedNotification__CodexErrorInfo",
-});
-
-export type V2ThreadStartedNotification__MisalignmentErrorDetails = {
-  readonly detailedExplanation?: string | null;
-  readonly errorType?: string | null;
-  readonly steer?: V2ThreadStartedNotification__MisalignmentSteer | null;
-};
-export const V2ThreadStartedNotification__MisalignmentErrorDetails = Schema.Struct({
-  detailedExplanation: Schema.optionalKey(
-    Schema.Union([
-      Schema.String.annotate({
-        description:
-          "A substantive localized explanation is required before offering continuation.",
-      }),
-      Schema.Null,
-    ]),
-  ),
-  errorType: Schema.optionalKey(
-    Schema.Union([
-      Schema.String.annotate({
-        description:
-          "Open-ended classification; clients must accept categories added by Responses.",
-      }),
-      Schema.Null,
-    ]),
-  ),
-  steer: Schema.optionalKey(
-    Schema.Union([V2ThreadStartedNotification__MisalignmentSteer, Schema.Null]).annotate({
-      description:
-        "Instruction to submit as the next turn's user input if continuation is confirmed.",
-    }),
-  ),
-}).annotate({ identifier: "V2ThreadStartedNotification__MisalignmentErrorDetails" });
-
-export type V2ThreadStartedNotification__TextElement = {
-  readonly byteRange: V2ThreadStartedNotification__ByteRange;
-  readonly placeholder?: string | null;
-};
-export const V2ThreadStartedNotification__TextElement = Schema.Struct({
-  byteRange: Schema.suspend(
-    (): Schema.Codec<V2ThreadStartedNotification__ByteRange> =>
-      V2ThreadStartedNotification__ByteRange,
-  ).annotate({ description: "Byte range in the parent `text` buffer that this element occupies." }),
-  placeholder: Schema.optionalKey(
-    Schema.Union([
-      Schema.String.annotate({
-        description: "Optional human-readable placeholder for the element, displayed in the UI.",
-      }),
-      Schema.Null,
-    ]),
-  ),
-}).annotate({ identifier: "V2ThreadStartedNotification__TextElement" });
-
-export type V2ThreadStartedNotification__FunctionCallOutputContentItem =
-  | { readonly text: string; readonly type: "input_text" }
-  | {
-      readonly detail?: V2ThreadStartedNotification__ImageDetail | null;
-      readonly type: "input_image";
-      readonly image_url: string;
-    }
-  | {
-      readonly detail?: V2ThreadStartedNotification__ImageDetail | null;
-      readonly type: "input_image";
-      readonly file_id: string;
-    }
-  | { readonly audio_url: string; readonly type: "input_audio" }
-  | { readonly encrypted_content: string; readonly type: "encrypted_content" };
-export const V2ThreadStartedNotification__FunctionCallOutputContentItem = Schema.Union(
-  [
-    Schema.Struct({
-      text: Schema.String,
-      type: Schema.Literal("input_text").annotate({
-        title: "InputTextFunctionCallOutputContentItemType",
-      }),
-    }).annotate({ title: "InputTextFunctionCallOutputContentItem" }),
-    Schema.Union([
-      Schema.Struct({
-        detail: Schema.optionalKey(
-          Schema.Union([V2ThreadStartedNotification__ImageDetail, Schema.Null]),
-        ),
-        type: Schema.Literal("input_image").annotate({
-          title: "InputImageFunctionCallOutputContentItemType",
-        }),
-        image_url: Schema.String,
-      }).annotate({ title: "ImageUrlFunctionCallOutputContentItem" }),
-      Schema.Struct({
-        detail: Schema.optionalKey(
-          Schema.Union([V2ThreadStartedNotification__ImageDetail, Schema.Null]),
-        ),
-        type: Schema.Literal("input_image").annotate({
-          title: "InputImageFunctionCallOutputContentItemType",
-        }),
-        file_id: Schema.String,
-      }).annotate({ title: "FileIdFunctionCallOutputContentItem" }),
-    ]).annotate({ title: "InputImageFunctionCallOutputContentItem" }),
-    Schema.Struct({
-      audio_url: Schema.String,
-      type: Schema.Literal("input_audio").annotate({
-        title: "InputAudioFunctionCallOutputContentItemType",
-      }),
-    }).annotate({ title: "InputAudioFunctionCallOutputContentItem" }),
-    Schema.Struct({
-      encrypted_content: Schema.String,
-      type: Schema.Literal("encrypted_content").annotate({
-        title: "EncryptedContentFunctionCallOutputContentItemType",
-      }),
-    }).annotate({ title: "EncryptedContentFunctionCallOutputContentItem" }),
-  ],
-  { mode: "oneOf" },
-).annotate({
-  description:
-    "Responses API compatible content items that can be returned by a tool call. This is a subset of ContentItem with the types we support as function call outputs.",
-  identifier: "V2ThreadStartedNotification__FunctionCallOutputContentItem",
-});
-
-export type V2ThreadStartedNotification__MemoryCitation = {
-  readonly entries: ReadonlyArray<V2ThreadStartedNotification__MemoryCitationEntry>;
-  readonly threadIds: ReadonlyArray<string>;
-};
-export const V2ThreadStartedNotification__MemoryCitation = Schema.Struct({
-  entries: Schema.Array(V2ThreadStartedNotification__MemoryCitationEntry),
-  threadIds: Schema.Array(Schema.String),
-}).annotate({ identifier: "V2ThreadStartedNotification__MemoryCitation" });
-
-export type V2ThreadStartedNotification__CommandAction =
+export type V2ThreadStartResponse__CommandAction =
   | {
       readonly command: string;
       readonly name: string;
-<<<<<<< HEAD
-      readonly path: V2ThreadStartedNotification__LegacyAppPathString;
-=======
       readonly path: V2ThreadStartResponse__LegacyAppPathString;
->>>>>>> d5d48742c9 (feat(codex): require Codex 0.156 and regenerate its protocol (#13481))
       readonly type: "read";
     }
   | { readonly command: string; readonly path?: string | null; readonly type: "listFiles" }
@@ -28624,16 +26429,12 @@ export type V2ThreadStartedNotification__CommandAction =
       readonly type: "search";
     }
   | { readonly command: string; readonly type: "unknown" };
-export const V2ThreadStartedNotification__CommandAction = Schema.Union(
+export const V2ThreadStartResponse__CommandAction = Schema.Union(
   [
     Schema.Struct({
       command: Schema.String,
       name: Schema.String,
-<<<<<<< HEAD
-      path: V2ThreadStartedNotification__LegacyAppPathString,
-=======
       path: V2ThreadStartResponse__LegacyAppPathString,
->>>>>>> d5d48742c9 (feat(codex): require Codex 0.156 and regenerate its protocol (#13481))
       type: Schema.Literal("read").annotate({ title: "ReadCommandActionType" }),
     }).annotate({ title: "ReadCommandAction" }),
     Schema.Struct({
@@ -29036,12 +26837,12 @@ export const V2ThreadStartResponse__MemoryCitation = Schema.Struct({
 
 export type V2ThreadStartResponse__FileUpdateChange = {
   readonly diff: string;
-  readonly kind: V2ThreadStartedNotification__PatchChangeKind;
+  readonly kind: V2ThreadStartResponse__PatchChangeKind;
   readonly path: string;
 };
-export const V2ThreadStartedNotification__FileUpdateChange = Schema.Struct({
+export const V2ThreadStartResponse__FileUpdateChange = Schema.Struct({
   diff: Schema.String,
-  kind: V2ThreadStartedNotification__PatchChangeKind,
+  kind: V2ThreadStartResponse__PatchChangeKind,
   path: Schema.String,
 }).annotate({ identifier: "V2ThreadStartResponse__FileUpdateChange" });
 
@@ -29112,8 +26913,6 @@ export const V2ThreadTokenUsageUpdatedNotification__ThreadTokenUsage = Schema.St
   total: V2ThreadTokenUsageUpdatedNotification__TokenUsageBreakdown,
 }).annotate({ identifier: "V2ThreadTokenUsageUpdatedNotification__ThreadTokenUsage" });
 
-<<<<<<< HEAD
-=======
 export type V2ThreadTurnsListResponse__CodexErrorInfo =
   | "contextWindowExceeded"
   | "sessionBudgetExceeded"
@@ -29245,7 +27044,6 @@ export const V2ThreadTurnsListResponse__CodexErrorInfo = Schema.Union(
   identifier: "V2ThreadTurnsListResponse__CodexErrorInfo",
 });
 
->>>>>>> d5d48742c9 (feat(codex): require Codex 0.156 and regenerate its protocol (#13481))
 export type V2ThreadTurnsListResponse__MisalignmentErrorDetails = {
   readonly detailedExplanation?: string | null;
   readonly errorType?: string | null;
@@ -29820,12 +27618,12 @@ export const V2ThreadUnarchiveResponse__CommandAction = Schema.Union(
 
 export type V2ThreadUnarchiveResponse__FileUpdateChange = {
   readonly diff: string;
-  readonly kind: V2ThreadTurnsListResponse__PatchChangeKind;
+  readonly kind: V2ThreadUnarchiveResponse__PatchChangeKind;
   readonly path: string;
 };
-export const V2ThreadTurnsListResponse__FileUpdateChange = Schema.Struct({
+export const V2ThreadUnarchiveResponse__FileUpdateChange = Schema.Struct({
   diff: Schema.String,
-  kind: V2ThreadTurnsListResponse__PatchChangeKind,
+  kind: V2ThreadUnarchiveResponse__PatchChangeKind,
   path: Schema.String,
 }).annotate({ identifier: "V2ThreadUnarchiveResponse__FileUpdateChange" });
 
@@ -31398,7 +29196,7 @@ export const CommandExecutionRequestApprovalResponse__CommandExecutionApprovalDe
       Schema.Literal("accept").annotate({ description: "User approved the command." }),
       Schema.Literal("acceptForSession").annotate({
         description:
-          "Migration-source selector used to produce the migration items. Pass the same value to detection and import; missing or unrecognized values use the default source.",
+          "User approved the command and future prompts in the same session-scoped approval cache should run without prompting.",
       }),
       Schema.Struct({
         acceptWithExecpolicyAmendment: Schema.Struct({
@@ -45093,20 +42891,6 @@ export const ServerNotification__AdditionalFileSystemPermissions = Schema.Struct
   ),
 }).annotate({ identifier: "ServerNotification__AdditionalFileSystemPermissions" });
 
-<<<<<<< HEAD
-export type ServerRequest__AdditionalFileSystemPermissions = {
-  readonly entries?: ReadonlyArray<ServerRequest__FileSystemSandboxEntry> | null;
-  readonly globScanMaxDepth?: number | null;
-  readonly read?: ReadonlyArray<ServerRequest__LegacyAppPathString> | null;
-  readonly write?: ReadonlyArray<ServerRequest__LegacyAppPathString> | null;
-};
-export const ServerNotification__ThreadSettingsUpdatedNotification = Schema.Struct({
-  threadId: Schema.String,
-  threadSettings: ServerNotification__ThreadSettings,
-}).annotate({ identifier: "ServerNotification__ThreadSettingsUpdatedNotification" });
-
-=======
->>>>>>> d5d48742c9 (feat(codex): require Codex 0.156 and regenerate its protocol (#13481))
 export type ServerRequest__AdditionalFileSystemPermissions = {
   readonly entries?: ReadonlyArray<ServerRequest__FileSystemSandboxEntry> | null;
   readonly globScanMaxDepth?: number | null;
@@ -47708,11 +45492,11 @@ export const V2ThreadResumeResponse__Thread = Schema.Struct({
     (): Schema.Codec<V2ThreadResumeResponse__ThreadStatus> => V2ThreadResumeResponse__ThreadStatus,
   ).annotate({ description: "Current runtime status for the thread." }),
   threadSource: Schema.optionalKey(
-    Schema.Union([V2ThreadRollbackResponse__ThreadSource, Schema.Null]).annotate({
+    Schema.Union([V2ThreadResumeResponse__ThreadSource, Schema.Null]).annotate({
       description: "Optional analytics source classification for this thread.",
     }),
   ),
-  turns: Schema.Array(V2ThreadRollbackResponse__Turn).annotate({
+  turns: Schema.Array(V2ThreadResumeResponse__Turn).annotate({
     description:
       "Only populated on `thread/resume`, `thread/fork`, and `thread/read` (when `includeTurns` is true) responses. For all other responses and notifications returning a Thread, the turns field will be an empty list.",
   }),
@@ -57992,28 +55776,9 @@ export const V2ThreadResumeResponse__TurnsPage = Schema.Struct({
   nextCursor: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])),
 });
 
-<<<<<<< HEAD
-export type V2ThreadRollbackParams = { readonly numTurns: number; readonly threadId: string };
-export const V2ThreadRollbackParams = Schema.Struct({
-  numTurns: Schema.Number.annotate({
-    description:
-      "The number of turns to drop from the end of the thread. Must be >= 1.\n\nThis only modifies the thread's history and does not revert local file changes that have been made by the agent. Clients are responsible for reverting these changes.",
-    format: "uint32",
-  })
-    .check(Schema.isInt().annotate({ expected: "an integer" }))
-    .check(
-      Schema.isGreaterThanOrEqualTo(0).annotate({ expected: "a value greater than or equal to 0" }),
-    ),
-  threadId: Schema.String,
-}).annotate({
-  title: "ThreadRevertParams",
-  description:
-    "Replace a paginated thread's durable history with the prefix before one turn.\n\nThis only changes persisted conversation history. It does not revert local file changes.",
-=======
 export type V2ThreadRevertedNotification = { readonly threadId: string };
 export const V2ThreadRevertedNotification = Schema.Struct({ threadId: Schema.String }).annotate({
   title: "ThreadRevertedNotification",
->>>>>>> d5d48742c9 (feat(codex): require Codex 0.156 and regenerate its protocol (#13481))
 });
 
 export type V2ThreadRevertParams = { readonly beforeTurnId: string; readonly threadId: string };

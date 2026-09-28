@@ -442,16 +442,11 @@ export const make = Effect.gen(function* () {
           ),
         // Every file feeds one aggregator, so read them one at a time, oldest first.
         { concurrency: 1 },
-        {
-          concurrency: 1,
-        },
       );
       const files = results.flatMap((result) =>
         Result.isSuccess(result) && result.success._tag === "Loaded"
           ? [{ path: result.success.path, text: result.success.text }]
           : [],
-=======
->>>>>>> 8b873eab0d (perf(server): opening Diagnostics no longer loads the whole trace ring into memory (#13763))
       );
       const foundFile = results.some((result) => Result.isSuccess(result) && result.success);
       const readFailure = results.find(Result.isFailure);

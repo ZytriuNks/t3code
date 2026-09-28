@@ -65,10 +65,6 @@ export function PromptFontPreview() {
         disabled={false}
         placeholder={DISCONNECTED_COMPOSER_PLACEHOLDER}
         className="max-h-42 min-h-14"
-=======
-        placeholder={DISCONNECTED_COMPOSER_PLACEHOLDER}
-        className="max-h-42 min-h-14"
->>>>>>> 9030a60eaf (fix(web): composer chip rings no longer clip at the editor edge (#13301))
         onChange={onChange}
         onPaste={noop}
       />

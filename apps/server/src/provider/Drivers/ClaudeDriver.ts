@@ -459,6 +459,68 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
           ),
         );
 
+      // Same rules as Codex: serialised on the config directory that holds the
+      // login, one request id kept until Claude answers (a cooldown or rate
+      // limit is an answer), then a re-probe.
+      const consumeResetCredit: NonNullable<ProviderInstance["consumeResetCredit"]> = () =>
+        Effect.gen(function* () {
+          const current = yield* snapshot.getSnapshot;
+          const grantId = current.usageLimits?.resetCredits?.nextCreditId;
+          if (!grantId || !current.version) return "noCredit" as const;
+          const version = current.version;
+          return yield* resetCreditCoordinator.redeem(
+            configDir,
+            (requestId) =>
+              ClaudeResetCredits.consumeClaudeResetCredit({
+                configDir,
+                accountConfigPath,
+                version,
+                grantId,
+                requestId,
+              }),
+            ClaudeResetCredits.isSettledClaudeResetCreditFailure,
+          );
+        }).pipe(
+          Effect.provideService(HttpClient.HttpClient, httpClient),
+          Effect.provideService(FileSystem.FileSystem, fileSystem),
+          Effect.provideService(Path.Path, path),
+          Effect.mapError(
+            (cause) =>
+              new ProviderDriverError({
+                driver: DRIVER_KIND,
+                instanceId,
+                detail:
+                  cause._tag === "ClaudeResetCreditError"
+                    ? cause.message
+                    : "Claude could not redeem the reset.",
+                cause,
+              }),
+          ),
+          // Re-probe after any answer, but only a reset claims the limits
+          // changed, so only a reset reports an unconfirmed refresh.
+          Effect.tap((outcome) =>
+            Effect.gen(function* () {
+              const before = (yield* snapshot.getSnapshot).usageLimits?.checkedAt;
+              yield* Cache.invalidateAll(capabilitiesProbeCache);
+              const refreshed = yield* snapshot.refresh;
+              const after = refreshed.usageLimits?.checkedAt;
+              if (
+                outcome === "reset" &&
+                (after === undefined ||
+                  after === before ||
+                  refreshed.usageLimits?.unavailable?.reason === "probeFailed")
+              ) {
+                return yield* new ProviderDriverError({
+                  driver: DRIVER_KIND,
+                  instanceId,
+                  detail:
+                    "The reset was applied, but Claude could not confirm the new limits. Refresh to check.",
+                });
+              }
+            }),
+          ),
+        );
+
       return {
         instanceId,
         driverKind: DRIVER_KIND,

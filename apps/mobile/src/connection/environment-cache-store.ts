@@ -115,7 +115,6 @@ export const make = Effect.fn("MobileEnvironmentCacheStore.make")(function* () {
       }).pipe(Effect.tap(() => Effect.promise(() => projectFaviconDatabaseCache.hydrate()))),
     ),
     saveShell: Effect.fn("MobileEnvironmentCache.saveShell")(function* (environmentId, snapshot) {
-=======
       const encodedSnapshot = yield* encodeShellSnapshotForCache(snapshot).pipe(
         Effect.mapError((cause) => persistenceError("save-shell", cause)),
       );

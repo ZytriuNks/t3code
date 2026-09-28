@@ -103,12 +103,7 @@ export function UsageRouteScreen() {
   );
   const isFocused = useIsFocused();
   const limits = useRefreshLimits(selectedEnvironmentIds, isFocused && tab === "limits");
-  const cursorAccessEnvironments = selectedEnvironments.filter(
-    (environment) => environment.needsCursorKeychainAccess,
-  );
-=======
   const cursorAccessEnvironments = cursorKeychainAccessEnvironments(selectedEnvironments);
->>>>>>> 679c34c096 (fix(clients): hide duplicate Cursor Keychain prompts (#13870))
   const refreshAfterCursorEnable = () => {
     void refresh();
     void limits.refreshAfterEnable();

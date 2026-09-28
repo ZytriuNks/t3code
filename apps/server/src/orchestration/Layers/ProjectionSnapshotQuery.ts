@@ -2539,7 +2539,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 "ProjectionSnapshotQuery.getShellSnapshot:listLatestTurns:decodeRows",
               ),
             ),
-          ]),
+          ),
         )
         .pipe(
           Effect.flatMap(([projectRows, threadRows, sessionRows, latestTurnRows, stateRows]) =>
@@ -2651,6 +2651,36 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         ).pipe(Effect.map((projects) => ({ ...snapshot, projects }))),
       ),
     );
+
+  const listThreadsWithPullRequests: ProjectionSnapshotQueryShape["listThreadsWithPullRequests"] =
+    () =>
+      listActiveThreadPullRequestSyncRows(undefined).pipe(
+        Effect.map((rows) => {
+          const threads = new Map<
+            ThreadId,
+            ProjectionThreadPullRequests & { readonly pullRequests: Array<ThreadPullRequestLink> }
+          >();
+          for (const row of rows) {
+            const thread = threads.get(row.threadId) ?? {
+              id: row.threadId,
+              projectId: row.projectId,
+              settledOverride: row.settledOverride,
+              settledAt: row.settledAt,
+              pullRequests: [],
+            };
+            thread.pullRequests.push(mapPullRequestRow(row));
+            threads.set(row.threadId, thread);
+          }
+          return [...threads.values()];
+        }),
+        Effect.mapError(
+          toPersistenceSqlOrDecodeError(
+            "ProjectionSnapshotQuery.listThreadsWithPullRequests:query",
+            "ProjectionSnapshotQuery.listThreadsWithPullRequests:decodeRows",
+          ),
+        ),
+      );
+  };
 
   const listThreadsWithPullRequests: ProjectionSnapshotQueryShape["listThreadsWithPullRequests"] =
     () =>

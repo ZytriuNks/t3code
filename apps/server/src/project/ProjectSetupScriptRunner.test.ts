@@ -535,26 +535,29 @@ describe("ProjectSetupScriptRunner", () => {
     });
     assert.equal(write.mock.calls[0]?.[0].data, "vp install\r");
     const lines: string[] = [];
-    const observed = yield* runner.runForThread({
-      threadId: "thread-1",
-      projectId,
-      worktreePath: "/repo-worktree",
-      observeCompletion: {
-        onOutputLine: (line) =>
-          Effect.sync(() => {
-            lines.push(line);
-          }),
-      },
-    });
+    const observed =
+      yield *
+      runner.runForThread({
+        threadId: "thread-1",
+        projectId,
+        worktreePath: "/repo-worktree",
+        observeCompletion: {
+          onOutputLine: (line) =>
+            Effect.sync(() => {
+              lines.push(line);
+            }),
+        },
+      });
     assert.equal(observed.status, "started");
     const listener = listeners[0]!;
-    yield* listener({
-      type: "output",
-      threadId: "thread-1",
-      terminalId: "setup-setup",
-      data: "Downloading 10%\rDownloading 20%\r\nDone\n",
-    });
+    yield *
+      listener({
+        type: "output",
+        threadId: "thread-1",
+        terminalId: "setup-setup",
+        data: "Downloading 10%\rDownloading 20%\r\nDone\n",
+      });
     assert.deepEqual(lines, ["Downloading 10%", "Downloading 20%", "Done"]);
-    yield* listener({ type: "closed", threadId: "thread-1", terminalId: "setup-setup" });
+    yield * listener({ type: "closed", threadId: "thread-1", terminalId: "setup-setup" });
   }).pipe(Effect.provide(layer));
 });
