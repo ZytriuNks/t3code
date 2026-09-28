@@ -20,7 +20,7 @@ import {
   type HttpClientRequest,
 } from "effect/unstable/http";
 
-import { EnvironmentId } from "@t3tools/contracts";
+import { DESKTOP_UPDATE_RESTART_MARKER_FILE, EnvironmentId } from "@t3tools/contracts";
 import { RelayClientTracer } from "@t3tools/shared/relayTracing";
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
@@ -82,6 +82,12 @@ const storeFailure = (tag: "AlreadyExists" | "PermissionDenied") =>
   });
 
 const unusedSecretStoreOperation = () => Effect.die("unused secret-store operation");
+// Linking wakes the awareness relay; these tests do not run it.
+const idleAwarenessRelay = AgentAwarenessRelay.AgentAwarenessRelay.of({
+  publishThread: () => Effect.void,
+  requestCatchUp: () => Effect.void,
+  start: () => Effect.void,
+});
 const decodeManagedTunnelRecoveryRegistration = Schema.decodeUnknownEffect(
   Schema.fromJsonString(RelayManagedEndpointRecoveryRegistrationRequest),
 );
@@ -253,7 +259,7 @@ describe("reconcileDesiredCloudLink", () => {
         CliTokenManager.CloudCliTokenManager,
         CliTokenManager.CloudCliTokenManager.of({
           get: unusedSecretStoreOperation(),
-          getExisting: Effect.succeed(Option.none()),
+          getExisting: Effect.succeedNone,
           hasCredential: unusedSecretStoreOperation(),
           store: () => unusedSecretStoreOperation(),
           clear: unusedSecretStoreOperation(),
@@ -358,6 +364,20 @@ describe("releaseManagedTunnelOnShutdown", () => {
       );
     });
 
+  // Writes the marker the desktop app leaves just before it stops its backend
+  // to install an update, and returns when it was written.
+  const writeDesktopUpdateRestartMarker = Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const config = yield* ServerConfigModule.ServerConfig;
+    const runtimeDir = path.join(config.baseDir, "runtime");
+    const markerPath = path.join(runtimeDir, DESKTOP_UPDATE_RESTART_MARKER_FILE);
+    yield* fs.makeDirectory(runtimeDir, { recursive: true });
+    yield* fs.writeFileString(markerPath, "");
+    const { mtime } = yield* fs.stat(markerPath);
+    return Option.getOrThrow(mtime).getTime();
+  });
+
   const provideReleaseHarness =
     (harness: ReleaseHarness) =>
     <A, E, R>(effect: Effect.Effect<A, E, R>) =>
@@ -400,7 +420,7 @@ describe("releaseManagedTunnelOnShutdown", () => {
           CliTokenManager.CloudCliTokenManager,
           CliTokenManager.CloudCliTokenManager.of({
             get: unusedSecretStoreOperation(),
-            getExisting: Effect.succeed(Option.some(cliToken)),
+            getExisting: Effect.succeedSome(cliToken),
             hasCredential: unusedSecretStoreOperation(),
             store: () => unusedSecretStoreOperation(),
             clear: unusedSecretStoreOperation(),
@@ -555,6 +575,38 @@ describe("releaseManagedTunnelOnShutdown", () => {
       expect(applyConfigCalls).toEqual([]);
       expect(requests).toEqual([]);
       expect(values.has(CLOUD_ENDPOINT_RUNTIME_CONFIG)).toBe(true);
+    }).pipe(provideReleaseHarness({ store, applyConfigCalls, requests }));
+  });
+
+  it.effect("keeps the tunnel once when the desktop app restarts it for an update", () => {
+    const { store, values } = makeMemorySecretStore(managedLinkSecrets);
+    const applyConfigCalls: Array<unknown> = [];
+    const requests: Array<HttpClientRequest.HttpClientRequest> = [];
+
+    return Effect.gen(function* () {
+      yield* TestClock.setTime(yield* writeDesktopUpdateRestartMarker);
+
+      expect(yield* releaseManagedTunnelOnShutdown()).toBe(false);
+      expect(requests).toEqual([]);
+      expect(values.has(CLOUD_ENDPOINT_RUNTIME_CONFIG)).toBe(true);
+
+      // The shutdown consumed the marker, so a later quit releases the tunnel.
+      expect(yield* releaseManagedTunnelOnShutdown()).toBe(true);
+      expect(requests).toHaveLength(1);
+    }).pipe(provideReleaseHarness({ store, applyConfigCalls, requests }));
+  });
+
+  it.effect("releases the tunnel when the desktop update marker is stale", () => {
+    const { store } = makeMemorySecretStore(managedLinkSecrets);
+    const applyConfigCalls: Array<unknown> = [];
+    const requests: Array<HttpClientRequest.HttpClientRequest> = [];
+
+    return Effect.gen(function* () {
+      const writtenAt = yield* writeDesktopUpdateRestartMarker;
+      yield* TestClock.setTime(writtenAt + Duration.toMillis(Duration.minutes(2)));
+
+      expect(yield* releaseManagedTunnelOnShutdown()).toBe(true);
+      expect(requests).toHaveLength(1);
     }).pipe(provideReleaseHarness({ store, applyConfigCalls, requests }));
   });
 

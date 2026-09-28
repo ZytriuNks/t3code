@@ -18,24 +18,13 @@ export function SettingsSwitchRow(
       label={props.label}
       subtitle={props.subtitle}
     >
-      {props.value === null ? (
-        <Pressable
-          accessibilityLabel={`Set ${props.label} on for selected environments`}
-          accessibilityRole="button"
-          disabled={props.disabled}
-          className="rounded-full bg-subtle px-3 py-2 active:opacity-70"
-          onPress={() => props.onValueChange(true)}
-        >
-          <Text className="text-sm font-t3-medium text-foreground">Mixed · Set on</Text>
-        </Pressable>
-      ) : (
-        <ThemedSwitch
-          accessibilityLabel={props.label}
-          disabled={props.disabled}
-          onValueChange={props.onValueChange}
-          value={props.value}
-        />
-      )}
+      <ThemedSwitch
+        style={{ alignSelf: "center" }}
+        accessibilityLabel={props.label}
+        disabled={props.disabled}
+        onValueChange={props.onValueChange}
+        value={props.value}
+      />
     </SettingsControlRow>
   );
 }

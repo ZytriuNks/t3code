@@ -1534,7 +1534,7 @@ export const makeCodexSessionRuntime = (
               }
             }),
           ),
-          Effect.catch(() => Effect.void),
+          Effect.ignore,
           Effect.forkIn(runtimeScope),
         );
     });

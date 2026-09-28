@@ -1,13 +1,6 @@
 import { type ReactNode, type RefObject, useLayoutEffect, useRef, useState } from "react";
 
-import { isElectron } from "~/env";
-import {
-  getPreviewPanelMaxWidth,
-  type PreviewPanelInlineSize,
-  usePreviewPanelInlineSize,
-} from "~/hooks/usePreviewPanelInlineSize";
-
-export { getPreviewPanelMaxWidth };
+import { useResizableWidth } from "~/hooks/useResizableWidth";
 import { cn } from "~/lib/utils";
 
 import { RightPanelResizeHandle } from "./RightPanelResizeHandle";
@@ -34,33 +27,7 @@ interface PreviewPanelShellProps {
   /** Overrides the initial width (px) before the user has resized the panel. */
   defaultWidth?: number;
   children: ReactNode;
-}
-
-export function PreviewPanelShell(props: PreviewPanelShellProps) {
-  if (props.inlineSize) {
-    return <PreviewPanelShellFrame {...props} inlineSize={props.inlineSize} />;
-  }
-
-  return <ResizablePreviewPanelShell {...props} />;
-}
-
-function ResizablePreviewPanelShell(props: PreviewPanelShellProps) {
-  const hostRef = useRef<HTMLDivElement | null>(null);
-  const inlineSize = usePreviewPanelInlineSize(hostRef, {
-    enabled: props.mode === "inline" && !props.maximized,
-    widthStorageKey: props.widthStorageKey,
-    defaultWidth: props.defaultWidth,
-  });
-  return <PreviewPanelShellFrame {...props} inlineSize={inlineSize} hostRef={hostRef} />;
-}
-
-function PreviewPanelShellFrame(
-  props: PreviewPanelShellProps & {
-    inlineSize: PreviewPanelInlineSize;
-    hostRef?: RefObject<HTMLDivElement | null>;
-  },
-) {
-  const useDragRegion = isElectron && props.mode !== "sheet" && props.mode !== "embedded";
+}) {
   const isInline = props.mode === "inline";
   const collapsible = isInline && props.open !== undefined;
   const open = props.open ?? true;
@@ -116,7 +83,7 @@ function PreviewPanelShellFrame(
             : "shrink-0 border-l border-border"
           : "w-full",
         collapsible &&
-          "[[data-panel-animations=true]_&]:transition-[width] [[data-panel-animations=true]_&]:[transition-duration:var(--panel-animation-duration)] [[data-panel-animations=true]_&]:ease-out",
+          "[[data-panel-animations=true]_&]:transition-[width] [[data-panel-animations=true]_&]:duration-(--panel-animation-duration) [[data-panel-animations=true]_&]:ease-out",
         collapsible && open && "[[data-panel-animations=true]_&]:starting:w-0!",
         collapsible && !open && "pointer-events-none",
       )}
@@ -137,7 +104,6 @@ function PreviewPanelShellFrame(
           className="flex h-full min-h-0 min-w-0 flex-col"
           style={collapsible && !maximized ? { width: `calc(${width}px - 1px)` } : undefined}
         >
-          {useDragRegion ? <div className="electron-drag-region h-0 w-full" aria-hidden /> : null}
           {props.children}
         </div>
       </div>

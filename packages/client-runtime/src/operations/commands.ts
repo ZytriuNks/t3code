@@ -33,7 +33,68 @@ import * as Effect from "effect/Effect";
 
 import { getInitialServerConfig, request } from "../rpc/client.ts";
 
-interface CommandMetadata {
+type CommandType = ClientOrchestrationCommand["type"];
+type CommandOf<T extends CommandType> = Extract<ClientOrchestrationCommand, { readonly type: T }>;
+type CommandInput<T extends CommandType> = Omit<
+  CommandOf<T>,
+  "type" | "commandId" | "createdAt"
+> & {
+  readonly commandId?: CommandId;
+} & ("createdAt" extends keyof CommandOf<T>
+    ? {
+        readonly createdAt?: CommandOf<T>["createdAt"];
+      }
+    : {});
+
+export type CreateProjectInput = CommandInput<"project.create">;
+export type UpdateProjectInput = CommandInput<"project.meta.update">;
+export type DeleteProjectInput = CommandInput<"project.delete">;
+export type CreateThreadInput = CommandInput<"thread.create">;
+export type DeleteThreadInput = CommandInput<"thread.delete">;
+export type ArchiveThreadInput = CommandInput<"thread.archive">;
+export type UnarchiveThreadInput = CommandInput<"thread.unarchive">;
+export type SettleThreadInput = CommandInput<"thread.settle">;
+export type UnsettleThreadInput = CommandInput<"thread.unsettle">;
+export type SnoozeThreadInput = CommandInput<"thread.snooze">;
+export type UnsnoozeThreadInput = CommandInput<"thread.unsnooze">;
+export type PinThreadInput = CommandInput<"thread.pin">;
+export type UnpinThreadInput = CommandInput<"thread.unpin">;
+export type ReorderPinnedThreadInput = CommandInput<"thread.pin.reorder">;
+export type SetThreadAutoSettleInput = CommandInput<"thread.auto-settle.set">;
+export type ReorderActiveThreadInput = CommandInput<"thread.active.reorder">;
+export type UpdateThreadMetadataInput = CommandInput<"thread.meta.update">;
+export type LinkThreadPullRequestInput = CommandInput<"thread.pull-request.link">;
+export type UnlinkThreadPullRequestInput = CommandInput<"thread.pull-request.unlink">;
+export type SetThreadRuntimeModeInput = CommandInput<"thread.runtime-mode.set">;
+export type SetThreadInteractionModeInput = CommandInput<"thread.interaction-mode.set">;
+export type StartThreadTurnInput = CommandInput<"thread.turn.start">;
+export type InterruptThreadTurnInput = CommandInput<"thread.turn.interrupt">;
+export type RespondToThreadApprovalInput = CommandInput<"thread.approval.respond">;
+export type RespondToThreadUserInputInput = CommandInput<"thread.user-input.respond">;
+export type DismissThreadUserInputInput = CommandInput<"thread.user-input.dismiss">;
+export type RevertThreadCheckpointInput = CommandInput<"thread.checkpoint.revert"> & {
+  readonly restoreFiles?: boolean;
+};
+export type StopThreadSessionInput = CommandInput<"thread.session.stop">;
+
+type DispatchTag = typeof ORCHESTRATION_WS_METHODS.dispatchCommand;
+type CommandEffect = Effect.Effect<
+  EnvironmentRpcSuccess<DispatchTag>,
+  EnvironmentRpcFailure<DispatchTag> | EnvironmentRpcUnavailableError,
+  Crypto.Crypto | EnvironmentSupervisor
+>;
+
+function commandId(input: { readonly commandId?: CommandId }) {
+  return Effect.gen(function* () {
+    if (input.commandId !== undefined) {
+      return input.commandId;
+    }
+    const crypto = yield* Crypto.Crypto;
+    return yield* crypto.randomUUIDv4.pipe(Effect.orDie, Effect.map(CommandId.make));
+  });
+}
+
+function timestampedCommandMetadata(input: {
   readonly commandId?: CommandId;
   readonly createdAt?: string;
   readonly creationSource?: OrchestrationV2CreationSource;
@@ -459,6 +520,27 @@ export const reorderPinnedThread = Effect.fn("EnvironmentCommands.reorderPinnedT
 ) {
   const commandId = yield* allocateCommandId(input);
   return yield* dispatch({
+    ...input,
+    type: "thread.unpin",
+    commandId: yield* commandId(input),
+  });
+});
+
+export const setThreadAutoSettle: (input: SetThreadAutoSettleInput) => CommandEffect = Effect.fn(
+  "EnvironmentCommands.setThreadAutoSettle",
+)(function* (input) {
+  return yield* dispatch({
+    ...input,
+    type: "thread.auto-settle.set",
+    commandId: yield* commandId(input),
+  });
+});
+
+export const reorderPinnedThread: (input: ReorderPinnedThreadInput) => CommandEffect = Effect.fn(
+  "EnvironmentCommands.reorderPinnedThread",
+)(function* (input) {
+  return yield* dispatch({
+    ...input,
     type: "thread.pin.reorder",
     commandId,
     threadId: input.threadId,

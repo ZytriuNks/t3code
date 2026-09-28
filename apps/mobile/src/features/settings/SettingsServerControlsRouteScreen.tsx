@@ -1,3 +1,5 @@
+import { useNavigation } from "@react-navigation/native";
+import { SettingsRow } from "./components/SettingsRow";
 import { ScreenScrollView as ScrollView } from "../../components/ScreenScrollView";
 import { AppText as Text } from "../../components/AppText";
 import {
@@ -128,6 +130,7 @@ export function SettingsEnvironmentMaintenanceRouteScreen() {
 
 function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
   const insets = useSafeAreaInsets();
+  const navigation = useNavigation();
   const { selectedTargets, projectGroups, selectedProjectKey } = useSettingsEnvironmentFilter();
   const selectedProject = projectGroups.find((group) => group.key === selectedProjectKey);
   const projectSelected = selectedProjectKey !== null;
@@ -373,36 +376,61 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
               ) : null}
 
               {props.page === "maintenance" ? (
-                <SettingsSection title="Updates">
-                  <SettingsSwitchRow
-                    icon="arrow.clockwise"
-                    label="Check provider updates"
-                    subtitle={
-                      projectSelected
-                        ? "Environment-wide setting. Select All projects to change it."
-                        : "Check installed provider CLIs for newer versions."
-                    }
-                    value={uniform("enableProviderUpdateChecks")}
-                    disabled={disabledFor("enableProviderUpdateChecks")}
-                    onValueChange={(value) => write({ enableProviderUpdateChecks: value })}
-                  />
-                  <View className="border-t border-border-subtle">
-                    <SettingsSwitchRow
-                      icon="arrow.uturn.forward"
-                      label="Continue after restart"
+                <>
+                  {!projectSelected ? (
+                    <SettingsSection title="Manage environments">
+                      {selectedTargets.map((target) => (
+                        <SettingsRow
+                          key={target.environmentId}
+                          icon="server.rack"
+                          label={target.label}
+                          value="Server and provider updates"
+                          onPress={() =>
+                            navigation.navigate("SettingsSheet", {
+                              screen: "SettingsContent",
+                              params: {
+                                screen: "SettingsEnvironmentDetail",
+                                params: { environmentId: target.environmentId },
+                              },
+                            })
+                          }
+                        />
+                      ))}
+                    </SettingsSection>
+                  ) : null}
+                  <SettingsSection title="Updates">
+                    <FanoutSwitchRow
+                      icon="arrow.clockwise"
+                      label="Check provider updates"
                       subtitle={
-                        supportsContinuation
-                          ? "Resume interrupted threads after an update or restart."
-                          : "Update older servers to control restart continuation."
+                        projectSelected
+                          ? "Environment-wide setting. Select All projects to change it."
+                          : "Check installed provider CLIs for newer versions."
                       }
-                      value={uniform("continueThreadsAfterServerUpdate")}
-                      disabled={
-                        disabledFor("continueThreadsAfterServerUpdate") || !supportsContinuation
-                      }
-                      onValueChange={(value) => write({ continueThreadsAfterServerUpdate: value })}
+                      value={uniform("enableProviderUpdateChecks")}
+                      disabled={disabledFor("enableProviderUpdateChecks")}
+                      onValueChange={(value) => write({ enableProviderUpdateChecks: value })}
                     />
-                  </View>
-                </SettingsSection>
+                    <View className="border-t border-border-subtle">
+                      <FanoutSwitchRow
+                        icon="arrow.uturn.forward"
+                        label="Continue after restart"
+                        subtitle={
+                          supportsContinuation
+                            ? "Resume interrupted threads after an update or restart."
+                            : "Update older servers to control restart continuation."
+                        }
+                        value={uniform("continueThreadsAfterServerUpdate")}
+                        disabled={
+                          disabledFor("continueThreadsAfterServerUpdate") || !supportsContinuation
+                        }
+                        onValueChange={(value) =>
+                          write({ continueThreadsAfterServerUpdate: value })
+                        }
+                      />
+                    </View>
+                  </SettingsSection>
+                </>
               ) : null}
             </>
           )}

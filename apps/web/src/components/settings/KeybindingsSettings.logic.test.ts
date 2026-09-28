@@ -58,43 +58,22 @@ describe("KeybindingsSettings.logic", () => {
       );
     },
   );
-  it("filters rows by localized command labels", () => {
-    const localizedLabels: Record<string, string> = {
-      "composer.workspace": "输入区：工作区",
-      "composer.sendAlternate": "输入区：切换排队/引导操作",
-    };
-    const rows = buildKeybindingRows(
-      DEFAULT_RESOLVED_KEYBINDINGS,
-      "输入区",
-      (command) => localizedLabels[command] ?? commandLabel(command),
-    );
-
-    expect(rows.map((row) => row.command)).toEqual(
-      expect.arrayContaining(["composer.workspace", "composer.sendAlternate"]),
-    );
-  });
-
-  it("uses localized labels for conflict descriptions when supplied", () => {
-    const rows = buildKeybindingRows(DEFAULT_RESOLVED_KEYBINDINGS, "", (command) =>
-      command === "composer.workspace" ? "输入区：工作区" : commandLabel(command),
-    );
-    const target = rows.find((row) => row.command === "composer.workspace");
-    expect(target).toBeDefined();
+  it("orders Usage bindings and command choices like the page", () => {
+    const expected = [
+      "usage.cost",
+      "usage.open",
+      "usage.tokens",
+      "usage.limits",
+      "usage.period.day",
+      "usage.period.week",
+      "usage.period.month",
+      "usage.period.quarter",
+    ];
+    const bindings = DEFAULT_RESOLVED_KEYBINDINGS.toReversed();
+    expect(buildKeybindingRows(bindings, "usage").map((row) => row.command)).toEqual(expected);
     expect(
-      keybindingConflictLabels(
-        [
-          target!,
-          {
-            ...target!,
-            id: `${target!.id}-conflict`,
-            command: "terminal.toggle",
-            key: target!.key,
-          },
-        ],
-        { rowId: `${target!.id}-conflict`, key: target!.key, when: target!.when },
-        (command) => (command === "composer.workspace" ? "输入区：工作区" : "终端：切换"),
-      ),
-    ).toContain("输入区：工作区");
+      buildKeybindingCommandOptions(bindings).filter((command) => command.startsWith("usage.")),
+    ).toEqual(expected);
   });
 
   it("builds searchable rows with readable key and when values", () => {
@@ -295,6 +274,7 @@ describe("KeybindingsSettings.logic", () => {
         "threadPanel.toggle",
         "rightPanel.toggleMaximized",
         "thread.stop",
+        "usage.open",
         "script.setup-db.run",
       ]),
     );

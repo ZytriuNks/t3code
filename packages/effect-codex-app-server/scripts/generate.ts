@@ -364,76 +364,6 @@ function adaptSchemaForEffect(value: Schema.Json): Schema.Json {
   };
 }
 
-// Codex 0.153 adds async questions to agent messages. Keep older protocol
-// fields until the next full refresh, including every thread history namespace.
-function addAsyncQuestionFields(value: Schema.Json): Schema.Json {
-  if (Array.isArray(value)) {
-    return value.map(addAsyncQuestionFields);
-  }
-  if (value === null || typeof value !== "object") {
-    return value;
-  }
-  const node: Record<string, Schema.Json> = { ...value };
-  for (const key of ["items", "additionalProperties"]) {
-    const child = node[key];
-    if (isJsonSchemaNode(child)) node[key] = adaptSchemaForEffect(child);
-  }
-  for (const key of ["anyOf", "oneOf", "allOf"]) {
-    const child = node[key];
-    if (Array.isArray(child)) node[key] = child.map(adaptSchemaForEffect);
-  }
-  for (const key of ["properties", "definitions"]) {
-    const child = node[key];
-    if (isJsonSchemaNode(child)) {
-      node[key] = Object.fromEntries(
-        Object.entries(child).map(([name, schema]) => [name, adaptSchemaForEffect(schema)]),
-      );
-    }
-  }
-
-  const { properties } = node;
-  if (
-    isJsonSchemaNode(properties) &&
-    Object.keys(properties).length > 0 &&
-    !("additionalProperties" in node)
-  ) {
-    node.additionalProperties = false;
-  }
-
-  const alternativesKey = "anyOf" in node ? "anyOf" : "oneOf";
-  const alternatives = node[alternativesKey];
-  if (
-    !isJsonSchemaNode(properties) ||
-    !Array.isArray(alternatives) ||
-    !alternatives.every(
-      (alternative) => isJsonSchemaNode(alternative) && alternative.type === "object",
-    )
-  ) {
-    return node;
-  }
-  const {
-    properties: _shared,
-    required,
-    type: _type,
-    additionalProperties: _closed,
-    ...rest
-  } = node;
-  const sharedRequired = Array.isArray(required) ? required : [];
-  return {
-    ...rest,
-    [alternativesKey]: alternatives.map((alternative) => {
-      const branch = alternative as JsonSchemaNode;
-      const branchProperties = isJsonSchemaNode(branch.properties) ? branch.properties : {};
-      const branchRequired = Array.isArray(branch.required) ? branch.required : [];
-      return {
-        ...branch,
-        properties: { ...properties, ...branchProperties },
-        required: [...new Set([...sharedRequired, ...branchRequired])],
-      };
-    }),
-  };
-}
-
 function toPascalCaseMethod(method: string) {
   return method
     .split("/")
@@ -751,7 +681,7 @@ const generateFiles = Effect.fn("generateFiles")(function* () {
   for (const [name, schema] of Object.entries(aggregateSchemas).toSorted(([left], [right]) =>
     left.localeCompare(right),
   )) {
-    aggregateSchemas[name] = adaptSchemaForEffect(addAsyncQuestionFields(schema));
+    aggregateSchemas[name] = adaptSchemaForEffect(schema);
     generator.addSchema(name, aggregateSchemas[name] as never);
   }
 

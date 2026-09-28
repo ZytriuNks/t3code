@@ -440,16 +440,8 @@ export const make = Effect.gen(function* () {
             ),
             Effect.result,
           ),
-<<<<<<< HEAD
-        ),
-        {
-          concurrency: 1,
-        },
-      );
-      const files = results.flatMap((result) =>
-        Result.isSuccess(result) && result.success._tag === "Loaded"
-          ? [{ path: result.success.path, text: result.success.text }]
-          : [],
+        // Every file feeds one aggregator, so read them one at a time, oldest first.
+        { concurrency: 1 },
 =======
         // Every file feeds one aggregator, so read them one at a time, oldest first.
         { concurrency: 1 },

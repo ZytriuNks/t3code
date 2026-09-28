@@ -598,17 +598,23 @@ OTLP export:
   `OTEL_EXPORTER_OTLP_HEADERS`: comma-separated `key=value` pairs with percent-encoded values.
 - `T3CODE_OTLP_PROTOCOL`: `http/json` (default) or `http/protobuf`
 
-The server also reads the standard `OTEL_EXPORTER_OTLP_{TRACES,METRICS,LOGS}_ENDPOINT` and generic
-`OTEL_EXPORTER_OTLP_ENDPOINT` (with `/v1/traces`, `/v1/metrics`, or `/v1/logs` appended), for a
-collector expecting those instead. A non-blank `T3CODE_OTLP_*_URL` wins over either, and a
-per-signal endpoint wins over the generic one for its signal. A blank value counts as unset. A
-signal with an OTEL endpoint takes its headers from `OTEL_EXPORTER_OTLP_HEADERS` and its protocol
-from `OTEL_EXPORTER_OTLP_PROTOCOL` (default `http/protobuf`, read case-insensitively), and a
-per-signal `OTEL_EXPORTER_OTLP_{TRACES,METRICS,LOGS}_HEADERS` or `_PROTOCOL` wins over the generic
-one for its signal. `T3CODE_OTLP_HEADERS` and `T3CODE_OTLP_PROTOCOL` never apply to it. An endpoint
-that is not an `http` or `https` URL, a protocol other than `http/protobuf` or `http/json` such as
-`grpc`, or headers that are not `key=value` pairs with percent-encoded values turn that signal's
-export off with a startup warning, rather than sending it to the Settings endpoint.
+The server and the desktop app also read the standard
+`OTEL_EXPORTER_OTLP_{TRACES,METRICS,LOGS}_ENDPOINT` and generic `OTEL_EXPORTER_OTLP_ENDPOINT` (with
+`/v1/traces`, `/v1/metrics`, or `/v1/logs` appended), for a collector expecting those instead. A
+non-blank `T3CODE_OTLP_*_URL` wins over either, and a per-signal endpoint wins over the generic one
+for its signal. A blank value counts as unset. A signal with an OTEL endpoint takes its headers from
+`OTEL_EXPORTER_OTLP_HEADERS` and its protocol from `OTEL_EXPORTER_OTLP_PROTOCOL` (default
+`http/protobuf`, read case-insensitively), and a per-signal
+`OTEL_EXPORTER_OTLP_{TRACES,METRICS,LOGS}_HEADERS` or `_PROTOCOL` wins over the generic one for its
+signal. `T3CODE_OTLP_HEADERS` and `T3CODE_OTLP_PROTOCOL` never apply to it. An endpoint that is not
+an `http` or `https` URL, a protocol other than `http/protobuf` or `http/json` such as `grpc`, or
+headers that are not `key=value` pairs with percent-encoded values turn that signal's export off
+with a startup warning, rather than sending it to the Settings endpoint.
+
+Service names are fixed: `t3code-server` for the backend and `t3code-desktop` for the desktop main
+process, both in `service.namespace` `t3code`. `OTEL_SERVICE_NAME` and a `service.name` or
+`service.namespace` in `OTEL_RESOURCE_ATTRIBUTES` are ignored. Tell installations apart with other
+resource attributes, such as `OTEL_RESOURCE_ATTRIBUTES=deployment.environment.name=development`.
 
 If the OTLP URLs are unset, local tracing still works, metrics stay in-process only, and logs stay
 on stdout only.
@@ -624,6 +630,11 @@ machine that sets `OTEL_SDK_DISABLED` for everything else. It accepts the usual 
 (`true`/`false`, `yes`/`no`, `on`/`off`, `1`/`0`, `y`/`n`). `OTEL_SDK_DISABLED` follows the
 OpenTelemetry specification and only `true` disables export, so `OTEL_SDK_DISABLED=1` does not.
 Values are case-insensitive and trimmed. An unrecognized value is ignored with a startup warning.
+
+`OTEL_TRACES_EXPORTER`, `OTEL_METRICS_EXPORTER`, or `OTEL_LOGS_EXPORTER` set to `none` turns off
+just that signal, overriding an OTEL endpoint and the Settings endpoint. A `T3CODE_OTLP_*_URL` still
+wins for its signal. `otlp` is the default, and any other exporter name, such as `console` or
+`prometheus`, is ignored with a startup warning.
 
 ### What Is Instrumented Today
 
@@ -645,3 +656,40 @@ Current high-value span and metric boundaries include:
 - logs outside spans are not persisted in the trace file; SSH-managed launch stdout/stderr is still
   captured in its launcher log
 - metrics are not snapshotted locally
+
+## Heap Snapshots
+
+To see what a long-running server holds in memory, send it `SIGUSR2`. The server writes a V8 heap
+snapshot to its logs dir and logs the path. This works for desktop, `npx t3`, and service installs
+on macOS and Linux. Windows has no `SIGUSR2`.
+
+Send the signal to the server pid in `server-runtime.json`, which sits in the server's state dir
+next to the `logs` dir. For a dev server or a `--home-dir` launch, use that server's state dir from
+[Traces](#traces). Do not send it to the desktop app or the service launcher: a process without the
+handler exits on `SIGUSR2`. After a crash the file can keep a stale pid that now belongs to a
+different process, so check the pid first.
+
+```bash
+pid="$(jq .pid "${T3CODE_HOME:-$HOME/.t3}/userdata/server-runtime.json")"
+ps -p "$pid" -o command=
+```
+
+If `ps` shows the T3 Code server, send the signal:
+
+```bash
+kill -USR2 "$pid"
+```
+
+The file is `<logsDir>/server-<pid>-<timestamp>.heapsnapshot`, next to `server.trace.ndjson`. To
+open it, use the Memory tab in Chrome DevTools and select Load.
+
+Before you take one:
+
+- The server stops while it writes the file. For a large heap this can take a minute or more.
+  Connected clients can reconnect during the pause, and an event loop monitor, if the server has
+  one, records the pause as a stall. Send the signal once. A second signal sent during a write
+  takes another snapshot after the first one finishes.
+- The write needs about as much free memory as the heap uses. On a machine that is already
+  swapping, it can make the problem worse or crash the server.
+- The file contains everything in server memory, including tokens, secrets, and thread content. Do
+  not share it publicly. Delete it when you are done, because storage cleanup does not remove it.

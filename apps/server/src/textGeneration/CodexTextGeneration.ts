@@ -110,6 +110,9 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
         ),
       );
 
+  const safeUnlink = (filePath: string): Effect.Effect<void, never> =>
+    fileSystem.remove(filePath).pipe(Effect.ignore);
+
   const encodeJsonForOperation = (
     operation:
       | "generateCommitMessage"
@@ -277,12 +280,9 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
       }
     });
 
-    const cleanup = Effect.all(
-      [
-        removeTempFileDir(schemaPath),
-        removeTempFileDir(outputPath),
-        ...cleanupPaths.map((filePath) => safeUnlink(filePath)),
-      ],
+    const cleanup = Effect.forEach(
+      [schemaPath, outputPath, ...cleanupPaths],
+      (filePath) => safeUnlink(filePath),
       {
         concurrency: "unbounded",
       },

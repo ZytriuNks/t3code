@@ -184,7 +184,10 @@ export function lookupRate(table: RateTable, model: string): ModelRate | null {
 }
 
 /** The parts of a transcript record that decide its price. */
-export type PricedRecord = Pick<UsageRecord, "model" | "totals" | "fast" | "reportedCostUsd">;
+export type PricedRecord = Pick<
+  UsageRecord,
+  "model" | "rateModel" | "totals" | "fast" | "reportedCostUsd"
+>;
 
 export interface PricedUsage {
   readonly costUsd: number;
