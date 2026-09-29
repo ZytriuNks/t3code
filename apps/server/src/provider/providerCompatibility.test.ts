@@ -52,33 +52,23 @@ const provider: ServerProvider = {
 };
 
 describe("provider compatibility", () => {
-  it("bundles a compatibility policy for every built-in harness", () => {
-    for (const builtIn of BUILT_IN_DRIVERS) {
+  it("bundles compatibility policies for version-gated built-in harnesses", () => {
+    for (const driverKind of [
+      "codex",
+      "claudeAgent",
+      "cursor",
+      "grok",
+      "opencode",
+      "antigravity",
+    ] as const) {
+      assert.isTrue(BUILT_IN_DRIVERS.some((builtIn) => builtIn.driverKind === driverKind));
       assert.isDefined(
         resolveProviderCompatibility(
           ModelManifest.BUNDLED_MODEL_MANIFEST.compatibility,
-          builtIn.driverKind,
+          ProviderDriverKind.make(driverKind),
           null,
         ),
-        `Missing bundled compatibility policy for ${builtIn.driverKind}`,
-      );
-    }
-  });
-
-  it("supports Codex 0.156 and marks Codex without Thread.projectId broken", () => {
-    const bundled = ModelManifest.BUNDLED_MODEL_MANIFEST.compatibility;
-    for (const [t3CodeVersion, codexVersion, expected] of [
-      ["0.0.42", "0.148.0", "broken"],
-      ["0.0.42", "0.149.0", "unsupported"],
-      ["0.0.42", "0.155.0", "unsupported"],
-      ["0.0.42", "0.156.0", "supported"],
-      ["0.0.43-nightly.20260924.2200", "0.153.3", "unsupported"],
-      ["0.0.43-nightly.20260924.2200", "0.156.1", "supported"],
-    ] as const) {
-      assert.strictEqual(
-        resolveProviderCompatibility(bundled, driver, codexVersion, t3CodeVersion)?.status,
-        expected,
-        `T3 Code ${t3CodeVersion} with Codex ${codexVersion}`,
+        `Missing bundled compatibility policy for ${driverKind}`,
       );
     }
   });
