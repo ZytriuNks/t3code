@@ -12,6 +12,7 @@ import {
   type ModelSelection,
   type OrchestrationV2Command,
   type OrchestrationV2CreationSource,
+  type ClientOrchestrationCommand,
   type PlanId,
   type ProjectId,
   type ProjectIconOverride,
@@ -29,9 +30,17 @@ import {
 import { modelSelectionCommandType } from "@t3tools/shared/model";
 import { derivePendingBackgroundWork } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import * as Crypto from "effect/Crypto";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 
-import { getInitialServerConfig, request } from "../rpc/client.ts";
+import {
+  getInitialServerConfig,
+  request,
+  type EnvironmentRpcSuccess,
+  type EnvironmentRpcFailure,
+  type EnvironmentRpcUnavailableError,
+} from "../rpc/client.ts";
+import type { EnvironmentSupervisor } from "../connection/supervisor.ts";
 
 type CommandType = ClientOrchestrationCommand["type"];
 type CommandOf<T extends CommandType> = Extract<ClientOrchestrationCommand, { readonly type: T }>;
@@ -46,38 +55,13 @@ type CommandInput<T extends CommandType> = Omit<
       }
     : {});
 
-export type CreateProjectInput = CommandInput<"project.create">;
-export type UpdateProjectInput = CommandInput<"project.meta.update">;
-export type DeleteProjectInput = CommandInput<"project.delete">;
-export type CreateThreadInput = CommandInput<"thread.create">;
-export type DeleteThreadInput = CommandInput<"thread.delete">;
-export type ArchiveThreadInput = CommandInput<"thread.archive">;
-export type UnarchiveThreadInput = CommandInput<"thread.unarchive">;
-export type SettleThreadInput = CommandInput<"thread.settle">;
-export type UnsettleThreadInput = CommandInput<"thread.unsettle">;
-export type SnoozeThreadInput = CommandInput<"thread.snooze">;
-export type UnsnoozeThreadInput = CommandInput<"thread.unsnooze">;
-export type PinThreadInput = CommandInput<"thread.pin">;
-export type UnpinThreadInput = CommandInput<"thread.unpin">;
-export type ReorderPinnedThreadInput = CommandInput<"thread.pin.reorder">;
-export type SetThreadAutoSettleInput = CommandInput<"thread.auto-settle.set">;
-export type ReorderActiveThreadInput = CommandInput<"thread.active.reorder">;
-export type UpdateThreadMetadataInput = CommandInput<"thread.meta.update">;
-export type LinkThreadPullRequestInput = CommandInput<"thread.pull-request.link">;
-export type UnlinkThreadPullRequestInput = CommandInput<"thread.pull-request.unlink">;
-export type SetThreadRuntimeModeInput = CommandInput<"thread.runtime-mode.set">;
-export type SetThreadInteractionModeInput = CommandInput<"thread.interaction-mode.set">;
-export type StartThreadTurnInput = CommandInput<"thread.turn.start">;
-export type InterruptThreadTurnInput = CommandInput<"thread.turn.interrupt">;
-export type RespondToThreadApprovalInput = CommandInput<"thread.approval.respond">;
-export type RespondToThreadUserInputInput = CommandInput<"thread.user-input.respond">;
-export type DismissThreadUserInputInput = CommandInput<"thread.user-input.dismiss">;
-export type RevertThreadCheckpointInput = CommandInput<"thread.checkpoint.revert"> & {
-  readonly restoreFiles?: boolean;
-};
-export type StopThreadSessionInput = CommandInput<"thread.session.stop">;
+interface CommandMetadata {
+  readonly commandId?: CommandId;
+  readonly createdAt?: string;
+  readonly creationSource?: OrchestrationV2CreationSource;
+}
 
-type DispatchTag = typeof ORCHESTRATION_WS_METHODS.dispatchCommand;
+type DispatchTag = typeof ORCHESTRATION_V2_WS_METHODS.dispatchCommand;
 type CommandEffect = Effect.Effect<
   EnvironmentRpcSuccess<DispatchTag>,
   EnvironmentRpcFailure<DispatchTag> | EnvironmentRpcUnavailableError,
@@ -98,6 +82,15 @@ function timestampedCommandMetadata(input: {
   readonly commandId?: CommandId;
   readonly createdAt?: string;
   readonly creationSource?: OrchestrationV2CreationSource;
+}) {
+  return Effect.all({
+    commandId: commandId(input),
+    createdAt:
+      input.createdAt === undefined
+        ? DateTime.now.pipe(Effect.map(DateTime.formatIso))
+        : Effect.succeed(input.createdAt),
+    creationSource: Effect.succeed(input.creationSource ?? "web"),
+  });
 }
 
 export interface CreateProjectInput extends CommandMetadata {
@@ -192,6 +185,8 @@ export interface UpdateThreadMetadataInput extends ThreadCommandInput {
   /** Link (object) or unlink (null) a pull request (#8160). */
   readonly linkedPullRequest?: ThreadLinkedPullRequest | null;
 }
+
+export interface SetThreadAutoSettleInput extends ThreadCommandInput {}
 
 export interface SetThreadRuntimeModeInput extends ThreadCommandInput {
   readonly runtimeMode: RuntimeMode;
@@ -515,30 +510,22 @@ export const pinThread = Effect.fn("EnvironmentCommands.pinThread")(function* (
   });
 });
 
-export const reorderPinnedThread = Effect.fn("EnvironmentCommands.reorderPinnedThread")(function* (
-  input: ReorderPinnedThreadInput,
-) {
-  const commandId = yield* allocateCommandId(input);
-  return yield* dispatch({
-    ...input,
-    type: "thread.unpin",
-    commandId: yield* commandId(input),
-  });
-});
-
 export const setThreadAutoSettle: (input: SetThreadAutoSettleInput) => CommandEffect = Effect.fn(
   "EnvironmentCommands.setThreadAutoSettle",
 )(function* (input) {
+  const commandId = yield* allocateCommandId(input);
   return yield* dispatch({
-    ...input,
-    type: "thread.auto-settle.set",
-    commandId: yield* commandId(input),
+    type: "thread.auto-settle",
+    commandId,
+    threadId: input.threadId,
+    snapshotAt: yield* DateTime.now,
   });
 });
 
 export const reorderPinnedThread: (input: ReorderPinnedThreadInput) => CommandEffect = Effect.fn(
   "EnvironmentCommands.reorderPinnedThread",
 )(function* (input) {
+  const commandId = yield* allocateCommandId(input);
   return yield* dispatch({
     ...input,
     type: "thread.pin.reorder",

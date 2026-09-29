@@ -52,6 +52,11 @@ export const fetchEnvironmentThreadSnapshot = Effect.fn(
 
 export type FetchEnvironmentThreadSnapshotError = RemoteEnvironmentRequestError;
 
+export type ThreadSnapshotLoadResult =
+  | { readonly _tag: "present"; readonly snapshot: OrchestrationV2ThreadDetailSnapshot }
+  | { readonly _tag: "missing" }
+  | { readonly _tag: "unavailable" };
+
 /**
  * Loads a thread's detail snapshot over HTTP.
  *
