@@ -316,6 +316,42 @@ describe("PiProvider", () => {
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
+  it.effect("surfaces each discovered model's upstream provider as subProvider", () =>
+    Effect.gen(function* () {
+      const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-pi-subprovider-"));
+      const agentDir = NodePath.join(root, "agent");
+      const cwd = NodePath.join(root, "workspace");
+      NodeFS.mkdirSync(NodePath.join(agentDir, "extensions"), { recursive: true });
+      NodeFS.mkdirSync(cwd);
+      try {
+        const snapshot = yield* checkPiProviderStatus(
+          settings,
+          { PI_CODING_AGENT_DIR: agentDir },
+          cwd,
+        ).pipe(
+          Effect.provideService(
+            ChildProcessSpawner.ChildProcessSpawner,
+            piProbeSpawner("0.84.3", true),
+          ),
+        );
+        const defaultModel = snapshot.models.find((model) => model.slug === "default");
+        const supportedModel = snapshot.models.find(
+          (model) => model.slug === "openai/gpt-supported",
+        );
+        const unlistedModel = snapshot.models.find((model) => model.slug === "openai/gpt-unlisted");
+
+        // The synthetic default has no upstream provider to surface.
+        assert.isUndefined(defaultModel?.subProvider);
+        // Every discovered model is tagged with its routing provider so the
+        // model picker can disambiguate instances exposing the same slug.
+        assert.equal(supportedModel?.subProvider, "openai");
+        assert.equal(unlistedModel?.subProvider, "openai");
+      } finally {
+        NodeFS.rmSync(root, { recursive: true, force: true });
+      }
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it("uses project fast configuration before global configuration", () => {
     const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-pi-fast-"));
     try {
