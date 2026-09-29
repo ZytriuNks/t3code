@@ -241,6 +241,10 @@ function parseDiscoveredModels(
     parsed.push({
       slug,
       name: recordString(model, "name") ?? slug,
+      // Pi routes each discovered model through a named upstream
+      // provider. Surface it so the model picker can show e.g.
+      // "Pi/openai" when several instances expose the same model slug.
+      subProvider: provider,
       isCustom: false,
       capabilities: thinkingCapabilitiesForPiModel(
         model,
