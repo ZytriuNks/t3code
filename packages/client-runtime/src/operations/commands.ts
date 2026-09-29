@@ -186,7 +186,9 @@ export interface UpdateThreadMetadataInput extends ThreadCommandInput {
   readonly linkedPullRequest?: ThreadLinkedPullRequest | null;
 }
 
-export interface SetThreadAutoSettleInput extends ThreadCommandInput {}
+export interface SetThreadAutoSettleInput extends ThreadCommandInput {
+  readonly enabled: boolean;
+}
 
 export interface SetThreadRuntimeModeInput extends ThreadCommandInput {
   readonly runtimeMode: RuntimeMode;
@@ -515,10 +517,10 @@ export const setThreadAutoSettle: (input: SetThreadAutoSettleInput) => CommandEf
 )(function* (input) {
   const commandId = yield* allocateCommandId(input);
   return yield* dispatch({
-    type: "thread.auto-settle",
+    type: "thread.auto-settle.set",
     commandId,
     threadId: input.threadId,
-    snapshotAt: yield* DateTime.now,
+    enabled: input.enabled,
   });
 });
 

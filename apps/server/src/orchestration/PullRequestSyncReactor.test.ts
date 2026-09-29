@@ -27,7 +27,6 @@ import { PullRequestService } from "../pullRequest/PullRequestService.ts";
 import { ServerActivation } from "../serverActivation.ts";
 import { OrchestratorV2, type OrchestratorV2Shape } from "../orchestration-v2/Orchestrator.ts";
 import { v2PullRequestThread } from "../orchestration-v2/testkit/pullRequestFixtures.ts";
-import { ProjectionSnapshotQuery } from "./Services/ProjectionSnapshotQuery.ts";
 import * as PullRequestSyncReactor from "./PullRequestSyncReactor.ts";
 
 const NOW = "2026-08-28T12:00:00.000Z";
@@ -199,26 +198,33 @@ const makeHarness = Effect.fn("makePullRequestSyncHarness")(function* (options: 
   };
 
   const dependencies = Layer.mergeAll(
-    Layer.mock(ProjectionSnapshotQuery)({
-      listThreadsWithPullRequests: () =>
-        Queue.offer(snapshotReads, undefined).pipe(
-          Effect.andThen(Ref.get(snapshots)),
-          Effect.map((snapshot) => snapshot.threads),
-        ),
-      getShellSnapshot: () =>
-        Ref.update(shellSnapshotReads, (count) => count + 1).pipe(
-          Effect.andThen(Queue.offer(snapshotReads, undefined)),
-          Effect.andThen(Ref.get(snapshots)),
-        ),
-    }),
     Layer.mock(PullRequestService)({
       summary,
       stack,
       invalidate: options.invalidate ?? (() => Effect.void),
     }),
     Layer.mock(OrchestratorV2)({
-      getShellSnapshot: () =>
+      listThreadsWithPullRequests: () =>
         Queue.offer(snapshotReads, undefined).pipe(
+          Effect.andThen(Ref.get(snapshots)),
+          Effect.map((snapshot) =>
+            snapshot.threads
+              .filter((thread) => thread.archivedAt === null && thread.pullRequests.length > 0)
+              .map((thread) => {
+                const shell = v2PullRequestThread(thread);
+                return {
+                  id: shell.id,
+                  projectId: shell.projectId,
+                  pullRequests: shell.pullRequests,
+                  settledOverride: shell.settledOverride,
+                  settledAt: shell.settledAt,
+                };
+              }),
+          ),
+        ),
+      getShellSnapshot: () =>
+        Ref.update(shellSnapshotReads, (count) => count + 1).pipe(
+          Effect.andThen(Queue.offer(snapshotReads, undefined)),
           Effect.andThen(Ref.get(snapshots)),
           Effect.map((snapshot) => ({
             schemaVersion: 2,

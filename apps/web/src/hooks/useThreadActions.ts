@@ -942,6 +942,7 @@ export function useThreadActions() {
       reorderPinnedThread,
       reorderActiveThread,
       setThreadAutoSettle,
+      markThreadUnread,
     }),
     [
       archiveThread,

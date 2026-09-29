@@ -13,7 +13,7 @@ layer("054_OrchestrationV2", (it) => {
     Effect.sync(() => {
       assert.deepStrictEqual(
         migrationEntries.map(([id]) => id),
-        Array.from({ length: 55 }, (_, index) => index + 1),
+        Array.from({ length: 56 }, (_, index) => index + 1),
       );
     }),
   );
@@ -25,8 +25,9 @@ layer("054_OrchestrationV2", (it) => {
 
       const executed = yield* runMigrations();
       assert.deepStrictEqual(executed, [
-        [54, "OrchestrationV2"],
-        [55, "RemoveRedundantProjectionIndexes"],
+        [54, "ProjectionThreadsAutoSettleDisabledAt"],
+        [55, "OrchestrationV2"],
+        [56, "RemoveRedundantProjectionIndexes"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
 
@@ -46,8 +47,9 @@ layer("054_OrchestrationV2", (it) => {
         { migration_id: 51, name: "ProjectionThreadMessageContext" },
         { migration_id: 52, name: "ProjectionThreadTitleState" },
         { migration_id: 53, name: "PullRequestFilesViewed" },
-        { migration_id: 54, name: "OrchestrationV2" },
-        { migration_id: 55, name: "RemoveRedundantProjectionIndexes" },
+        { migration_id: 54, name: "ProjectionThreadsAutoSettleDisabledAt" },
+        { migration_id: 55, name: "OrchestrationV2" },
+        { migration_id: 56, name: "RemoveRedundantProjectionIndexes" },
       ]);
 
       const tables = yield* sql<{ readonly name: string }>`
@@ -122,3 +124,16 @@ layer("054_OrchestrationV2", (it) => {
     }),
   );
 });
+
+it.effect("upgrades a released auto-settle database through the V2 migration", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* runMigrations({ toMigrationInclusive: 54 });
+    assert.deepStrictEqual(yield* runMigrations(), [
+      [55, "OrchestrationV2"],
+      [56, "RemoveRedundantProjectionIndexes"],
+    ]);
+    const columns = yield* sql<{ readonly name: string }>`PRAGMA table_info(orchestration_events)`;
+    assert.ok(columns.some(({ name }) => name === "application_event_version"));
+  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+);

@@ -44,7 +44,10 @@ function renderPendingActions(isRunning: boolean) {
   );
 }
 
-function renderSendButton(sendDisabledReason: string | null = null) {
+function renderSendButton(
+  sendDisabledReason: string | null = null,
+  isEditingQueuedMessage = false,
+) {
   return renderToStaticMarkup(
     createElement(ComposerPrimaryActions, {
       compact: true,
@@ -58,6 +61,7 @@ function renderSendButton(sendDisabledReason: string | null = null) {
       isEnvironmentUnavailable: false,
       isPreparingWorktree: false,
       hasSendableContent: true,
+      isEditingQueuedMessage,
       onPreviousPendingQuestion: () => {},
       onInterrupt: () => {},
       onImplementPlanInNewThread: () => {},
@@ -76,6 +80,11 @@ describe("ComposerPrimaryActions", () => {
 
     expect(markup).toContain("disabled");
     expect(markup).toContain('aria-label="Sending feedback"');
+  });
+
+  it("labels queue edits separately from ordinary sends", () => {
+    expect(renderSendButton()).toContain('aria-label="Submit message"');
+    expect(renderSendButton(null, true)).toContain('aria-label="Update queued message"');
   });
 
   it("offers Stop generation while a running turn is waiting for user input", () => {

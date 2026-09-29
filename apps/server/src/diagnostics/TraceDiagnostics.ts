@@ -443,11 +443,6 @@ export const make = Effect.gen(function* () {
         // Every file feeds one aggregator, so read them one at a time, oldest first.
         { concurrency: 1 },
       );
-      const files = results.flatMap((result) =>
-        Result.isSuccess(result) && result.success._tag === "Loaded"
-          ? [{ path: result.success.path, text: result.success.text }]
-          : [],
-      );
       const foundFile = results.some((result) => Result.isSuccess(result) && result.success);
       const readFailure = results.find(Result.isFailure);
       const readFailureError = readFailure

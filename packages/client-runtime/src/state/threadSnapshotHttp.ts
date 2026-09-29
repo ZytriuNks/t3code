@@ -52,8 +52,18 @@ export const fetchEnvironmentThreadSnapshot = Effect.fn(
 
 export type FetchEnvironmentThreadSnapshotError = RemoteEnvironmentRequestError;
 
+export type ThreadSnapshotHistoryMeta = {
+  readonly historyCursor: string | null;
+  readonly hasMoreHistory: boolean;
+  readonly latestLocalTurnOrdinal?: number | null;
+};
+
 export type ThreadSnapshotLoadResult =
-  | { readonly _tag: "present"; readonly snapshot: OrchestrationV2ThreadDetailSnapshot }
+  | {
+      readonly _tag: "present";
+      readonly snapshot: OrchestrationV2ThreadDetailSnapshot;
+      readonly history?: ThreadSnapshotHistoryMeta;
+    }
   | { readonly _tag: "missing" }
   | { readonly _tag: "unavailable" };
 

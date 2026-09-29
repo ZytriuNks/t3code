@@ -2035,7 +2035,10 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
     ];
 
     const applyAttachmentSideEffects = Effect.fn("applyAttachmentSideEffects")(
-      function* (event: OrchestrationEvent, sideEffects: AttachmentSideEffects) {
+      function* (
+        event: Pick<OrchestrationEvent, "sequence" | "type">,
+        sideEffects: AttachmentSideEffects,
+      ) {
         const deletedThreadIds = new Set<string>();
         for (const threadId of sideEffects.deletedThreadIds) {
           const recreatedLater = yield* eventStore.hasEventAfter({

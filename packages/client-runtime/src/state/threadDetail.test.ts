@@ -1,6 +1,7 @@
 import {
   EnvironmentId,
   NodeId,
+  ProjectId,
   ProviderDriverKind,
   RuntimeRequestId,
   TurnItemId,
@@ -14,15 +15,62 @@ import * as Option from "effect/Option";
 import { AsyncResult, Atom, AtomRegistry } from "effect/unstable/reactivity";
 import { describe, expect, it } from "vite-plus/test";
 
-import { v2Projection, v2Now } from "./orchestrationV2TestFixtures.ts";
+import { v2Projection, v2Now, v2ThreadShell } from "./orchestrationV2TestFixtures.ts";
+import { presentThreadShell } from "./models.ts";
 import { EMPTY_THREAD_HISTORY_META } from "./threadHistoryMerge.ts";
-import { createEnvironmentThreadDetailAtoms } from "./threadDetail.ts";
+import { createEnvironmentThreadDetailAtoms, mergeEnvironmentThread } from "./threadDetail.ts";
 import type { EnvironmentThreadState } from "./threads.ts";
 
 const ref: ScopedThreadRef = {
   environmentId: EnvironmentId.make("environment-detail"),
   threadId: ThreadId.make(v2Projection.thread.id),
 };
+
+describe("mergeEnvironmentThread", () => {
+  const detail = { environmentId: ref.environmentId, projection: v2Projection };
+  const shell = presentThreadShell(ref.environmentId, {
+    ...v2ThreadShell,
+    projectId: ProjectId.make("moved-project"),
+    branch: "feature/current",
+    worktreePath: "/workspace/current",
+    settledOverride: "settled",
+    settledAt: v2Now,
+    pinnedAt: v2Now,
+    activeOrderKey: "a1",
+  });
+
+  it("uses current shell workspace metadata while retaining cached V2 history", () => {
+    const merged = mergeEnvironmentThread(detail, shell);
+
+    expect(merged?.projection.thread).toMatchObject({
+      projectId: "moved-project",
+      branch: "feature/current",
+      worktreePath: "/workspace/current",
+      settledOverride: "settled",
+      settledAt: v2Now,
+      pinnedAt: v2Now,
+      activeOrderKey: "a1",
+    });
+    expect(merged?.projection.messages).toBe(v2Projection.messages);
+    expect(merged?.projection.runs).toBe(v2Projection.runs);
+    expect(merged?.projection.visibleTurnItems).toBe(v2Projection.visibleTurnItems);
+    expect(detail.projection.thread.worktreePath).toBeNull();
+  });
+
+  it("retains detail when the shell is absent or belongs to another scoped thread", () => {
+    expect(mergeEnvironmentThread(null, shell)).toBeNull();
+    expect(mergeEnvironmentThread(detail, null)).toBe(detail);
+    expect(
+      mergeEnvironmentThread(detail, {
+        ...shell,
+        environmentId: EnvironmentId.make("other-environment"),
+      }),
+    ).toBe(detail);
+    expect(mergeEnvironmentThread(detail, { ...shell, id: ThreadId.make("other-thread") })).toBe(
+      detail,
+    );
+  });
+});
 
 function threadState(
   partial: Pick<EnvironmentThreadState, "data" | "status" | "error"> &

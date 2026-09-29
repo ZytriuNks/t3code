@@ -4,7 +4,9 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as NodeTimersPromises from "node:timers/promises";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- Privileged schemes must read packaged identity synchronously before app.ready and Effect service startup.
 import * as NodeFS from "node:fs";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- The same synchronous Electron startup boundary resolves the packaged manifest path.
 import * as NodePath from "node:path";
 import * as Path from "effect/Path";
 import * as Mime from "effect/unstable/http/Mime";

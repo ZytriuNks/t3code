@@ -1,7 +1,9 @@
 import {
   EnvironmentId,
   EventId,
+  MessageId,
   ORCHESTRATION_V2_WS_METHODS,
+  RunId,
   ThreadId,
   TurnItemId,
   type OrchestrationV2ThreadDetailSnapshot,
@@ -317,6 +319,58 @@ const deleted = (sequence = 3): OrchestrationV2ThreadStreamItem => {
 };
 
 describe("EnvironmentThreads", () => {
+  for (const status of ["preparing", "starting", "running"] as const) {
+    it.effect(`keeps a ${status} V2 run out of the cache until it completes`, () =>
+      Effect.gen(function* () {
+        const run = {
+          id: RunId.make("run-active"),
+          threadId: THREAD_ID,
+          ordinal: 1,
+          providerInstanceId: BASE_PROJECTION.thread.providerInstanceId,
+          modelSelection: {
+            instanceId: BASE_PROJECTION.thread.providerInstanceId,
+            model: "gpt-5.4",
+          },
+          providerThreadId: null,
+          userMessageId: MessageId.make("message-active"),
+          rootNodeId: null,
+          activeAttemptId: null,
+          status,
+          requestedAt: BASE_PROJECTION.updatedAt,
+          startedAt: null,
+          completedAt: null,
+          checkpointId: null,
+          contextHandoffId: null,
+        };
+        const activeScope = yield* Scope.make();
+        const active = yield* makeHarness().pipe(Effect.provideService(Scope.Scope, activeScope));
+        yield* Queue.offer(active.inputs, snapshot({ ...BASE_PROJECTION, runs: [run] }));
+        yield* awaitThreadState(active.observed, (value) => value.status === "live");
+        yield* TestClock.adjust("10 seconds");
+        expect(yield* Ref.get(active.savedThreads)).toEqual([]);
+        yield* Scope.close(activeScope, Exit.void);
+        expect(yield* Ref.get(active.savedThreads)).toEqual([]);
+
+        const completedScope = yield* Scope.make();
+        const completed = yield* makeHarness().pipe(
+          Effect.provideService(Scope.Scope, completedScope),
+        );
+        yield* Queue.offer(
+          completed.inputs,
+          snapshot({
+            ...BASE_PROJECTION,
+            runs: [{ ...run, status: "completed", completedAt: BASE_PROJECTION.updatedAt }],
+          }),
+        );
+        yield* awaitThreadState(completed.observed, (value) => value.status === "live");
+        yield* Scope.close(completedScope, Exit.void);
+        expect(
+          (yield* Ref.get(completed.savedThreads)).map((saved) => saved.projection.runs[0]?.status),
+        ).toEqual(["completed"]);
+      }),
+    );
+  }
+
   for (const source of ["disk", "HTTP"] as const) {
     it.effect(`does not rewrite an unchanged ${source} snapshot on navigation or warm return`, () =>
       Effect.gen(function* () {

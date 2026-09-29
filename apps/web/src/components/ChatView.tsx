@@ -10,6 +10,7 @@ import * as DateTime from "effect/DateTime";
 import { restorePlanFollowUpComposer } from "./ChatView.logic";
 import { assistantCitationsToPlainText } from "@t3tools/shared/assistantCitations";
 import { prepareQueuedEditAttachments, recoverQueuedMessageEdit } from "./chat/queuedMessageEdit";
+import { restoreQueuedThreadContexts } from "./chat/queuedMessageRestore";
 import {
   isPaintOnlyThreadTimeline,
   peekHeldThreadTimeline,
@@ -352,7 +353,6 @@ import {
   terminalContextReference,
 } from "../lib/composerContextRecords";
 import {
-  latestCompletedToolActivityId,
   type QueuedComposerMessage,
   type QueuedMessageSendSettings,
   useQueuedMessages,
@@ -384,6 +384,7 @@ import {
   resolveThreadDetailRef,
   useProject,
   useProjects,
+  useThread,
   useThreadProjection,
   useThreadStatus,
   useThreadHistory,
@@ -504,6 +505,7 @@ import {
   codexArtifactTemplatePromptToAppend,
   waitForStartedServerThread,
   shouldRefocusComposerOnWindowFocus,
+  latestCompletedToolTurnItemId,
 } from "./ChatView.logic";
 import { useLocalStorage } from "~/hooks/useLocalStorage";
 import { useComposerHandleContext } from "../composerHandleContext";
@@ -934,7 +936,6 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
   const openTerminal = useAtomCommand(terminalEnvironment.open, "terminal open");
   const writeTerminal = useAtomCommand(terminalEnvironment.write, "terminal write");
   const closeTerminalMutation = useAtomCommand(terminalEnvironment.close, "terminal close");
-  const serverThread = useThreadShell(threadRef);
   const draftThread = useComposerDraftStore((store) => store.getDraftThreadByRef(threadRef));
   // Hidden drawers stay mounted (see MAX_HIDDEN_MOUNTED_TERMINAL_THREADS), so they read only
   // the shell: a detail subscription would keep each hidden thread's history in memory. The
@@ -943,9 +944,9 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
     waitForShell: draftThread !== null,
   });
   const serverThreadShell = useThreadShell(threadRef);
-  const serverThread = activeServerThread ?? serverThreadShell;
+  const serverThread = activeServerThread?.projection.thread ?? serverThreadShell;
   const projectRef = serverThread
-    ? scopeProjectRef(serverThread.environmentId, serverThread.projectId)
+    ? scopeProjectRef(threadRef.environmentId, serverThread.projectId)
     : draftThread
       ? scopeProjectRef(draftThread.environmentId, draftThread.projectId)
       : null;
@@ -4224,8 +4225,15 @@ export default function ChatView(props: ChatViewProps) {
     composerRef.current?.focusAtEnd();
   }, [composerRef]);
   const canInterruptRunningThread = activeThread !== undefined && phase === "running";
+  const restoreQueuedMessagesRef = useRef<(messages: ReadonlyArray<QueuedComposerMessage>) => void>(
+    () => undefined,
+  );
   const onInterrupt = useCallback(async () => {
     if (!activeThread) return;
+    if (activeThreadKey) {
+      const cancelled = useQueuedMessageStore.getState().drain(activeThreadKey);
+      if (cancelled.length > 0) restoreQueuedMessagesRef.current(cancelled);
+    }
     const result = await interruptThreadTurn({
       environmentId,
       input: { threadId: activeThread.id },
@@ -4237,7 +4245,7 @@ export default function ChatView(props: ChatViewProps) {
         error instanceof Error ? error.message : "Failed to interrupt the current turn.",
       );
     }
-  }, [activeThread, environmentId, interruptThreadTurn, setThreadError]);
+  }, [activeThread, activeThreadKey, environmentId, interruptThreadTurn, setThreadError]);
   useEffect(() => subscribeSnapShotComposerFocus(focusComposer), [focusComposer]);
   const scheduleComposerFocus = useCallback(() => {
     window.requestAnimationFrame(() => {
@@ -6782,11 +6790,6 @@ export default function ChatView(props: ChatViewProps) {
     if (activeBackgroundTasks.length === 0 || !activeThread) {
       return null;
     }
-    const working = activeBackgroundLiveness === "working";
-    const liveCount = agentPanelModel.liveCount;
-    // Hidden once the Agents surface is on screen; the link would point at nothing.
-    const showViewAgents =
-      liveCount > 0 && !(rightPanelOpen && activeRightPanelSurface?.kind === "agents");
     return {
       id: `background-work:${activeThread.id}`,
       variant: "default",
@@ -6797,36 +6800,23 @@ export default function ChatView(props: ChatViewProps) {
           aria-hidden="true"
         />
       ),
-      title: count === 1 ? "Waiting on background task" : `Waiting on ${count} background tasks`,
+      title:
+        activeBackgroundTasks.length === 1
+          ? "Waiting on background task"
+          : `Waiting on ${activeBackgroundTasks.length} background tasks`,
       description: activeBackgroundTasks.map((task) => task.description || task.taskId).join(", "),
       actions: (
-        <>
-          {showViewAgents ? (
-            <Button size="xs" variant="ghost" aria-label="View agents" onClick={addAgentsSurface}>
-              View
-            </Button>
-          ) : null}
-          <Button
-            size="xs"
-            variant="ghost"
-            disabled={isStoppingBackgroundWork}
-            onClick={() => void handleStopBackgroundWork()}
-          >
-            {isStoppingBackgroundWork ? "Stopping..." : "Stop"}
-          </Button>
-        </>
+        <Button
+          size="xs"
+          variant="ghost"
+          disabled={isStoppingBackgroundWork}
+          onClick={() => void handleStopBackgroundWork()}
+        >
+          {isStoppingBackgroundWork ? "Stopping..." : "Stop"}
+        </Button>
       ),
     };
-  }, [
-    activeBackgroundLiveness,
-    activeRightPanelSurface?.kind,
-    activeThread,
-    addAgentsSurface,
-    agentPanelModel.liveCount,
-    handleStopBackgroundWork,
-    isStoppingBackgroundWork,
-    rightPanelOpen,
-  ]);
+  }, [activeBackgroundTasks, activeThread, handleStopBackgroundWork, isStoppingBackgroundWork]);
   // A woken thread announces itself in the open view, not just the sidebar
   // pill. Dismissing marks the wake as seen (same acknowledgment as the
   // pill); sending a message clears it as a side effect of the send path.
@@ -7941,10 +7931,11 @@ export default function ChatView(props: ChatViewProps) {
         images: overflow.filter((attachment) => attachment.type === "image"),
         files: overflow.filter((attachment) => attachment.type === "file"),
         terminalContexts: [],
+        threadContexts: [],
         previewAnnotations: [],
         reviewComments: [],
         sendSettings: sendCtx ? readComposerSendSettings(sendCtx) : firstMessage.sendSettings,
-        queuedAfterToolActivityId: latestCompletedToolActivityId(threadActivities),
+        queuedAfterToolActivityId: latestCompletedToolTurnItemId(serverProjection?.turnItems ?? []),
         // Restoration is not a send. The user decides when the overflow goes.
         holdUntilUserAction: true,
         createdAt: new Date().toISOString(),
@@ -7972,9 +7963,11 @@ export default function ChatView(props: ChatViewProps) {
       ...(draft?.reviewComments ?? []),
       ...messages.flatMap((message) => message.reviewComments),
     ]);
+    const restoredPrompt = restoreQueuedThreadContexts(composerDraftTarget, messages);
+    promptRef.current = restoredPrompt;
     composerRef.current?.resetCursorState({
-      cursor: collapseExpandedComposerCursor(nextPrompt, nextPrompt.length),
-      prompt: nextPrompt,
+      cursor: collapseExpandedComposerCursor(restoredPrompt, restoredPrompt.length),
+      prompt: restoredPrompt,
       detectTrigger: true,
     });
   };
@@ -8099,6 +8092,7 @@ export default function ChatView(props: ChatViewProps) {
       terminalContexts: composerTerminalContexts,
       previewAnnotations: sendContextPreviewAnnotations,
       reviewComments: composerReviewComments,
+      threadContexts: composerThreadContexts,
       selectedProvider: ctxSelectedProvider,
       selectedModel: ctxSelectedModel,
       selectedProviderModels: ctxSelectedProviderModels,
@@ -8171,7 +8165,7 @@ export default function ChatView(props: ChatViewProps) {
         ? parseCodexFeedbackCommand(trimmed)
         : null;
     if (feedbackCommand && multipleModelSelections === null) {
-      if (!isServerThread || activeThread.session === null) {
+      if (!isServerThread || serverProjection?.thread.activeProviderThreadId == null) {
         toastManager.add(
           stackedThreadToast({
             type: "warning",
@@ -8355,10 +8349,11 @@ export default function ChatView(props: ChatViewProps) {
         images: [...composerImages],
         files: [...composerFiles],
         terminalContexts: [...composerTerminalContexts],
+        threadContexts: [...composerThreadContexts],
         previewAnnotations: [...composerPreviewAnnotations],
         reviewComments: [...composerReviewComments],
         sendSettings,
-        queuedAfterToolActivityId: latestCompletedToolActivityId(threadActivities),
+        queuedAfterToolActivityId: latestCompletedToolTurnItemId(serverProjection?.turnItems ?? []),
         createdAt: new Date().toISOString(),
       });
       promptRef.current = "";
@@ -10108,52 +10103,6 @@ export default function ChatView(props: ChatViewProps) {
     return <NoActiveThreadState />;
   }
 
-  const panelToggleControls = (
-    <PanelLayoutControls
-      terminalAvailable={activeProject !== null}
-      terminalOpen={terminalUiState.terminalOpen}
-      terminalShortcutLabel={shortcutLabelForCommand(keybindings, "terminal.toggle")}
-      rightPanelAvailable={activeProject !== null}
-      rightPanelOpen={rightPanelOpen}
-      rightPanelShortcutLabel={shortcutLabelForCommand(keybindings, "rightPanel.toggle")}
-      // Suppressed while the Agents surface is visible: the roster itself is
-      // on screen, so the toggle badge would be pointing at nothing.
-      liveAgentCount={
-        rightPanelOpen && activeRightPanelSurface?.kind === "agents" ? 0 : agentPanelModel.liveCount
-      }
-      onToggleTerminal={toggleTerminalVisibility}
-      onToggleRightPanel={toggleRightPanel}
-    />
-  );
-  const panelLayoutControls = (
-    <div
-      className={cn(
-        // Keep one viewport anchor inside the header's no-drag region. The
-        // header can shrink behind the right panel without moving the controls.
-        "pointer-events-none fixed top-[var(--workspace-controls-top)] right-[var(--workspace-controls-right)] z-50 mr-px flex h-[var(--workspace-topbar-height)] items-center gap-1 [-webkit-app-region:no-drag]",
-      )}
-      data-workspace-titlebar-controls
-    >
-      {!shouldUseRightPanelSheet ? (
-        <span
-          aria-hidden={!rightPanelOpen}
-          className={cn(
-            "flex shrink-0",
-            panelAnimationsActive &&
-              "motion-safe:transition-opacity motion-safe:duration-(--panel-animation-duration) motion-safe:ease-out",
-            rightPanelOpen ? "pointer-events-auto opacity-100" : "pointer-events-none opacity-0",
-          )}
-          inert={!rightPanelOpen}
-        >
-          <RightPanelMaximizeControl
-            maximized={rightPanelMaximized}
-            onToggle={toggleRightPanelMaximized}
-          />
-        </span>
-      ) : null}
-      <div className="pointer-events-auto flex h-full items-center">{panelToggleControls}</div>
-    </div>
-  );
   const rightPanelContent = activeThreadRef ? (
     renderedRightPanelSurface?.kind === "preview" ? (
       <Suspense fallback={null}>
@@ -10334,7 +10283,7 @@ export default function ChatView(props: ChatViewProps) {
         : undefined,
     onEnvironmentChange,
     onEnvModeChange,
-    ...(canOverrideServerThreadEnvMode ? { effectiveEnvModeOverride: envMode } : {}),
+    envMode,
     ...(canOverrideServerThreadEnvMode
       ? {
           activeThreadBranchOverride: activeThreadBranch,
@@ -10576,8 +10525,6 @@ export default function ChatView(props: ChatViewProps) {
                 {...(!paintOnlyDisplayedTimeline
                   ? {
                       onCiteAssistantText: citeAssistantText,
-                      agentPanelModel,
-                      onOpenAgents: addAgentsSurface,
                       onUseArtifactTemplate: useArtifactTemplate,
                       ...(activeProject ? { onRunShellCommand: runShellCommand } : {}),
                     }
@@ -10595,6 +10542,9 @@ export default function ChatView(props: ChatViewProps) {
                 isPreparingWorktree={!paintOnlyDisplayedTimeline && isPreparingWorktree}
                 listRef={legendListRef}
                 timelineEntries={displayedTimeline.entries}
+                queuedMessages={paintOnlyDisplayedTimeline ? [] : queuedMessages}
+                onSteerQueuedMessage={onSteerQueuedMessage}
+                onRemoveQueuedMessage={onRemoveQueuedMessage}
                 providerStatuses={
                   environmentById.get(
                     displayedThreadRef?.environmentId ?? activeThread.environmentId,
@@ -10703,7 +10653,7 @@ export default function ChatView(props: ChatViewProps) {
               }
             >
               <div
-                ref={attachDraftHeroTransitionGroupRef}
+                ref={draftHeroTransition.transitionGroupRef}
                 className="w-full ps-(--workspace-gutter-start) pe-(--workspace-gutter-end)"
               >
                 <div

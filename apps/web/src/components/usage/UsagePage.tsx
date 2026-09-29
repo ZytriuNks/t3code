@@ -1,4 +1,3 @@
-import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
 import { RefreshIcon } from "~/components/ui/refresh-icon";
 import { useAtomValue } from "@effect/atom-react";
 import {

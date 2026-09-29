@@ -166,6 +166,7 @@ export function applyOrchestrationV2ProjectionEvent(
     case "thread.unarchived":
     case "thread.deleted":
     case "thread.settled":
+    case "thread.auto-settle-set":
     case "thread.unsettled":
     case "thread.snoozed":
     case "thread.unsnoozed":

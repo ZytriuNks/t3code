@@ -50,6 +50,7 @@ import {
   reorderQueuedRun,
   revertThreadCheckpoint,
   settleThread,
+  setThreadAutoSettle,
   startThreadTurn,
   unsettleThread,
   updateProject,
@@ -148,6 +149,33 @@ const makeSupervisor = Effect.fn("TestEnvironmentCommands.makeSupervisor")(funct
 });
 
 describe("V2 environment commands", () => {
+  it.effect("dispatches both per-thread auto-settle settings as V2 commands", () =>
+    Effect.gen(function* () {
+      const commands: OrchestrationV2Command[] = [];
+      const supervisor = yield* makeSupervisor({ commands, projects: [] });
+      const threadId = ThreadId.make("thread-auto-settle");
+      for (const enabled of [false, true]) {
+        yield* setThreadAutoSettle({ threadId, enabled }).pipe(
+          Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+        );
+      }
+      expect(commands.map(({ type, ...rest }) => ({ type, ...rest }))).toEqual([
+        {
+          type: "thread.auto-settle.set",
+          commandId: "00000000-0000-4000-8000-000000000000",
+          threadId,
+          enabled: false,
+        },
+        {
+          type: "thread.auto-settle.set",
+          commandId: "00000000-0000-4000-8000-000000000000",
+          threadId,
+          enabled: true,
+        },
+      ]);
+    }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
+  );
+
   it.effect("routes projects through the event-sourced project transport", () =>
     Effect.gen(function* () {
       const projects: ProjectMutation[] = [];

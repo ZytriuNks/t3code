@@ -1563,6 +1563,33 @@ it.layer(TestLayer)("OrchestrationV2LayerLive lifecycle", (it) => {
       });
       assert.equal((yield* orchestrator.getThreadProjection(threadId)).thread.activeOrderKey, "a0");
 
+      yield* orchestrator.dispatch({
+        type: "thread.auto-settle.set",
+        commandId: CommandId.make("runtime-layer-lifecycle-disable-auto-settle"),
+        threadId,
+        enabled: false,
+      });
+      const disabledProjection = yield* orchestrator.getThreadProjection(threadId);
+      assert.isNotNull(disabledProjection.thread.autoSettleDisabledAt);
+      const disabledAutoSettle = yield* orchestrator
+        .dispatch({
+          type: "thread.auto-settle",
+          commandId: CommandId.make("runtime-layer-lifecycle-auto-settle-disabled"),
+          threadId,
+          snapshotAt: disabledProjection.thread.updatedAt,
+        })
+        .pipe(Effect.flip);
+      assert.instanceOf(disabledAutoSettle, OrchestratorDispatchError);
+      yield* orchestrator.dispatch({
+        type: "thread.auto-settle.set",
+        commandId: CommandId.make("runtime-layer-lifecycle-enable-auto-settle"),
+        threadId,
+        enabled: true,
+      });
+      assert.isNull(
+        (yield* orchestrator.getThreadProjection(threadId)).thread.autoSettleDisabledAt,
+      );
+
       // Automatic settlement (#8600): a stale snapshot loses to any change
       // made after it, and a fresh one settles like a user settle would.
       const preAutoProjection = yield* orchestrator.getThreadProjection(threadId);

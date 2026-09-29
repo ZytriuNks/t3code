@@ -26,21 +26,21 @@ describe("Cursor usage limits", () => {
         {
           id: "totalPercentUsed",
           kind: "monthly",
-          label: "Monthly",
+          label: "Overall",
           usedPercent: 72.4,
           resetsAt: "2026-09-20T03:53:06.000Z",
         },
         {
           id: "autoPercentUsed",
           kind: "monthly",
-          label: "Monthly · Auto",
+          label: "Cursor Models",
           usedPercent: 69.5,
           resetsAt: "2026-09-20T03:53:06.000Z",
         },
         {
           id: "apiPercentUsed",
           kind: "monthly",
-          label: "Monthly · API",
+          label: "Other Models",
           usedPercent: 100,
           resetsAt: "2026-09-20T03:53:06.000Z",
         },
@@ -54,11 +54,44 @@ describe("Cursor usage limits", () => {
     );
     expect(
       cursorUsageResponseToLimits({ planUsage: { totalPercentUsed: 0 } }, checkedAt).windows,
-    ).toEqual([{ id: "totalPercentUsed", kind: "monthly", label: "Monthly", usedPercent: 0 }]);
+    ).toEqual([{ id: "totalPercentUsed", kind: "monthly", label: "Overall", usedPercent: 0 }]);
     expect(
       cursorUsageResponseToLimits({ planUsage: { totalPercentUsed: 150 } }, checkedAt).windows,
-    ).toEqual([{ id: "totalPercentUsed", kind: "monthly", label: "Monthly", usedPercent: 100 }]);
+    ).toEqual([{ id: "totalPercentUsed", kind: "monthly", label: "Overall", usedPercent: 100 }]);
   });
+
+  it.effect("uses the configured fallback when the instance has no API endpoint", () =>
+    Effect.gen(function* () {
+      for (const apiEndpoint of [undefined, "https://cursor.example/"]) {
+        const limits = yield* withNodeServices(
+          readCursorUsageLimits(
+            {},
+            {
+              CURSOR_AUTH_TOKEN: "fixture-token",
+              ...(apiEndpoint ? { CURSOR_API_ENDPOINT: apiEndpoint } : {}),
+            },
+          ).pipe(
+            Effect.provideService(HostProcessPlatform, "linux"),
+            Effect.provideService(
+              HttpClient.HttpClient,
+              HttpClient.make((request) => {
+                expect(request.url).toBe(
+                  `${apiEndpoint?.replace(/\/$/, "") ?? "https://api2.cursor.sh"}/aiserver.v1.DashboardService/GetCurrentPeriodUsage`,
+                );
+                return Effect.succeed(
+                  HttpClientResponse.fromWeb(
+                    request,
+                    Response.json({ planUsage: { totalPercentUsed: 25 } }),
+                  ),
+                );
+              }),
+            ),
+          ),
+        );
+        expect(limits.windows[0]?.usedPercent).toBe(25);
+      }
+    }),
+  );
 
   it.effect("reads the instance's credentials and endpoint even when usage enabled is false", () =>
     Effect.gen(function* () {

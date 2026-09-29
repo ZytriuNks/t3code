@@ -1,19 +1,26 @@
 import { parseScopedThreadKey } from "@t3tools/client-runtime/environment";
-import { derivePendingRequests } from "@t3tools/client-runtime/pending-requests";
+import { derivePendingThreadRequests } from "@t3tools/client-runtime/state/thread-requests";
 import { useEffect, useMemo } from "react";
 import { useShallow } from "zustand/react/shallow";
 
 import { useComposerDraftStore } from "../composerDraftStore";
 import {
   isQueuedMessageDue,
-  latestCompletedToolActivityId,
   useQueuedMessageStore,
   useQueuedMessages,
 } from "../queuedMessageStore";
 import { derivePhase } from "../session-logic";
-import { useServerConfigs, useThread, useThreadStatus } from "../state/entities";
+import {
+  useServerConfigs,
+  useThreadProjection,
+  useThreadShell,
+  useThreadStatus,
+} from "../state/entities";
 import { useEnvironment } from "../state/environments";
-import { hasServerAcknowledgedLocalDispatch, latestTurnStartFailureId } from "./ChatView.logic";
+import {
+  hasServerAcknowledgedLocalDispatch,
+  latestCompletedToolTurnItemId,
+} from "./ChatView.logic";
 import { sendQueuedMessage } from "./chat/sendQueuedMessage";
 
 /**
@@ -34,7 +41,8 @@ export function QueuedMessageSender() {
  */
 function ThreadQueueSender({ threadKey }: { threadKey: string }) {
   const threadRef = useMemo(() => parseScopedThreadKey(threadKey), [threadKey]);
-  const thread = useThread(threadRef);
+  const thread = useThreadProjection(threadRef);
+  const shell = useThreadShell(threadRef);
   const threadStatus = useThreadStatus(threadRef);
   const environmentId = threadRef?.environmentId ?? null;
   const environment = useEnvironment(environmentId);
@@ -44,13 +52,20 @@ function ThreadQueueSender({ threadKey }: { threadKey: string }) {
   const queue = useQueuedMessages(threadKey);
   const next = queue[0];
   const sending = queue.some((message) => message.sending);
-  const activities = thread?.activities;
+  const projection = thread?.projection;
+  const turnItems = projection?.turnItems;
   const latestToolActivityId = useMemo(
-    () => latestCompletedToolActivityId(activities ?? []),
-    [activities],
+    () => latestCompletedToolTurnItemId(turnItems ?? []),
+    [turnItems],
   );
-  const pendingRequests = useMemo(() => derivePendingRequests(activities ?? []), [activities]);
-  const phase = derivePhase(thread?.session ?? null);
+  const pendingRequests = useMemo(
+    () =>
+      projection === undefined
+        ? { approvals: [], userInputs: [] }
+        : derivePendingThreadRequests(projection),
+    [projection],
+  );
+  const phase = derivePhase(shell?.runtime ?? null);
 
   // A send that starts a new turn leaves the thread idle until the server
   // picks it up. Hold the next message until then, as the composer does for
@@ -58,19 +73,18 @@ function ThreadQueueSender({ threadKey }: { threadKey: string }) {
   const lastDispatch = useQueuedMessageStore(
     (state) => state.lastDispatchByThreadKey[threadKey]?.thread ?? null,
   );
-  const latestUserMessageId = thread?.messages.findLast((m) => m.role === "user")?.id ?? null;
+  const latestUserMessageId = projection?.messages.findLast((m) => m.role === "user")?.id ?? null;
   const waitingForServer =
     lastDispatch !== null &&
     !hasServerAcknowledgedLocalDispatch({
       localDispatch: lastDispatch,
       phase,
-      latestTurn: thread?.latestTurn ?? null,
+      latestRun: shell?.latestRun ?? null,
       latestUserMessageId,
-      session: thread?.session ?? null,
+      runtime: shell?.runtime ?? null,
       hasPendingApproval: pendingRequests.approvals.length > 0,
       hasPendingUserInput: pendingRequests.userInputs.length > 0,
-      latestTurnStartFailureId: latestTurnStartFailureId(thread ?? undefined, latestUserMessageId),
-      threadError: null,
+      threadError: shell?.runtime?.lastError ?? null,
     });
 
   // Approvals and questions block the agent; a steer landing on top of them
@@ -79,6 +93,7 @@ function ThreadQueueSender({ threadKey }: { threadKey: string }) {
   const blocked =
     threadRef === null ||
     thread === null ||
+    shell === null ||
     threadStatus !== "live" ||
     (environment !== null && environment.connection.phase !== "connected") ||
     !serverConfigLoaded ||

@@ -3,6 +3,7 @@ import type {
   PreviewAnnotationPayload,
   ProviderInteractionMode,
   RuntimeMode,
+  ThreadContextRecord,
 } from "@t3tools/contracts";
 import { create } from "zustand";
 
@@ -36,6 +37,7 @@ export interface QueuedComposerMessage {
   images: ComposerImageAttachment[];
   files: ComposerFileAttachment[];
   terminalContexts: TerminalContextDraft[];
+  threadContexts: ThreadContextRecord[];
   previewAnnotations: PreviewAnnotationPayload[];
   reviewComments: ReviewCommentContext[];
   sendSettings: QueuedMessageSendSettings;

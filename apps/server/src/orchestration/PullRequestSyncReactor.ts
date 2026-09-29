@@ -1,6 +1,7 @@
 import { siblingPullRequestUrl } from "@t3tools/shared/changeRequestUrl";
 import {
   CommandId,
+  type OrchestrationV2ThreadShell,
   type PullRequestSummary,
   type ThreadPullRequestKey,
   type ThreadPullRequestLink,
@@ -34,7 +35,10 @@ const SLOW_SYNC_INTERVAL_MS = 15 * 60 * 1_000;
 type SnapshotFields = Omit<ThreadPullRequestSnapshot, "syncedAt">;
 
 interface LinkEntry {
-  readonly thread: ProjectionSnapshotQuery.ProjectionThreadPullRequests;
+  readonly thread: Pick<
+    OrchestrationV2ThreadShell,
+    "id" | "projectId" | "pullRequests" | "settledOverride" | "settledAt"
+  >;
   readonly link: ThreadPullRequestLink;
 }
 
@@ -102,15 +106,15 @@ function stacksEqual(
   );
 }
 
-function isUnsettled(thread: ProjectionSnapshotQuery.ProjectionThreadPullRequests): boolean {
+function isUnsettled(thread: LinkEntry["thread"]): boolean {
   return thread.settledOverride !== "settled" && thread.settledAt === null;
 }
 
 /**
  * Keeps every thread ↔ pull request link's host snapshot current. One sweep a minute reads
- * only the active threads that have links, groups visible links by pull request so the host
- * is asked once per PR no matter how many threads share it, and writes back only what
- * changed. Native stacks the host reports are auto-linked to the thread as `source: "stack"`.
+ * only active threads that have links, groups visible links by pull request so the host is
+ * asked once per PR no matter how many threads share it, and writes back only what changed.
+ * Native stacks the host reports are auto-linked to the thread as `source: "stack"`.
  */
 export class PullRequestSyncReactor extends Context.Service<
   PullRequestSyncReactor,
@@ -150,14 +154,14 @@ export const make = Effect.gen(function* () {
       Cause.hasInterruptsOnly(cause) ? Effect.failCause(cause) : Effect.logWarning(message, fields);
 
   const sweep = Effect.fn("PullRequestSyncReactor.sweep")(function* (requestedKey?: string) {
-    const threads = yield* snapshots.listThreadsWithPullRequests();
+    const threads = yield* engine.listThreadsWithPullRequests();
     const now = yield* DateTime.now;
     const nowMs = DateTime.toEpochMillis(now);
     const nowIso = DateTime.formatIso(now);
 
     const groups = new Map<string, Array<LinkEntry>>();
     for (const thread of threads) {
-      for (const link of visibleThreadPullRequests(thread.pullRequests)) {
+      for (const link of visibleThreadPullRequests(thread.pullRequests ?? [])) {
         const key = threadPullRequestKeyOf(link);
         const entries = groups.get(key) ?? [];
         entries.push({ thread, link });

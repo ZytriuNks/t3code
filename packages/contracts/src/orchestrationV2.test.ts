@@ -366,6 +366,17 @@ describe("orchestration V2 contracts", () => {
     expect(event.payload.id).toBe(RunId.make("run-1"));
   });
 
+  it("decodes the per-thread auto-settle setting command", () => {
+    const command = decodeOrchestrationV2Command({
+      type: "thread.auto-settle.set",
+      commandId: "command-auto-settle",
+      threadId: "thread-1",
+      enabled: false,
+    });
+    expect(command.type).toBe("thread.auto-settle.set");
+    if (command.type === "thread.auto-settle.set") expect(command.enabled).toBe(false);
+  });
+
   it("decodes app-owned delegated task commands", () => {
     const command = decodeOrchestrationV2Command({
       type: "delegated_task.request",

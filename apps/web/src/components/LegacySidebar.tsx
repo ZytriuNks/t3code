@@ -188,6 +188,7 @@ import {
   isTrailingDoubleClick,
   resolveProjectStatusIndicator,
   resolveThreadStatusPill,
+  resolveThreadLastVisitedAt,
   orderItemsByPreferredIds,
   shouldClearThreadSelectionOnMouseDown,
   sortProjectsForSidebar,

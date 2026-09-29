@@ -8,7 +8,7 @@ import {
   type ThreadQueueWorkflowState,
 } from "./threadWorkflows.ts";
 import { deriveThreadTurnSubagents, type ThreadTurnSubagents } from "./threadSubagents.ts";
-import type { EnvironmentThread } from "./models.ts";
+import type { EnvironmentThread, EnvironmentThreadShell } from "./models.ts";
 import { EMPTY_ENVIRONMENT_THREAD_STATE, type EnvironmentThreadState } from "./threadState.ts";
 import {
   createQuestionHistoryProjector,
@@ -17,10 +17,9 @@ import {
 } from "./threadRequests.ts";
 import { arrayElementsEqual, parseThreadKey, threadKey } from "./entities.ts";
 
-const EMPTY_MESSAGES: ReadonlyArray<OrchestrationMessage> = Object.freeze([]);
-const EMPTY_ACTIVITIES: ReadonlyArray<OrchestrationThreadActivity> = Object.freeze([]);
-const EMPTY_PROPOSED_PLANS: ReadonlyArray<OrchestrationProposedPlan> = Object.freeze([]);
-const EMPTY_CHECKPOINTS: ReadonlyArray<OrchestrationCheckpointSummary> = Object.freeze([]);
+const EMPTY_VISIBLE_TURN_ITEMS: OrchestrationV2ThreadProjection["visibleTurnItems"] = Object.freeze(
+  [],
+);
 
 /**
  * Combine detail-only collections with the shell's authoritative thread metadata.
@@ -28,7 +27,7 @@ const EMPTY_CHECKPOINTS: ReadonlyArray<OrchestrationCheckpointSummary> = Object.
  * Shell and detail subscriptions are intentionally independent. A cached detail can
  * therefore briefly outlive a newer shell snapshot after reconnecting. Workspace
  * consumers must use the shell branch/worktree/project fields so they do not target
- * a stale checkout while retaining messages, activities, plans, and checkpoints
+ * a stale checkout while retaining messages, runs, plans, and checkpoints
  * from the detail subscription.
  */
 export function mergeEnvironmentThread(
@@ -38,35 +37,52 @@ export function mergeEnvironmentThread(
   if (detail === null || shell === null) {
     return detail;
   }
-  if (detail.environmentId !== shell.environmentId || detail.id !== shell.id) {
+  if (detail.environmentId !== shell.environmentId || detail.projection.thread.id !== shell.id) {
     return detail;
   }
 
+  const source = shell.source;
   return {
     ...detail,
-    environmentId: shell.environmentId,
-    id: shell.id,
-    projectId: shell.projectId,
-    title: shell.title,
-    modelSelection: shell.modelSelection,
-    runtimeMode: shell.runtimeMode,
-    interactionMode: shell.interactionMode,
-    branch: shell.branch,
-    worktreePath: shell.worktreePath,
-    latestTurn: shell.latestTurn,
-    createdAt: shell.createdAt,
-    updatedAt: shell.updatedAt,
-    archivedAt: shell.archivedAt,
-    settledOverride: shell.settledOverride,
-    settledAt: shell.settledAt,
-    unsettledAt: shell.unsettledAt,
-    activeOrderKey: shell.activeOrderKey,
-    autoSettleDisabledAt: shell.autoSettleDisabledAt,
-    snoozedUntil: shell.snoozedUntil,
-    snoozedAt: shell.snoozedAt,
-    pinnedAt: shell.pinnedAt,
-    pinOrderKey: shell.pinOrderKey,
-    session: shell.session,
+    projection: {
+      ...detail.projection,
+      thread: {
+        ...detail.projection.thread,
+        projectId: source.projectId,
+        title: source.title,
+        providerInstanceId: source.providerInstanceId,
+        modelSelection: source.modelSelection,
+        runtimeMode: source.runtimeMode,
+        interactionMode: source.interactionMode,
+        branch: source.branch,
+        worktreePath: source.worktreePath,
+        linkedPullRequest: source.linkedPullRequest,
+        pullRequests: source.pullRequests,
+        branchPullRequest: source.branchPullRequest,
+        activeProviderThreadId: source.activeProviderThreadId,
+        historyOrigin: source.historyOrigin,
+        lineage: source.lineage,
+        forkedFrom: source.forkedFrom,
+        createdAt: source.createdAt,
+        updatedAt: source.updatedAt,
+        archivedAt: source.archivedAt,
+        settledOverride: source.settledOverride,
+        settledAt: source.settledAt,
+        unsettledAt: source.unsettledAt,
+        activeOrderKey: source.activeOrderKey,
+        snoozedUntil: source.snoozedUntil,
+        snoozedAt: source.snoozedAt,
+        limitRecovery: source.limitRecovery,
+        pinnedAt: source.pinnedAt,
+        pinOrderKey: source.pinOrderKey,
+        lastVisitedAt:
+          source.lastVisitedAt === undefined
+            ? detail.projection.thread.lastVisitedAt
+            : source.lastVisitedAt,
+        titleRegeneration: source.titleRegeneration,
+        deletedAt: source.deletedAt,
+      },
+    },
   };
 }
 

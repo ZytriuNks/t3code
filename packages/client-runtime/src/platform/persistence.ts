@@ -1,8 +1,8 @@
 import {
   type EnvironmentId,
-  OrchestrationProjectShell,
-  type OrchestrationShellSnapshot,
-  type OrchestrationThreadDetailSnapshot,
+  type OrchestrationV2ShellSnapshot,
+  OrchestrationV2ShellSnapshotJson,
+  type OrchestrationV2ThreadDetailSnapshot,
   type ServerConfig,
   type ThreadId,
   type VcsListRefsResult,
@@ -131,20 +131,8 @@ export class EnvironmentCacheStore extends Context.Service<
   }
 >()("@t3tools/client-runtime/platform/persistence/EnvironmentCacheStore") {}
 
-const encodeProjectShells = Schema.encodeEffect(Schema.Array(OrchestrationProjectShell));
-
-/**
- * Encodes a shell snapshot for `EnvironmentCacheStore.saveShell`. The result
- * equals `Schema.encode(OrchestrationShellSnapshot)`, so the cache format does
- * not change. Walking thousands of threads through Schema blocks the UI
- * thread, and a decoded thread shell is already in its encoded form, so only
- * the projects go through Schema: their icon has a real encode transform.
- */
-export const encodeShellSnapshotForCache = (snapshot: OrchestrationShellSnapshot) =>
-  Effect.map(
-    encodeProjectShells(snapshot.projects),
-    (projects) => ({ ...snapshot, projects }) satisfies typeof OrchestrationShellSnapshot.Encoded,
-  );
+/** Encodes project icons and V2 thread dates for `EnvironmentCacheStore.saveShell`. */
+export const encodeShellSnapshotForCache = Schema.encodeEffect(OrchestrationV2ShellSnapshotJson);
 
 export class EnvironmentOwnedDataCleanup extends Context.Reference<{
   readonly clear: (environmentId: EnvironmentId) => Effect.Effect<void>;

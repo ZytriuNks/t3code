@@ -665,12 +665,7 @@ export function BranchToolbarBranchSelector({
         value={itemValue}
         onClick={() => selectPickerItem(itemValue)}
         onContextMenu={(event) => handleBranchContextMenu(event, itemValue)}
-      >
-        <div className="flex w-full min-w-0 items-center justify-between gap-2">
-          <MiddleTruncate value={itemValue} className="flex-1" />
-          {badge && <span className="shrink-0 text-3xs text-muted-foreground/45">{badge}</span>}
-        </div>
-      </ComboboxItem>
+      />
     );
   }
 
@@ -748,16 +743,18 @@ export function BranchToolbarBranchSelector({
             className="min-w-0 max-w-full active:scale-100"
             disabled={isInitialBranchesLoadPending || isBranchActionPending}
           >
-            <GitBranchIcon className="size-3 shrink-0 opacity-70" />
-            <span
-              data-composer-label
-              className="min-w-0 max-w-[240px] group-data-[compact]/composer-context:max-w-0"
-            >
-              <span
-                data-composer-label-motion
-                className="flex w-full max-w-[240px] transition-opacity duration-180 ease-drawer group-data-[compact]/composer-context:opacity-0 motion-reduce:transition-none"
-              >
-                <MiddleTruncate value={triggerLabel} />
+            <GitBranchIcon
+              className={cn(
+                "size-3 shrink-0 opacity-70",
+                displayMode === "panel" && THREAD_DETAILS_PANEL_ICON_CLASS,
+              )}
+            />
+            <ComposerContextLabel displayMode={displayMode}>
+              <MiddleTruncate value={triggerLabel} className="w-full" />
+            </ComposerContextLabel>
+            {displayMode === "panel" ? (
+              <span data-slot="select-icon">
+                <ChevronDownIcon className={THREAD_DETAILS_PANEL_CHEVRON_CLASS} />
               </span>
             ) : (
               <ChevronDownIcon className="size-3 shrink-0 opacity-50" />

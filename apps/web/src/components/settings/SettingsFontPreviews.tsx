@@ -63,7 +63,7 @@ export function PromptFontPreview() {
         skills={EMPTY_SKILLS}
         accessibleCopy={accessibleCopy}
         disabled={false}
-        placeholder={DISCONNECTED_COMPOSER_PLACEHOLDER}
+        placeholder={t("composer.placeholder.disconnected")}
         className="max-h-42 min-h-14"
         onChange={onChange}
         onPaste={noop}

@@ -15,6 +15,7 @@ function makeMessage(prompt: string): Omit<QueuedComposerMessage, "id"> {
     images: [],
     files: [],
     terminalContexts: [],
+    threadContexts: [],
     previewAnnotations: [],
     reviewComments: [],
     sendSettings: {

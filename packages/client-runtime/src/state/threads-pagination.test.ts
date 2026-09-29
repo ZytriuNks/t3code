@@ -1,24 +1,29 @@
 import {
   EnvironmentId,
   EventId,
-  ORCHESTRATION_WS_METHODS,
-  ProjectId,
+  MessageId,
+  ORCHESTRATION_V2_WS_METHODS,
+  OrchestrationV2ThreadHistoryPage,
   ProviderInstanceId,
-  ThreadId,
-  TurnId,
-  type OrchestrationMessage,
-  type OrchestrationThread,
-  type OrchestrationThreadDetailSnapshot,
-  type OrchestrationThreadStreamItem,
+  RunId,
+  TurnItemId,
+  type OrchestrationV2Run,
+  type OrchestrationV2ThreadDetailSnapshot,
+  type OrchestrationV2ThreadProjection,
+  type OrchestrationV2ThreadStreamItem,
+  type OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
+import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 
 import type { WsRpcProtocolClient } from "../rpc/protocol.ts";
 import {
@@ -30,13 +35,16 @@ import {
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import * as Persistence from "../platform/persistence.ts";
 import * as RpcSession from "../rpc/session.ts";
-import type { ThreadSnapshotWindow } from "./threadSnapshotHttp.ts";
+import { v2Now, v2Projection, v2ThreadId } from "./orchestrationV2TestFixtures.ts";
 import {
-  INITIAL_THREAD_USER_TURN_LIMIT,
+  ThreadHistoryController,
+  threadHistoryControllerLayer,
+} from "./threadHistoryController.ts";
+import {
   makeEnvironmentThreadState,
-  requestOlderThreadTurns,
   ThreadSnapshotLoader,
   type EnvironmentThreadState,
+  type ThreadSnapshotLoadResult,
 } from "./threads.ts";
 
 const TARGET = new PrimaryConnectionTarget({
@@ -45,7 +53,7 @@ const TARGET = new PrimaryConnectionTarget({
   httpBaseUrl: "https://environment.example.test",
   wsBaseUrl: "wss://environment.example.test",
 });
-const THREAD_ID = ThreadId.make("thread-1");
+const THREAD_ID = v2ThreadId;
 const PREPARED: PreparedConnection = {
   environmentId: TARGET.environmentId,
   label: TARGET.label,
@@ -54,136 +62,126 @@ const PREPARED: PreparedConnection = {
   httpAuthorization: null,
   target: TARGET,
 };
+const RECENT_RUN: OrchestrationV2Run = {
+  id: RunId.make("run-recent"),
+  threadId: THREAD_ID,
+  ordinal: 2,
+  providerInstanceId: ProviderInstanceId.make("codex"),
+  modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+  providerThreadId: null,
+  userMessageId: MessageId.make("message-recent"),
+  rootNodeId: null,
+  activeAttemptId: null,
+  status: "completed",
+  requestedAt: v2Now,
+  startedAt: v2Now,
+  completedAt: v2Now,
+  checkpointId: null,
+  contextHandoffId: null,
+};
 
-function message(id: string, turnId: string, createdAt: string): OrchestrationMessage {
+function row(index: number, runId: RunId | null = null) {
+  const item = {
+    id: TurnItemId.make(`item-${index}`),
+    type: "command_execution",
+    threadId: THREAD_ID,
+    runId,
+    nodeId: null,
+    providerThreadId: null,
+    providerTurnId: null,
+    nativeItemRef: null,
+    parentItemId: null,
+    ordinal: index + 1,
+    status: "completed",
+    title: `Command ${index}`,
+    input: `cmd-${index}`,
+    output: `out-${index}`,
+    exitCode: 0,
+    startedAt: v2Now,
+    completedAt: v2Now,
+    updatedAt: v2Now,
+  } satisfies OrchestrationV2TurnItem;
   return {
-    id: id as OrchestrationMessage["id"],
-    role: "assistant",
-    text: `text of ${id}`,
-    turnId: TurnId.make(turnId),
-    streaming: false,
-    createdAt,
-    updatedAt: createdAt,
+    position: index,
+    visibility: "local" as const,
+    sourceThreadId: THREAD_ID,
+    sourceItemId: item.id,
+    item,
   };
 }
 
-const OLDER_MESSAGE = message("message-old", "turn-1", "2026-04-01T00:00:00.000Z");
-const RECENT_MESSAGE = message("message-recent", "turn-2", "2026-04-01T01:00:00.000Z");
-
-// Reverts retain turns via checkpoints with checkpointTurnCount <= the revert's
-// turnCount, so both fixture turns carry one: reverting to turnCount 1 keeps
-// turn-1 (the older page's turn) and discards turn-2 (the loaded window's).
-function checkpoint(turnId: string, turnCount: number): OrchestrationThread["checkpoints"][number] {
-  return {
-    turnId: TurnId.make(turnId),
-    checkpointTurnCount: turnCount,
-    checkpointRef:
-      `checkpoint-${turnCount}` as OrchestrationThread["checkpoints"][number]["checkpointRef"],
-    status: "ready",
-    files: [],
-    assistantMessageId: null,
-    completedAt: "2026-04-01T01:00:00.000Z",
-  };
-}
-
-const BASE_THREAD: OrchestrationThread = {
-  id: THREAD_ID,
-  projectId: ProjectId.make("project-1"),
-  title: "Windowed thread",
-  modelSelection: {
-    instanceId: ProviderInstanceId.make("codex"),
-    model: "gpt-5.4",
-  },
-  runtimeMode: "full-access",
-  interactionMode: "default",
-  branch: "main",
-  worktreePath: null,
-  latestTurn: null,
-  createdAt: "2026-04-01T00:00:00.000Z",
-  updatedAt: "2026-04-01T00:00:00.000Z",
-  archivedAt: null,
-  settledOverride: null,
-  settledAt: null,
-  pullRequests: [],
-  deletedAt: null,
-  messages: [RECENT_MESSAGE],
-  proposedPlans: [],
-  activities: [],
-  checkpoints: [checkpoint("turn-2", 2)],
-  session: null,
+const OLDER_ROW = row(0);
+const RECENT_ROW = row(1, RECENT_RUN.id);
+const BASE_PROJECTION: OrchestrationV2ThreadProjection = {
+  ...v2Projection,
+  runs: [RECENT_RUN],
+  turnItems: [RECENT_ROW.item],
+  visibleTurnItems: [{ ...RECENT_ROW, position: 0 }],
 };
-
-const WINDOWED_SNAPSHOT: OrchestrationThreadDetailSnapshot = {
+const HISTORY = {
+  historyCursor: "cursor-1",
+  hasMoreHistory: true,
+  latestLocalTurnOrdinal: RECENT_ROW.item.ordinal,
+};
+const WINDOWED_SNAPSHOT: OrchestrationV2ThreadDetailSnapshot = {
   snapshotSequence: 10,
-  thread: BASE_THREAD,
-  page: { beforeCursor: "cursor-1", hasMore: true, snapshotSequence: 10 },
+  projection: BASE_PROJECTION,
+  ...HISTORY,
 };
-
-const OLDER_PAGE: OrchestrationThreadDetailSnapshot = {
+const OLDER_PAGE: OrchestrationV2ThreadHistoryPage = {
   snapshotSequence: 10,
-  thread: {
-    ...BASE_THREAD,
-    messages: [OLDER_MESSAGE],
-    checkpoints: [checkpoint("turn-1", 1)],
-  },
-  page: { beforeCursor: null, hasMore: false, snapshotSequence: 10 },
+  items: [OLDER_ROW],
+  nextCursor: null,
+  hasMoreHistory: false,
 };
+const encodePage = Schema.encodeSync(OrchestrationV2ThreadHistoryPage);
+const pageResponse = (page: OrchestrationV2ThreadHistoryPage = OLDER_PAGE) =>
+  Response.json(encodePage(page));
 
-type LoaderResponse = Option.Option<OrchestrationThreadDetailSnapshot>;
+type SubscribeInput = Parameters<
+  WsRpcProtocolClient[typeof ORCHESTRATION_V2_WS_METHODS.subscribeThread]
+>[0];
 
 const makeHarness = Effect.fn("TestThreadPagination.makeHarness")(function* (options?: {
-  readonly paginationCapability?: boolean;
-  readonly reasoningCapability?: boolean;
-  readonly initialResponse?: LoaderResponse;
-  /** Cached snapshot returned by the cache store (simulates a warm cache). */
-  readonly cached?: OrchestrationThreadDetailSnapshot;
+  readonly initialResponse?: ThreadSnapshotLoadResult;
+  readonly cached?: OrchestrationV2ThreadDetailSnapshot;
+  readonly historyPaging?: "no-http" | "no-controller";
 }) {
-  const inputs = yield* Queue.unbounded<OrchestrationThreadStreamItem>();
+  const inputs = yield* Queue.unbounded<OrchestrationV2ThreadStreamItem>();
   const observed = yield* Queue.unbounded<EnvironmentThreadState>();
-  const loaderWindows = yield* Ref.make<ReadonlyArray<ThreadSnapshotWindow | undefined>>([]);
-  const loaderReasoning = yield* Ref.make<ReadonlyArray<boolean | undefined>>([]);
-  const lastSubscribeInput = yield* Ref.make<Record<string, unknown> | undefined>(undefined);
-  const savedThreads = yield* Ref.make<ReadonlyArray<OrchestrationThreadDetailSnapshot>>([]);
-  // Older-page responses resolve through deferreds so tests can interleave
-  // live events with an in-flight page fetch.
-  const pendingPageResponses = yield* Queue.unbounded<Deferred.Deferred<LoaderResponse>>();
+  const subscriptions = yield* Queue.unbounded<SubscribeInput>();
+  const loaderCalls = yield* Ref.make(0);
+  const historyCursors = yield* Ref.make<ReadonlyArray<string | null>>([]);
+  const pendingPages = yield* Queue.unbounded<Deferred.Deferred<Response>>();
   const supervisorState = yield* SubscriptionRef.make<SupervisorConnectionState>(
     AVAILABLE_CONNECTION_STATE,
   );
   const client = {
-    [ORCHESTRATION_WS_METHODS.subscribeThread]: (input: Record<string, unknown>) =>
-      Stream.unwrap(Ref.set(lastSubscribeInput, input).pipe(Effect.as(Stream.fromQueue(inputs)))),
+    [ORCHESTRATION_V2_WS_METHODS.subscribeThread]: (input: SubscribeInput) =>
+      Stream.unwrap(Queue.offer(subscriptions, input).pipe(Effect.as(Stream.fromQueue(inputs)))),
   } as unknown as WsRpcProtocolClient;
   const session: RpcSession.RpcSession = {
     client,
-    initialConfig: Effect.succeed({
-      threadSnapshotPagination: options?.paginationCapability !== false,
-      reasoningMessages: options?.reasoningCapability === true,
-    } as never),
+    initialConfig: Effect.succeed({} as never),
     subscribeServerConfig: (input) => client.subscribeServerConfig(input),
     ready: Effect.void,
     probe: Effect.void,
     closed: Effect.never,
   };
-  const supervisorSession = yield* SubscriptionRef.make<Option.Option<RpcSession.RpcSession>>(
-    Option.some(session),
-  );
+  const supervisorSession = yield* SubscriptionRef.make(Option.some(session));
   const prepared = yield* SubscriptionRef.make<Option.Option<PreparedConnection>>(
     Option.some(PREPARED),
   );
   const snapshotLoader = ThreadSnapshotLoader.of({
-    load: (_prepared, _threadId, window, reasoningMessages) =>
-      Ref.update(loaderWindows, (current) => [...current, window]).pipe(
-        Effect.andThen(Ref.update(loaderReasoning, (current) => [...current, reasoningMessages])),
-        Effect.andThen(
-          window?.beforeCursor === undefined
-            ? Effect.succeed(
-                options?.initialResponse ?? Option.none<OrchestrationThreadDetailSnapshot>(),
-              )
-            : Deferred.make<LoaderResponse>().pipe(
-                Effect.tap((deferred) => Queue.offer(pendingPageResponses, deferred)),
-                Effect.flatMap(Deferred.await),
-              ),
+    load: () =>
+      Ref.update(loaderCalls, (count) => count + 1).pipe(
+        Effect.as(
+          options?.initialResponse ??
+            ({
+              _tag: "present",
+              snapshot: WINDOWED_SNAPSHOT,
+              history: HISTORY,
+            } satisfies ThreadSnapshotLoadResult),
         ),
       ),
   });
@@ -195,14 +193,12 @@ const makeHarness = Effect.fn("TestThreadPagination.makeHarness")(function* (opt
     connect: Effect.void,
     disconnect: Effect.void,
     retryNow: Effect.void,
-  } satisfies EnvironmentSupervisor.EnvironmentSupervisor["Service"]);
+  });
   const cache = Persistence.EnvironmentCacheStore.of({
     loadShell: () => Effect.succeedNone,
     saveShell: () => Effect.void,
-    loadThread: () =>
-      Effect.succeed(options?.cached !== undefined ? Option.some(options.cached) : Option.none()),
-    saveThread: (_environmentId, thread) =>
-      Ref.update(savedThreads, (current) => [...current, thread]),
+    loadThread: () => Effect.succeed(Option.fromUndefinedOr(options?.cached)),
+    saveThread: () => Effect.void,
     removeThread: () => Effect.void,
     loadServerConfig: () => Effect.succeedNone,
     saveServerConfig: () => Effect.void,
@@ -212,453 +208,423 @@ const makeHarness = Effect.fn("TestThreadPagination.makeHarness")(function* (opt
     clearVcsRefs: () => Effect.void,
     clear: () => Effect.void,
   });
-  const threadState = yield* makeEnvironmentThreadState(THREAD_ID).pipe(
+  const historyController = yield* ThreadHistoryController.pipe(
+    Effect.provide(threadHistoryControllerLayer),
+  );
+  let makeState = makeEnvironmentThreadState(THREAD_ID).pipe(
     Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
     Effect.provideService(Persistence.EnvironmentCacheStore, cache),
     Effect.provideService(ThreadSnapshotLoader, snapshotLoader),
   );
+  if (options?.historyPaging !== "no-controller") {
+    makeState = makeState.pipe(Effect.provideService(ThreadHistoryController, historyController));
+  }
+  if (options?.historyPaging !== "no-http") {
+    makeState = makeState.pipe(
+      Effect.provideService(
+        HttpClient.HttpClient,
+        HttpClient.make((request, url) =>
+          Effect.gen(function* () {
+            const response = yield* Deferred.make<Response>();
+            yield* Ref.update(historyCursors, (current) => [
+              ...current,
+              url.searchParams.get("cursor"),
+            ]);
+            yield* Queue.offer(pendingPages, response);
+            return HttpClientResponse.fromWeb(request, yield* Deferred.await(response));
+          }),
+        ),
+      ),
+    );
+  }
+  const threadState = yield* makeState;
   yield* SubscriptionRef.changes(threadState).pipe(
     Stream.runForEach((state) => Queue.offer(observed, state)),
     Effect.forkScoped,
   );
-
-  const awaitState = (predicate: (state: EnvironmentThreadState) => boolean) =>
-    Queue.take(observed).pipe(Effect.repeat({ until: predicate }));
-  const resolveNextPage = (response: LoaderResponse) =>
-    Queue.take(pendingPageResponses).pipe(
-      Effect.flatMap((deferred) => Deferred.succeed(deferred, response)),
-    );
-
+  const subscribeInput = yield* Queue.take(subscriptions);
   return {
     inputs,
-    observed,
-    awaitState,
-    resolveNextPage,
-    loaderWindows,
-    loaderReasoning,
-    lastSubscribeInput,
-    savedThreads,
     threadState,
+    subscribeInput,
+    loaderCalls,
+    historyCursors,
+    nextPage: Queue.take(pendingPages),
+    loadEarlier: () => historyController.loadEarlier(TARGET.environmentId, THREAD_ID),
+    awaitState: (predicate: (state: EnvironmentThreadState) => boolean) =>
+      Queue.take(observed).pipe(Effect.repeat({ until: predicate })),
   };
 });
 
-const hasMessage = (state: EnvironmentThreadState, id: string): boolean =>
-  Option.match(state.data, {
-    onNone: () => false,
-    onSome: (thread) => thread.messages.some((entry) => entry.id === id),
-  });
+const visibleIds = (state: EnvironmentThreadState) =>
+  Option.getOrThrow(state.data).visibleTurnItems.map((entry) => entry.sourceItemId);
 
-const titleEvent = (title: string, sequence: number): OrchestrationThreadStreamItem => ({
+const titleEvent = (title: string, sequence: number): OrchestrationV2ThreadStreamItem => ({
   kind: "event",
+  sequence,
   event: {
-    eventId: EventId.make(`event-title-${sequence}`),
-    sequence,
-    occurredAt: "2026-04-01T01:30:00.000Z",
-    commandId: null,
-    causationEventId: null,
-    correlationId: null,
-    metadata: {},
-    aggregateKind: "thread",
-    aggregateId: THREAD_ID,
-    type: "thread.meta-updated",
-    payload: {
-      threadId: THREAD_ID,
-      title,
-      updatedAt: "2026-04-01T01:30:00.000Z",
-    },
+    id: EventId.make(`event-title-${sequence}`),
+    type: "thread.metadata-updated",
+    threadId: THREAD_ID,
+    occurredAt: v2Now,
+    payload: { ...v2Projection.thread, title },
   },
 });
 
-// Reverting to turnCount 1 retains only turns whose checkpoint count is <= 1:
-// turn-1 survives, turn-2 (the loaded window's newest turn) is discarded.
-const revertEvent = (sequence: number): OrchestrationThreadStreamItem => ({
+const itemEvent = (
+  item: OrchestrationV2TurnItem,
+  sequence: number,
+): OrchestrationV2ThreadStreamItem => ({
   kind: "event",
+  sequence,
   event: {
-    eventId: EventId.make(`event-revert-${sequence}`),
-    sequence,
-    occurredAt: "2026-04-01T02:00:00.000Z",
-    commandId: null,
-    causationEventId: null,
-    correlationId: null,
-    metadata: {},
-    aggregateKind: "thread",
-    aggregateId: THREAD_ID,
-    type: "thread.reverted",
-    payload: {
-      threadId: THREAD_ID,
-      turnCount: 1,
-    },
+    id: EventId.make(`event-item-${sequence}`),
+    type: "turn-item.updated",
+    threadId: THREAD_ID,
+    occurredAt: v2Now,
+    payload: item,
   },
+});
+
+const rollbackEvent = (sequence: number): OrchestrationV2ThreadStreamItem => ({
+  kind: "event",
+  sequence,
+  event: {
+    id: EventId.make(`event-rollback-${sequence}`),
+    type: "run.updated",
+    threadId: THREAD_ID,
+    runId: RECENT_RUN.id,
+    occurredAt: v2Now,
+    payload: { ...RECENT_RUN, status: "rolled_back" },
+  },
+});
+
+const replacementSnapshot = (bounded: boolean): OrchestrationV2ThreadStreamItem => ({
+  kind: "snapshot",
+  snapshotSequence: 20,
+  projection: {
+    ...BASE_PROJECTION,
+    thread: { ...BASE_PROJECTION.thread, title: "Replacement snapshot" },
+  },
+  ...(bounded ? { ...HISTORY, historyCursor: "cursor-2" } : {}),
 });
 
 describe("thread pagination state", () => {
-  for (const reasoningCapability of [false, true]) {
+  it.effect("keeps reasoning rows across initial, older and live V2 reads", () =>
+    Effect.gen(function* () {
+      const reasoning: OrchestrationV2TurnItem = {
+        ...OLDER_ROW.item,
+        type: "reasoning",
+        text: "Earlier reasoning",
+        streaming: false,
+      };
+      const recentReasoning: OrchestrationV2TurnItem = {
+        ...RECENT_ROW.item,
+        type: "reasoning",
+        text: "Recent reasoning",
+        streaming: false,
+      };
+      const projection = {
+        ...BASE_PROJECTION,
+        turnItems: [recentReasoning],
+        visibleTurnItems: [{ ...RECENT_ROW, item: recentReasoning, position: 0 }],
+      };
+      const harness = yield* makeHarness({
+        initialResponse: {
+          _tag: "present",
+          snapshot: { snapshotSequence: 10, projection },
+          history: HISTORY,
+        },
+      });
+      expect(
+        Option.getOrThrow((yield* SubscriptionRef.get(harness.threadState)).data).turnItems,
+      ).toEqual([recentReasoning]);
+      const loading = yield* harness.loadEarlier().pipe(Effect.forkScoped);
+      yield* Deferred.succeed(
+        yield* harness.nextPage,
+        pageResponse({ ...OLDER_PAGE, items: [{ ...OLDER_ROW, item: reasoning }] }),
+      );
+      expect(yield* Fiber.join(loading)).toEqual({ _tag: "loaded" });
+      const continued = { ...reasoning, text: "Earlier reasoning continued" };
+      yield* Queue.offer(harness.inputs, itemEvent(continued, 11));
+      const state = yield* harness.awaitState((value) =>
+        Option.exists(value.data, (projection) =>
+          projection.turnItems.some((item) => item === continued),
+        ),
+      );
+      expect(Option.getOrThrow(state.data).visibleTurnItems.map((entry) => entry.item)).toEqual([
+        continued,
+        recentReasoning,
+      ]);
+    }),
+  );
+
+  it.effect("installs the initial history window and negotiates bounded socket fallback", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness();
+      const state = yield* SubscriptionRef.get(harness.threadState);
+      expect(state.history).toEqual({
+        ...HISTORY,
+        loading: false,
+        error: null,
+        expanded: false,
+      });
+      expect(harness.subscribeInput.afterSequence).toBe(10);
+      expect(harness.subscribeInput.acceptBoundedSnapshot).toBe(true);
+    }),
+  );
+
+  for (const historyPaging of ["no-http", "no-controller"] as const) {
+    it.effect(`does not negotiate bounded snapshots with ${historyPaging}`, () =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness({
+          historyPaging,
+          initialResponse: {
+            _tag: "present",
+            snapshot: { snapshotSequence: 10, projection: BASE_PROJECTION },
+          },
+        });
+        expect(harness.subscribeInput.acceptBoundedSnapshot).toBeUndefined();
+        expect(yield* harness.loadEarlier()).toEqual({ _tag: "noop" });
+        expect(yield* Ref.get(harness.historyCursors)).toEqual([]);
+      }),
+    );
+  }
+
+  it.effect("merges older rows in order, dedupes overlap and clears the cursor", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness();
+      const loading = yield* harness.loadEarlier().pipe(Effect.forkScoped);
+      const pending = yield* harness.nextPage;
+      expect((yield* SubscriptionRef.get(harness.threadState)).history.loading).toBe(true);
+      expect(yield* harness.loadEarlier()).toEqual({ _tag: "busy" });
+      yield* Deferred.succeed(
+        pending,
+        pageResponse({ ...OLDER_PAGE, items: [OLDER_ROW, RECENT_ROW] }),
+      );
+      expect(yield* Fiber.join(loading)).toEqual({ _tag: "loaded" });
+      const state = yield* SubscriptionRef.get(harness.threadState);
+      expect(visibleIds(state)).toEqual([OLDER_ROW.sourceItemId, RECENT_ROW.sourceItemId]);
+      expect(state.history).toEqual({
+        historyCursor: null,
+        hasMoreHistory: false,
+        loading: false,
+        error: null,
+        expanded: true,
+        latestLocalTurnOrdinal: RECENT_ROW.item.ordinal,
+      });
+      expect(yield* harness.loadEarlier()).toEqual({ _tag: "noop" });
+      expect(yield* Ref.get(harness.historyCursors)).toEqual(["cursor-1"]);
+    }),
+  );
+
+  it.effect("does not resurrect rows rolled back while an older page is in flight", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness();
+      const loading = yield* harness.loadEarlier().pipe(Effect.forkScoped);
+      const pending = yield* harness.nextPage;
+      yield* Queue.offer(harness.inputs, rollbackEvent(11));
+      yield* harness.awaitState((state) =>
+        Option.exists(state.data, (projection) => projection.runs[0]?.status === "rolled_back"),
+      );
+      yield* Deferred.succeed(
+        pending,
+        pageResponse({ ...OLDER_PAGE, items: [OLDER_ROW, RECENT_ROW] }),
+      );
+      expect(yield* Fiber.join(loading)).toEqual({ _tag: "loaded" });
+      const state = yield* SubscriptionRef.get(harness.threadState);
+      expect(visibleIds(state)).toEqual([OLDER_ROW.sourceItemId]);
+      expect(Option.getOrThrow(state.data).runs[0]?.status).toBe("rolled_back");
+    }),
+  );
+
+  for (const bounded of [false, true]) {
+    it.effect(`discards an in-flight page after a replacement snapshot (bounded: ${bounded})`, () =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness();
+        const loading = yield* harness.loadEarlier().pipe(Effect.forkScoped);
+        const pending = yield* harness.nextPage;
+        yield* Queue.offer(harness.inputs, replacementSnapshot(bounded));
+        const replacement = yield* harness.awaitState((state) =>
+          Option.exists(
+            state.data,
+            (projection) => projection.thread.title === "Replacement snapshot",
+          ),
+        );
+        yield* Deferred.succeed(pending, pageResponse());
+        expect(yield* Fiber.join(loading)).toEqual({ _tag: "noop" });
+        const state = yield* SubscriptionRef.get(harness.threadState);
+        expect(visibleIds(state)).toEqual([RECENT_ROW.sourceItemId]);
+        expect(state.history).toEqual(replacement.history);
+        expect(state.history.historyCursor).toBe(bounded ? "cursor-2" : null);
+      }),
+    );
+  }
+
+  for (const failed of [false, true]) {
     it.effect(
-      `negotiates reasoning for initial, older and socket reads: ${reasoningCapability}`,
+      `keeps a replacement request loading when the stale request finishes (failed: ${failed})`,
       () =>
         Effect.gen(function* () {
-          const harness = yield* makeHarness({
-            reasoningCapability,
-            initialResponse: Option.some(WINDOWED_SNAPSHOT),
-          });
-          yield* harness.awaitState((value) => Option.isSome(value.page));
-          const input = yield* Ref.get(harness.lastSubscribeInput);
-          expect(input?.reasoningMessages).toBe(reasoningCapability ? true : undefined);
-          expect(yield* Ref.get(harness.loaderReasoning)).toEqual([reasoningCapability]);
-          expect(requestOlderThreadTurns(TARGET.environmentId, THREAD_ID)).toBe(true);
-          yield* harness.resolveNextPage(Option.some(OLDER_PAGE));
-          yield* harness.awaitState((value) =>
-            Option.match(value.page, { onNone: () => false, onSome: (page) => !page.hasMore }),
+          const harness = yield* makeHarness();
+          const oldLoading = yield* harness.loadEarlier().pipe(Effect.forkScoped);
+          const oldPending = yield* harness.nextPage;
+          yield* Queue.offer(harness.inputs, replacementSnapshot(true));
+          yield* harness.awaitState((state) => state.history.historyCursor === "cursor-2");
+          const newLoading = yield* harness.loadEarlier().pipe(Effect.forkScoped);
+          const newPending = yield* harness.nextPage;
+          yield* Deferred.succeed(
+            oldPending,
+            failed ? new Response(null, { status: 503 }) : pageResponse(),
           );
-          expect(yield* Ref.get(harness.loaderReasoning)).toEqual([
-            reasoningCapability,
-            reasoningCapability,
+          expect(yield* Fiber.join(oldLoading)).toEqual({ _tag: "noop" });
+          const state = yield* SubscriptionRef.get(harness.threadState);
+          expect(state.history).toMatchObject({
+            historyCursor: "cursor-2",
+            loading: true,
+            error: null,
+          });
+          expect(visibleIds(state)).toEqual([RECENT_ROW.sourceItemId]);
+          yield* Deferred.succeed(newPending, pageResponse());
+          expect(yield* Fiber.join(newLoading)).toEqual({ _tag: "loaded" });
+          expect(visibleIds(yield* SubscriptionRef.get(harness.threadState))).toEqual([
+            OLDER_ROW.sourceItemId,
+            RECENT_ROW.sourceItemId,
           ]);
+          expect(yield* Ref.get(harness.historyCursors)).toEqual(["cursor-1", "cursor-2"]);
         }),
     );
   }
 
-  it.effect("windows the initial load when the server advertises pagination", () =>
-    Effect.gen(function* () {
-      const harness = yield* makeHarness({ initialResponse: Option.some(WINDOWED_SNAPSHOT) });
-      const state = yield* harness.awaitState((value) => Option.isSome(value.page));
-      expect(Option.getOrThrow(state.page)).toEqual({
-        beforeCursor: "cursor-1",
-        hasMore: true,
-        loadingOlder: false,
-      });
-      const windows = yield* Ref.get(harness.loaderWindows);
-      expect(windows[0]?.turnLimit).toBe(INITIAL_THREAD_USER_TURN_LIMIT);
-      const subscribeInput = yield* Ref.get(harness.lastSubscribeInput);
-      expect(subscribeInput?.turnLimit).toBe(INITIAL_THREAD_USER_TURN_LIMIT);
-    }),
+  it.effect(
+    "an older projection page cannot overwrite updates received while it was in flight",
+    () =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness();
+        const loading = yield* harness.loadEarlier().pipe(Effect.forkScoped);
+        const pending = yield* harness.nextPage;
+        const liveItem = { ...RECENT_ROW.item, output: "newer live output" };
+        yield* Queue.offerAll(harness.inputs, [
+          itemEvent(liveItem, 11),
+          titleEvent("Updated while loading", 12),
+        ]);
+        yield* harness.awaitState((state) =>
+          Option.exists(
+            state.data,
+            (projection) => projection.thread.title === "Updated while loading",
+          ),
+        );
+        yield* Deferred.succeed(
+          pending,
+          pageResponse({ ...OLDER_PAGE, snapshotSequence: 5, items: [OLDER_ROW, RECENT_ROW] }),
+        );
+        expect(yield* Fiber.join(loading)).toEqual({ _tag: "loaded" });
+        const projection = Option.getOrThrow(
+          (yield* SubscriptionRef.get(harness.threadState)).data,
+        );
+        expect(projection.thread.title).toBe("Updated while loading");
+        expect(projection.visibleTurnItems.map((entry) => entry.item)).toEqual([
+          OLDER_ROW.item,
+          liveItem,
+        ]);
+      }),
   );
 
-  it.effect("does not send a window to servers without the capability", () =>
+  it.effect("a history page never advances the live-event dedupe sequence", () =>
     Effect.gen(function* () {
-      const harness = yield* makeHarness({
-        paginationCapability: false,
-        initialResponse: Option.some({ snapshotSequence: 10, thread: BASE_THREAD }),
-      });
-      const state = yield* harness.awaitState((value) => Option.isSome(value.data));
-      expect(Option.isNone(state.page)).toBe(true);
-      const windows = yield* Ref.get(harness.loaderWindows);
-      expect(windows[0]).toBeUndefined();
-      const subscribeInput = yield* Ref.get(harness.lastSubscribeInput);
-      expect(subscribeInput?.turnLimit).toBeUndefined();
-    }),
-  );
-
-  it.effect("merges an older page below the loaded window and clears the cursor", () =>
-    Effect.gen(function* () {
-      const harness = yield* makeHarness({ initialResponse: Option.some(WINDOWED_SNAPSHOT) });
-      yield* harness.awaitState((value) => Option.isSome(value.page));
-
-      expect(requestOlderThreadTurns(TARGET.environmentId, THREAD_ID)).toBe(true);
-      yield* harness.awaitState((value) =>
-        Option.match(value.page, { onNone: () => false, onSome: (page) => page.loadingOlder }),
+      const harness = yield* makeHarness();
+      const loading = yield* harness.loadEarlier().pipe(Effect.forkScoped);
+      yield* Deferred.succeed(
+        yield* harness.nextPage,
+        pageResponse({ ...OLDER_PAGE, snapshotSequence: 12 }),
       );
-      yield* harness.resolveNextPage(Option.some(OLDER_PAGE));
-
-      const state = yield* harness.awaitState((value) => hasMessage(value, "message-old"));
-      const thread = Option.getOrThrow(state.data);
-      // Older rows land before the loaded window's rows.
-      expect(thread.messages.map((entry) => entry.id)).toEqual(["message-old", "message-recent"]);
-      expect(Option.getOrThrow(state.page)).toEqual({
-        beforeCursor: null,
-        hasMore: false,
-        loadingOlder: false,
-      });
-    }),
-  );
-
-  it.effect("discards an in-flight older page when a revert rewrites history", () =>
-    Effect.gen(function* () {
-      const harness = yield* makeHarness({ initialResponse: Option.some(WINDOWED_SNAPSHOT) });
-      yield* harness.awaitState((value) => Option.isSome(value.page));
-
-      requestOlderThreadTurns(TARGET.environmentId, THREAD_ID);
-      yield* harness.awaitState((value) =>
-        Option.match(value.page, { onNone: () => false, onSome: (page) => page.loadingOlder }),
-      );
-      // Revert lands while the page fetch is in flight and removes turn-2.
-      yield* Queue.offer(harness.inputs, revertEvent(11));
-      yield* harness.awaitState((value) => !hasMessage(value, "message-recent"));
-      yield* harness.resolveNextPage(Option.some(OLDER_PAGE));
-
+      expect(yield* Fiber.join(loading)).toEqual({ _tag: "loaded" });
+      yield* Queue.offer(harness.inputs, rollbackEvent(11));
       const state = yield* harness.awaitState((value) =>
-        Option.match(value.page, { onNone: () => false, onSome: (page) => !page.loadingOlder }),
+        Option.exists(value.data, (projection) => projection.runs[0]?.status === "rolled_back"),
       );
-      // The stale page was dropped: no resurrected rows, cursor unchanged.
-      expect(hasMessage(state, "message-old")).toBe(false);
-      expect(Option.getOrThrow(state.page).beforeCursor).toBe("cursor-1");
+      expect(visibleIds(state)).toEqual([OLDER_ROW.sourceItemId]);
     }),
   );
 
-  it.effect("discards an in-flight older page when a fresh snapshot replaces the thread", () =>
+  it.effect("live updates after a newer history page replace content without duplicating it", () =>
     Effect.gen(function* () {
-      const harness = yield* makeHarness({ initialResponse: Option.some(WINDOWED_SNAPSHOT) });
-      yield* harness.awaitState((value) => Option.isSome(value.page));
-
-      requestOlderThreadTurns(TARGET.environmentId, THREAD_ID);
-      yield* harness.awaitState((value) =>
-        Option.match(value.page, { onNone: () => false, onSome: (page) => page.loadingOlder }),
-      );
-      yield* Queue.offer(harness.inputs, {
-        kind: "snapshot",
-        snapshot: {
-          snapshotSequence: 20,
-          thread: { ...BASE_THREAD, title: "Replaced thread" },
-          page: { beforeCursor: "cursor-2", hasMore: true, snapshotSequence: 20 },
-        },
-      });
-      yield* harness.awaitState((value) =>
-        Option.match(value.data, {
-          onNone: () => false,
-          onSome: (thread) => thread.title === "Replaced thread",
-        }),
-      );
-      yield* harness.resolveNextPage(Option.some(OLDER_PAGE));
-
-      const state = yield* harness.awaitState((value) =>
-        Option.match(value.page, { onNone: () => false, onSome: (page) => !page.loadingOlder }),
-      );
-      expect(hasMessage(state, "message-old")).toBe(false);
-      // The replacement snapshot's cursor wins over the discarded page's.
-      expect(Option.getOrThrow(state.page).beforeCursor).toBe("cursor-2");
-    }),
-  );
-
-  it.effect("keeps a new page loading when a snapshot replaced a parked older page", () =>
-    Effect.gen(function* () {
-      const harness = yield* makeHarness({ initialResponse: Option.some(WINDOWED_SNAPSHOT) });
-      yield* harness.awaitState((value) => Option.isSome(value.page));
-      requestOlderThreadTurns(TARGET.environmentId, THREAD_ID);
-      yield* harness.resolveNextPage(
-        Option.some({
-          ...OLDER_PAGE,
-          snapshotSequence: 30,
-          page: { beforeCursor: null, hasMore: false, snapshotSequence: 30, threadSequence: 30 },
-        }),
-      );
-      yield* Queue.offer(harness.inputs, titleEvent("Waiting for old watermark", 11));
-      yield* harness.awaitState((value) =>
-        Option.exists(value.data, (thread) => thread.title === "Waiting for old watermark"),
-      );
-      expect(
-        Option.getOrThrow((yield* SubscriptionRef.get(harness.threadState)).page).loadingOlder,
-      ).toBe(true);
-
-      yield* Queue.offer(harness.inputs, {
-        kind: "snapshot",
-        snapshot: {
-          snapshotSequence: 20,
-          thread: { ...BASE_THREAD, title: "Replacement snapshot" },
-          page: { beforeCursor: "cursor-2", hasMore: true, snapshotSequence: 20 },
-        },
-      });
-      yield* harness.awaitState((value) =>
-        Option.exists(value.data, (thread) => thread.title === "Replacement snapshot"),
-      );
-      requestOlderThreadTurns(TARGET.environmentId, THREAD_ID);
-      yield* harness.awaitState((value) =>
-        Option.exists(value.page, (page) => page.loadingOlder && page.beforeCursor === "cursor-2"),
-      );
-      yield* Queue.offer(harness.inputs, titleEvent("New request still loading", 21));
-      yield* harness.awaitState((value) =>
-        Option.exists(value.data, (thread) => thread.title === "New request still loading"),
-      );
-      const loading = yield* SubscriptionRef.get(harness.threadState);
-      expect(Option.getOrThrow(loading.page).loadingOlder).toBe(true);
-      expect(hasMessage(loading, "message-old")).toBe(false);
-      expect((yield* Ref.get(harness.loaderWindows)).map((window) => window?.beforeCursor)).toEqual(
-        [undefined, "cursor-1", "cursor-2"],
-      );
-
-      yield* harness.resolveNextPage(
-        Option.some({
-          ...OLDER_PAGE,
-          snapshotSequence: 21,
-          page: { beforeCursor: null, hasMore: false, snapshotSequence: 21, threadSequence: 21 },
-        }),
-      );
-      const completed = yield* harness.awaitState((value) => hasMessage(value, "message-old"));
-      expect(Option.getOrThrow(completed.page).loadingOlder).toBe(false);
-      expect(Option.getOrThrow(completed.page).beforeCursor).toBeNull();
-    }),
-  );
-
-  it.effect("discards an older page read from a projection behind the loaded state", () =>
-    Effect.gen(function* () {
-      const harness = yield* makeHarness({ initialResponse: Option.some(WINDOWED_SNAPSHOT) });
-      yield* harness.awaitState((value) => Option.isSome(value.page));
-
-      requestOlderThreadTurns(TARGET.environmentId, THREAD_ID);
-      yield* harness.awaitState((value) =>
-        Option.match(value.page, { onNone: () => false, onSome: (page) => page.loadingOlder }),
-      );
-      yield* harness.resolveNextPage(Option.some({ ...OLDER_PAGE, snapshotSequence: 5 }));
-
-      const state = yield* harness.awaitState((value) =>
-        Option.match(value.page, { onNone: () => false, onSome: (page) => !page.loadingOlder }),
-      );
-      expect(hasMessage(state, "message-old")).toBe(false);
-      expect(Option.getOrThrow(state.page).beforeCursor).toBe("cursor-1");
-    }),
-  );
-
-  it.effect("a merged history page never advances the live-event dedupe sequence", () =>
-    Effect.gen(function* () {
-      const harness = yield* makeHarness({ initialResponse: Option.some(WINDOWED_SNAPSHOT) });
-      yield* harness.awaitState((value) => Option.isSome(value.page));
-
-      requestOlderThreadTurns(TARGET.environmentId, THREAD_ID);
-      yield* harness.awaitState((value) =>
-        Option.match(value.page, { onNone: () => false, onSome: (page) => page.loadingOlder }),
-      );
-      // The page was captured at a newer projection sequence (12) than the
-      // loaded state (10); merging it must not swallow events 11-12.
-      yield* harness.resolveNextPage(
-        Option.some({
+      const harness = yield* makeHarness();
+      const loading = yield* harness.loadEarlier().pipe(Effect.forkScoped);
+      const continued = { ...OLDER_ROW.item, output: "out-0 continued" };
+      yield* Deferred.succeed(
+        yield* harness.nextPage,
+        pageResponse({
           ...OLDER_PAGE,
           snapshotSequence: 12,
-          page: { beforeCursor: null, hasMore: false, snapshotSequence: 12 },
+          items: [{ ...OLDER_ROW, item: continued }],
         }),
       );
-      yield* harness.awaitState((value) => hasMessage(value, "message-old"));
-
-      // Event at sequence 11 must still apply after the merge: the revert
-      // discards turn-2, so the loaded window's row disappears while the
-      // merged older turn-1 row survives. If the merge had advanced the
-      // dedupe sequence to the page's 12, this event would be swallowed.
-      yield* Queue.offer(harness.inputs, revertEvent(11));
-      const state = yield* harness.awaitState(
-        (value) => !hasMessage(value, "message-recent") && hasMessage(value, "message-old"),
-      );
-      expect(hasMessage(state, "message-old")).toBe(true);
-    }),
-  );
-
-  it.effect("parks a page read ahead of the live state until events catch up", () =>
-    Effect.gen(function* () {
-      // A page whose thread watermark is ahead of the loaded state may
-      // contain streaming content the subscription has not delivered yet
-      // (e.g. an out-of-window subagent turn mid-stream); merging it
-      // immediately and then replaying those deltas would duplicate text.
-      // The page parks until the live state reaches the watermark.
-      const harness = yield* makeHarness({ initialResponse: Option.some(WINDOWED_SNAPSHOT) });
-      yield* harness.awaitState((value) => Option.isSome(value.page));
-
-      requestOlderThreadTurns(TARGET.environmentId, THREAD_ID);
-      yield* harness.awaitState((value) =>
-        Option.match(value.page, { onNone: () => false, onSome: (page) => page.loadingOlder }),
-      );
-      // Page watermark 11 > loaded sequence 10: must park, not merge.
-      yield* harness.resolveNextPage(
-        Option.some({
-          ...OLDER_PAGE,
-          snapshotSequence: 11,
-          page: { beforeCursor: null, hasMore: false, snapshotSequence: 11, threadSequence: 11 },
-        }),
-      );
-
-      // A live event at sequence 11 arrives; only then does the page merge.
+      expect(yield* Fiber.join(loading)).toEqual({ _tag: "loaded" });
       yield* Queue.offerAll(harness.inputs, [
-        titleEvent("Advanced past watermark", 11),
-        {
-          kind: "event",
-          event: {
-            eventId: EventId.make("event-after-page"),
-            sequence: 12,
-            aggregateKind: "thread",
-            aggregateId: THREAD_ID,
-            occurredAt: BASE_THREAD.createdAt,
-            commandId: null,
-            causationEventId: null,
-            correlationId: null,
-            metadata: {},
-            type: "thread.message-sent",
-            payload: {
-              ...OLDER_MESSAGE,
-              threadId: THREAD_ID,
-              messageId: OLDER_MESSAGE.id,
-              text: " continued",
-              streaming: true,
-            },
-          },
-        },
+        itemEvent(continued, 11),
+        titleEvent("Caught up with history", 12),
       ]);
-      const state = yield* harness.awaitState(
-        (value) => Option.getOrNull(value.data)?.messages[0]?.text.endsWith(" continued") === true,
-      );
-      expect(Option.getOrThrow(state.data).messages[0]?.text).toBe(
-        `${OLDER_MESSAGE.text} continued`,
-      );
-      expect(hasMessage(state, "message-recent")).toBe(true);
-      expect(Option.getOrThrow(state.page).loadingOlder).toBe(false);
-    }),
-  );
-
-  it.effect("a revert keeps the page cursor and triggers no refresh fetch", () =>
-    Effect.gen(function* () {
-      // Cursors are an (anchor, turnId) keyset derived from event content, so
-      // they survive the revert projector's row rewrite: the machine keeps
-      // the stored cursor and performs no snapshot re-fetch. The revert
-      // reducer's turn filtering alone handles loaded history.
-      const harness = yield* makeHarness({ initialResponse: Option.some(WINDOWED_SNAPSHOT) });
-      yield* harness.awaitState((value) => Option.isSome(value.page));
-
-      yield* Queue.offer(harness.inputs, revertEvent(11));
-      const state = yield* harness.awaitState((value) => !hasMessage(value, "message-recent"));
-
-      expect(Option.getOrThrow(state.page).beforeCursor).toBe("cursor-1");
-      const windows = yield* Ref.get(harness.loaderWindows);
-      // Only the initial load hit the loader — no post-revert refresh fetch.
-      expect(windows.length).toBe(1);
-    }),
-  );
-
-  it.effect("drops a windowed cache when the server lacks the pagination capability", () =>
-    Effect.gen(function* () {
-      // Resuming a windowed cache via afterSequence against a pre-pagination
-      // server would render only the window forever with no way to load the
-      // rest: the machine must discard the cache and take a full snapshot.
-      const fullSnapshot: OrchestrationThreadDetailSnapshot = {
-        snapshotSequence: 20,
-        thread: { ...BASE_THREAD, title: "Full reload" },
-      };
-      const harness = yield* makeHarness({
-        paginationCapability: false,
-        cached: WINDOWED_SNAPSHOT,
-        initialResponse: Option.some(fullSnapshot),
-      });
-
       const state = yield* harness.awaitState((value) =>
-        Option.match(value.data, {
-          onNone: () => false,
-          onSome: (thread) => thread.title === "Full reload",
-        }),
+        Option.exists(
+          value.data,
+          (projection) => projection.thread.title === "Caught up with history",
+        ),
       );
-      expect(Option.isNone(state.page)).toBe(true);
-      // The subscription resumed from the fresh full snapshot, not the
-      // discarded windowed cache's watermark, and sent no window fields.
-      const subscribeInput = yield* Ref.get(harness.lastSubscribeInput);
-      expect(subscribeInput?.turnLimit).toBeUndefined();
-      expect(subscribeInput?.afterSequence).toBe(20);
+      expect(Option.getOrThrow(state.data).visibleTurnItems.map((entry) => entry.item)).toEqual([
+        continued,
+        RECENT_ROW.item,
+      ]);
     }),
   );
 
-  it.effect("keeps a windowed cache when the server supports pagination", () =>
+  it.effect("a rollback retains the history cursor without refreshing the snapshot", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness();
+      yield* Queue.offer(harness.inputs, rollbackEvent(11));
+      const state = yield* harness.awaitState((value) =>
+        Option.exists(value.data, (projection) => projection.runs[0]?.status === "rolled_back"),
+      );
+      expect(visibleIds(state)).toEqual([]);
+      expect(state.history.historyCursor).toBe("cursor-1");
+      expect(yield* Ref.get(harness.loaderCalls)).toBe(1);
+      expect(yield* Ref.get(harness.historyCursors)).toEqual([]);
+    }),
+  );
+
+  it.effect("a full replacement of a cached window clears load-earlier state", () =>
     Effect.gen(function* () {
       const harness = yield* makeHarness({ cached: WINDOWED_SNAPSHOT });
-      const state = yield* harness.awaitState((value) => Option.isSome(value.page));
-      expect(Option.getOrThrow(state.page).beforeCursor).toBe("cursor-1");
-      // Wait for the subscription (recorded when the WS method is invoked)
-      // before asserting its input.
-      const subscribeInput = yield* Ref.get(harness.lastSubscribeInput).pipe(
-        Effect.repeat({ until: (input) => input !== undefined }),
+      expect(harness.subscribeInput.afterSequence).toBe(10);
+      yield* Queue.offer(harness.inputs, replacementSnapshot(false));
+      const state = yield* harness.awaitState((value) =>
+        Option.exists(
+          value.data,
+          (projection) => projection.thread.title === "Replacement snapshot",
+        ),
       );
-      expect(subscribeInput?.afterSequence).toBe(10);
+      expect(state.history).toMatchObject({ historyCursor: null, hasMoreHistory: false });
+      expect(yield* harness.loadEarlier()).toEqual({ _tag: "noop" });
+      expect(yield* Ref.get(harness.historyCursors)).toEqual([]);
+    }),
+  );
+
+  it.effect("resumes a cached history window and loads earlier rows without another snapshot", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({ cached: WINDOWED_SNAPSHOT });
+      expect(harness.subscribeInput.afterSequence).toBe(10);
+      expect((yield* SubscriptionRef.get(harness.threadState)).history.historyCursor).toBe(
+        "cursor-1",
+      );
+      const loading = yield* harness.loadEarlier().pipe(Effect.forkScoped);
+      yield* Deferred.succeed(yield* harness.nextPage, pageResponse());
+      expect(yield* Fiber.join(loading)).toEqual({ _tag: "loaded" });
+      expect(visibleIds(yield* SubscriptionRef.get(harness.threadState))).toEqual([
+        OLDER_ROW.sourceItemId,
+        RECENT_ROW.sourceItemId,
+      ]);
+      expect(yield* Ref.get(harness.loaderCalls)).toBe(0);
+      expect(yield* Ref.get(harness.historyCursors)).toEqual(["cursor-1"]);
     }),
   );
 });

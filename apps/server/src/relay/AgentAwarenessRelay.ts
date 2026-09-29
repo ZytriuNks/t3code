@@ -53,6 +53,7 @@ export class AgentAwarenessRelay extends Context.Service<
   AgentAwarenessRelay,
   {
     readonly publishThread: (threadId: ThreadId) => Effect.Effect<void>;
+    readonly drain: Effect.Effect<void>;
     /** Retries a pending catch-up publish now. Call after this process links or enables publishing. */
     readonly requestCatchUp: () => Effect.Effect<void>;
     readonly start: () => Effect.Effect<void, never, Scope.Scope>;
@@ -91,6 +92,7 @@ export function shouldPublishAgentAwarenessEvent(
     case "runtime-request.updated":
       return true;
     case "thread.settled":
+    case "thread.auto-settle-set":
     case "thread.unsettled":
     case "thread.snoozed":
     case "thread.unsnoozed":
@@ -312,15 +314,15 @@ function resolveAgentAwarenessRelayPublishSnapshot(input: {
   };
 }
 
-function terminalWorkSinceStart(thread: OrchestrationThreadShell, startedAt: number): boolean {
-  return Date.parse(thread.latestTurn?.completedAt ?? "") > startedAt;
+function terminalWorkSinceStart(thread: OrchestrationV2ThreadShell, startedAt: number): boolean {
+  return (thread.latestRunCompletedAt?.epochMilliseconds ?? 0) > startedAt;
 }
 
 export function resolveAgentAwarenessRelayActiveThreadIds(input: {
   readonly environmentId: EnvironmentId;
   readonly startedAt: number;
-  readonly projects: ReadonlyArray<Pick<OrchestrationProjectShell, "id" | "title">>;
-  readonly threads: ReadonlyArray<OrchestrationThreadShell>;
+  readonly projects: ReadonlyArray<Pick<Project, "id" | "title">>;
+  readonly threads: ReadonlyArray<OrchestrationV2ThreadShell>;
 }): ReadonlyArray<ThreadId> {
   const projectById = new Map(input.projects.map((project) => [project.id, project]));
   return input.threads
@@ -329,7 +331,7 @@ export function resolveAgentAwarenessRelayActiveThreadIds(input: {
       if (!project) {
         return false;
       }
-      const state = projectThreadAwareness({
+      const state = projectThreadAwarenessV2({
         environmentId: input.environmentId,
         project,
         thread,
@@ -603,11 +605,7 @@ export const make = Effect.gen(function* () {
     publishConfirmDeadlines.delete(threadId);
     yield* Ref.update(publishedStateByThreadRef, (publishedStates) => {
       const nextPublishedStates = new Map(publishedStates);
-      if (snapshot.state === null) {
-        nextPublishedStates.delete(threadId);
-      } else {
-        nextPublishedStates.set(threadId, publishIdentity);
-      }
+      nextPublishedStates.set(threadId, publishIdentity);
       return nextPublishedStates;
     });
   });
@@ -631,6 +629,41 @@ export const make = Effect.gen(function* () {
       Effect.withSpan("AgentAwarenessRelay.publishThread"),
       withRelayClientTracing,
     );
+  });
+
+  const worker = yield* makeAgentAwarenessPublishWorker(processThreadPublish);
+  const enqueueThreadPublish = (threadId: ThreadId) =>
+    cancelPublishRetry(threadId).pipe(Effect.andThen(worker.enqueue(threadId)));
+  const publishThread: AgentAwarenessRelay["Service"]["publishThread"] = (threadId) =>
+    enqueueThreadPublish(threadId).pipe(Effect.andThen(worker.drain));
+
+  schedulePublishRetry = Effect.fnUntraced(function* (threadId: ThreadId) {
+    const attempts = publishRetries.get(threadId)?.attempts ?? 0;
+    const delayMs = RELAY_AGENT_ACTIVITY_RETRY_DELAYS_MS[attempts];
+    if (delayMs === undefined) {
+      yield* Effect.logWarning("agent activity publish retry budget exhausted", { threadId });
+      return;
+    }
+    const retry = {
+      attempts: attempts + 1,
+      timer: undefined as Fiber.Fiber<void> | undefined,
+    };
+    publishRetries.set(threadId, retry);
+    const timer = yield* Effect.sleep(delayMs).pipe(
+      Effect.andThen(
+        Effect.suspend(() => {
+          if (publishRetries.get(threadId) !== retry) return Effect.void;
+          retry.timer = undefined;
+          return worker.enqueue(threadId);
+        }),
+      ),
+      Effect.forkIn(scope),
+    );
+    if (publishRetries.get(threadId) !== retry) {
+      yield* Fiber.interrupt(timer);
+    } else {
+      retry.timer = timer;
+    }
   });
 
   // Publishes the active threads once. Returns why it did not, so the retry
@@ -665,8 +698,8 @@ export const make = Effect.gen(function* () {
     const activeThreadIds = resolveAgentAwarenessRelayActiveThreadIds({
       environmentId,
       startedAt,
-      projects: snapshot.projects,
-      threads: snapshot.threads,
+      projects: projectSnapshot.projects,
+      threads: shellSnapshot.threads,
     });
     if (activeThreadIds.length === 0) {
       yield* Effect.logDebug("agent activity snapshot has no publishable threads");
@@ -675,7 +708,8 @@ export const make = Effect.gen(function* () {
     yield* Effect.logInfo("publishing active agent activity snapshot", {
       count: activeThreadIds.length,
     });
-    yield* Effect.forEach(activeThreadIds, publishThread, { concurrency: 4, discard: true });
+    yield* Effect.forEach(activeThreadIds, enqueueThreadPublish, { discard: true });
+    yield* worker.drain;
     return "published" as const;
   });
 
@@ -771,6 +805,7 @@ export const make = Effect.gen(function* () {
 
   return AgentAwarenessRelay.of({
     publishThread,
+    drain: worker.drain,
     requestCatchUp: () => Queue.offer(catchUpRequests, undefined).pipe(Effect.asVoid),
     start,
   });

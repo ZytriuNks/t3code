@@ -1,4 +1,4 @@
-import { ThreadId, type WorktreeSetupSnapshot } from "@t3tools/contracts";
+import { ProviderInstanceId, ThreadId, type WorktreeSetupSnapshot } from "@t3tools/contracts";
 import {
   CheckpointRef,
   NodeId,
@@ -16,6 +16,7 @@ import {
 } from "../../session-logic";
 import { makeStreamingTimelineFixture } from "../../test-fixtures";
 import type { TurnDiffSummary } from "../../types";
+import type { QueuedComposerMessage } from "../../queuedMessageStore";
 import { describe, expect, it } from "vite-plus/test";
 import { MessageId, RunId } from "@t3tools/contracts";
 import {
@@ -34,6 +35,43 @@ import {
   workEntryDisplayLabel,
   workEntryIsVisibleInGroup,
 } from "./MessagesTimeline.logic";
+
+describe("local queued messages", () => {
+  it("keeps queued submissions visible after timeline activity in submission order", () => {
+    const makeQueuedMessage = (id: string): QueuedComposerMessage => ({
+      id,
+      prompt: id,
+      images: [],
+      files: [],
+      terminalContexts: [],
+      threadContexts: [],
+      previewAnnotations: [],
+      reviewComments: [],
+      sendSettings: {
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        promptEffort: null,
+      },
+      queuedAfterToolActivityId: null,
+      createdAt: "2026-09-11T00:00:00.000Z",
+    });
+    const first = makeQueuedMessage("first");
+    const second = makeQueuedMessage("second");
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries: [],
+      queuedMessages: [first, second],
+      isWorking: false,
+      turnDiffSummaries: [],
+      supportsConversationRollback: false,
+    });
+
+    expect(rows.slice(-2)).toEqual([
+      expect.objectContaining({ kind: "queued-message", queuedMessage: first, isNext: true }),
+      expect.objectContaining({ kind: "queued-message", queuedMessage: second, isNext: false }),
+    ]);
+  });
+});
 
 describe("expanded tool group scrolling", () => {
   const entries = [{ id: "first" }, { id: "second" }];
@@ -529,46 +567,6 @@ describe("resolveAssistantMessageCopyState", () => {
 });
 
 describe("deriveMessagesTimelineRows", () => {
-  const queuedMessage = (id: string, prompt: string) => ({
-    id,
-    prompt,
-    images: [],
-    files: [],
-    terminalContexts: [],
-    previewAnnotations: [],
-    reviewComments: [],
-    sendSettings: {
-      modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
-      runtimeMode: "full-access" as const,
-      interactionMode: "default" as const,
-      promptEffort: null,
-    },
-    queuedAfterToolActivityId: null,
-    createdAt: "2026-01-01T00:00:01Z",
-  });
-
-  it("appends queued messages after the live rows, marking the oldest as next", () => {
-    const rows = deriveMessagesTimelineRows({
-      timelineEntries: [],
-      isWorking: true,
-      activeTurnStartedAt: "2026-01-01T00:00:00Z",
-      turnDiffSummaries: [],
-      supportsConversationRollback: false,
-      queuedMessages: [queuedMessage("q1", "first"), queuedMessage("q2", "second")],
-    });
-
-    expect(rows.map((row) => row.kind)).toEqual([
-      "working",
-      "thinking",
-      "queued-message",
-      "queued-message",
-    ]);
-    expect(rows.slice(2)).toMatchObject([
-      { id: "queued-message:q1", isNext: true, queuedMessage: { prompt: "first" } },
-      { id: "queued-message:q2", isNext: false, queuedMessage: { prompt: "second" } },
-    ]);
-  });
-
   it("leads the worktree setup card with the working header", () => {
     const snapshot: WorktreeSetupSnapshot = {
       threadId: ThreadId.make("thread-setup"),
@@ -591,7 +589,7 @@ describe("deriveMessagesTimelineRows", () => {
         id: "user-1" as never,
         role: "user",
         text: "Build it",
-        turnId: null,
+        runId: null,
         createdAt: "2026-01-01T00:00:00Z",
         updatedAt: "2026-01-01T00:00:00Z",
         streaming: false,
@@ -605,7 +603,7 @@ describe("deriveMessagesTimelineRows", () => {
         id: "assistant-1" as never,
         role: "assistant",
         text: "On it",
-        turnId: "turn-1" as never,
+        runId: "turn-1" as never,
         createdAt: "2026-01-01T00:00:30Z",
         updatedAt: "2026-01-01T00:00:30Z",
         streaming: true,
@@ -621,6 +619,139 @@ describe("deriveMessagesTimelineRows", () => {
     });
     expect(withoutMessages).toEqual([
       { kind: "working", id: "working-indicator-row", createdAt: "2026-01-01T00:00:00Z" },
+      {
+        kind: "worktree-setup",
+        id: "worktree-setup-row",
+        createdAt: "2026-01-01T00:00:00Z",
+        snapshot,
+        embedded: false,
+      },
+    ]);
+
+    // The main pass already places the working header after the send while a
+    // bootstrap counts as working; the card slots under that one header.
+    const withUserMessage = deriveMessagesTimelineRows({
+      timelineEntries: [userEntry],
+      isWorking: true,
+      activeTurnStartedAt: "2026-01-01T00:00:00Z",
+      turnDiffSummaries: [],
+      supportsConversationRollback: false,
+      worktreeSetup: snapshot,
+    });
+    expect(withUserMessage.map((row) => row.kind)).toEqual([
+      "message",
+      "working",
+      "worktree-setup",
+    ]);
+
+    // A failed setup never handed off, so the card stays under the send. The
+    // rest of the timeline is untouched: a running send still gets its
+    // working and thinking rows remain visible.
+    const withMessages = deriveMessagesTimelineRows({
+      timelineEntries: [userEntry, assistantEntry],
+      isWorking: true,
+      activeTurnStartedAt: "2026-01-01T00:00:00Z",
+      turnDiffSummaries: [],
+      supportsConversationRollback: false,
+      worktreeSetup: { ...snapshot, phase: "failed" },
+    });
+    expect(withMessages.map((row) => row.kind)).toEqual([
+      "message",
+      "worktree-setup",
+      "working",
+      "message",
+      "thinking",
+    ]);
+    // Once the agent stage is done and the turn is live, a still-running
+    // script leaves the timeline; the working header surfaces it instead.
+    const stage = (id: "agent" | "setup-script", status: "done" | "running") =>
+      ({
+        id,
+        status,
+        startedAt: "2026-01-01T00:00:10Z",
+        endedAt: status === "done" ? "2026-01-01T00:00:11Z" : null,
+        percent: null,
+        detail: null,
+        tail: [],
+      }) as const;
+    const asyncSnapshot: WorktreeSetupSnapshot = {
+      ...snapshot,
+      stages: [stage("setup-script", "running"), stage("agent", "done")],
+    };
+    const liveTurn = {
+      runId: "turn-1" as never,
+      status: "running",
+      startedAt: "2026-01-01T00:00:11Z",
+      completedAt: null,
+    } as const;
+    const asyncRows = deriveMessagesTimelineRows({
+      timelineEntries: [userEntry],
+      latestRun: liveTurn,
+      isWorking: true,
+      activeTurnStartedAt: "2026-01-01T00:00:00Z",
+      turnDiffSummaries: [],
+      supportsConversationRollback: false,
+      worktreeSetup: asyncSnapshot,
+    });
+    expect(asyncRows.map((row) => row.kind)).toEqual(["message", "working", "thinking"]);
+
+    // Dispatched but not yet visible as a turn: the full card stays put so
+    // nothing collapses during the handoff.
+    const handoffRows = deriveMessagesTimelineRows({
+      timelineEntries: [userEntry],
+      isWorking: true,
+      activeTurnStartedAt: "2026-01-01T00:00:00Z",
+      turnDiffSummaries: [],
+      supportsConversationRollback: false,
+      worktreeSetup: asyncSnapshot,
+    });
+    expect(handoffRows.map((row) => row.kind)).toEqual(["message", "working", "worktree-setup"]);
+    expect(handoffRows[2]).toMatchObject({ kind: "worktree-setup", embedded: false });
+
+    // A script that outlives the reply never trails the assistant's message.
+    const outlivedRows = deriveMessagesTimelineRows({
+      timelineEntries: [
+        userEntry,
+        { ...assistantEntry, message: { ...assistantEntry.message, streaming: false } },
+      ],
+      latestRun: { ...liveTurn, status: "completed", completedAt: "2026-01-01T00:00:40Z" },
+      isWorking: false,
+      activeTurnStartedAt: null,
+      turnDiffSummaries: [],
+      supportsConversationRollback: false,
+      worktreeSetup: asyncSnapshot,
+    });
+    expect(outlivedRows.map((row) => row.kind)).toEqual(["message", "message"]);
+
+    // A failed script after the handoff keeps its row under the send.
+    const failedRows = deriveMessagesTimelineRows({
+      timelineEntries: [userEntry],
+      latestRun: liveTurn,
+      isWorking: true,
+      activeTurnStartedAt: "2026-01-01T00:00:00Z",
+      turnDiffSummaries: [],
+      supportsConversationRollback: false,
+      worktreeSetup: {
+        ...asyncSnapshot,
+        phase: "done",
+        endedAt: "2026-01-01T00:00:20Z",
+        stages: [{ ...stage("setup-script", "done"), status: "failed" }, stage("agent", "done")],
+      },
+    });
+    expect(failedRows.map((row) => row.kind)).toEqual([
+      "message",
+      "worktree-setup",
+      "working",
+      "thinking",
+    ]);
+    expect(failedRows[1]).toMatchObject({ kind: "worktree-setup", embedded: true });
+  });
+
+  it("presents project MCP calls and summarizes successful clones through the web timeline", () => {
+    const fixture = makeStreamingTimelineFixture();
+    const source = fixture.visibleTurnItems.find((row) => row.item.type === "dynamic_tool")!;
+    if (source.item.type !== "dynamic_tool") throw new Error("Expected tool fixture");
+    const items: OrchestrationV2ProjectedTurnItem["item"][] = [
       {
         ...source.item,
         type: "dynamic_tool",

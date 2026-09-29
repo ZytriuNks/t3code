@@ -7,6 +7,7 @@ import {
   type ComposerFileAttachment,
   type ComposerImageAttachment,
 } from "../../composerDraftStore";
+import { threadContextRecord } from "../../lib/composerContextRecords";
 import { prepareQueuedEditAttachments, recoverQueuedMessageEdit } from "./queuedMessageEdit";
 
 const environmentId = EnvironmentId.make("remote-environment");
@@ -37,7 +38,7 @@ const uploadedFile = {
   sizeBytes: file.sizeBytes,
 };
 
-describe("queued message file edits", () => {
+describe("queued message edits", () => {
   beforeEach(() => {
     useComposerDraftStore.setState({ draftsByThreadKey: {}, draftThreadsByThreadKey: {} });
   });
@@ -118,6 +119,23 @@ describe("queued message file edits", () => {
       "discarded",
     );
     expect(store.getComposerDraft(threadTarget)?.prompt).toBe("Separate draft");
+    expect(store.getComposerDraft(editTarget)).toBeNull();
+  });
+
+  it("keeps a thread reference when a queued edit is recovered", () => {
+    const store = useComposerDraftStore.getState();
+    const reference = threadContextRecord(
+      scopeThreadRef(environmentId, ThreadId.make("thread:reference")),
+      "Earlier thread",
+    );
+    store.setPrompt(editTarget, "Original message");
+    store.setThreadContexts(editTarget, [reference]);
+
+    expect(
+      recoverQueuedMessageEdit({ editTarget, threadTarget, originalText: "Original message" }),
+    ).toBe("kept");
+    expect(store.getComposerDraft(threadTarget)?.threadContexts).toEqual([reference]);
+    expect(store.getComposerDraft(threadTarget)?.prompt).toContain(reference.contextId);
     expect(store.getComposerDraft(editTarget)).toBeNull();
   });
 });

@@ -71,6 +71,7 @@ import {
   getStartedThreadModelChangeBlockReason,
   hasEnvironmentReconnectWarningGraceElapsed,
   hasServerAcknowledgedLocalDispatch,
+  latestCompletedToolTurnItemId,
   isBranchMismatchDismissedForSession,
   reconcileMountedTerminalThreadIds,
   resolveDraftPromotionNavigationTarget,
@@ -578,6 +579,46 @@ describe("startNewThreadForProject", () => {
       }),
     ).toBe(false);
     expect(called).toBe(false);
+  });
+});
+
+describe("latestCompletedToolTurnItemId", () => {
+  it("uses the newest V2 tool completion even when items arrive out of order", () => {
+    const first = DateTime.makeUnsafe("2026-03-29T00:00:01.000Z");
+    const latest = DateTime.makeUnsafe("2026-03-29T00:00:02.000Z");
+    const items: Parameters<typeof latestCompletedToolTurnItemId>[0] = [
+      {
+        id: TurnItemId.make("tool-latest"),
+        type: "dynamic_tool",
+        status: "failed",
+        completedAt: latest,
+        ordinal: 1,
+      },
+      {
+        id: TurnItemId.make("assistant"),
+        type: "assistant_message",
+        status: "completed",
+        completedAt: latest,
+        ordinal: 4,
+      },
+      {
+        id: TurnItemId.make("tool-pending"),
+        type: "command_execution",
+        status: "running",
+        completedAt: null,
+        ordinal: 3,
+      },
+      {
+        id: TurnItemId.make("tool-first"),
+        type: "command_execution",
+        status: "completed",
+        completedAt: first,
+        ordinal: 2,
+      },
+    ];
+
+    expect(latestCompletedToolTurnItemId(items)).toBe("tool-latest");
+    expect(latestCompletedToolTurnItemId([])).toBeNull();
   });
 });
 

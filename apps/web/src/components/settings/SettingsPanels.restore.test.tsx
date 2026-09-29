@@ -24,6 +24,16 @@ vi.mock("react/compiler-runtime", async () => {
   return { c: reactHookHarness.useMemoCache };
 });
 
+vi.mock("../../i18n/I18nProvider", async () => {
+  const { translate } = await import("../../i18n/messages");
+  return {
+    useI18n: () => ({
+      t: (key: Parameters<typeof translate>[1], values?: Parameters<typeof translate>[2]) =>
+        translate("en", key, values),
+    }),
+  };
+});
+
 vi.mock("../../hooks/useTheme", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../hooks/useTheme")>()),
   useTheme: () => ({

@@ -86,30 +86,16 @@ function dateTime(value: string): DateTime.Utc {
   return DateTime.makeUnsafe(value);
 }
 
-function hasImportBlockingActivity(
-  thread: OrchestrationThread,
-  importedHistoryPresent: boolean,
-): boolean {
-  return (
-    thread.archivedAt !== null ||
-    thread.deletedAt !== null ||
-    thread.latestTurn !== null ||
-    thread.session !== null ||
-    thread.messages.some((message) => !isImportedAgentSessionMessageId(message.id)) ||
-    thread.proposedPlans.length > 0 ||
-    thread.activities.length > 0 ||
-    thread.checkpoints.length > 0 ||
-    thread.snoozedUntil != null ||
-    thread.snoozedAt != null ||
-    thread.pinnedAt != null ||
-    thread.pinOrderKey != null ||
-    thread.autoSettleDisabledAt != null ||
-    thread.titleRegeneration != null ||
-    thread.linkedPullRequest != null ||
-    thread.unsettledAt != null ||
-    (importedHistoryPresent
-      ? thread.settledOverride !== "settled"
-      : thread.settledOverride !== null || thread.settledAt !== null)
+function messageEvents(input: {
+  readonly threadId: ThreadId;
+  readonly index: number;
+  readonly message: AgentSessionScanner.AgentSessionThreadMessage;
+}): ReadonlyArray<OrchestrationV2DomainEvent> {
+  const ordinal = input.index + 1;
+  const suffix = String(input.index).padStart(6, "0");
+  const messageId = MessageId.make(`${input.threadId}:${suffix}`);
+  const turnItemId = TurnItemId.make(
+    `${IMPORT_EVENT_PREFIX}:turn-item:${input.threadId}:${suffix}`,
   );
   const at = dateTime(input.message.createdAt);
   const message: OrchestrationV2ConversationMessage = {

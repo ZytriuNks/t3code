@@ -30,6 +30,16 @@ vi.mock("@t3tools/client-runtime/state/runtime", async (importOriginal) => ({
   squashAtomCommandFailure: () => new Error("The settings update failed."),
 }));
 
+vi.mock("../../i18n/I18nProvider", async () => {
+  const { translate } = await import("../../i18n/messages");
+  return {
+    useI18n: () => ({
+      t: (key: Parameters<typeof translate>[1], values?: Parameters<typeof translate>[2]) =>
+        translate("en", key, values),
+    }),
+  };
+});
+
 vi.mock("../../hooks/useSettings", () => ({
   useEnvironmentSettings: settingsHooks.read,
   usePersistEnvironmentProviderInstanceMutation: settingsHooks.useMutation,

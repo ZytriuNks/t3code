@@ -1,14 +1,4 @@
-import type { UsageProviderKind } from "@t3tools/contracts";
-
-import {
-  AntigravityIcon,
-  ClaudeAI,
-  CursorIcon,
-  GrokIcon,
-  type Icon,
-  OpenAI,
-  OpenCodeIcon,
-} from "../Icons";
+import { ProviderDriverKind, type UsageProviderKind } from "@t3tools/contracts";
 
 type UsageProviderPresentation = {
   readonly label: string;
@@ -38,9 +28,17 @@ export const PROVIDER_PRESENTATION = {
     color: "color-mix(in oklab, var(--contrast-foreground) 72%, var(--background))",
     driverKind: ProviderDriverKind.make("grok"),
   },
-  cursor: { label: "Cursor", color: "#8b8b8b", mark: CursorIcon },
-  opencode: { label: "OpenCode", color: "#5b9bbd", mark: OpenCodeIcon },
-  antigravity: { label: "Antigravity", color: "#8c7bd1", mark: AntigravityIcon },
+  cursor: { label: "Cursor", color: "#8b8b8b", driverKind: ProviderDriverKind.make("cursor") },
+  opencode: {
+    label: "OpenCode",
+    color: "#5b9bbd",
+    driverKind: ProviderDriverKind.make("opencode"),
+  },
+  antigravity: {
+    label: "Antigravity",
+    color: "#8c7bd1",
+    driverKind: ProviderDriverKind.make("antigravity"),
+  },
 } satisfies Record<UsageProviderKind, UsageProviderPresentation>;
 
 /** Stable provider reading order across charts, summaries, tables, and hover rows. */

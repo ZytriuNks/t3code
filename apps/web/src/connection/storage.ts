@@ -6,6 +6,10 @@ import {
   ConnectionTargetStore,
   EMPTY_CONNECTION_CATALOG_DOCUMENT,
   EnvironmentCacheStore,
+  ORCHESTRATION_CACHE_SCHEMA_VERSION,
+  StoredOrchestrationShellSnapshot,
+  StoredOrchestrationThreadSnapshot,
+  decodeOrDiscardOrchestrationCache,
   encodeShellSnapshotForCache,
   putRemoteDpopTokenInCatalog,
   registerConnectionInCatalog,
@@ -586,7 +590,7 @@ export const connectionStorageLayer = Layer.effectContext(
             try: () =>
               // @effect-diagnostics-next-line preferSchemaOverJson:off - the snapshot is already encoded.
               JSON.stringify({
-                schemaVersion: SHELL_SNAPSHOT_CACHE_SCHEMA_VERSION,
+                schemaVersion: ORCHESTRATION_CACHE_SCHEMA_VERSION,
                 environmentId,
                 snapshot: encodedSnapshot,
               } satisfies typeof StoredShellSnapshot.Encoded),

@@ -15,6 +15,7 @@ import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { NoOpProviderEventLoggers, ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
+import { CursorSdkCatalogLive } from "../Layers/CursorSdkCatalog.ts";
 import { CursorDriver } from "./CursorDriver.ts";
 import { CursorAgentSdkRunner } from "../../orchestration-v2/Adapters/CursorAgentSdk.ts";
 import { layer as idAllocatorLayer } from "../../orchestration-v2/IdAllocator.ts";
@@ -27,6 +28,7 @@ const testLayer = ServerSecretStore.layer.pipe(
   ),
   Layer.provideMerge(NodeServices.layer),
   Layer.provideMerge(idAllocatorLayer),
+  Layer.provideMerge(CursorSdkCatalogLive),
   Layer.provideMerge(
     Layer.mock(CursorAgentSdkRunner)({
       open: () => Effect.die("Maintenance resolution must not open a Cursor session"),

@@ -6,6 +6,7 @@ import type {
 } from "@t3tools/client-runtime/state/shell";
 import {
   EMPTY_THREAD_HISTORY_META,
+  mergeEnvironmentThread,
   type EnvironmentThreadStatus,
   type ThreadHistoryMeta,
 } from "@t3tools/client-runtime/state/threads";
@@ -116,6 +117,19 @@ export function useThreadProjection(ref: ScopedThreadRef | null): EnvironmentThr
   );
 }
 
+export function useThread(
+  ref: ScopedThreadRef | null,
+  options: { waitForShell?: boolean } = {},
+): EnvironmentThread | null {
+  const shell = useThreadShell(ref);
+  const detailRef = resolveThreadDetailRef(ref, {
+    shellExists: shell !== null,
+    waitForShell: options.waitForShell ?? false,
+  });
+  const detail = useThreadProjection(detailRef);
+  return mergeEnvironmentThread(detail, shell);
+}
+
 export function useThreadStatus(ref: ScopedThreadRef | null): EnvironmentThreadStatus {
   return useAtomValue(
     ref === null ? EMPTY_THREAD_STATUS_ATOM : environmentThreadDetails.statusAtom(ref),
@@ -185,10 +199,19 @@ export function readThreadShell(ref: ScopedThreadRef): EnvironmentThreadShell | 
   return appAtomRegistry.get(environmentThreadShells.threadShellAtom(ref));
 }
 
+export function waitForThreadShell(ref: ScopedThreadRef, timeoutMs = 5_000): Promise<boolean> {
+  return waitForAtomValue({
+    registry: appAtomRegistry,
+    atom: environmentThreadShells.threadShellAtom(ref),
+    predicate: (thread) => thread !== null,
+    timeoutMs,
+  });
+}
+
 /** The thread as `useThread` returns it, read outside React. */
 export function readThread(ref: ScopedThreadRef): EnvironmentThread | null {
   return mergeEnvironmentThread(
-    appAtomRegistry.get(environmentThreadDetails.detailAtom(ref)),
+    appAtomRegistry.get(environmentThreadDetails.threadAtom(ref)),
     readThreadShell(ref),
   );
 }
@@ -217,6 +240,14 @@ export function readEnvironmentSupportsSnooze(environmentId: EnvironmentId): boo
     settlement: against older servers, clients keep the browser-local visited
     state instead. */
 export function readEnvironmentSupportsVisitedTracking(environmentId: EnvironmentId): boolean {
+  return (
+    appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities
+      .threadVisitedTracking === true
+  );
+}
+
+/** Whether the environment's server understands thread.pin/unpin. */
+export function readEnvironmentSupportsPinning(environmentId: EnvironmentId): boolean {
   return (
     appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities
       .threadPinning === true

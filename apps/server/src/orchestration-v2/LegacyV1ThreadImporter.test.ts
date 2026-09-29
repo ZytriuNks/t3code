@@ -116,6 +116,11 @@ it.layer(TestLayer)("LegacyV1ThreadImporter", (it) => {
         )
       `;
       yield* sql`
+        UPDATE projection_threads
+        SET auto_settle_disabled_at = '2026-01-03T13:00:00.000Z'
+        WHERE thread_id = ${threadId}
+      `;
+      yield* sql`
         INSERT INTO projection_thread_messages (
           message_id,
           thread_id,
@@ -212,6 +217,10 @@ it.layer(TestLayer)("LegacyV1ThreadImporter", (it) => {
         DateTime.makeUnsafe("2026-01-02T00:00:00.000Z"),
       );
       assert.equal(shellProjection.thread.pinOrderKey, "m");
+      assert.deepEqual(
+        shellProjection.thread.autoSettleDisabledAt,
+        DateTime.makeUnsafe("2026-01-03T13:00:00.000Z"),
+      );
       assert.deepEqual(
         shellProjection.thread.snoozedUntil,
         DateTime.makeUnsafe("2026-02-01T00:00:00.000Z"),
@@ -322,6 +331,7 @@ it.layer(TestLayer)("LegacyV1ThreadImporter", (it) => {
           '$.snoozedUntil',
           '$.snoozedAt',
           '$.unsettledAt',
+          '$.autoSettleDisabledAt',
           '$.linkedPullRequest',
           '$.pullRequests'
         )
@@ -341,6 +351,10 @@ it.layer(TestLayer)("LegacyV1ThreadImporter", (it) => {
       assert.deepEqual(
         repaired.thread.unsettledAt,
         DateTime.makeUnsafe("2026-01-03T12:00:00.000Z"),
+      );
+      assert.deepEqual(
+        repaired.thread.autoSettleDisabledAt,
+        DateTime.makeUnsafe("2026-01-03T13:00:00.000Z"),
       );
       assert.equal(repaired.thread.linkedPullRequest?.number, 9000);
       assert.deepStrictEqual(

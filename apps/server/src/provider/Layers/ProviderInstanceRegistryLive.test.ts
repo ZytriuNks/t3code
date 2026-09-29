@@ -1,5 +1,4 @@
 import * as ServerSecretStore from "../../auth/ServerSecretStore.ts";
-import * as CodexResetCredit from "./codexResetCredit.ts";
 /**
  * Multi-instance validation slices for `ProviderInstanceRegistryLive`.
  *
@@ -36,7 +35,7 @@ import {
   type ProviderInstanceConfigMap,
   ProviderInstanceId,
 } from "@t3tools/contracts";
-import { HostProcessPlatform, isHostWindows } from "@t3tools/shared/hostProcess";
+import { isHostWindows } from "@t3tools/shared/hostProcess";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -58,6 +57,7 @@ import { OpenCodeDriver, type OpenCodeDriverEnv } from "../Drivers/OpenCodeDrive
 import * as ModelManifest from "../ModelManifest.ts";
 import { OpenCodeRuntimeLive } from "../opencodeRuntime.ts";
 import * as ResetCreditCoordinator from "./resetCreditCoordinator.ts";
+import { CursorSdkCatalogLive } from "./CursorSdkCatalog.ts";
 import { NoOpProviderEventLoggers, ProviderEventLoggers } from "./ProviderEventLoggers.ts";
 import { makeProviderInstanceRegistry } from "./ProviderInstanceRegistryLive.ts";
 import { ProviderOrchestrationAdapterInfrastructureLive } from "./ProviderOrchestrationAdapterInfrastructure.ts";
@@ -155,6 +155,7 @@ const makeTildeProviderFixtures = Effect.fn(
   const codexPath = path.join(fixtureDir, "codex");
   const claudePath = path.join(fixtureDir, "claude");
   const claudeHomePath = path.join(fixtureDir, "claude-home");
+  const windowsHost = yield* isHostWindows;
   const codexScriptPath = path.join(fixtureDir, "codex-script.json");
   const codexFixtureDir = path.join(import.meta.dirname, "../testFixtures");
 
@@ -224,13 +225,24 @@ const makeTildeProviderFixtures = Effect.fn(
       "",
     ].join("\n"),
   );
-  yield* fileSystem.chmod(claudePath, 0o755);
+  if (windowsHost) {
+    const packageDir = path.join(fixtureDir, "node_modules", "@anthropic-ai", "claude-code");
+    yield* fileSystem.makeDirectory(packageDir, { recursive: true });
+    yield* fileSystem.copyFile(claudePath, path.join(packageDir, "cli.js"));
+    yield* fileSystem.writeFileString(path.join(packageDir, "package.json"), '{"type":"module"}');
+    yield* fileSystem.writeFileString(
+      `${claudePath}.cmd`,
+      `@echo off\r\n"${process.execPath}" "%~dp0claude" %*\r\n`,
+    );
+  } else {
+    yield* fileSystem.chmod(claudePath, 0o755);
+  }
   yield* fileSystem.makeDirectory(claudeHomePath);
 
   const asTildePath = (filePath: string) => `~/${path.relative(homePath, filePath)}`;
   return {
     codexBinaryPath: asTildePath(codexPath),
-    claudeBinaryPath: asTildePath(claudePath),
+    claudeBinaryPath: asTildePath(windowsHost ? `${claudePath}.cmd` : claudePath),
     claudeHomePath,
     codexScriptPath,
   };
@@ -253,6 +265,10 @@ describe("ProviderInstanceRegistryLive — multi-instance codex slice", () => {
     Layer.provideMerge(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
     Layer.provideMerge(ModelManifest.layerTest),
     Layer.provideMerge(ResetCreditCoordinator.layerTest),
+  );
+  const testLayer = ProviderOrchestrationAdapterInfrastructureLive.pipe(
+    Layer.provideMerge(baseLayer),
+    Layer.provideMerge(CursorSdkCatalogLive),
   );
 
   it.live("boots two independent codex instances from a ProviderInstanceConfigMap", () =>
@@ -514,11 +530,7 @@ describe("ProviderInstanceRegistryLive — multi-instance codex slice", () => {
       expect(before.usageLimits?.resetCredits?.nextCreditId).toBe("grant_a");
       const outcome = yield* instance!.consumeResetCredit!().pipe(Effect.result);
       return { outcome, after: yield* instance!.snapshot.getSnapshot };
-    }).pipe(
-      // macOS logins live in the Keychain, where resets are never read.
-      Effect.provideService(HostProcessPlatform, "linux"),
-      Effect.provide(testLayer),
-    );
+    }).pipe(Effect.provide(testLayer));
 
   it.live("refreshes Claude usage after redeeming a reset", () =>
     Effect.gen(function* () {
@@ -611,6 +623,10 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
     Layer.provideMerge(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
     Layer.provideMerge(ModelManifest.layerTest),
     Layer.provideMerge(ResetCreditCoordinator.layerTest),
+  );
+  const testLayer = ProviderOrchestrationAdapterInfrastructureLive.pipe(
+    Layer.provideMerge(baseLayer),
+    Layer.provideMerge(CursorSdkCatalogLive),
   );
 
   it.live("boots one instance of every shipped driver from a single config map", () =>

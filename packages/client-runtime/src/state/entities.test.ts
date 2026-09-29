@@ -74,6 +74,15 @@ describe("V2 client presentation", () => {
     expect(shell.source).toBe(v2ThreadShell);
   });
 
+  it("exposes the auto-settle opt-out timestamp and defaults older shells to enabled", () => {
+    const disabledAt = DateTime.makeUnsafe("2026-06-20T02:00:00.000Z");
+    expect(
+      presentThreadShell(environmentId, { ...v2ThreadShell, autoSettleDisabledAt: disabledAt })
+        .autoSettleDisabledAt,
+    ).toBe("2026-06-20T02:00:00.000Z");
+    expect(presentThreadShell(environmentId, v2ThreadShell).autoSettleDisabledAt).toBeNull();
+  });
+
   it("preserves active ordering and both pull-request sources", () => {
     const linkedPullRequest = {
       projectId: v2ThreadShell.projectId,

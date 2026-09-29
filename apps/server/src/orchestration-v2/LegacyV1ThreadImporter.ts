@@ -50,6 +50,7 @@ interface LegacyThreadRow {
   readonly archived_at: string | null;
   readonly settled_override: string | null;
   readonly settled_at: string | null;
+  readonly auto_settle_disabled_at: string | null;
   readonly unsettled_at: string | null;
   readonly snoozed_until: string | null;
   readonly snoozed_at: string | null;
@@ -230,6 +231,7 @@ function importedThread(row: LegacyThreadRow): OrchestrationV2AppThread {
     archivedAt: nullableDateTime(row.archived_at),
     settledOverride: settledOverrideFor(row.settled_override),
     settledAt: nullableDateTime(row.settled_at),
+    autoSettleDisabledAt: nullableDateTime(row.auto_settle_disabled_at),
     unsettledAt: nullableDateTime(row.unsettled_at),
     snoozedUntil: nullableDateTime(row.snoozed_until),
     snoozedAt: nullableDateTime(row.snoozed_at),
@@ -455,6 +457,7 @@ const make = Effect.gen(function* () {
         thread.archived_at,
         thread.settled_override,
         thread.settled_at,
+        thread.auto_settle_disabled_at,
         thread.unsettled_at,
         thread.snoozed_until,
         thread.snoozed_at,
@@ -476,6 +479,7 @@ const make = Effect.gen(function* () {
          OR json_type(projection.payload_json, '$.snoozedUntil') IS NULL
          OR json_type(projection.payload_json, '$.snoozedAt') IS NULL
          OR json_type(projection.payload_json, '$.unsettledAt') IS NULL
+         OR json_type(projection.payload_json, '$.autoSettleDisabledAt') IS NULL
          OR json_type(projection.payload_json, '$.linkedPullRequest') IS NULL
          OR json_type(projection.payload_json, '$.pullRequests') IS NULL
          OR json_type(projection.payload_json, '$.branchPullRequest') IS NULL
@@ -497,6 +501,10 @@ const make = Effect.gen(function* () {
           current.snoozedUntil === undefined ? legacy.snoozedUntil : current.snoozedUntil,
         snoozedAt: current.snoozedAt === undefined ? legacy.snoozedAt : current.snoozedAt,
         unsettledAt: current.unsettledAt === undefined ? legacy.unsettledAt : current.unsettledAt,
+        autoSettleDisabledAt:
+          current.autoSettleDisabledAt === undefined
+            ? legacy.autoSettleDisabledAt
+            : current.autoSettleDisabledAt,
         linkedPullRequest:
           current.linkedPullRequest === undefined
             ? legacy.linkedPullRequest
@@ -554,6 +562,7 @@ const make = Effect.gen(function* () {
         thread.archived_at,
         thread.settled_override,
         thread.settled_at,
+        thread.auto_settle_disabled_at,
         thread.unsettled_at,
         thread.snoozed_until,
         thread.snoozed_at,

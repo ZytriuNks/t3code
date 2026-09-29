@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 const testState = vi.hoisted(() => ({
   useT3ProjectFileScripts: vi.fn(),
   projectScriptsControl: vi.fn(),
+  branchToolbar: vi.fn(),
 }));
 
 vi.mock("../../hooks/useT3ProjectFileScripts", () => ({
@@ -12,7 +13,10 @@ vi.mock("../../hooks/useT3ProjectFileScripts", () => ({
     testState.useT3ProjectFileScripts(...args),
 }));
 vi.mock("../BranchToolbar", () => ({
-  BranchToolbar: () => null,
+  BranchToolbar: (props: unknown) => {
+    testState.branchToolbar(props);
+    return null;
+  },
 }));
 vi.mock("../ProjectScriptsControl", () => ({
   default: (props: unknown) => {
@@ -33,6 +37,7 @@ describe("ThreadDetailsPanel", () => {
   beforeEach(() => {
     testState.useT3ProjectFileScripts.mockReset();
     testState.projectScriptsControl.mockReset();
+    testState.branchToolbar.mockReset();
   });
 
   it("passes checked-in t3.json scripts to the project scripts control", () => {
@@ -63,6 +68,7 @@ describe("ThreadDetailsPanel", () => {
       availableEnvironments: [],
       onEnvironmentChange: vi.fn(),
       onEnvModeChange: vi.fn(),
+      envMode: "local",
       startFromOrigin: false,
       onStartFromOriginChange: vi.fn(),
       onComposerFocusRequest: vi.fn(),
@@ -77,6 +83,9 @@ describe("ThreadDetailsPanel", () => {
     renderToStaticMarkup(<ThreadDetailsPanel {...props} />);
 
     expect(testState.useT3ProjectFileScripts).toHaveBeenCalledWith(environmentId, gitCwd);
+    expect(testState.branchToolbar).toHaveBeenCalledWith(
+      expect.objectContaining({ envMode: "local" }),
+    );
     expect(testState.projectScriptsControl).toHaveBeenCalledWith(
       expect.objectContaining({
         displayMode: "panel",

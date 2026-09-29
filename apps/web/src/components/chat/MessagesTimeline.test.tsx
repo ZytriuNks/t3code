@@ -1,4 +1,12 @@
-import { CheckpointRef, EnvironmentId, MessageId, RunId, ThreadId } from "@t3tools/contracts";
+import {
+  CheckpointRef,
+  EnvironmentId,
+  MessageId,
+  ProviderInstanceId,
+  RunId,
+  ThreadId,
+} from "@t3tools/contracts";
+import type { QueuedComposerMessage } from "../../queuedMessageStore";
 import {
   act,
   createRef,
@@ -220,6 +228,8 @@ function stubDomGlobals() {
   };
 
   vi.stubGlobal("Element", ElementStub);
+  vi.stubGlobal("requestAnimationFrame", (_callback: FrameRequestCallback) => 0);
+  vi.stubGlobal("cancelAnimationFrame", () => {});
   vi.stubGlobal("localStorage", {
     getItem: () => null,
     setItem: () => {},
@@ -352,6 +362,57 @@ function buildSnapShotTimelineEntry(previewUrl?: string) {
 }
 
 describe("MessagesTimeline", () => {
+  it("shows a local queued message with send and cancel actions", async () => {
+    const queuedMessage: QueuedComposerMessage = {
+      id: "queued-1",
+      prompt: "Follow up after the tool finishes",
+      images: [],
+      files: [],
+      terminalContexts: [],
+      threadContexts: [],
+      previewAnnotations: [],
+      reviewComments: [],
+      sendSettings: {
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        promptEffort: null,
+      },
+      queuedAfterToolActivityId: null,
+      createdAt: MESSAGE_CREATED_AT,
+    };
+    const onSteerQueuedMessage = vi.fn();
+    const onRemoveQueuedMessage = vi.fn();
+    let renderer: ReactTestRenderer | null = null;
+    try {
+      await act(() => {
+        renderer = create(
+          <MessagesTimeline
+            {...buildProps()}
+            timelineEntries={[]}
+            queuedMessages={[queuedMessage]}
+            onSteerQueuedMessage={onSteerQueuedMessage}
+            onRemoveQueuedMessage={onRemoveQueuedMessage}
+          />,
+        );
+      });
+      expect(
+        renderer!.root.findByProps({ "data-queued-message-id": queuedMessage.id }),
+      ).toBeTruthy();
+      await act(() =>
+        renderer!.root.findByProps({ "aria-label": "Send now" }).props.onClick({ nativeEvent: {} }),
+      );
+      await act(() =>
+        renderer!.root
+          .findByProps({ "aria-label": "Cancel and return to the composer" })
+          .props.onClick({ nativeEvent: {} }),
+      );
+      expect(onSteerQueuedMessage).toHaveBeenCalledWith(queuedMessage.id);
+      expect(onRemoveQueuedMessage).toHaveBeenCalledWith(queuedMessage.id);
+    } finally {
+      await act(() => renderer?.unmount());
+    }
+  });
   it("shows dynamic tool input without cached output when the row is expanded", async () => {
     activityTestState.expanded = true;
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
@@ -493,14 +554,14 @@ describe("MessagesTimeline", () => {
   );
 
   it("renders elapsed time for a completed turn", () => {
-    const turnId = TurnId.make("turn-with-fold");
+    const runId = RunId.make("run-with-fold");
     const assistantEntry = buildAssistantTimelineEntry("Done.");
     const markup = renderToStaticMarkup(
       <MessagesTimeline
         {...buildProps()}
-        latestTurn={{
-          turnId,
-          state: "completed",
+        latestRun={{
+          runId,
+          status: "completed",
           startedAt: "2026-03-17T19:12:20.000Z",
           completedAt: "2026-03-17T19:12:28.000Z",
         }}
@@ -512,7 +573,7 @@ describe("MessagesTimeline", () => {
             entry: {
               id: "work-with-fold",
               createdAt: "2026-03-17T19:12:22.000Z",
-              turnId,
+              runId,
               label: "Ran command",
               tone: "tool",
               toolLifecycleStatus: "completed",
@@ -520,64 +581,13 @@ describe("MessagesTimeline", () => {
           },
           {
             ...assistantEntry,
-            message: { ...assistantEntry.message, turnId },
+            message: { ...assistantEntry.message, runId },
           },
         ]}
       />,
     );
 
     expect(markup).toContain("Worked for 8.0s");
-  });
-
-  it("keeps assistant changed-files headers sticky below the thread header", () => {
-    const assistantMessageId = MessageId.make("message-assistant-with-files");
-    const turnId = TurnId.make("turn-with-files");
-    const markup = renderToStaticMarkup(
-      <MessagesTimeline
-        {...buildProps()}
-        latestTurn={{
-          turnId,
-          state: "completed",
-          startedAt: MESSAGE_CREATED_AT,
-          completedAt: MESSAGE_CREATED_AT,
-        }}
-        timelineEntries={[
-          {
-            id: "entry-assistant-with-files",
-            kind: "message",
-            createdAt: MESSAGE_CREATED_AT,
-            message: {
-              id: assistantMessageId,
-              role: "assistant",
-              text: "Updated the fixture.",
-              turnId,
-              createdAt: MESSAGE_CREATED_AT,
-              updatedAt: MESSAGE_CREATED_AT,
-              streaming: false,
-            },
-          },
-        ]}
-        turnDiffSummaries={[
-          {
-            turnId,
-            checkpointTurnCount: 1,
-            checkpointRef: CheckpointRef.make("checkpoint-with-files"),
-            status: "ready",
-            files: [{ path: "README.md", kind: "modified", additions: 2, deletions: 1 }],
-            assistantMessageId,
-            completedAt: MESSAGE_CREATED_AT,
-          },
-        ]}
-      />,
-    );
-
-    expect(markup).toContain("sticky top-2 z-10");
-    expect(markup).not.toContain("self-start");
-    expect(markup).toContain("whitespace-nowrap");
-    expect(markup).toContain("size-3");
-    expect(markup).not.toContain('aria-label="Collapse all folders"');
-    expect(markup).toContain('aria-label="Open diff"');
-    expect(markup).toContain("1 changed file");
   });
 
   it("treats only the strict list end as the live edge", async () => {
@@ -1034,49 +1044,6 @@ describe("MessagesTimeline", () => {
     }
   });
 
-  it("keeps reserved end space when tool work starts while reading history", () => {
-    const turnId = TurnId.make("turn-with-active-tool");
-    const firstEntry = buildUserTimelineEntry("Run the command.");
-    const markup = renderToStaticMarkup(
-      <MessagesTimeline
-        {...buildProps()}
-        isWorking
-        activeTurnStartedAt={MESSAGE_CREATED_AT}
-        latestTurn={{
-          turnId,
-          state: "running",
-          startedAt: MESSAGE_CREATED_AT,
-          completedAt: null,
-        }}
-        runningTurnId={turnId}
-        anchorMessageId={firstEntry.message.id}
-        liveFollowEnabled={false}
-        timelineEntries={[
-          firstEntry,
-          {
-            id: "entry-active-tool",
-            kind: "work",
-            createdAt: MESSAGE_CREATED_AT,
-            entry: {
-              id: "work-active-tool",
-              createdAt: MESSAGE_CREATED_AT,
-              turnId,
-              toolCallId: "call-active-tool",
-              label: "Run command",
-              tone: "tool",
-              itemType: "command_execution",
-              command: "git status",
-              toolLifecycleStatus: "inProgress",
-            },
-          },
-        ]}
-      />,
-    );
-
-    expect(markup).toContain('data-anchor-index="0"');
-    expect(markup).not.toContain('data-maintain-scroll-at-end="enabled"');
-  });
-
   it("hands end-following back to the list once the send anchor is released", () => {
     const firstEntry = buildUserTimelineEntry("First prompt.");
     const secondEntry = {
@@ -1139,7 +1106,6 @@ describe("MessagesTimeline", () => {
     expect(markup).toContain('data-maintain-scroll-at-end="enabled"');
     expect(markup).toContain('data-maintain-scroll-at-end-animated="false"');
     expect(markup).toContain('data-maintain-scroll-at-end-data-change="true"');
-    expect(markup).toContain('data-maintain-scroll-at-end-footer-layout="false"');
     expect(markup).toContain('data-maintain-scroll-at-end-item-layout="true"');
     expect(markup).toContain('data-maintain-scroll-at-end-layout="true"');
     expect(markup).toContain('data-user-message-collapsed="true"');
@@ -1397,95 +1363,6 @@ describe("MessagesTimeline", () => {
     expect(markup).not.toContain('aria-label="Collapse all folders"');
     expect(markup).toContain('aria-label="Open diff"');
     expect(markup).toContain("1 changed file");
-  });
-
-  it("treats the follow re-arm band above the content bottom as the live edge", async () => {
-    const {
-      resolveTimelineIsAtEnd,
-      resolveTimelineMinimapHasPersistentGutter,
-      resolveTimelineMinimapHeightStyle,
-      resolveTimelineMinimapHitStripWidth,
-      resolveTimelineMinimapIndexFromPointer,
-      resolveTimelineMinimapInteractiveWidth,
-      resolveTimelineMinimapTopPercent,
-    } = await import("./MessagesTimeline.logic");
-
-    expect(resolveTimelineIsAtEnd({ isAtEnd: true })).toBe(true);
-    expect(resolveTimelineIsAtEnd(undefined)).toBeUndefined();
-    // Within the pixel band above the content bottom counts as the end...
-    expect(
-      resolveTimelineIsAtEnd({
-        isAtEnd: false,
-        contentLength: 2000,
-        scroll: 1170,
-        scrollLength: 800,
-      }),
-    ).toBe(true);
-    // ...but half a viewport up (LegendList's isNearEnd territory) does not.
-    expect(
-      resolveTimelineIsAtEnd({
-        isAtEnd: false,
-        contentLength: 2000,
-        scroll: 900,
-        scrollLength: 800,
-      }),
-    ).toBe(false);
-    // LegendList can report at-end while the composer still covers the last row.
-    expect(
-      resolveTimelineIsAtEnd({
-        isAtEnd: true,
-        contentLength: 2100,
-        scroll: 1170,
-        scrollLength: 800,
-      }),
-    ).toBe(false);
-    // Geometry missing (older state shape): fall back to the nearEnd/strict flags.
-    expect(resolveTimelineIsAtEnd({ isNearEnd: true, isAtEnd: false })).toBe(false);
-    expect(resolveTimelineIsAtEnd({ isAtEnd: false })).toBe(false);
-
-    expect(resolveTimelineMinimapHeightStyle(5)).toBe("min(32px, calc(100vh - 18rem))");
-    expect(resolveTimelineMinimapTopPercent(2, 5)).toBe(50);
-    expect(
-      resolveTimelineMinimapIndexFromPointer({
-        itemCount: 101,
-        railTop: 100,
-        railHeight: 500,
-        pointerY: 350,
-      }),
-    ).toBe(50);
-    expect(
-      resolveTimelineMinimapIndexFromPointer({
-        itemCount: 101,
-        railTop: 100,
-        railHeight: 500,
-        pointerY: 999,
-      }),
-    ).toBe(100);
-    expect(resolveTimelineMinimapHasPersistentGutter(832)).toBe(false);
-    expect(resolveTimelineMinimapHasPersistentGutter(863)).toBe(false);
-    expect(resolveTimelineMinimapHasPersistentGutter(864)).toBe(true);
-
-    // No usable gutter (zoomed in / narrow pane): the strip must go inert
-    // instead of overlaying the centered content column.
-    expect(resolveTimelineMinimapHitStripWidth(768)).toBe(0);
-    expect(resolveTimelineMinimapHitStripWidth(792)).toBe(0);
-    // Partial gutter: strip shrinks to what fits between the viewport edge
-    // and the content column.
-    expect(resolveTimelineMinimapHitStripWidth(820)).toBe(14);
-    // Full gutter: unchanged 40px-wide strip.
-    expect(resolveTimelineMinimapHitStripWidth(872)).toBe(40);
-    expect(resolveTimelineMinimapHitStripWidth(1400)).toBe(40);
-    expect(resolveTimelineMinimapHitStripWidth(0)).toBe(0);
-    expect(resolveTimelineMinimapHitStripWidth(Number.NaN)).toBe(0);
-
-    // The collapsed target stays narrow, but an open preview keeps its full
-    // 20rem width plus the 2rem offset from the minimap rail interactive.
-    expect(resolveTimelineMinimapInteractiveWidth(0, false)).toBe(0);
-    expect(resolveTimelineMinimapInteractiveWidth(14, false)).toBe(14);
-    expect(resolveTimelineMinimapInteractiveWidth(40, false)).toBe(40);
-    expect(resolveTimelineMinimapInteractiveWidth(0, true)).toBe("22rem");
-    expect(resolveTimelineMinimapInteractiveWidth(14, true)).toBe("22rem");
-    expect(resolveTimelineMinimapInteractiveWidth(40, true)).toBe("22rem");
   });
 
   it("anchors a sent attachment message using its measured height", () => {

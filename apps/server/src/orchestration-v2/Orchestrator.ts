@@ -80,6 +80,7 @@ import {
   type ProjectionRecordFilter,
   type ProjectionRecords,
   type ProjectionCheckpointContext,
+  type ProjectionPullRequestThread,
 } from "./ProjectionStore.ts";
 import type { ProviderAdapterV2Shape } from "./ProviderAdapter.ts";
 import { ProviderAdapterRegistryV2 } from "./ProviderAdapterRegistry.ts";
@@ -258,6 +259,10 @@ export interface OrchestratorV2Shape {
   readonly getThreadShell: (
     threadId: ThreadId,
   ) => Effect.Effect<OrchestrationV2ThreadShell | null, OrchestratorV2Error>;
+  readonly listThreadsWithPullRequests: () => Effect.Effect<
+    ReadonlyArray<ProjectionPullRequestThread>,
+    OrchestratorV2Error
+  >;
   readonly getThreadEventSequence: (
     threadId: ThreadId,
   ) => Effect.Effect<number, OrchestratorV2Error>;
@@ -308,6 +313,7 @@ function commandThreadId(command: OrchestrationV2Command): ThreadId {
     case "thread.delete":
     case "thread.settle":
     case "thread.auto-settle":
+    case "thread.auto-settle.set":
     case "thread.unsettle":
     case "thread.snooze":
     case "thread.unsnooze":
@@ -2099,6 +2105,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           | "thread.archive"
           | "thread.unarchive"
           | "thread.settle"
+          | "thread.auto-settle.set"
           | "thread.unsettle"
           | "thread.snooze"
           | "thread.unsnooze"
@@ -2179,6 +2186,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     }
     if (
       (command.type === "thread.settle" ||
+        command.type === "thread.auto-settle.set" ||
         command.type === "thread.unsettle" ||
         command.type === "thread.snooze" ||
         command.type === "thread.unsnooze" ||
@@ -2472,6 +2480,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             settledAt: null,
             unsettledAt: alreadyPinnedActive ? (thread.unsettledAt ?? null) : now,
             updatedAt: alreadyPinnedActive ? thread.updatedAt : now,
+          };
+        }
+        case "thread.auto-settle.set": {
+          const disabledAt = thread.autoSettleDisabledAt ?? null;
+          const unchanged = command.enabled ? disabledAt === null : disabledAt !== null;
+          return {
+            ...thread,
+            autoSettleDisabledAt: command.enabled ? null : (disabledAt ?? now),
+            updatedAt: unchanged ? thread.updatedAt : now,
           };
         }
         case "thread.snooze": {
@@ -2799,6 +2816,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           return "thread.unarchived" as const;
         case "thread.settle":
           return "thread.settled" as const;
+        case "thread.auto-settle.set":
+          return "thread.auto-settle-set" as const;
         case "thread.unsettle":
           return "thread.unsettled" as const;
         case "thread.snooze":
@@ -8703,6 +8722,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           );
         if (
           thread.settledOverride !== null ||
+          thread.autoSettleDisabledAt != null ||
           DateTime.toEpochMillis(thread.updatedAt) > DateTime.toEpochMillis(command.snapshotAt)
         ) {
           return yield* new OrchestratorDispatchError({
@@ -8753,6 +8773,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "thread.archive":
       case "thread.unarchive":
       case "thread.settle":
+      case "thread.auto-settle.set":
       case "thread.unsettle":
       case "thread.snooze":
       case "thread.unsnooze":
@@ -9239,6 +9260,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       projectionStore
         .getThreadShell(threadId)
         .pipe(Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause }))),
+    listThreadsWithPullRequests: () =>
+      projectionStore.listThreadsWithPullRequests().pipe(
+        Effect.mapError(
+          (cause) =>
+            new OrchestratorProjectionError({
+              threadId: ThreadId.make("thread:pull-requests"),
+              cause,
+            }),
+        ),
+      ),
     getThreadEventSequence: (threadId) =>
       eventSink
         .latestSequence({ threadId })
@@ -9361,6 +9392,13 @@ const layerUnavailable: Layer.Layer<OrchestratorV2> = Layer.succeed(
       Effect.fail(
         new OrchestratorProjectionError({
           threadId,
+          cause: "Orchestration V2 live runtime is not configured.",
+        }),
+      ),
+    listThreadsWithPullRequests: () =>
+      Effect.fail(
+        new OrchestratorProjectionError({
+          threadId: ThreadId.make("thread:pull-requests"),
           cause: "Orchestration V2 live runtime is not configured.",
         }),
       ),

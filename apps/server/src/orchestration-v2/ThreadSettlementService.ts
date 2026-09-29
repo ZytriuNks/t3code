@@ -133,7 +133,12 @@ export function isAutoSettlementCandidate(
   thread: ProjectionSettlementCandidate,
   nowMs: number,
 ): boolean {
-  if (thread.archivedAt !== null || thread.settledOverride !== null) return false;
+  if (
+    thread.archivedAt !== null ||
+    thread.settledOverride !== null ||
+    thread.autoSettleDisabledAt != null
+  )
+    return false;
   if (thread.pinnedAt != null) return false;
   // Blocked-on-you work must never park behind a settled override.
   if (thread.pendingRuntimeRequest !== null) return false;

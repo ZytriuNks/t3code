@@ -17,9 +17,16 @@ export function recoverQueuedMessageEdit(input: {
   const draft = store.getComposerDraft(input.editTarget);
   const dirty =
     draft !== null &&
-    (draft.prompt !== input.originalText || draft.images.length > 0 || draft.files.length > 0);
+    (draft.prompt !== input.originalText ||
+      draft.images.length > 0 ||
+      draft.files.length > 0 ||
+      draft.threadContexts.length > 0);
   if (dirty && !composerDraftHasUserContent(store.getComposerDraft(input.threadTarget))) {
     store.moveComposerPromptAndImages(input.editTarget, input.threadTarget);
+    if (draft.threadContexts.length > 0) {
+      store.setThreadContexts(input.threadTarget, draft.threadContexts);
+      store.setThreadContexts(input.editTarget, []);
+    }
     return "kept";
   }
   store.clearComposerContent(input.editTarget);

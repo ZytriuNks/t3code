@@ -66,16 +66,57 @@ function formatThreadError(cause: Cause.Cause<unknown>): string {
     : "Could not synchronize the thread.";
 }
 
-/**
- * A starting or running session is mid-turn. Its detail can change many times
- * per second, so the disk cache waits for it to settle.
- */
-export function isThreadSessionRunning(session: OrchestrationThread["session"]): boolean {
-  return session?.status === "starting" || session?.status === "running";
+function formatHistoryError(error: unknown): string {
+  if (error instanceof Error && error.message.trim().length > 0) {
+    return error.message;
+  }
+  return "Could not load earlier activity.";
 }
 
-function shouldPersistThread(thread: OrchestrationThread): boolean {
-  return !isThreadSessionRunning(thread.session);
+function historyMetaFromCachedSnapshot(
+  snapshot: OrchestrationV2ThreadDetailSnapshot,
+): ThreadHistoryMeta {
+  return {
+    historyCursor: snapshot.historyCursor ?? null,
+    hasMoreHistory: snapshot.hasMoreHistory ?? false,
+    loading: false,
+    error: null,
+    // Cache never stores expanded progressive history (load-earlier growth).
+    expanded: false,
+    latestLocalTurnOrdinal: snapshot.latestLocalTurnOrdinal ?? null,
+  };
+}
+
+function snapshotToPersist(
+  snapshotSequence: number,
+  projection: OrchestrationV2ThreadProjection,
+  history: ThreadHistoryMeta,
+  acceptsBoundedSnapshots: boolean,
+): OrchestrationV2ThreadDetailSnapshot {
+  // Retain paging support even when the bounded snapshot contains all history.
+  if (acceptsBoundedSnapshots || history.hasMoreHistory || history.historyCursor !== null) {
+    return {
+      snapshotSequence,
+      projection,
+      historyCursor: history.historyCursor,
+      hasMoreHistory: history.hasMoreHistory,
+      latestLocalTurnOrdinal: history.latestLocalTurnOrdinal,
+    };
+  }
+  return { snapshotSequence, projection };
+}
+
+function shouldPersistThread(
+  thread: OrchestrationV2ThreadProjection,
+  history: ThreadHistoryMeta,
+): boolean {
+  // Expanded history stays in memory to keep the disk cache bounded.
+  return (
+    !history.expanded &&
+    !thread.runs.some(
+      (run) => run.status === "preparing" || run.status === "starting" || run.status === "running",
+    )
+  );
 }
 
 interface ThreadResumeSnapshot {

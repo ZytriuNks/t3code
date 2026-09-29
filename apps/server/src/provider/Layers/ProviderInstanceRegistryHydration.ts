@@ -62,9 +62,13 @@ import {
 } from "./ProviderOrchestrationAdapterInfrastructure.ts";
 import { AcpRegistryCatalog } from "../acp/AcpRegistrySupport.ts";
 import { AcpRegistryCatalogLive } from "./AcpRegistryCatalog.ts";
+import { CursorSdkCatalog, CursorSdkCatalogLive } from "./CursorSdkCatalog.ts";
 
 type ProviderInstanceRegistryHydrationEnv =
-  | Exclude<BuiltInDriversEnv, ProviderOrchestrationAdapterInfrastructure | AcpRegistryCatalog>
+  | Exclude<
+      BuiltInDriversEnv,
+      ProviderOrchestrationAdapterInfrastructure | AcpRegistryCatalog | CursorSdkCatalog
+    >
   | ServerSettingsService;
 
 /**
@@ -181,6 +185,7 @@ export const ProviderInstanceRegistryHydrationLive: Layer.Layer<
     }).pipe(
       Layer.provide(ProviderOrchestrationAdapterInfrastructureLive),
       Layer.provide(AcpRegistryCatalogLive),
+      Layer.provide(CursorSdkCatalogLive),
     );
 
     return SettingsWatcherLive.pipe(Layer.provideMerge(mutableLayer));

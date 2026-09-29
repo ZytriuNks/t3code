@@ -11,6 +11,7 @@ import {
   type MessageId,
   type ModelSelection,
   type OrchestrationV2ProjectedTurnItem,
+  type OrchestrationV2TurnItem,
   type PreviewAnnotationPayload,
   type ProviderInteractionMode,
   ProviderDriverKind,
@@ -1202,6 +1203,44 @@ export function createLocalDispatchSnapshot(
     runtimeStatus: runtime?.status ?? null,
     runtimeUpdatedAt: runtime?.updatedAt ?? null,
   };
+}
+
+/** The newest finished V2 tool item anchors queued sends to a real tool boundary. */
+export function latestCompletedToolTurnItemId(
+  items: ReadonlyArray<
+    Pick<OrchestrationV2TurnItem, "id" | "type" | "status" | "completedAt" | "ordinal">
+  >,
+): OrchestrationV2TurnItem["id"] | null {
+  let latestId: OrchestrationV2TurnItem["id"] | null = null;
+  let latestCompletedAt = -Infinity;
+  let latestOrdinal = -1;
+  for (const item of items) {
+    if (
+      item.completedAt === null ||
+      (item.status !== "completed" &&
+        item.status !== "failed" &&
+        item.status !== "cancelled" &&
+        item.status !== "interrupted") ||
+      (item.type !== "command_execution" &&
+        item.type !== "file_change" &&
+        item.type !== "file_search" &&
+        item.type !== "web_search" &&
+        item.type !== "dynamic_tool" &&
+        item.type !== "subagent")
+    ) {
+      continue;
+    }
+    const completedAt = DateTime.toEpochMillis(item.completedAt);
+    if (
+      completedAt > latestCompletedAt ||
+      (completedAt === latestCompletedAt && item.ordinal > latestOrdinal)
+    ) {
+      latestId = item.id;
+      latestCompletedAt = completedAt;
+      latestOrdinal = item.ordinal;
+    }
+  }
+  return latestId;
 }
 
 /**

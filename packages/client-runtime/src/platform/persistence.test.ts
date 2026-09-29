@@ -1,7 +1,8 @@
 import {
   OrchestrationProjectShell,
-  OrchestrationShellSnapshot,
-  OrchestrationThreadShell,
+  OrchestrationV2ShellSnapshot,
+  OrchestrationV2ShellSnapshotJson,
+  OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Arr from "effect/Array";
@@ -27,14 +28,18 @@ const sampleDecoded = <S extends Schema.Constraint>(schema: S) =>
     );
     return Arr.getSomes(decoded);
   });
-const encodeSnapshot = Schema.encodeEffect(OrchestrationShellSnapshot);
+const decodeSnapshot = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(OrchestrationV2ShellSnapshotJson),
+);
+const serializeSnapshot = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 
 describe("encodeShellSnapshotForCache", () => {
-  it.effect("matches the Schema encoding of a generated snapshot", () =>
+  it.effect("encodes V2 dates and preserves snapshots through JSON cache storage", () =>
     Effect.gen(function* () {
-      const threads = yield* sampleDecoded(OrchestrationThreadShell);
+      const threads = yield* sampleDecoded(OrchestrationV2ThreadShell);
       const projects = yield* sampleDecoded(OrchestrationProjectShell);
-      const snapshot: OrchestrationShellSnapshot = {
+      const snapshot: OrchestrationV2ShellSnapshot = {
+        schemaVersion: 1,
         snapshotSequence: 1,
         // The generator rarely makes monogram icons, and they are the one
         // project field whose encoding differs from the decoded value.
@@ -44,12 +49,16 @@ describe("encodeShellSnapshotForCache", () => {
             : project,
         ),
         threads,
-        updatedAt: "2026-09-25T00:00:00.000Z",
+        archivedThreads: threads.slice(0, 1),
       };
 
       expect(threads.length).toBeGreaterThan(0);
       expect(projects.length).toBeGreaterThan(0);
-      expect(yield* encodeShellSnapshotForCache(snapshot)).toEqual(yield* encodeSnapshot(snapshot));
+      const encoded = yield* encodeShellSnapshotForCache(snapshot);
+      expect(typeof encoded.threads[0]?.createdAt).toBe("string");
+      expect(typeof encoded.archivedThreads[0]?.createdAt).toBe("string");
+      const serialized = yield* serializeSnapshot(encoded);
+      expect(yield* decodeSnapshot(serialized)).toEqual(snapshot);
     }),
   );
 });

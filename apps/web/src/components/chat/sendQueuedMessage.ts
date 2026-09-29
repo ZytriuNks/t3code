@@ -17,7 +17,7 @@ import {
   startAttachmentUpload,
 } from "../../lib/attachmentUploadQueue";
 import { newMessageId } from "../../lib/utils";
-import { latestCompletedToolActivityId, useQueuedMessageStore } from "../../queuedMessageStore";
+import { useQueuedMessageStore } from "../../queuedMessageStore";
 import { appAtomRegistry } from "../../rpc/atomRegistry";
 import { readThread, readThreadShell } from "../../state/entities";
 import { environmentServerConfigsAtom } from "../../state/server";
@@ -25,6 +25,7 @@ import { threadEnvironment } from "../../state/threads";
 import {
   createLocalDispatchSnapshot,
   deriveComposerSendState,
+  latestCompletedToolTurnItemId,
   readFileAsDataUrl,
   resolveThreadMetadataUpdateForNextTurn,
   revokeBlobPreviewUrl,
@@ -55,7 +56,7 @@ export async function sendQueuedMessage(
   const message = queue.beginSend(
     threadKey,
     messageId,
-    latestCompletedToolActivityId(readThread(threadRef)?.activities ?? []),
+    latestCompletedToolTurnItemId(readThread(threadRef)?.projection.turnItems ?? []),
   );
   if (!message) return;
   const { sendSettings } = message;
@@ -77,7 +78,10 @@ export async function sendQueuedMessage(
       prompt: message.prompt,
       imageCount: attachments.length,
       terminalContexts: message.terminalContexts,
-      elementContextCount: message.previewAnnotations.length + message.reviewComments.length,
+      elementContextCount:
+        message.previewAnnotations.length +
+        message.reviewComments.length +
+        message.threadContexts.length,
     });
     // Only expired terminal context was left. Retrying would block the queue
     // on every boundary, so drop it and let the queue move on.
@@ -162,12 +166,18 @@ export async function sendQueuedMessage(
 
     // Stop hands a preparing message back to the composer. Past this point
     // the send can no longer be taken back.
-    const thread = readThread(threadRef) ?? undefined;
-    if (!queue.markDispatching(threadKey, message.id, createLocalDispatchSnapshot(thread))) return;
+    const latestUserMessageId =
+      readThread(threadRef)?.projection.messages.findLast((entry) => entry.role === "user")?.id ??
+      null;
+    const dispatchSnapshot = createLocalDispatchSnapshot(readThreadShell(threadRef) ?? undefined, {
+      latestUserMessageId,
+    });
+    if (!queue.markDispatching(threadKey, message.id, dispatchSnapshot)) return;
     const context = buildMessageContext({
       terminalContexts: sendableTerminalContexts,
       reviewComments: message.reviewComments,
       previewAnnotations: message.previewAnnotations,
+      threadContexts: message.threadContexts,
       attachments: attachments.map((attachment, index) => ({
         attachment,
         attachmentId: wireAttachments[index]?.id ?? attachment.id,

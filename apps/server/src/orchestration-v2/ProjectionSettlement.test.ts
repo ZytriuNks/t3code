@@ -148,6 +148,42 @@ for (const [name, testLayer] of [
   ["sql", SqlLayer],
   ["memory", layerMemory],
 ] as const) {
+  it.effect(`${name}: lists only active threads with pull request links`, () =>
+    Effect.gen(function* () {
+      const store = yield* ProjectionStoreV2;
+      const linkedPullRequest = {
+        projectId: ProjectId.make("project:settlement"),
+        repository: "owner/repo",
+        number: 12,
+        url: "https://github.com/owner/repo/pull/12",
+      };
+      const active = yield* createThread("linked-active", {
+        pullRequests: [
+          {
+            host: "github.com",
+            repository: "owner/repo",
+            number: 11,
+            url: "https://github.com/owner/repo/pull/11",
+            source: "manual",
+            linkedAt: DateTime.formatIso(old),
+            snapshot: null,
+            stack: null,
+          },
+        ],
+      });
+      const legacy = yield* createThread("linked-legacy", { linkedPullRequest });
+      yield* createThread("linked-archived", { linkedPullRequest, archivedAt: old });
+      yield* createThread("linked-deleted", { linkedPullRequest, deletedAt: old });
+      yield* createThread("linked-cleared", { linkedPullRequest, pullRequests: [] });
+      yield* createThread("unlinked");
+
+      const threads = yield* store.listThreadsWithPullRequests();
+      assert.deepEqual(new Set(threads.map((thread) => thread.id)), new Set([active, legacy]));
+      assert.equal(threads.find((thread) => thread.id === active)?.pullRequests?.[0]?.number, 11);
+      assert.equal(threads.find((thread) => thread.id === legacy)?.pullRequests?.[0]?.number, 12);
+    }).pipe(Effect.provide(testLayer)),
+  );
+
   it.effect(
     `${name}: discovers settlement work with the same activity and background semantics as the shell`,
     () =>
@@ -161,6 +197,7 @@ for (const [name, testLayer] of [
           ["deleted", { deletedAt: old }],
           ["settled", { settledOverride: "settled" }],
           ["unsettled", { settledOverride: "active" }],
+          ["auto-settle-disabled", { autoSettleDisabledAt: old }],
           ["pinned", { pinnedAt: old }],
         ] satisfies ReadonlyArray<readonly [string, Partial<OrchestrationV2AppThread>]>) {
           yield* createRun(yield* createThread(name, overrides));

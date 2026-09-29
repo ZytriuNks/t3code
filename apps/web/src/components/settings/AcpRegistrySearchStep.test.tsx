@@ -66,10 +66,21 @@ vi.mock("../../state/use-atom-command", () => ({
   useAtomCommand: () => state.prepare,
 }));
 
-vi.mock("@t3tools/client-runtime/state/runtime", () => ({
+vi.mock("@t3tools/client-runtime/state/runtime", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@t3tools/client-runtime/state/runtime")>()),
   isAtomCommandInterrupted: () => false,
   squashAtomCommandFailure: () => new Error("Prepare failed."),
 }));
+
+vi.mock("../../i18n/I18nProvider", async () => {
+  const { translate } = await import("../../i18n/messages");
+  return {
+    useI18n: () => ({
+      t: (key: Parameters<typeof translate>[1], values?: Parameters<typeof translate>[2]) =>
+        translate("en", key, values),
+    }),
+  };
+});
 
 import { AcpRegistrySearchStep } from "./AcpRegistrySearchStep";
 

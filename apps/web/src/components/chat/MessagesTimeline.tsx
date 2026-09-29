@@ -1,5 +1,4 @@
 import { WorkLogBlock, WorkLogButton, WorkLogDetails, WorkLogList, WorkLogRow } from "./WorkLog";
-import { PullRequestGlyph } from "../pullRequest/pullRequestIcons";
 import type { WorktreeSetupSnapshot } from "@t3tools/contracts";
 import { ReadOnlySourcePreview } from "../files/AttachmentFilePreview";
 import { useRightPanelStore } from "~/rightPanelStore";
@@ -48,6 +47,8 @@ import {
 
 const NOOP_USE_ARTIFACT_TEMPLATE = () => {};
 const NOOP_OPEN_ATTACHMENT = (_attachment: ChatFileAttachment) => {};
+const NOOP_QUEUE_MESSAGE_ACTION = (_id: string) => {};
+const EMPTY_QUEUED_MESSAGES: ReadonlyArray<QueuedComposerMessage> = [];
 
 import { resolveChatListAnchoredEndSpace } from "@t3tools/shared/chatList";
 import { toolActivityFaviconUrl } from "@t3tools/shared/favicon";
@@ -108,12 +109,14 @@ import { T3Wordmark } from "../T3Wordmark";
 import { ThreadContextChip } from "../ThreadContextChip";
 import {
   BotIcon,
+  ArrowUpIcon,
   BrainIcon,
   CheckIcon,
   ChevronDownIcon,
   ChevronRightIcon,
   ChevronUpIcon,
   CircleAlertIcon,
+  ClockIcon,
   DownloadIcon,
   EyeIcon,
   GitForkIcon,
@@ -169,6 +172,7 @@ import { PierreEntryIcon } from "./PierreEntryIcon";
 import { inferEntryKindFromPath } from "../../pierre-icons";
 import { AssistantSelectionToolbar } from "./AssistantSelectionToolbar";
 import type { AssistantCitationSourceAnchor } from "~/lib/assistantTextSelection";
+import type { QueuedComposerMessage } from "../../queuedMessageStore";
 import {
   AssistantCitationSource,
   type AssistantCitationRequest,
@@ -323,6 +327,8 @@ interface TimelineRowSharedState {
   onCancelWorktreeSetup: (() => void) | null;
   onWorktreeSetupWorkLocally: (() => void) | null;
   onOpenWorktreeSetupTerminal: ((terminalId: string) => void) | null;
+  onSteerQueuedMessage: (id: string) => void;
+  onRemoveQueuedMessage: (id: string) => void;
   workGroupViewState: WorkGroupViewState;
 }
 
@@ -436,6 +442,9 @@ interface MessagesTimelineProps {
   activeTurnInProgress: boolean;
   activeTurnStartedAt?: string | null;
   worktreeSetup?: WorktreeSetupSnapshot | null;
+  queuedMessages?: ReadonlyArray<QueuedComposerMessage>;
+  onSteerQueuedMessage?: (id: string) => void;
+  onRemoveQueuedMessage?: (id: string) => void;
   onCancelWorktreeSetup?: () => void;
   onWorktreeSetupWorkLocally?: () => void;
   onOpenWorktreeSetupTerminal?: (terminalId: string) => void;
@@ -518,6 +527,9 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   activeTurnInProgress,
   activeTurnStartedAt = null,
   worktreeSetup = null,
+  queuedMessages = EMPTY_QUEUED_MESSAGES,
+  onSteerQueuedMessage = NOOP_QUEUE_MESSAGE_ACTION,
+  onRemoveQueuedMessage = NOOP_QUEUE_MESSAGE_ACTION,
   onCancelWorktreeSetup,
   onWorktreeSetupWorkLocally,
   onOpenWorktreeSetupTerminal,
@@ -768,6 +780,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     const projection = deriveMessagesTimelineRowsWithState(
       {
         timelineEntries,
+        queuedMessages,
         latestRun,
         runningRunId,
         expandedRunIds,
@@ -790,6 +803,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     listIdentityKey,
     workspaceRoot,
     timelineEntries,
+    queuedMessages,
     latestRun,
     runningRunId,
     expandedRunIds,
@@ -1173,7 +1187,6 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onRunShellCommand,
       onImageExpand,
       onFileOpen,
-      onUseArtifactTemplate,
       onFileDownload,
       openPullRequest,
       onOpenTurnDiff,
@@ -1187,6 +1200,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onCancelWorktreeSetup: onCancelWorktreeSetup ?? null,
       onWorktreeSetupWorkLocally: onWorktreeSetupWorkLocally ?? null,
       onOpenWorktreeSetupTerminal: onOpenWorktreeSetupTerminal ?? null,
+      onSteerQueuedMessage,
+      onRemoveQueuedMessage,
       workGroupViewState,
     }),
     [
@@ -1222,6 +1237,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onCancelWorktreeSetup,
       onWorktreeSetupWorkLocally,
       onOpenWorktreeSetupTerminal,
+      onSteerQueuedMessage,
+      onRemoveQueuedMessage,
       workGroupViewState,
     ],
   );
@@ -1369,7 +1386,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
             onScroll={handleScroll}
             onItemSizeChanged={reportContentOverflow}
             className={cn(
-              "messages-timeline-scroll scrollbar-gutter-both h-full min-h-0 overflow-x-hidden overscroll-y-contain px-3 [overflow-anchor:none] sm:px-5",
+              "scrollbar-gutter-both h-full min-h-0 overflow-x-hidden overscroll-y-contain px-3 [overflow-anchor:none] sm:px-5",
               topFadeEnabled && "topbar-scroll-fade",
             )}
             ListHeaderComponent={listHeader}
@@ -1816,6 +1833,7 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
       {row.kind === "attempt-fold" ? <AttemptFoldTimelineRow row={row} /> : null}
       {row.kind === "context-compaction" ? <ContextCompactionTimelineRow row={row} /> : null}
       {row.kind === "message" && row.message.role === "user" ? <UserTimelineRow row={row} /> : null}
+      {row.kind === "queued-message" ? <QueuedMessageTimelineRow row={row} /> : null}
       {row.kind === "message" && row.message.role === "assistant" ? (
         <AssistantTimelineRow row={row} />
       ) : null}
@@ -1853,7 +1871,7 @@ function WorktreeSetupTimelineRow({
   );
 }
 
-/** A message waiting for the running turn: a dashed user bubble with icon actions inside it. */
+/** 正在运行的轮次结束前，本地队列消息仍需可见、可立即发送或撤回。 */
 function QueuedMessageTimelineRow({
   row,
 }: {
@@ -1861,23 +1879,36 @@ function QueuedMessageTimelineRow({
 }) {
   const ctx = use(TimelineRowCtx);
   const { queuedMessage } = row;
+  const isZh = ctx.language === "zh-CN";
   const attachmentCount = queuedMessage.images.length + queuedMessage.files.length;
   const contextCount =
     queuedMessage.terminalContexts.length +
+    queuedMessage.threadContexts.length +
     queuedMessage.previewAnnotations.length +
     queuedMessage.reviewComments.length;
   const text = queuedMessage.prompt.trim();
   const sending = queuedMessage.sending !== undefined;
   const statusLabel = sending
-    ? "Sending to the agent"
+    ? isZh
+      ? "正在发送给智能体"
+      : "Sending to the agent"
     : queuedMessage.holdUntilUserAction
-      ? "Waits for Send now"
+      ? isZh
+        ? "等待立即发送"
+        : "Waits for Send now"
       : row.isNext
-        ? "Sends after the next tool call or when the turn ends"
-        : "Sends after the messages above it";
+        ? isZh
+          ? "下次工具调用后或本轮结束时发送"
+          : "Sends after the next tool call or when the turn ends"
+        : isZh
+          ? "排在前面的消息发送后发送"
+          : "Sends after the messages above it";
+  const sendNowLabel = isZh ? "立即发送" : "Send now";
+  const cancelLabel = isZh ? "取消并返回编辑器" : "Cancel and return to the composer";
+
   return (
     <div className="flex flex-col items-end" data-queued-message-id={queuedMessage.id}>
-      <div className="max-w-[80%] rounded-2xl border border-dashed border-border p-3 text-message-foreground/80">
+      <div className="max-w-full rounded-2xl border border-dashed border-border p-3 text-message-foreground/80 sm:max-w-2xl">
         {text.length > 0 ? (
           <UserMessageBody text={text} skills={ctx.skills} markdownCwd={ctx.markdownCwd} />
         ) : null}
@@ -1885,14 +1916,18 @@ function QueuedMessageTimelineRow({
           <div className={cn("text-secondary-label text-xs", text.length > 0 && "mt-1.5")}>
             {[
               attachmentCount > 0
-                ? `${attachmentCount} attachment${attachmentCount === 1 ? "" : "s"}`
+                ? isZh
+                  ? `${attachmentCount} 个附件`
+                  : `${attachmentCount} attachment${attachmentCount === 1 ? "" : "s"}`
                 : null,
               contextCount > 0
-                ? `${contextCount} context item${contextCount === 1 ? "" : "s"}`
+                ? isZh
+                  ? `${contextCount} 个上下文项`
+                  : `${contextCount} context item${contextCount === 1 ? "" : "s"}`
                 : null,
             ]
               .filter(Boolean)
-              .join(", ")}
+              .join(isZh ? "、" : ", ")}
           </div>
         ) : null}
         <div
@@ -1902,10 +1937,10 @@ function QueuedMessageTimelineRow({
           <Tooltip>
             <TooltipTrigger
               render={<span className="inline-flex h-6 items-center gap-1" />}
-              aria-label={`${sending ? "Sending" : "Queued"}. ${statusLabel}.`}
+              aria-label={`${sending ? (isZh ? "发送中" : "Sending") : isZh ? "已排队" : "Queued"}. ${statusLabel}.`}
             >
               <ClockIcon className="size-3.5" aria-hidden />
-              {sending ? "Sending" : "Queued"}
+              {sending ? (isZh ? "发送中" : "Sending") : isZh ? "已排队" : "Queued"}
             </TooltipTrigger>
             <TooltipPopup side="bottom">{statusLabel}</TooltipPopup>
           </Tooltip>
@@ -1919,18 +1954,13 @@ function QueuedMessageTimelineRow({
                     variant="ghost-muted"
                     onPointerDown={(event) => event.preventDefault()}
                     onClick={() => ctx.onSteerQueuedMessage(queuedMessage.id)}
-                    aria-label="Send now"
+                    aria-label={sendNowLabel}
                   />
                 }
               >
                 <ArrowUpIcon className="size-3.5" aria-hidden />
               </TooltipTrigger>
-              <TooltipPopup side="bottom">
-                Send now
-                {row.isNext && ctx.steerQueuedMessageShortcutLabel
-                  ? ` (${ctx.steerQueuedMessageShortcutLabel})`
-                  : null}
-              </TooltipPopup>
+              <TooltipPopup side="bottom">{sendNowLabel}</TooltipPopup>
             </Tooltip>
             <Tooltip>
               <TooltipTrigger
@@ -1941,13 +1971,13 @@ function QueuedMessageTimelineRow({
                     variant="ghost-muted"
                     onPointerDown={(event) => event.preventDefault()}
                     onClick={() => ctx.onRemoveQueuedMessage(queuedMessage.id)}
-                    aria-label="Cancel and return to the composer"
+                    aria-label={cancelLabel}
                   />
                 }
               >
                 <XIcon className="size-3.5" aria-hidden />
               </TooltipTrigger>
-              <TooltipPopup side="bottom">Cancel and return to the composer</TooltipPopup>
+              <TooltipPopup side="bottom">{cancelLabel}</TooltipPopup>
             </Tooltip>
           </div>
         </div>
@@ -2205,7 +2235,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
     <div className="group flex flex-col items-end gap-1">
       {userMessage.isAutomation ? (
         <p
-          className="me-1 text-[11px] text-muted-foreground/70"
+          className="me-1 text-2xs text-muted-foreground/70"
           data-user-message-attribution="automation"
         >
           {userMessage.scheduledTaskId ? (
@@ -2224,10 +2254,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
           )}
         </p>
       ) : row.message.createdBy === "agent" ? (
-        <p
-          className="me-1 text-[11px] text-muted-foreground/70"
-          data-user-message-attribution="agent"
-        >
+        <p className="me-1 text-2xs text-muted-foreground/70" data-user-message-attribution="agent">
           {senderThreadId ? (
             <InlineButton
               onClick={() => ctx.onOpenThread(senderThreadId)}
@@ -2362,7 +2389,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
       row.projectedItem.item.status !== "pending" &&
       row.projectedItem.item.status !== "waiting" ? (
         <div className="me-1 flex items-center gap-1.5">
-          <span className="rounded-full border border-destructive/25 bg-destructive/8 px-1.5 py-0.5 text-[10px] font-medium text-destructive">
+          <span className="rounded-full border border-destructive/25 bg-destructive/8 px-1.5 py-0.5 text-3xs font-medium text-destructive">
             {row.projectedItem.item.status}
           </span>
         </div>
@@ -2590,7 +2617,7 @@ function AttemptFoldTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "at
     >
       <Icon className="size-3.5 shrink-0 text-muted-foreground" />
       <span className="text-xs font-medium text-foreground/80">{row.label}</span>
-      <span className="text-[11px] text-muted-foreground">Partial output retained</span>
+      <span className="text-2xs text-muted-foreground">Partial output retained</span>
     </button>
   );
 }
@@ -2739,7 +2766,7 @@ function AssistantMessageMeta({
         <AssistantForkButton projectedItem={projectedItem} />
       ) : null}
       {projectedItem && projectedItem.item.status !== "completed" ? (
-        <span className="rounded-full border border-border/70 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+        <span className="rounded-full border border-border/70 px-1.5 py-0.5 font-mono text-3xs text-muted-foreground">
           {projectedItem.item.status}
         </span>
       ) : null}
@@ -2919,9 +2946,9 @@ function V2EventTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "event"
       <details
         className={cn(
           "group rounded-md border",
-          presentation.tone === "warning" && "border-amber-500/25 bg-amber-500/5",
+          presentation.tone === "warning" && "border-warning/25 bg-warning/5",
           presentation.tone === "danger" && "border-destructive/25 bg-destructive/5",
-          presentation.tone === "success" && "border-emerald-500/20 bg-emerald-500/5",
+          presentation.tone === "success" && "border-success/20 bg-success/5",
         )}
         data-v2-item-type={item.type}
         data-v2-item-visibility={visibility}
@@ -2931,16 +2958,16 @@ function V2EventTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "event"
           <Icon
             className={cn(
               "size-3.5 shrink-0",
-              presentation.tone === "warning" && "text-amber-600 dark:text-amber-400",
+              presentation.tone === "warning" && "text-warning",
               presentation.tone === "danger" && "text-destructive",
-              presentation.tone === "success" && "text-emerald-600 dark:text-emerald-400",
+              presentation.tone === "success" && "text-success",
             )}
           />
           <span className="shrink-0 font-medium text-foreground/90">{presentation.label}</span>
           {item.status !== "completed" ? (
             <span
               className={cn(
-                "shrink-0 rounded-full border px-1.5 py-0.5 font-mono text-[10px]",
+                "shrink-0 rounded-full border px-1.5 py-0.5 font-mono text-3xs",
                 item.status === "failed"
                   ? "border-destructive/40 text-destructive"
                   : "border-border/70 text-muted-foreground",
@@ -2955,7 +2982,7 @@ function V2EventTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "event"
             </span>
           ) : null}
           {visibility !== "local" ? (
-            <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+            <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-3xs text-muted-foreground">
               {visibility === "inherited" ? "Inherited" : "Synthetic"}
             </span>
           ) : null}
@@ -2974,7 +3001,7 @@ function V2EventTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "event"
             </div>
           ) : null}
           {visibility === "inherited" ? (
-            <p className="mt-1 font-mono text-[10px] text-muted-foreground/65">
+            <p className="mt-1 font-mono text-3xs text-muted-foreground/65">
               From {sourceThreadId}
             </p>
           ) : null}
@@ -2997,9 +3024,9 @@ function V2EventTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "event"
     <section
       className={cn(
         "rounded-lg border px-3 py-2",
-        presentation.tone === "warning" && "border-amber-500/25 bg-amber-500/5",
+        presentation.tone === "warning" && "border-warning/25 bg-warning/5",
         presentation.tone === "danger" && "border-destructive/25 bg-destructive/5",
-        presentation.tone === "success" && "border-emerald-500/20 bg-emerald-500/5",
+        presentation.tone === "success" && "border-success/20 bg-success/5",
         presentation.tone === "muted" && "border-border/60 bg-card/30",
       )}
       data-v2-item-type={item.type}
@@ -3009,9 +3036,9 @@ function V2EventTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "event"
         <Icon
           className={cn(
             "mt-0.5 size-3.5 shrink-0",
-            presentation.tone === "warning" && "text-amber-600 dark:text-amber-400",
+            presentation.tone === "warning" && "text-warning",
             presentation.tone === "danger" && "text-destructive",
-            presentation.tone === "success" && "text-emerald-600 dark:text-emerald-400",
+            presentation.tone === "success" && "text-success",
             presentation.tone === "muted" && "text-muted-foreground",
           )}
         />
@@ -3021,7 +3048,7 @@ function V2EventTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "event"
             {item.status !== "completed" ? (
               <span
                 className={cn(
-                  "rounded-full border px-1.5 py-0.5 font-mono text-[10px]",
+                  "rounded-full border px-1.5 py-0.5 font-mono text-3xs",
                   item.status === "failed"
                     ? "border-destructive/40 text-destructive"
                     : "border-border/70 text-muted-foreground",
@@ -3031,7 +3058,7 @@ function V2EventTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "event"
               </span>
             ) : null}
             {visibility !== "local" ? (
-              <span className="rounded-full bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+              <span className="rounded-full bg-muted px-1.5 py-0.5 text-3xs text-muted-foreground">
                 {visibility === "inherited" ? "Inherited" : "Synthetic"}
               </span>
             ) : null}
@@ -3048,7 +3075,7 @@ function V2EventTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "event"
             </div>
           ) : null}
           {visibility === "inherited" ? (
-            <p className="mt-1 font-mono text-[10px] text-muted-foreground/65">
+            <p className="mt-1 font-mono text-3xs text-muted-foreground/65">
               From {sourceThreadId}
             </p>
           ) : null}
@@ -3106,104 +3133,7 @@ function subagentGroupTiming(
   };
 }
 
-/**
- * Thinking inside a tool group has its own disclosure, preserved across recycling.
- * A group whose row already reads "Thought" (no visible tool) skips the header.
- */
-function ReasoningTraceBlock({
-  anchorKey,
-  messages,
-  live,
-  showHeader,
-}: {
-  anchorKey: string;
-  messages: ReadonlyArray<ChatMessage>;
-  live: boolean;
-  showHeader: boolean;
-}) {
-  const ctx = use(TimelineRowCtx);
-  const { isWorking, unsettledTurnId } = use(TimelineRowActivityCtx);
-  const first = messages[0]!;
-  const expanded = !showHeader || ctx.expandedReasoningMessageIds.has(first.id);
-  const streaming =
-    live &&
-    messages.some((reasoningMessage) => reasoningMessage.streaming) &&
-    isWorking &&
-    first.turnId !== null &&
-    first.turnId === unsettledTurnId;
-  if (
-    messages.every((reasoningMessage) => reasoningMessage.text.trim().length === 0) &&
-    !streaming
-  ) {
-    return null;
-  }
-  const label = streaming ? "Thinking" : "Thought";
-  const collapsedPreview = messages.find((message) => message.text.trim().length > 0)?.text.trim();
-  const headerText = expanded ? (
-    label
-  ) : (
-    <ReactMarkdown remarkPlugins={[remarkGfm, [remarkThoughtPreview, label]]}>
-      {collapsedPreview ?? label}
-    </ReactMarkdown>
-  );
-  return (
-    <div className="flex flex-col">
-      {showHeader ? (
-        <button
-          type="button"
-          aria-expanded={expanded}
-          onClick={() => ctx.onToggleReasoning(first.id, !expanded, anchorKey)}
-          className="flex min-h-6 cursor-pointer select-none items-center gap-1.5 rounded-md ps-0.5 pe-2 text-start text-sm leading-relaxed transition-colors hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
-        >
-          <span className="flex size-6 shrink-0 items-center justify-center text-icon-muted">
-            <BrainIcon aria-hidden className="block size-4 shrink-0 stroke-2 opacity-70" />
-          </span>
-          <span
-            ref={streaming ? observeVisibleAnimation : undefined}
-            className="relative min-w-0 flex-1 truncate text-secondary-label"
-          >
-            {headerText}
-            {streaming ? <ActivityShimmerOverlay>{headerText}</ActivityShimmerOverlay> : null}
-          </span>
-          <span className="flex size-4 shrink-0 items-center justify-center" aria-hidden>
-            <ChevronRightIcon
-              className={cn(
-                "size-3 shrink-0 text-icon-muted opacity-70 transition-transform duration-200",
-                expanded && "rotate-90",
-              )}
-            />
-          </span>
-        </button>
-      ) : null}
-      {expanded ? (
-        <div className="ms-7 flex max-h-96 flex-col gap-3 overflow-auto px-0.5 py-1 select-text">
-          {messages.map((reasoningMessage) => (
-            <ChatMarkdown
-              key={reasoningMessage.id}
-              className="text-foreground"
-              text={reasoningMessage.text}
-              cwd={ctx.markdownCwd}
-              threadRef={ctx.threadRef ?? undefined}
-              isStreaming={streaming && reasoningMessage.streaming}
-              lineBreaks
-              skills={ctx.skills}
-              headingLevelOffset={MESSAGE_HEADING_LEVEL}
-              onUseArtifactTemplate={ctx.onUseArtifactTemplate}
-              onImageExpand={ctx.onImageExpand}
-            />
-          ))}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-/**
- * A provider's thinking trace. Collapsed by default: reasoning is context for
- * the answer, not the answer. The open/closed flag lives on the list so it
- * survives row recycling in the virtualizer.
- */
-const ReasoningTimelineRow = memo(function ReasoningTimelineRow({
+const V2SubagentGroup = memo(function V2SubagentGroup({
   row,
 }: {
   row: Extract<TimelineRow, { kind: "event" }>;
@@ -3241,32 +3171,47 @@ const ReasoningTimelineRow = memo(function ReasoningTimelineRow({
     setExpanded(open);
   };
   return (
-    <div className={cn("flex flex-col", expanded && "mb-1")}>
-      <button
-        type="button"
-        aria-expanded={expanded}
-        onClick={toggle}
-        className="flex cursor-pointer select-none items-center gap-1.5 rounded-md px-0.5 py-0.5 text-start transition-colors hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
-      >
-        <span className="flex size-6 shrink-0 items-center justify-center text-icon-muted">
-          <BrainIcon aria-hidden className="block size-4 shrink-0 stroke-2 opacity-70" />
-        </span>
-        <span className="flex min-w-0 flex-1 items-center gap-1.5">
-          <span className="relative min-w-0 flex-1 truncate text-secondary-label text-sm leading-relaxed">
-            Thought
+    <WorkLogBlock continues={row.continuesWorkLog}>
+      <Collapsible open={expanded} onOpenChange={toggleExpanded} data-subagent-group>
+        <CollapsibleTrigger
+          aria-label={label}
+          aria-description={statusSummary}
+          className={cn(
+            "flex w-full min-w-0 items-center gap-3 py-2 text-left transition-opacity hover:opacity-100",
+            expanded || summary.active
+              ? "text-foreground opacity-100"
+              : "text-muted-foreground opacity-55",
+          )}
+        >
+          <span className="flex shrink-0 items-center -space-x-1.5" aria-hidden>
+            {agents.slice(0, 3).map(({ item, status }) => (
+              <SubagentAvatar
+                key={item.id}
+                driver={item.driver}
+                provider={ctx.providerStatuses.find(
+                  (provider) => provider.instanceId === item.providerInstanceId,
+                )}
+                status={agents.length === 1 ? status : undefined}
+              />
+            ))}
+            {agents.length > 3 ? (
+              <span className="inline-flex size-6 items-center justify-center rounded-full bg-muted text-3xs font-medium text-muted-foreground ring-2 ring-background">
+                +{agents.length - 3}
+              </span>
+            ) : null}
           </span>
           <span className="min-w-0 flex-1">
             <span className="block text-xs font-semibold">{label}</span>
             <span
               className={cn(
-                "block truncate text-[10px] text-muted-foreground",
+                "block truncate text-3xs text-muted-foreground",
                 summary.active ? "text-info" : summary.failed && "text-destructive",
               )}
             >
               {statusSummary}
             </span>
           </span>
-          <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
+          <span className="shrink-0 font-mono text-3xs text-muted-foreground">
             <SubagentElapsed agent={subagentGroupTiming(agents)} />
           </span>
           <ChevronDownIcon
@@ -3735,7 +3680,7 @@ function LiveActivityContent({
             <ToolActivityIconView
               icon={toolIcon}
               fallbackName={iconName}
-              className="block size-4 shrink-0 stroke-[1.8]"
+              className="block size-4 shrink-0 stroke-2"
               muted={!highlighted}
             />
           </span>
@@ -3749,12 +3694,7 @@ function LiveActivityContent({
             active && "live-tool-shine",
           )}
         >
-          <ToolActivityIconView
-            icon={toolIcon}
-            fallbackName={iconName}
-            className="block size-4 shrink-0 stroke-2"
-            muted={!highlighted}
-          />
+          {label}
         </span>
       }
       trailing={
@@ -3897,10 +3837,8 @@ function WorkGroupHeader(props: {
       onClick={props.onToggle}
       icon={
         <ToolActivityIconView
-          icon={row.toolIcon}
-          fallbackName={
-            row.summaryToolIcon ?? row.toolSurface ?? toolGroupSummaryIconName(row.summaryKind)
-          }
+          icon={props.toolIcon}
+          fallbackName={props.iconName}
           className="size-4 shrink-0 stroke-2"
           muted
         />
@@ -5078,45 +5016,37 @@ function remarkThoughtPreview(fallback: string) {
           : "";
         return node.children.map(plainText).join(separator);
       }
-      className={cn(
-        "flex flex-col rounded-md px-1 py-0.5 transition-colors",
-        canExpand &&
-          "cursor-pointer hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70",
-      )}
-    >
-      <div className="flex select-none items-center gap-1.5">
-        <p className="flex min-w-0 flex-1 items-baseline gap-1.5 text-sm leading-relaxed">
-          <span
-            className={cn(
-              "min-w-0 truncate",
-              agent.status === "failed" ? failedToolIconClassName : "text-foreground/80",
-            )}
-          >
-            {agent.title}
-          </span>
-          {role ? (
-            <span className="max-w-28 shrink-0 truncate rounded-sm border border-border/60 px-1 font-mono text-3xs text-muted-foreground">
-              {role}
-            </span>
-          ) : null}
-        </p>
-        <span className="shrink-0 font-mono text-2xs tabular-nums text-muted-foreground">
-          {statusLabel}
-        </span>
-      </div>
-      {!open && firstLine ? (
-        <p className="truncate text-xs text-muted-foreground">{firstLine}</p>
-      ) : null}
-      {open ? (
-        <div
-          className="mt-1 cursor-default rounded-md bg-muted/40 px-3 py-2"
-          onClick={stopRowToggle}
-          onPointerDown={stopRowToggle}
-        >
-          <pre className={toolCallExpandedBodyClassName}>{body}</pre>
-        </div>
-      ) : null}
-    </div>
+      return node.type === "break" ? " " : "";
+    };
+    tree.children = [
+      { type: "text", value: plainText(tree).replace(/\s+/g, " ").trim() || fallback },
+    ];
+  };
+}
+
+function ReasoningTraceContent({ entries }: { entries: ReadonlyArray<TimelineWorkEntry> }) {
+  const ctx = use(TimelineRowCtx);
+  const { isWorking, latestRunId } = use(TimelineRowActivityCtx);
+  return (
+    <WorkLogDetails>
+      {entries.map((entry) => (
+        <ChatMarkdown
+          key={entry.id}
+          className="text-foreground"
+          text={entry.detail ?? ""}
+          cwd={ctx.markdownCwd}
+          threadRef={ctx.threadRef ?? undefined}
+          skills={ctx.skills}
+          isStreaming={
+            isWorking && entry.runId === latestRunId && entry.toolLifecycleStatus === "inProgress"
+          }
+          headingLevelOffset={MESSAGE_HEADING_LEVEL}
+          onUseArtifactTemplate={ctx.onUseArtifactTemplate}
+          onImageExpand={ctx.onImageExpand}
+          lineBreaks
+        />
+      ))}
+    </WorkLogDetails>
   );
 }
 

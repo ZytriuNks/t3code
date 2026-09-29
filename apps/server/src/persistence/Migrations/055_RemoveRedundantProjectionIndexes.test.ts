@@ -13,7 +13,7 @@ layer("055_RemoveRedundantProjectionIndexes", (it) => {
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       yield* runMigrations({ toMigrationInclusive: 54 });
-      yield* runMigrations({ toMigrationInclusive: 55 });
+      yield* runMigrations({ toMigrationInclusive: 56 });
 
       const rows = yield* sql<{ readonly name: string }>`
         SELECT name
