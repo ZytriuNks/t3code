@@ -100,13 +100,11 @@ function resolveDesktopAppStageLabel(input: {
   readonly isDevelopment: boolean;
   readonly appName: string;
 }): DesktopAppStageLabel {
-  if (input.isDevelopment) {
+  if (input.isDevelopment || input.appName === "T3 Code (Dev)") {
     return "Dev";
   }
-  // Derive the stage from Electron's reported app name (which on packaged
-  // builds equals `productName` from package.json). Alpha and Experimental
-  // builds both stage as themselves; any unrecognized name falls back to
-  // Experimental to preserve the historical default.
+  // Packaged builds use productName independently of development-server mode.
+  // Unrecognized names keep the historical Experimental default.
   if (input.appName === "T3 Code (Alpha)") {
     return "Alpha";
   }
@@ -253,18 +251,19 @@ const make = Effect.fn("desktop.environment.make")(function* (
     branding,
     displayName,
     appUserModelId: Option.getOrElse(config.appUserModelIdOverride, () =>
-      isDevelopment
+      isDevelopment || appName === "T3 Code (Dev)"
         ? "com.t3tools.t3code.dev"
         : appName === "T3 Code (Alpha)"
           ? "com.t3tools.t3code"
           : "com.t3tools.t3code.experimental",
     ),
     linuxDesktopEntryName: resolveLinuxDesktopEntryName(isDevelopment, appName),
-    linuxWmClass: isDevelopment
-      ? "t3code-dev"
-      : appName === "T3 Code (Alpha)"
-        ? "t3code"
-        : "t3code-experimental",
+    linuxWmClass:
+      isDevelopment || appName === "T3 Code (Dev)"
+        ? "t3code-dev"
+        : appName === "T3 Code (Alpha)"
+          ? "t3code"
+          : "t3code-experimental",
     linuxApplicationsDir,
     appImagePath: config.appImagePath,
     defaultDesktopSettings: DesktopAppSettings.resolveDefaultDesktopSettings(input.appVersion),

@@ -1,4 +1,5 @@
 import { useAtomValue } from "@effect/atom-react";
+import type { EnvironmentIdentificationMode } from "@t3tools/contracts";
 import { useId } from "react";
 
 import { APP_STAGE_LABEL } from "../branding";
@@ -6,7 +7,7 @@ import { resolveServerBackedAppStageLabel } from "../branding.logic";
 import { primaryServerConfigAtom } from "../state/server";
 
 export type SidebarStageBackdropVariant = "nightly" | "dev";
-export type EnvironmentIdentificationPillLabel = "Dev" | "Nightly";
+export type EnvironmentIdentificationPillLabel = "Alpha" | "Experimental" | "Dev" | "Nightly";
 
 // A wide viewBox keeps the 96-unit art height at a fixed scale while sidebar resizing reveals
 // more horizontal canvas instead of zooming the scene.
@@ -25,8 +26,14 @@ export function resolveSidebarStageBackdropVariant(
 
 export function resolveEnvironmentIdentificationPillLabel(
   stageLabel: string,
+  mode: EnvironmentIdentificationMode = "pill",
 ): EnvironmentIdentificationPillLabel | null {
+  if (mode === "none") return null;
+  // Stages without artwork still need an identity when artwork is the saved default.
+  if (mode === "artwork" && resolveSidebarStageBackdropVariant(stageLabel) !== null) return null;
   const normalized = stageLabel.trim().toLowerCase();
+  if (normalized === "alpha") return "Alpha";
+  if (normalized === "experimental") return "Experimental";
   if (normalized === "dev") return "Dev";
   if (normalized === "nightly") return "Nightly";
   return null;

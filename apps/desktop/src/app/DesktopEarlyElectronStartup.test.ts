@@ -88,6 +88,47 @@ describe("DesktopEarlyElectronStartup", () => {
     });
   });
 
+  for (const stage of [
+    {
+      appName: "T3 Code (Dev)",
+      linuxWmClass: "t3code-dev",
+      linuxDesktopEntryName: "com.t3tools.T3Code.Development.desktop",
+      settingsPath: "/home/user/.t3-dev/userdata/desktop-settings.json",
+    },
+    {
+      appName: "T3 Code (Alpha)",
+      linuxWmClass: "t3code",
+      linuxDesktopEntryName: "com.t3tools.T3Code.desktop",
+      settingsPath: "/home/user/.t3-alpha/userdata/desktop-settings.json",
+    },
+    {
+      appName: "T3 Code (Experimental)",
+      linuxWmClass: "t3code-experimental",
+      linuxDesktopEntryName: "com.t3tools.T3Code.Experimental.desktop",
+      settingsPath: "/home/user/.t3-experimental/userdata/desktop-settings.json",
+    },
+  ]) {
+    it(`keeps the packaged ${stage.appName} identity before Electron is ready`, () => {
+      const options = resolveEarlyLinuxElectronOptions({
+        env: {},
+        appName: stage.appName,
+        homeDirectory: "/home/user",
+        joinPath,
+        readFileString: (path) => {
+          assert.equal(path, stage.settingsPath);
+          return JSON.stringify({ linuxPasswordStore: "kwallet6" });
+        },
+      });
+
+      assert.deepEqual(options, {
+        isDevelopment: false,
+        linuxWmClass: stage.linuxWmClass,
+        linuxDesktopEntryName: stage.linuxDesktopEntryName,
+        passwordStore: "kwallet6",
+      });
+    });
+  }
+
   it("keeps implicit development state under ~/.t3-experimental/dev when T3CODE_HOME is unset", () => {
     const preference = resolveEarlyLinuxPasswordStorePreference({
       env: {

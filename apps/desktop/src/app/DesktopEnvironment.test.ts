@@ -40,6 +40,56 @@ const makeEnvironment = (
   DesktopEnvironment.DesktopEnvironment.pipe(Effect.provide(makeEnvironmentLayer(overrides, env)));
 
 describe("DesktopEnvironment", () => {
+  for (const stage of [
+    {
+      appName: "T3 Code (Dev)",
+      stageLabel: "Dev",
+      appUserModelId: "com.t3tools.t3code.dev",
+      linuxWmClass: "t3code-dev",
+      linuxDesktopEntryName: "com.t3tools.T3Code.Development.desktop",
+      stateDir: "/Users/alice/.t3-dev/userdata",
+    },
+    {
+      appName: "T3 Code (Alpha)",
+      stageLabel: "Alpha",
+      appUserModelId: "com.t3tools.t3code",
+      linuxWmClass: "t3code",
+      linuxDesktopEntryName: "com.t3tools.T3Code.desktop",
+      stateDir: "/Users/alice/.t3-alpha/userdata",
+    },
+    {
+      appName: "T3 Code (Experimental)",
+      stageLabel: "Experimental",
+      appUserModelId: "com.t3tools.t3code.experimental",
+      linuxWmClass: "t3code-experimental",
+      linuxDesktopEntryName: "com.t3tools.T3Code.Experimental.desktop",
+      stateDir: "/Users/alice/.t3-experimental/userdata",
+    },
+  ]) {
+    it.effect(`keeps the packaged ${stage.stageLabel} identity without a development server`, () =>
+      Effect.gen(function* () {
+        const environment = yield* makeEnvironment({
+          platform: "win32",
+          isPackaged: true,
+          appName: stage.appName,
+        });
+
+        assert.equal(environment.displayName, stage.appName);
+        assert.deepEqual(environment.branding, {
+          baseName: "T3 Code",
+          stageLabel: stage.stageLabel,
+          displayName: stage.appName,
+        });
+        assert.equal(environment.appUserModelId, stage.appUserModelId);
+        assert.equal(environment.linuxWmClass, stage.linuxWmClass);
+        assert.equal(environment.linuxDesktopEntryName, stage.linuxDesktopEntryName);
+        assert.equal(environment.isDevelopment, false);
+        assert.deepEqual(environment.devServerUrl, Option.none());
+        assert.equal(environment.stateDir, stage.stateDir);
+      }),
+    );
+  }
+
   it.effect("derives state paths and development identity inside Effect", () =>
     Effect.gen(function* () {
       const environment = yield* makeEnvironment(

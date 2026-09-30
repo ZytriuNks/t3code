@@ -19,7 +19,28 @@ describe("SidebarStageBackdrop", () => {
     expect(resolveEnvironmentIdentificationPillLabel("Dev")).toBe("Dev");
     expect(resolveEnvironmentIdentificationPillLabel("nightly")).toBe("Nightly");
     expect(resolveEnvironmentIdentificationPillLabel("Latest")).toBeNull();
-    expect(resolveEnvironmentIdentificationPillLabel("Alpha")).toBeNull();
+    expect(resolveEnvironmentIdentificationPillLabel("Alpha")).toBe("Alpha");
+    expect(resolveEnvironmentIdentificationPillLabel(" experimental ")).toBe("Experimental");
+    expect(resolveEnvironmentIdentificationPillLabel("unknown")).toBeNull();
+  });
+
+  it.each([
+    ["Alpha", "artwork", "Alpha"],
+    ["Alpha", "pill", "Alpha"],
+    ["Alpha", "none", null],
+    ["Experimental", "artwork", "Experimental"],
+    ["Experimental", "pill", "Experimental"],
+    ["Experimental", "none", null],
+    ["Dev", "artwork", null],
+    ["Dev", "pill", "Dev"],
+    ["Dev", "none", null],
+    ["Nightly", "artwork", null],
+    ["Nightly", "pill", "Nightly"],
+    ["Nightly", "none", null],
+    ["Latest", "artwork", null],
+    ["Latest", "pill", null],
+  ] as const)("resolves %s identification in %s mode", (stage, mode, expected) => {
+    expect(resolveEnvironmentIdentificationPillLabel(stage, mode)).toBe(expected);
   });
 
   it.each(["nightly", "dev"] as const)(

@@ -1,9 +1,8 @@
 # Fork 构建与安装指南
 
-本 fork 在 `feat/web-zh-cn-settings-followup` 之上引入了一套基于
-`productName` 的派生机制，使**同一份仓库源码可以产出三个互不干扰
-的桌面客户端**：Alpha（基线）、Experimental（验证）、Dev（开发）。
-本指南说明如何构建、安装、以及在 PR/新分支后刷新所有客户端。
+本 fork 基于 `productName` 派生三个桌面身份：Alpha（已合并并审验的
+主用基线）、Experimental（待审验候选）、Dev（参考对照）。本指南说明
+构建、安装与身份核验；维护者本地的 PR 和构建记录保存在 `AGENTS-local/`。
 
 ## 三个身份如何隔离
 
@@ -15,10 +14,15 @@
 | `T3 Code (Experimental)` | `D:\t3code\experimental\T3 Code (Experimental)\` | `%APPDATA%\t3code-experimental\` | `~\.t3-experimental\` |
 | `T3 Code (Dev)`          | `D:\t3code\dev\T3 Code (Dev)\`                   | `%APPDATA%\t3code-dev\`          | `~\.t3-dev\`          |
 
-appId、URL scheme、`appUserModelId`、WM_CLASS、Linux desktop entry、
-NSIS INSTALLDIR 都从 productName 派生（见
-`scripts/build-desktop-artifact.ts` 的
-`DESKTOP_IDENTITY_BY_PRODUCT_NAME`）。
+构建身份由 `scripts/build-desktop-artifact.ts` 中的
+`DESKTOP_IDENTITY_BY_PRODUCT_NAME` 决定。运行时的名称、系统身份、
+数据目录和协议仍分别由桌面模块派生，修改构建表并不会自动更新这些判断。
+
+安装版 Dev 的 `isDevelopment` 仍为 `false`；这个字段表示是否连接开发服务器，
+不能用它单独判断产品阶段。`DesktopEnvironment.ts` 和
+`DesktopEarlyElectronStartup.ts` 必须同时识别产品名 `T3 Code (Dev)`，
+否则会出现安装目录正确、窗口名称和系统身份却回落为 Experimental 的情况。
+构建结束后还原源码中的 `productName` 不会改变已生成安装包的身份。
 
 `install-dir-override.nsh` 在 staging 阶段写入两个 hook：
 
@@ -41,46 +45,41 @@ NSIS INSTALLDIR 都从 productName 派生（见
 
 ## 构建流程
 
-版本号强制为 `0.0.42-fork-1` 以保证 NSIS 在覆盖安装时不会因
-同版本号直接跳过（NSIS 的 same-version skip 会让覆盖 install 失
-效）。`T3CODE_DESKTOP_VERSION` 必须在每次构建时显式传入，因为
-desktop 阶段读 `apps/server/package.json` 的 `version`，而
-`apps/desktop/package.json` 里的 `version` 不参与。
+为每个阶段分别选择源码基线和版本号。Experimental 使用待审验分支；Dev
+使用对应的已合并基线；Alpha 仅在明确请求后构建。严格 A/B 对照需要记录
+两包的源码提交，确认差异范围，不能仅凭相近版本号判断。
+
+构建前核对 `release/`、存档目录以及已安装版本，选择该阶段尚未使用的新版本号。
+Dev 和 Experimental 的 `fork-N` 独立递增。显式设置 `T3CODE_DESKTOP_VERSION`；
+未设置时构建脚本使用 `apps/server/package.json` 的版本。
+
+下面演示单次 Dev 构建；Experimental 则将 `$stage` 改为 `Experimental`，
+并选择该阶段的版本号。使用 `finally` 恢复清单，失败时也不遗留产品名修改。
 
 ```powershell
-# 在仓库根目录
-$env:T3CODE_DESKTOP_VERSION = "0.0.42-fork-1"
-
-# Experimental
-(Get-Content apps/desktop/package.json) `
-  -replace '"productName": "T3 Code \([^)]+\)"', `
-           '"productName": "T3 Code (Experimental)"' `
-  | Set-Content apps/desktop/package.json
-corepack pnpm dist:desktop:win:x64
-
-# Alpha
-(Get-Content apps/desktop/package.json) `
-  -replace '"productName": "T3 Code \([^)]+\)"', `
-           '"productName": "T3 Code (Alpha)"' `
-  | Set-Content apps/desktop/package.json
-corepack pnpm dist:desktop:win:x64
-
-# Dev
-(Get-Content apps/desktop/package.json) `
-  -replace '"productName": "T3 Code \([^)]+\)"', `
-           '"productName": "T3 Code (Dev)"' `
-  | Set-Content apps/desktop/package.json
-corepack pnpm dist:desktop:win:x64
-
-# 把 productName 还原到 Experimental 留给下一次构建
-(Get-Content apps/desktop/package.json) `
-  -replace '"productName": "T3 Code \([^)]+\)"', `
-           '"productName": "T3 Code (Experimental)"' `
-  | Set-Content apps/desktop/package.json
+$stage = 'Dev'
+$env:T3CODE_DESKTOP_VERSION = '0.0.42-fork-2' # 示例；每次先核对现有版本
+$manifestPath = Join-Path (Get-Location) 'apps/desktop/package.json'
+$original = [System.IO.File]::ReadAllBytes($manifestPath)
+try {
+  $manifest = [System.Text.Encoding]::UTF8.GetString($original)
+  $manifest = $manifest -replace '"productName": "T3 Code \([^)]+\)"',
+    ('"productName": "T3 Code (' + $stage + ')"')
+  [System.IO.File]::WriteAllText($manifestPath, $manifest, [System.Text.UTF8Encoding]::new($false))
+  corepack pnpm dist:desktop:win:x64 --keep-stage
+  if ($LASTEXITCODE -ne 0) { throw 'Desktop build failed' }
+} finally {
+  [System.IO.File]::WriteAllBytes($manifestPath, $original)
+}
 ```
 
-每次 `dist:desktop:win:x64` 会在 `release/` 下产出形如
-`T3-Code-T3Code<Stage>-0.0.42-fork-1-x64.exe` 的安装包。
+产物位于 `release/T3-Code-T3Code<Stage>-<version>-x64.exe`。
+`--keep-stage` 保留临时打包目录供核验；身份修复后应完整构建，不复用旧的
+`dist-electron` 或使用 `--skip-build`。
+
+新工作区需要安装依赖。如果第三方许可证插件下载 SPDX 数据超时，可以复制
+主检出中同版本的 `.generated/third-party-licenses/spdx/` 缓存后重试；
+保留许可证生成和校验，不能跳过它们。
 
 ## 安装流程
 
@@ -99,39 +98,17 @@ fork build 时会进入 `UninstallLoop`：调旧版 uninstaller，失败 5 次
 安装一次成功。
 
 ```powershell
-# 安装一个
-pwsh .\scripts\fork-build\install-fork.ps1 -Stage Alpha
-
-# 一次性装完三个
-pwsh .\scripts\fork-build\install-fork.ps1 -Stage All -Force
+# 用户先关闭要升级的 Dev / Experimental，再按阶段分别调用
+pwsh .\scripts\fork-build\install-fork.ps1 -Stage Dev
+pwsh .\scripts\fork-build\install-fork.ps1 -Stage Experimental
 ```
 
-`-Force` 在安装前 `Stop-Process` 所有运行中的 `T3 Code*` 和
-`t3-resource-monitor`，避免 silent 模式被运行进程阻塞。
+`Stage` 是单值参数，不支持 `-Stage Experimental,Dev`。不要使用 `-Force`：
+当前脚本会停止所有匹配的 T3 进程，可能关闭主用 Alpha。Alpha 安装按维护者
+明确安排手动执行。
 
-### 手动重装时的等价命令
-
-如果不方便用脚本，可以把这两步复制粘贴到 PowerShell：
-
-```powershell
-$reg = "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
-Get-ChildItem -Path $reg | ForEach-Object {
-  $p = Get-ItemProperty -Path $_.PSPath -ErrorAction SilentlyContinue
-  if ($p.DisplayName -like "T3 Code (Alpha)*" -or
-      $p.DisplayName -like "T3 Code (Experimental)*" -or
-      $p.DisplayName -like "T3 Code (Dev)*") {
-    Remove-Item -Path $_.PSPath -Recurse -Force
-  }
-}
-& "C:\Users\87500\Downloads\T3-Code-Alpha-0.0.42-fork-1-x64.exe" /S
-& "C:\Users\87500\Downloads\T3-Code-Experimental-0.0.42-fork-1-x64.exe" /S
-& "C:\Users\87500\Downloads\T3-Code-Dev-0.0.42-fork-1-x64.exe" /S
-```
-
-> 注意：`& "路径" /S` 在中文 (chcp 936) PowerShell 下会因为调用
-> 解析问题报 `CommandNotFoundException`。请优先使用上面的脚本，
-> 或在 `cmd` 下运行（先把 `.exe` 文件名复制对，GBK 编码下文件名
-> 不会乱码）。
+显式使用 `-InstallerPath` 时必须与单个 `-Stage` 匹配；不要将它与 `-Stage All`
+组合，否则三个阶段会重复执行同一个安装包，并清理其他阶段的卸载项。
 
 ## 数据迁移 / 备份
 
@@ -152,10 +129,10 @@ Get-ChildItem -Path $reg | ForEach-Object {
 
 每次改完派生表（`build-desktop-artifact.ts`、`DesktopUserData.ts`、
 `ElectronProtocol.ts`、`DesktopBackendConfiguration.ts`、
-`DesktopStatePaths.ts`）后跑：
+`DesktopStatePaths.ts`、`DesktopEnvironment.ts`、`DesktopEarlyElectronStartup.ts`）后跑：
 
 ```powershell
-corepack pnpm typecheck
+corepack pnpm --filter @t3tools/desktop typecheck
 corepack pnpm exec vp test run --passWithNoTests `
   apps/desktop/src/electron/ElectronProtocol.test.ts `
   apps/desktop/src/app/DesktopUserData.test.ts `
@@ -166,22 +143,15 @@ corepack pnpm exec vp test run --passWithNoTests `
   apps/desktop/src/backend/DesktopBackendConfiguration.test.ts
 ```
 
-预期 62 个用例全过；`scripts/build-desktop-artifact.test.ts` 中
-7 个 cargo 路径相关的失败是 pre-existing 环境依赖，与 fork 改动
-无关。
+以本次实际测试结果为准，不依赖历史测试数量，也不预先忽略任何失败。
 
-## 后续 PR / 分支
+## 产物验收
 
-每次上游/其他分支合入后再构建，安装脚本不变，只需把
-`release/` 下的新 `.exe` 指给脚本即可：
-
-```powershell
-pwsh .\scripts\fork-build\install-fork.ps1 -Stage All `
-  -InstallerPath release\T3-Code-T3CodeAlpha-0.0.42-fork-2-x64.exe
-```
-
-或者用 glob 自动挑最新的：
-
-```powershell
-pwsh .\scripts\fork-build\install-fork.ps1 -Stage All
-```
+- 核对安装包的 `ProductName`、版本号，以及 `app.asar/package.json` 的
+  `productName`、`t3codeBuildStage`、`t3codeCommitHash`。
+- 验证包内名称派生逻辑在没有开发服务器时返回目标阶段，Windows 应用 ID、
+  URL scheme 和数据目录也与该阶段对应。文件名正确不足以证明运行时身份正确。
+- 安装后的窗口标题应为 `T3 Code (<Stage>)`。侧栏的小标签另受前端支持阶段
+  和“设置 → 外观 → 环境标识”控制；窗口名修复不等于所有阶段都已支持标签。
+- 保存 `.exe` 和 `.blockmap`，复制到存档目录后核对 SHA-256。记录测试、
+  包内检查与用户实际启动验收的区别。

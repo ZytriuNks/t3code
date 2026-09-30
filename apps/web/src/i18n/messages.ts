@@ -456,7 +456,7 @@ export const EN_MESSAGES = {
     "Higher values make menus, dialogs, and the composer more solid.",
   "settings.appearance.glassOpacity.resetLabel": "glass opacity",
   "settings.appearance.environmentIdentification.description":
-    "Choose how Dev and Nightly environments are identified.",
+    "Choose how Alpha, Experimental, Dev, and Nightly environments are identified. Environments without artwork use a version pill instead.",
   "settings.appearance.environmentIdentification.resetLabel": "environment identification",
   "settings.appearance.environmentIdentification.option.artwork": "Artwork",
   "settings.appearance.environmentIdentification.option.versionPill": "Version pill",
@@ -2961,7 +2961,8 @@ export const ZH_CN_MESSAGES = {
   "settings.appearance.contrast.resetLabel": "对比度",
   "settings.appearance.glassOpacity.description": "值越高，菜单、对话框和输入区越不透明。",
   "settings.appearance.glassOpacity.resetLabel": "玻璃透明度",
-  "settings.appearance.environmentIdentification.description": "选择如何标识 Dev 和 Nightly 环境。",
+  "settings.appearance.environmentIdentification.description":
+    "选择如何标识 Alpha、Experimental、Dev 和 Nightly 环境。没有专用图案的环境使用版本标签。",
   "settings.appearance.environmentIdentification.resetLabel": "环境标识",
   "settings.appearance.environmentIdentification.option.artwork": "图案",
   "settings.appearance.environmentIdentification.option.versionPill": "版本标签",

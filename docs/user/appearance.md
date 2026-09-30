@@ -21,6 +21,13 @@ Android uses **Material You Layout** by default unless you have turned it off in
 It changes shapes, spacing, and controls independently
 of the selected theme.
 
+## Environment identification
+
+On web and desktop, **Settings → Appearance → Environment identification** controls the stage
+indicator beside the app name. **Version pill** shows Alpha, Experimental, Dev, or Nightly;
+**None** hides it. **Artwork** uses the Dev or Nightly background artwork and falls back to a
+version pill for Alpha and Experimental. Custom themes that do not support artwork also use a pill.
+
 ## Composer context
 
 Git-backed projects show branch and worktree controls below the composer while you create a thread.
