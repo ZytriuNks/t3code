@@ -42,10 +42,10 @@ export const SidebarChromeHeader = memo(function SidebarChromeHeader({
     stageLabel,
     environmentIdentificationMode === "artwork",
   );
-  const pillLabel =
-    environmentIdentificationMode === "pill"
-      ? resolveEnvironmentIdentificationPillLabel(stageLabel)
-      : null;
+  const pillLabel = resolveEnvironmentIdentificationPillLabel(
+    stageLabel,
+    environmentIdentificationMode,
+  );
 
   return (
     // The titlebar row, not a padded SidebarHeader: it aligns to the window controls.
