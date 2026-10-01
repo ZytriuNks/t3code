@@ -1,3 +1,4 @@
+import { isChatGptUsageLimitFailure } from "@t3tools/shared/usageLimits";
 import { usageLimitRecoveryBannerItem } from "./chat/UsageLimitRecoveryBanner";
 import {
   resolveBackgroundDraftWorkspaceOptions,
@@ -2066,6 +2067,15 @@ export default function ChatView(props: ChatViewProps) {
   )
     ? threadError
     : null;
+  const chatGptUsageLimit = useMemo(() => {
+    if (serverProjection === null) return false;
+    const run = serverProjection.runs.find((candidate) => candidate.id === serverLatestRun?.runId);
+    return isChatGptUsageLimitFailure(
+      serverProjection.visibleTurnItems.map((entry) => entry.item),
+      visibleThreadError,
+      run,
+    );
+  }, [serverProjection, serverLatestRun?.runId, visibleThreadError]);
   // Dismissing only mutates the session-scoped mask set, which does not
   // trigger a render on its own; setThreadError(null) can also bail when the
   // local shadow is already empty and the banner is driven purely by
@@ -7021,6 +7031,7 @@ export default function ChatView(props: ChatViewProps) {
     serverRuntime.lastErrorClass === "usage_limit" &&
     activeThreadShell?.latestRun
       ? usageLimitRecoveryBannerItem({
+          chatGptUsageLimit,
           runId: activeThreadShell.latestRun.runId,
           resetAt: serverRuntime.usageLimitResetAt ?? null,
           stoppedAt: activeThreadShell.latestRun.completedAt ?? activeThreadShell.updatedAt,
@@ -10523,6 +10534,7 @@ export default function ChatView(props: ChatViewProps) {
                     ? (serverRuntime?.lastErrorClass ?? null)
                     : null
                 }
+                chatGptUsageLimit={chatGptUsageLimit}
                 onDismiss={() => {
                   setThreadError(activeThread.id, null);
                   dismissThreadErrorBannerForSession(threadErrorBannerKey);

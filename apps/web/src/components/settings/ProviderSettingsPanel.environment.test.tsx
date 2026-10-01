@@ -64,6 +64,16 @@ vi.mock("./settingsLayout", async (importOriginal) => {
   };
 });
 
+vi.mock("../../i18n/I18nProvider", async () => {
+  const { translate } = await import("../../i18n/messages");
+  return {
+    useI18n: () => ({
+      t: (key: Parameters<typeof translate>[1], values?: Parameters<typeof translate>[2]) =>
+        translate("en", key, values),
+    }),
+  };
+});
+
 vi.mock("./SettingsScopeSentence", () => ({ SettingsScopeSentence: () => null }));
 vi.mock("react/compiler-runtime", async () => {
   const { reactHookHarness } = await import("../../test/reactHookHarness");

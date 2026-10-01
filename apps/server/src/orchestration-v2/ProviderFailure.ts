@@ -15,6 +15,7 @@ import * as Cause from "effect/Cause";
 
 import type { IdAllocatorV2Shape } from "./IdAllocator.ts";
 import { ContextHandoffBudgetError } from "./ContextHandoffDelivery.ts";
+import { classifyCodexManagedError } from "../provider/CodexManagedErrors.ts";
 
 export const MAX_PROVIDER_FAILURE_MESSAGE_LENGTH = 4_096;
 export const MAX_PROVIDER_FAILURE_CODE_LENGTH = 128;
@@ -63,7 +64,7 @@ function causeMessage(cause: unknown): string | undefined {
   return message;
 }
 
-function stringField(value: unknown, key: "message" | "code"): string | undefined {
+function stringField(value: unknown, key: "message" | "code" | "driver"): string | undefined {
   if (typeof value !== "object" || value === null) return undefined;
   try {
     const candidate = (value as Record<string, unknown>)[key];
@@ -140,14 +141,22 @@ export function makeProviderFailure(input: {
   readonly retryable?: boolean | null;
   readonly resetAt?: string | null;
 }): OrchestrationV2ProviderFailure {
-  const rawMessage = input.message ?? causeMessage(input.cause) ?? DEFAULT_PROVIDER_FAILURE_MESSAGE;
+  const managedError =
+    stringField(input.cause, "driver") === "codex"
+      ? classifyCodexManagedError(input.cause)
+      : undefined;
+  const rawMessage =
+    input.message ??
+    managedError?.message ??
+    causeMessage(input.cause) ??
+    DEFAULT_PROVIDER_FAILURE_MESSAGE;
   const message = boundedText(rawMessage, MAX_PROVIDER_FAILURE_MESSAGE_LENGTH);
-  const rawCode = input.code ?? stringField(input.cause, "code") ?? null;
+  const rawCode = input.code ?? managedError?.code ?? stringField(input.cause, "code") ?? null;
   const code =
     rawCode === null ? null : boundedText(rawCode, MAX_PROVIDER_FAILURE_CODE_LENGTH) || null;
 
   return {
-    class: input.class ?? "unknown",
+    class: input.class ?? (managedError ? "provider_error" : "unknown"),
     message: message || DEFAULT_PROVIDER_FAILURE_MESSAGE,
     code,
     retryable: input.retryable ?? null,

@@ -5,10 +5,13 @@ import {
 } from "@t3tools/contracts";
 import { GaugeIcon } from "lucide-react";
 import { useEffect, useState } from "react";
+import { ChatGptUsageButton } from "../settings/ChatGptUsageButton";
+import { OpenAI } from "../Icons";
 import { Button } from "../ui/button";
 import type { ComposerBannerStackItem } from "./ComposerBannerStack";
 
 type RecoveryProps = {
+  chatGptUsageLimit?: boolean;
   runId: RunId;
   resetAt: string | null;
   stoppedAt: string;
@@ -24,12 +27,20 @@ export function usageLimitRecoveryBannerItem(props: RecoveryProps): ComposerBann
     id: `usage-limit-recovery:${runId}`,
     variant: "warning",
     priority: "urgent",
-    icon: <GaugeIcon />,
-    title: "Usage limit reached",
+    icon: props.chatGptUsageLimit ? <OpenAI /> : <GaugeIcon />,
+    title: props.chatGptUsageLimit ? "ChatGPT usage limit reached" : "Usage limit reached",
     description: resetAt
       ? `Resets ${new Date(resetAt).toLocaleString()}`
-      : "Reset time unavailable; retry manually",
-    actions: canSchedule ? <RecoveryActions key={`${runId}:${resetAt}`} {...props} /> : null,
+      : props.chatGptUsageLimit
+        ? "Review your usage settings in ChatGPT to continue."
+        : "Reset time unavailable; retry manually",
+    actions:
+      canSchedule || props.chatGptUsageLimit ? (
+        <>
+          {props.chatGptUsageLimit ? <ChatGptUsageButton size="sm" /> : null}
+          {canSchedule ? <RecoveryActions key={`${runId}:${resetAt}`} {...props} /> : null}
+        </>
+      ) : null,
   };
 }
 

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { EnvironmentId, ProjectId } from "@t3tools/contracts";
+import { DEFAULT_UNIFIED_SETTINGS, EnvironmentId, ProjectId } from "@t3tools/contracts";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 
 const mocks = vi.hoisted(() => ({
@@ -10,6 +10,8 @@ const mocks = vi.hoisted(() => ({
   complete: vi.fn(),
   refresh: vi.fn(),
   toast: vi.fn(),
+  mutate: vi.fn(),
+  config: null as { settings: typeof DEFAULT_UNIFIED_SETTINGS } | null,
   projects: [] as Array<{ id: string; environmentId: string; workspaceRoot: string }>,
 }));
 vi.mock("../../state/agentSessions", () => ({ agentSessionImport: "import" }));
@@ -41,7 +43,7 @@ vi.mock("../../state/environments", () => {
 vi.mock("../../state/server", () => ({
   serverEnvironment: {
     providersValueAtom: () => [],
-    configValueAtom: () => null,
+    configValueAtom: () => mocks.config,
     refreshProviders: "refresh",
   },
 }));
@@ -74,6 +76,18 @@ vi.mock("../../state/terminal", () => ({ terminalEnvironment: {} }));
 vi.mock("../clerk/useT3ConnectAuthPrompt", () => ({ useT3ConnectAuthPrompt: vi.fn() }));
 vi.mock("../../cloud/publicConfig", () => ({ hasCloudPublicConfig: () => false }));
 vi.mock("../ThreadTerminalDrawer", () => ({ TerminalViewport: () => null }));
+vi.mock("../settings/ChatGptWelcomeCoordinator", () => ({ ChatGptWelcomeCoordinator: () => null }));
+vi.mock("../../hooks/useSettings", () => ({
+  usePersistEnvironmentProviderInstanceMutation:
+    (environmentId: EnvironmentId) => (mutation: unknown, patch: unknown) =>
+      mocks.mutate(environmentId, mutation, patch),
+}));
+vi.mock("../settings/CodexSetupSection", () => ({
+  CodexSetupSection: ({ onModeChange }: { onModeChange: (mode: "managed") => void }) => (
+    <button onClick={() => onModeChange("managed")}>Connect managed Codex</button>
+  ),
+  AddManagedCodexAccountDialog: () => null,
+}));
 vi.mock("../cloud/CloudEnvironmentConnectList", () => ({
   CloudEnvironmentConnectRows: () => null,
 }));
@@ -101,6 +115,8 @@ beforeEach(() => {
     value: () => [],
   });
   mocks.projects = [{ id: "test-project", environmentId: "test-env", workspaceRoot: "/project" }];
+  mocks.config = null;
+  mocks.mutate.mockResolvedValue({ _tag: "Success", value: {} });
   mocks.complete.mockResolvedValue(undefined);
   mocks.refresh.mockResolvedValue(undefined);
   mocks.importThreads.mockResolvedValue({
@@ -124,6 +140,26 @@ async function click(label: string) {
   expect(button, `button ${label}`).toBeDefined();
   await act(async () => button!.click());
 }
+
+it("updates onboarding Codex mode atomically on the chosen environment", async () => {
+  mocks.config = { settings: DEFAULT_UNIFIED_SETTINGS };
+  await act(async () => root.render(<WelcomeWizard localAvailable onDone={vi.fn()} />));
+  await click("Continue");
+  await click("Connect managed Codex");
+  expect(mocks.mutate).toHaveBeenCalledWith(
+    "test-env",
+    expect.objectContaining({
+      operation: "upsert",
+      instanceId: "codex",
+      instance: expect.objectContaining({
+        driver: "codex",
+        enabled: true,
+        config: expect.objectContaining({ setupMode: "managed" }),
+      }),
+    }),
+    expect.not.objectContaining({ providerInstances: expect.anything() }),
+  );
+});
 
 it("enters the workspace after a partial import and warns after navigation finishes", async () => {
   let finishNavigation = () => {};

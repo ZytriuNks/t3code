@@ -595,6 +595,28 @@ describe("CodexAdapterV2 runtime policy", () => {
       assert.equal(params.collaborationMode?.settings.reasoning_effort, "xhigh");
     }),
   );
+  it.effect(
+    "omits service tier for managed ChatGPT while retaining the selected model and effort",
+    () =>
+      Effect.gen(function* () {
+        const params = yield* buildCodexTurnStartParams({
+          nativeThreadId: "managed-native-thread",
+          codexInput: [],
+          runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+          modelSelection: {
+            ...CODEX_TEST_MODEL_SELECTION,
+            options: [
+              { id: "serviceTier", value: "priority" },
+              { id: "reasoningEffort", value: "high" },
+            ],
+          },
+          managed: true,
+        });
+        assert.equal(params.model, CODEX_TEST_MODEL_SELECTION.model);
+        assert.equal(params.effort, "high");
+        assert.notProperty(params, "serviceTier");
+      }),
+  );
 });
 
 describe("CodexAdapterV2 process spawning", () => {
@@ -1475,6 +1497,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       params: unknown,
     ) => Effect.Effect<unknown, CodexAppServerError> = (threadId) =>
       Effect.succeed({ thread: { id: threadId }, model: "" }),
+    managed = false,
   ) =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -1527,6 +1550,16 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         fileSystem,
         idAllocator,
         serverConfig,
+        ...(managed
+          ? {
+              resolveRuntime: Effect.succeed({
+                config: { ...DEFAULT_CODEX_SETTINGS, setupMode: "managed" as const },
+                environment: { ACCESS_TOKEN: "fixture-managed-access" },
+                revision: "fixture-managed-revision",
+              }),
+              withRuntimeAccess: <A, E, R>(effect: Effect.Effect<A, E, R>) => effect,
+            }
+          : {}),
         continuationRequests: {
           offer: (request) =>
             Effect.sync(() => {
@@ -4932,13 +4965,28 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       expectedClass: "usage_limit",
     },
     { name: "retry", code: "usageLimitExceeded", notification: true, expectedClass: "usage_limit" },
+    {
+      name: "managed-terminal",
+      code: "other",
+      notification: false,
+      expectedClass: "provider_error",
+    },
+    {
+      name: "managed-notification",
+      code: "other",
+      notification: true,
+      expectedClass: "provider_error",
+    },
   ] as const) {
     it.effect(`classifies Codex terminal failures from ${scenario.name} evidence`, () =>
       Effect.scoped(
         Effect.gen(function* () {
           const nativeThreadId = `native-limit-${scenario.name}`;
           const nativeTurnId = `turn-limit-${scenario.name}`;
-          const message = "Provider stopped this request.";
+          const managed = scenario.name.startsWith("managed-");
+          const message = managed
+            ? "subscription_sharing_usage_limit_exceeded"
+            : "Provider stopped this request.";
           const resetAt = "2033-05-19T07:20:00.000Z";
           const snapshot = {
             type: "emit_inbound" as const,
@@ -5077,12 +5125,17 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             ],
           });
           const resetReceipt = yield* Deferred.make<void>();
-          const harness = yield* makeCodexReplayHarness(transcript, (event) =>
-            event.type === "turn_item.updated" &&
-            event.turnItem.type === "error" &&
-            event.turnItem.failure.resetAt === resetAt
-              ? Deferred.succeed(resetReceipt, undefined)
-              : Effect.void,
+          const harness = yield* makeCodexReplayHarness(
+            transcript,
+            (event) =>
+              event.type === "turn_item.updated" &&
+              event.turnItem.type === "error" &&
+              event.turnItem.failure.resetAt === resetAt
+                ? Deferred.succeed(resetReceipt, undefined)
+                : Effect.void,
+            undefined,
+            undefined,
+            managed,
           );
           yield* harness.runtime.startTurn(
             makeCodexTestTurnInput({
@@ -5099,6 +5152,11 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           if (terminal?.status !== "failed") return;
           assert.equal(terminal.failure.class, scenario.expectedClass);
           assert.equal(terminal.threadDisposition, "reusable");
+          if (managed) {
+            assert.equal(terminal.failure.code, "subscription_sharing_usage_limit_exceeded");
+            assert.include(terminal.failure.message, "ChatGPT Usage settings");
+            assert.isUndefined(terminal.failure.resetAt);
+          }
           if (scenario.name === "known-reset" || scenario.name === "deferred-reset")
             assert.equal(terminal.failure.resetAt, resetAt);
           if (scenario.name === "matching-details")

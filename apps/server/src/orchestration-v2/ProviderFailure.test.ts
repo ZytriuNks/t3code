@@ -20,6 +20,25 @@ import {
 import { IdAllocatorV2, layer as idAllocatorLayer } from "./IdAllocator.ts";
 import { ContextHandoffBudgetError } from "./ContextHandoffDelivery.ts";
 import { ProviderAdapterTurnStartError } from "./ProviderAdapter.ts";
+import { CodexAppServerRequestError } from "effect-codex-app-server/errors";
+
+it("preserves a managed Codex sharing rejection received as an RPC error", () => {
+  const cause = new ProviderAdapterTurnStartError({
+    driver: ProviderDriverKind.make("codex"),
+    threadId: ThreadId.make("managed-thread"),
+    providerThreadId: ProviderThreadId.make("managed-native-thread"),
+    runId: RunId.make("managed-run"),
+    cause: new CodexAppServerRequestError({
+      code: -32000,
+      errorMessage: "subscription_sharing_usage_limit_exceeded",
+      data: { code: "subscription_sharing_usage_limit_exceeded" },
+    }),
+  });
+  const failure = makeProviderFailure({ cause });
+  assert.equal(failure.code, "subscription_sharing_usage_limit_exceeded");
+  assert.include(failure.message, "ChatGPT Usage settings");
+  assert.equal(failure.class, "provider_error");
+});
 
 it("redacts credentials and URL secrets from provider failures", () => {
   const failure = makeProviderFailure({

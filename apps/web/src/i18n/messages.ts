@@ -1404,6 +1404,7 @@ export const EN_MESSAGES = {
   "settings.providers.dialog.noCompatibleAgents": "No compatible agents found",
   "settings.providers.dialog.broaderSearch": "Try a broader search.",
   "settings.providers.dialog.searchRegistry": "Search registry",
+  "settings.providers.dialog.configureManually": "Configure manually",
   "settings.providers.dialog.manualTitle": "Enter manually",
   "settings.providers.dialog.manualDescription":
     "Enter an official registry ID and any local executable or auth override.",
@@ -3865,6 +3866,7 @@ export const ZH_CN_MESSAGES = {
   "settings.providers.dialog.noCompatibleAgents": "未找到兼容的代理",
   "settings.providers.dialog.broaderSearch": "请尝试更宽泛的搜索。",
   "settings.providers.dialog.searchRegistry": "搜索注册表",
+  "settings.providers.dialog.configureManually": "手动配置",
   "settings.providers.dialog.manualTitle": "手动输入",
   "settings.providers.dialog.manualDescription":
     "输入官方注册表 ID，以及本地可执行文件或身份验证覆盖设置。",

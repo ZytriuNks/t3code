@@ -1,4 +1,6 @@
 import * as NodeOS from "node:os";
+// @effect-diagnostics-next-line nodeBuiltinImport:off - Effect symlink 没有 type 参数，Windows 目录需要免提升权限的 junction。
+import * as NodeFSP from "node:fs/promises";
 
 import { ProviderDriverKind, type CodexSettings } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -6,6 +8,9 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as PlatformError from "effect/PlatformError";
+import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 
 import { expandHomePath } from "../../pathExpansion.ts";
 
@@ -30,7 +35,7 @@ const KNOWN_SHARED_DIRECTORIES = [
 ] as const;
 
 const PRIVATE_ENTRY_NAMES = new Set(["auth.json", "models_cache.json"]);
-const SHADOW_LOCAL_ENTRY_NAMES = new Set(["log", "memories", "tmp"]);
+const SHADOW_LOCAL_ENTRY_NAMES = new Set(["log", "memories", "tmp", ".t3-shared-links"]);
 const REPLACEABLE_SHARED_RUNTIME_DIRECTORIES = new Set(["mcp-oauth-locks"]);
 
 function resolveHomePath(path: Path.Path, value: string | undefined): string {
@@ -74,7 +79,17 @@ export class CodexShadowHomeFileSystemError extends Schema.TaggedError<CodexShad
   "CodexShadowHomeFileSystemError",
   {
     ...CodexShadowHomeContext,
-    operation: Schema.Literals(["readLink", "makeDirectory", "readDirectory", "remove", "symlink"]),
+    operation: Schema.Literals([
+      "readLink",
+      "makeDirectory",
+      "readDirectory",
+      "remove",
+      "symlink",
+      "fileSymlink",
+      "link",
+      "stat",
+      "hardlinkMetadata",
+    ]),
     path: Schema.String,
     targetPath: Schema.optional(Schema.String),
     entryName: Schema.optional(Schema.String),
@@ -83,7 +98,11 @@ export class CodexShadowHomeFileSystemError extends Schema.TaggedError<CodexShad
 ) {
   override get message(): string {
     const target = this.targetPath === undefined ? "" : ` to '${this.targetPath}'`;
-    return `Codex shadow home filesystem operation '${this.operation}' failed for '${this.path}'${target}.`;
+    const guidance =
+      this.operation === "fileSymlink"
+        ? " Windows file links across volumes require Developer Mode or elevated permissions. Enable Developer Mode, or configure the shared and shadow homes on the same volume."
+        : "";
+    return `Codex shadow home filesystem operation '${this.operation}' failed for '${this.path}'${target}.${guidance}`;
   }
 }
 
@@ -220,6 +239,7 @@ const ensureSymlink = Effect.fn("CodexHomeLayout.ensureSymlink")(function* (inpu
   readonly entryName: string;
 }): Effect.fn.Return<void, CodexShadowHomeError, Path.Path> {
   const path = yield* Path.Path;
+  const platform = yield* HostProcessPlatform;
   const target = path.join(input.sharedHomePath, input.entryName);
   const link = path.join(input.effectiveHomePath, input.entryName);
   const state = yield* readLinkState({
@@ -227,20 +247,50 @@ const ensureSymlink = Effect.fn("CodexHomeLayout.ensureSymlink")(function* (inpu
     linkPath: link,
   });
 
-  const createLink = input.fileSystem.symlink(target, link).pipe(
-    Effect.catchTags({
-      PlatformError: (cause) =>
-        new CodexShadowHomeFileSystemError({
-          sharedHomePath: input.sharedHomePath,
-          effectiveHomePath: input.effectiveHomePath,
-          operation: "symlink",
-          path: link,
-          targetPath: target,
-          entryName: input.entryName,
-          cause,
-        }),
-    }),
-  );
+  if (platform === "win32") {
+    const info = yield* input.fileSystem.stat(target).pipe(
+      Effect.mapError(
+        (cause) =>
+          new CodexShadowHomeFileSystemError({
+            ...input,
+            operation: "stat",
+            path: target,
+            targetPath: target,
+            cause,
+          }),
+      ),
+    );
+    if (info.type === "File")
+      return yield* ensureWindowsHardLink({ ...input, target, link, state });
+  }
+
+  const createLink =
+    platform === "win32"
+      ? Effect.tryPromise({
+          try: () => NodeFSP.symlink(target, link, "junction"),
+          catch: (cause) =>
+            new CodexShadowHomeFileSystemError({
+              ...input,
+              operation: "symlink",
+              path: link,
+              targetPath: target,
+              cause,
+            }),
+        })
+      : input.fileSystem.symlink(target, link).pipe(
+          Effect.catchTags({
+            PlatformError: (cause) =>
+              new CodexShadowHomeFileSystemError({
+                sharedHomePath: input.sharedHomePath,
+                effectiveHomePath: input.effectiveHomePath,
+                operation: "symlink",
+                path: link,
+                targetPath: target,
+                entryName: input.entryName,
+                cause,
+              }),
+          }),
+        );
 
   if (state._tag === "NotSymlink") {
     if (!REPLACEABLE_SHARED_RUNTIME_DIRECTORIES.has(input.entryName)) {
@@ -290,6 +340,108 @@ const ensureSymlink = Effect.fn("CodexHomeLayout.ensureSymlink")(function* (inpu
     );
     yield* createLink;
   }
+});
+
+const WindowsHardLinkIdentity = Schema.Struct({ dev: Schema.String, ino: Schema.String });
+const windowsHardLinkIdentityJson = Schema.fromJsonString(WindowsHardLinkIdentity);
+const decodeWindowsHardLinkIdentity = Schema.decodeUnknownEffect(windowsHardLinkIdentityJson);
+const encodeWindowsHardLinkIdentity = Schema.encodeEffect(windowsHardLinkIdentityJson);
+
+const ensureWindowsHardLink = Effect.fn("CodexHomeLayout.ensureWindowsHardLink")(function* (input: {
+  readonly fileSystem: FileSystem.FileSystem;
+  readonly sharedHomePath: string;
+  readonly effectiveHomePath: string;
+  readonly entryName: string;
+  readonly target: string;
+  readonly link: string;
+  readonly state: LinkState;
+}) {
+  const path = yield* Path.Path;
+  const fs = input.fileSystem;
+  const marker = path.join(input.effectiveHomePath, ".t3-shared-links", `${input.entryName}.json`);
+  const conflict = () =>
+    new CodexShadowHomeEntryConflictError({
+      ...input,
+      linkPath: input.link,
+      targetPath: input.target,
+    });
+  return yield* Effect.gen(function* () {
+    // Windows 的 inode 可超过 Number.MAX_SAFE_INTEGER，Effect stat 会把它省略。
+    const identity = (file: string) =>
+      Effect.tryPromise({
+        try: async () => {
+          const info = await NodeFSP.stat(file, { bigint: true });
+          return { dev: info.dev.toString(), ino: info.ino.toString() };
+        },
+        catch: (cause) =>
+          new CodexShadowHomeFileSystemError({
+            ...input,
+            operation: "stat",
+            path: file,
+            cause,
+          }),
+      });
+    const record = (value: typeof WindowsHardLinkIdentity.Type) =>
+      Effect.gen(function* () {
+        yield* fs.makeDirectory(path.dirname(marker), { recursive: true });
+        yield* fs.writeFileString(marker, yield* encodeWindowsHardLinkIdentity(value));
+      });
+    const targetIdentity = yield* identity(input.target);
+    if (input.state._tag === "NotSymlink") {
+      const linkedInfo = yield* identity(input.link);
+      if (linkedInfo.dev === targetIdentity.dev && linkedInfo.ino === targetIdentity.ino)
+        return yield* record(linkedInfo);
+      // 只替换本程序此前创建的 hardlink；用户自己的同名文件仍是冲突。
+      const owned = yield* fs
+        .readFileString(marker)
+        .pipe(Effect.flatMap(decodeWindowsHardLinkIdentity), Effect.option);
+      if (
+        Option.isNone(owned) ||
+        owned.value.dev !== linkedInfo.dev ||
+        owned.value.ino !== linkedInfo.ino
+      )
+        return yield* conflict();
+      yield* fs.remove(input.link);
+    } else if (input.state._tag === "Symlink") {
+      if (path.resolve(path.dirname(input.link), input.state.target) === input.target) return;
+      yield* fs.remove(input.link);
+    }
+    yield* fs.link(input.target, input.link).pipe(
+      Effect.catchIf(
+        (cause) =>
+          "cause" in cause.reason &&
+          Predicate.hasProperty(cause.reason.cause, "code") &&
+          cause.reason.cause.code === "EXDEV",
+        () =>
+          fs.symlink(input.target, input.link).pipe(
+            Effect.mapError(
+              (cause) =>
+                new CodexShadowHomeFileSystemError({
+                  ...input,
+                  operation: "fileSymlink",
+                  path: input.link,
+                  targetPath: input.target,
+                  cause,
+                }),
+            ),
+          ),
+      ),
+    );
+    yield* record(yield* identity(input.link));
+  }).pipe(
+    Effect.mapError((cause) =>
+      cause._tag === "CodexShadowHomeEntryConflictError" ||
+      cause._tag === "CodexShadowHomeFileSystemError"
+        ? cause
+        : new CodexShadowHomeFileSystemError({
+            ...input,
+            operation: "hardlinkMetadata",
+            path: input.link,
+            targetPath: input.target,
+            cause,
+          }),
+    ),
+  );
 });
 
 const ensureShadowAuthIsPrivate = Effect.fn("CodexHomeLayout.ensureShadowAuthIsPrivate")(
