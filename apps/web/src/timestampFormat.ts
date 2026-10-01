@@ -280,6 +280,17 @@ export function formatRelativeTimeLabel(isoDate: string) {
   return relative.suffix ? `${relative.value} ${relative.suffix}` : relative.value;
 }
 
+/** Legacy sidebar ages round up to a minute, with a minimum label of 1m. */
+export function formatLegacySidebarTimeLabel(isoDate: string, nowMs: number = Date.now()): string {
+  const date = parseTimestampDate(isoDate);
+  if (!date) return "";
+  const minutes = Math.max(1, Math.ceil((nowMs - date.getTime()) / 60_000));
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  return `${Math.floor(hours / 24)}d`;
+}
+
 export function getRelativeTimeState(isoDate: string | null): RelativeTimeState {
   if (!isoDate) return { status: "missing" };
   const relative = formatRelativeTime(isoDate);

@@ -4,7 +4,6 @@ import { Spinner } from "~/components/ui/spinner";
 import {
   ArchiveIcon,
   ArrowUpDownIcon,
-  ChevronRightIcon,
   FolderPlusIcon,
   Globe2Icon,
   SearchIcon,
@@ -12,6 +11,7 @@ import {
   TerminalIcon,
   TriangleAlertIcon,
 } from "lucide-react";
+import { MorphIcon } from "morphicons/react";
 import {
   ChangeRequestStatusIcon,
   prStatusIndicator,
@@ -127,7 +127,7 @@ import {
   resolveThreadRouteTarget,
 } from "../threadRoutes";
 import { stackedThreadToast, toastManager } from "./ui/toast";
-import { formatRelativeTimeLabel } from "../timestampFormat";
+import { formatLegacySidebarTimeLabel } from "../timestampFormat";
 import { Kbd } from "./ui/kbd";
 import {
   getArm64IntelBuildWarningDescription,
@@ -464,6 +464,10 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     [discoveredPorts, navigateToThread, openPreview, threadRef],
   );
   const isThreadRunning = !threadRuntimeCanArchive(thread.runtime);
+  const {
+    legacySidebarThreadStatusDots: showThreadStatusDots,
+    legacySidebarHideStatusLabels: hideStatusLabels,
+  } = useClientSettings();
   const threadStatus = resolveThreadStatusPill({
     thread: {
       ...thread,
@@ -773,7 +777,20 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
               <PullRequestGlyph.pullRequest className="size-3" />
             </a>
           ) : null}
-          {threadStatus && <ThreadStatusLabel status={threadStatus} />}
+          {threadStatus ? (
+            <ThreadStatusLabel
+              status={threadStatus}
+              hideLabel={showThreadStatusDots && hideStatusLabels}
+              reserveIconSpace
+            />
+          ) : showThreadStatusDots ? (
+            <span
+              aria-hidden="true"
+              className="inline-flex size-4 shrink-0 items-center justify-center"
+            >
+              <span className="size-1.5 rounded-full bg-sidebar-muted-foreground/15" />
+            </span>
+          ) : null}
           {renamingThreadKey === threadKey ? (
             <input
               ref={handleRenameInputRef}
@@ -934,11 +951,11 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                   </Tooltip>
                 ) : (
                   <span
-                    className={`text-3xs tabular-nums ${
+                    className={`text-xs tabular-nums ${
                       isHighlighted ? "text-foreground" : "text-secondary-label"
                     }`}
                   >
-                    {formatRelativeTimeLabel(
+                    {formatLegacySidebarTimeLabel(
                       thread.latestUserMessageAt ?? thread.updatedAt ?? thread.createdAt,
                     )}
                   </span>
@@ -1047,11 +1064,16 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
   } = props;
   const showMoreButtonRender = useMemo(() => <button type="button" />, []);
   const showLessButtonRender = useMemo(() => <button type="button" />, []);
+  const showProjectGuides = useClientSettings((settings) => settings.legacySidebarProjectGuides);
 
   return (
     <SidebarMenuSub
       ref={attachThreadListAutoAnimateRef}
-      className="mx-0.5 my-0 w-full translate-x-0 overflow-hidden sm:mx-1"
+      indented={showProjectGuides}
+      className={cn(
+        "my-0 w-full translate-x-0 overflow-hidden",
+        showProjectGuides && "mx-0.5 sm:mx-1",
+      )}
     >
       {shouldShowThreadPanel && showEmptyThreadState ? (
         <SidebarMenuSubItem className="w-full" data-thread-selection-safe>
@@ -2371,49 +2393,33 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       <div className="group/project-header relative">
         <SidebarMenuButton
           ref={isManualProjectSorting ? dragHandleProps?.setActivatorNodeRef : undefined}
-          className={isManualProjectSorting ? "cursor-grab active:cursor-grabbing" : undefined}
           {...(isManualProjectSorting && dragHandleProps ? dragHandleProps.attributes : {})}
           {...(isManualProjectSorting && dragHandleProps ? dragHandleProps.listeners : {})}
           onPointerDownCapture={handleProjectButtonPointerDownCapture}
+          aria-expanded={projectExpanded}
           onClick={handleProjectButtonClick}
           onKeyDown={handleProjectButtonKeyDown}
           onContextMenu={handleProjectButtonContextMenu}
         >
-          {!projectExpanded && projectStatus ? (
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <span
-                    aria-label={projectStatus.label}
-                    className={`-ml-0.5 relative inline-flex size-3.5 shrink-0 items-center justify-center ${projectStatus.colorClass}`}
-                  />
-                }
-              >
-                <span className="absolute inset-0 flex items-center justify-center transition-opacity duration-150 group-hover/project-header:opacity-0">
-                  <span
-                    className={`size-[9px] rounded-full ${projectStatus.dotClass} ${
-                      projectStatus.pulse ? "animate-status-pulse" : ""
-                    }`}
-                  />
-                </span>
-                <ChevronRightIcon className="absolute inset-0 m-auto size-3.5 text-icon-muted opacity-0 transition-opacity duration-150 group-hover/project-header:opacity-100" />
-              </TooltipTrigger>
-              <TooltipPopup side="top">{projectStatus.label}</TooltipPopup>
-            </Tooltip>
-          ) : (
-            <ChevronRightIcon
-              className={`-ml-0.5 size-3.5 shrink-0 text-muted-foreground/70 transition-transform duration-150 ${
-                projectExpanded ? "rotate-90" : ""
-              }`}
+          <span className="relative flex size-3.5 shrink-0 items-center justify-center">
+            <span className="flex transition-opacity duration-150 group-hover/project-header:opacity-0 group-has-[:focus-visible]/project-header:opacity-0">
+              <ProjectFavicon project={project} />
+            </span>
+            <MorphIcon
+              aria-hidden="true"
+              icon={projectExpanded ? "m6 9 6 6 6-6" : "m9 18 6-6-6-6"}
+              spring="snappy"
+              reducedMotion="user"
+              className="absolute inset-0 size-3.5 text-icon-muted opacity-0 transition-opacity duration-150 group-hover/project-header:opacity-100 group-has-[:focus-visible]/project-header:opacity-100"
             />
-          )}
-          <span className="flex shrink-0">
-            <ProjectFavicon project={project} />
           </span>
           <span className="flex min-w-0 flex-1 items-center gap-2">
             <span className="truncate text-sm font-medium text-sidebar-foreground/90">
               {project.displayName}
             </span>
+            {!projectExpanded && projectStatus && (
+              <ThreadStatusLabel status={projectStatus} compact />
+            )}
             {project.groupedProjectCount > 1 ? (
               <span className="shrink-0 text-secondary-label text-3xs">
                 {project.groupedProjectCount} projects

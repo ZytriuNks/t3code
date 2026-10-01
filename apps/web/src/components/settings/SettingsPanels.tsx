@@ -752,6 +752,10 @@ export function useSettingsRestore(onRestored?: () => void) {
       ...(settings.proactivePanelsEnabled !== DEFAULT_UNIFIED_SETTINGS.proactivePanelsEnabled
         ? [t("settings.restore.label.proactivePanels")]
         : []),
+      ...(settings.autoExpandThreadDetailsPanel !==
+      DEFAULT_UNIFIED_SETTINGS.autoExpandThreadDetailsPanel
+        ? [t("settings.search.item.auto-expand-thread-details.title")]
+        : []),
       ...(settings.showSkillsInSlashMenu !== DEFAULT_UNIFIED_SETTINGS.showSkillsInSlashMenu
         ? [t("settings.restore.label.skillsInSlashMenu")]
         : []),
@@ -841,6 +845,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.diffIgnoreWhitespace,
       settings.diffLayout,
       settings.proactivePanelsEnabled,
+      settings.autoExpandThreadDetailsPanel,
       settings.environmentIdentificationMode,
       settings.contextWindowMeterEnabled,
       settings.fontFamilyCode,
@@ -951,6 +956,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       diffIgnoreWhitespace: DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace,
       diffLayout: DEFAULT_UNIFIED_SETTINGS.diffLayout,
       proactivePanelsEnabled: DEFAULT_UNIFIED_SETTINGS.proactivePanelsEnabled,
+      autoExpandThreadDetailsPanel: DEFAULT_UNIFIED_SETTINGS.autoExpandThreadDetailsPanel,
       showSkillsInSlashMenu: DEFAULT_UNIFIED_SETTINGS.showSkillsInSlashMenu,
       composerCollapseOnScroll: DEFAULT_UNIFIED_SETTINGS.composerCollapseOnScroll,
       composerRichTextEnabled: DEFAULT_UNIFIED_SETTINGS.composerRichTextEnabled,
@@ -1428,6 +1434,108 @@ function useSettingsPanelCopy(): SettingsRowCopy {
   );
 }
 
+function SidebarAppearanceSettingsSection() {
+  const { t } = useI18n();
+  const settings = useScopedSettings();
+  const updateSettings = useUpdateScopedSettings();
+  const sidebarStyleOptions = [
+    { value: "default", label: t("settings.appearance.sidebar.option.default") },
+    { value: "legacy", label: t("settings.appearance.sidebar.option.legacy") },
+  ];
+  const threadStatusDotOptions = [
+    { value: "off", label: t("settings.appearance.sidebarThreadStatusDots.off") },
+    { value: "labels", label: t("settings.appearance.sidebarThreadStatusDots.labels") },
+    { value: "dots", label: t("settings.appearance.sidebarThreadStatusDots.dots") },
+  ];
+  const threadStatusDotMode = settings.legacySidebarThreadStatusDots
+    ? settings.legacySidebarHideStatusLabels
+      ? "dots"
+      : "labels"
+    : "off";
+
+  return (
+    <SettingsSection id="sidebar-appearance" title={t("settings.appearance.sidebar.title")}>
+      <Collapsible open={settings.legacySidebarEnabled}>
+        <SettingsRow
+          {...searchableSetting("legacy-sidebar", t)}
+          description={t("settings.appearance.sidebar.description")}
+          control={
+            <Select
+              items={sidebarStyleOptions}
+              value={settings.legacySidebarEnabled ? "legacy" : "default"}
+              onValueChange={(value) => {
+                if (value === "default" || value === "legacy") {
+                  updateSettings({ legacySidebarEnabled: value === "legacy" });
+                }
+              }}
+            >
+              <SelectTrigger size="sm" aria-label={searchableSetting("legacy-sidebar", t).title}>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectPopup align="end" alignItemWithTrigger={false}>
+                {sidebarStyleOptions.map(({ value, label }) => (
+                  <SelectItem hideIndicator key={value} value={value}>
+                    {label}
+                  </SelectItem>
+                ))}
+              </SelectPopup>
+            </Select>
+          }
+        />
+        <CollapsiblePanel>
+          <SettingsRow
+            className="border-t border-border/50"
+            {...searchableSetting("legacy-sidebar-project-guides", t)}
+            description={t("settings.appearance.sidebarProjectGuides.description")}
+            control={
+              <Switch
+                checked={settings.legacySidebarProjectGuides}
+                onCheckedChange={(checked) =>
+                  updateSettings({ legacySidebarProjectGuides: Boolean(checked) })
+                }
+                aria-label={searchableSetting("legacy-sidebar-project-guides", t).title}
+              />
+            }
+          />
+          <SettingsRow
+            className="border-t border-border/50"
+            {...searchableSetting("legacy-sidebar-thread-status-dots", t)}
+            description={t("settings.appearance.sidebarThreadStatusDots.description")}
+            control={
+              <Select
+                items={threadStatusDotOptions}
+                value={threadStatusDotMode}
+                onValueChange={(value) => {
+                  if (value === "off" || value === "labels" || value === "dots") {
+                    updateSettings({
+                      legacySidebarThreadStatusDots: value !== "off",
+                      legacySidebarHideStatusLabels: value === "dots",
+                    });
+                  }
+                }}
+              >
+                <SelectTrigger
+                  size="sm"
+                  aria-label={searchableSetting("legacy-sidebar-thread-status-dots", t).title}
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectPopup align="end" alignItemWithTrigger={false}>
+                  {threadStatusDotOptions.map(({ value, label }) => (
+                    <SelectItem hideIndicator key={value} value={value}>
+                      {label}
+                    </SelectItem>
+                  ))}
+                </SelectPopup>
+              </Select>
+            }
+          />
+        </CollapsiblePanel>
+      </Collapsible>
+    </SettingsSection>
+  );
+}
+
 export function AppearanceSettingsPanel() {
   const copy = useSettingsPanelCopy();
   return (
@@ -1738,6 +1846,8 @@ function AppearanceSettingsRows() {
           }
         />
       </SettingsSection>
+
+      <SidebarAppearanceSettingsSection />
 
       <SettingsSection id="motion" title={t("settings.appearance.motion.title")}>
         <SettingsRow
@@ -2381,7 +2491,6 @@ function AutoSettleDaysInput({
 const LEGACY_FEATURE_TARGET_IDS: ReadonlySet<string> = new Set([
   "legacy-plan-mode",
   "legacy-context-window-indicator",
-  "legacy-sidebar",
 ]);
 
 /**
@@ -2446,19 +2555,6 @@ function LegacyFeaturesSection() {
                     updateSettings({ contextWindowMeterEnabled: Boolean(checked) })
                   }
                   aria-label={searchableSetting("legacy-context-window-indicator", t).title}
-                />
-              }
-            />
-            <SettingsRow
-              {...searchableSetting("legacy-sidebar", t)}
-              description={t("settings.general.legacy.sidebar.description")}
-              control={
-                <Switch
-                  checked={settings.legacySidebarEnabled}
-                  onCheckedChange={(checked) =>
-                    updateSettings({ legacySidebarEnabled: Boolean(checked) })
-                  }
-                  aria-label={searchableSetting("legacy-sidebar", t).title}
                 />
               }
             />
@@ -3021,6 +3117,34 @@ function GeneralSettingsRows() {
                 updateSettings({ proactivePanelsEnabled: Boolean(checked) })
               }
               aria-label={t("settings.general.proactivePanels.ariaLabel")}
+            />
+          }
+        />
+
+        <SettingsRow
+          {...searchableSetting("auto-expand-thread-details", t)}
+          description={t("settings.general.autoExpandThreadDetails.description")}
+          resetAction={
+            settings.autoExpandThreadDetailsPanel !==
+            DEFAULT_UNIFIED_SETTINGS.autoExpandThreadDetailsPanel ? (
+              <SettingResetButton
+                label={t("settings.search.item.auto-expand-thread-details.title")}
+                onClick={() =>
+                  updateSettings({
+                    autoExpandThreadDetailsPanel:
+                      DEFAULT_UNIFIED_SETTINGS.autoExpandThreadDetailsPanel,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Switch
+              checked={settings.autoExpandThreadDetailsPanel}
+              onCheckedChange={(checked) =>
+                updateSettings({ autoExpandThreadDetailsPanel: Boolean(checked) })
+              }
+              aria-label={t("settings.search.item.auto-expand-thread-details.title")}
             />
           }
         />

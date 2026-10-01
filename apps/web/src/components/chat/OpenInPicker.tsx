@@ -211,6 +211,7 @@ export const OpenInPicker = memo(function OpenInPicker({
   compact = false,
   enableShortcut = true,
   displayMode = "toolbar",
+  onExternalOpen,
   reveal = false,
 }: {
   environmentId: EnvironmentId;
@@ -221,6 +222,7 @@ export const OpenInPicker = memo(function OpenInPicker({
   compact?: boolean;
   enableShortcut?: boolean;
   displayMode?: "toolbar" | "panel";
+  onExternalOpen?: () => void;
   reveal?: boolean;
 }) {
   const isPanel = displayMode === "panel";
@@ -278,6 +280,7 @@ export const OpenInPicker = memo(function OpenInPicker({
           if (!opened) return;
           markRemoteHintSeen();
           setPreferredEditor(editor);
+          onExternalOpen?.();
         });
         return;
       }
@@ -290,12 +293,16 @@ export const OpenInPicker = memo(function OpenInPicker({
         },
       });
       setPreferredEditor(editor);
-      return result;
+      return result.then((outcome) => {
+        if (outcome._tag === "Success") onExternalOpen?.();
+        return outcome;
+      });
     },
     [
       environmentId,
       markRemoteHintSeen,
       openInCwd,
+      onExternalOpen,
       openInEditorMutation,
       preferredEditor,
       reveal,

@@ -190,6 +190,8 @@ export const EN_MESSAGES = {
   "settings.general.proactivePanels.description":
     "Open linked pull requests when found and turn diffs when work changes files.",
   "settings.general.proactivePanels.ariaLabel": "Proactive panels",
+  "settings.general.autoExpandThreadDetails.description":
+    "Show workspace details beside the conversation when there is enough space. Turn off to open them from the toolbar only. The panel closes after opening an external app.",
   "settings.general.proactivePanels.resetLabel": "proactive panels",
   "settings.general.skillsInSlashMenu.description":
     "Also include skills in the / command menu. Skills always appear when you type $.",
@@ -441,8 +443,18 @@ export const EN_MESSAGES = {
     "Restore Build/Plan, /plan, /default, and Shift+Tab. Off uses build mode.",
   "settings.general.legacy.contextWindowIndicator.description":
     "Shows context window usage as a circular indicator in the composer.",
-  "settings.general.legacy.sidebar.description":
-    "Restore per-project thread trees instead of the default flat sidebar.",
+  "settings.appearance.sidebar.title": "Sidebar",
+  "settings.appearance.sidebar.option.default": "Default",
+  "settings.appearance.sidebar.option.legacy": "Legacy",
+  "settings.appearance.sidebar.description":
+    "Choose the default flat list or the legacy per-project thread tree.",
+  "settings.appearance.sidebarProjectGuides.description":
+    "Show vertical guides and indent conversations beneath each project. Turn off to align conversation rows with project rows.",
+  "settings.appearance.sidebarThreadStatusDots.description":
+    "Show dim gray dots for idle threads and colored dots for other statuses in the legacy sidebar. Choose whether to show status text such as Working.",
+  "settings.appearance.sidebarThreadStatusDots.off": "Off",
+  "settings.appearance.sidebarThreadStatusDots.labels": "Dots and status text",
+  "settings.appearance.sidebarThreadStatusDots.dots": "Dots only",
   "settings.general.mixed": "Mixed",
   "settings.general.cancel": "Cancel",
   "settings.appearance.colorsAndThemes.title": "Colors & themes",
@@ -894,6 +906,9 @@ export const EN_MESSAGES = {
   "settings.search.item.diff-layout.title": "Diff layout",
   "settings.search.item.diff-layout.keywords": "stacked split side by side unified inline view",
   "settings.search.item.proactive-panels.title": "Proactive panels",
+  "settings.search.item.auto-expand-thread-details.title": "Automatically expand workspace details",
+  "settings.search.item.auto-expand-thread-details.keywords":
+    "auto expand workspace thread details panel wide width toolbar popover collapse external app",
   "settings.search.item.proactive-panels.keywords":
     "automatically open diff pull request pr right panel agent completion",
   "settings.search.item.skills-in-slash-menu.title": "Show skills in slash menu",
@@ -944,8 +959,15 @@ export const EN_MESSAGES = {
   "settings.search.item.legacy-context-window-indicator.title": "Context window indicator (legacy)",
   "settings.search.item.legacy-context-window-indicator.keywords":
     "composer meter usage tokens circle old",
-  "settings.search.item.legacy-sidebar.title": "Sidebar (legacy)",
-  "settings.search.item.legacy-sidebar.keywords": "project thread tree old flat list",
+  "settings.search.item.legacy-sidebar.title": "Sidebar style",
+  "settings.search.item.legacy-sidebar.keywords":
+    "sidebar style default legacy project thread tree old flat list",
+  "settings.search.item.legacy-sidebar-project-guides.title": "Show project guides",
+  "settings.search.item.legacy-sidebar-project-guides.keywords":
+    "project guides vertical lines thread tree indent left align legacy sidebar",
+  "settings.search.item.legacy-sidebar-thread-status-dots.title": "Thread status dots",
+  "settings.search.item.legacy-sidebar-thread-status-dots.keywords":
+    "thread status dots idle gray working completed indicator",
   "settings.search.item.keybindings.title": "Keybindings",
   "settings.search.item.keybindings.keywords": "keyboard shortcuts hotkeys commands bindings json",
   "settings.search.item.snap-shot-enabled.title": "SnapShots",
@@ -1085,6 +1107,7 @@ export const EN_MESSAGES = {
   "settings.search.clear": "Clear settings search",
   "settings.search.empty": "No settings found",
   "settings.search.results": "Settings search results",
+  "settings.search.requiresLegacySidebar": "Only available with the legacy sidebar",
   "settings.section.project": "Project",
   "settings.section.general": "General",
   "settings.section.appearance": "Appearance",
@@ -2732,6 +2755,8 @@ export const ZH_CN_MESSAGES = {
   "settings.general.proactivePanels.description":
     "发现关联的拉取请求时打开它，并在工作更改文件时打开差异。",
   "settings.general.proactivePanels.ariaLabel": "主动面板",
+  "settings.general.autoExpandThreadDetails.description":
+    "空间充足时在对话右侧显示工作区面板。关闭后仅通过顶部按钮打开；从面板打开外部应用后自动收起。",
   "settings.general.proactivePanels.resetLabel": "主动面板",
   "settings.general.skillsInSlashMenu.description":
     "在 / 命令菜单中也包含技能。输入 $ 时始终会显示技能。",
@@ -2950,7 +2975,17 @@ export const ZH_CN_MESSAGES = {
     "恢复 Build/Plan、/plan、/default 和 Shift+Tab。关闭后使用 build 模式。",
   "settings.general.legacy.contextWindowIndicator.description":
     "在输入区以环形指示器显示上下文窗口用量。",
-  "settings.general.legacy.sidebar.description": "恢复按项目分组的线程树，替代默认的扁平侧栏。",
+  "settings.appearance.sidebar.title": "侧栏",
+  "settings.appearance.sidebar.option.default": "默认",
+  "settings.appearance.sidebar.option.legacy": "旧版",
+  "settings.appearance.sidebar.description": "选择默认的扁平列表，或旧版按项目分组的对话树。",
+  "settings.appearance.sidebarProjectGuides.description":
+    "显示项目下方的竖线并缩进对话列表。关闭后，对话条目与项目条目统一左对齐。",
+  "settings.appearance.sidebarThreadStatusDots.description":
+    "在旧版侧栏中为空闲对话显示深灰色圆点，其他状态沿用原有圆点颜色，可选择是否显示 Working 等状态文字。",
+  "settings.appearance.sidebarThreadStatusDots.off": "关闭",
+  "settings.appearance.sidebarThreadStatusDots.labels": "圆点与状态文字",
+  "settings.appearance.sidebarThreadStatusDots.dots": "仅圆点",
   "settings.general.mixed": "不一致",
   "settings.general.cancel": "取消",
   "settings.appearance.colorsAndThemes.title": "颜色与主题",
@@ -3362,6 +3397,9 @@ export const ZH_CN_MESSAGES = {
   "settings.search.item.diff-layout.title": "差异布局",
   "settings.search.item.diff-layout.keywords": "堆叠 分栏 并排 统一 内联 视图",
   "settings.search.item.proactive-panels.title": "主动面板",
+  "settings.search.item.auto-expand-thread-details.title": "宽屏时自动展开工作区面板",
+  "settings.search.item.auto-expand-thread-details.keywords":
+    "自动 展开 工作区 线程 详情 面板 宽度 工具栏 下拉 收起 外部 应用 auto expand workspace thread details panel",
   "settings.search.item.proactive-panels.keywords":
     "自动 打开 差异 拉取请求 PR 右侧 面板 代理 完成",
   "settings.search.item.skills-in-slash-menu.title": "在斜杠菜单中显示技能",
@@ -3405,8 +3443,14 @@ export const ZH_CN_MESSAGES = {
   "settings.search.item.legacy-context-window-indicator.title": "上下文窗口指示器（旧版）",
   "settings.search.item.legacy-context-window-indicator.keywords":
     "输入区 指示器 用量 token 圆环 旧版",
-  "settings.search.item.legacy-sidebar.title": "侧栏（旧版）",
-  "settings.search.item.legacy-sidebar.keywords": "项目 线程 树 旧版 扁平列表",
+  "settings.search.item.legacy-sidebar.title": "侧栏样式",
+  "settings.search.item.legacy-sidebar.keywords": "侧栏 样式 外观 默认 项目 线程 树 旧版 扁平列表",
+  "settings.search.item.legacy-sidebar-project-guides.title": "显示项目竖线",
+  "settings.search.item.legacy-sidebar-project-guides.keywords":
+    "项目 竖线 引导线 对话 线程 树 缩进 左对齐 旧版 侧栏",
+  "settings.search.item.legacy-sidebar-thread-status-dots.title": "对话状态圆点",
+  "settings.search.item.legacy-sidebar-thread-status-dots.keywords":
+    "对话 线程 状态 圆点 空闲 灰色 运行 完成 指示器",
   "settings.search.item.keybindings.title": "快捷键",
   "settings.search.item.keybindings.keywords": "键盘 快捷键 热键 命令 绑定 JSON",
   "settings.search.item.snap-shot-enabled.title": "截屏",
@@ -3539,6 +3583,7 @@ export const ZH_CN_MESSAGES = {
   "settings.search.clear": "清除设置搜索",
   "settings.search.empty": "未找到设置",
   "settings.search.results": "设置搜索结果",
+  "settings.search.requiresLegacySidebar": "仅适用于旧版侧栏",
   "settings.section.project": "项目",
   "settings.section.general": "常规",
   "settings.section.appearance": "外观",

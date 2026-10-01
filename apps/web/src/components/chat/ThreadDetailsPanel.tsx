@@ -166,6 +166,7 @@ export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
                 availableEditors={props.availableEditors}
                 openInCwd={props.gitCwd}
                 displayMode="panel"
+                {...(props.onClose ? { onExternalOpen: props.onClose } : {})}
               />
             ) : null}
 

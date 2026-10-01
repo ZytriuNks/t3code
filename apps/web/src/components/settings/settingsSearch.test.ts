@@ -11,6 +11,7 @@ import {
   isSettingsSearchScopeAvailable,
   searchableSetting,
   searchSettings,
+  settingsSearchItemTargetId,
   SETTINGS_SEARCH_ITEMS,
   type SettingsSearchItem,
 } from "./settingsSearch";
@@ -48,7 +49,36 @@ const ITEMS: ReadonlyArray<SettingsSearchItem> = [
 
 const zh = (key: MessageKey, values?: MessageValues) => translate("zh-CN", key, values);
 
+describe("settingsSearchItemTargetId", () => {
+  it.each(["legacy-sidebar-project-guides", "legacy-sidebar-thread-status-dots"])(
+    "routes %s to the style selector only while its control is hidden",
+    (id) => {
+      const item = SETTINGS_SEARCH_ITEMS.find((candidate) => candidate.id === id)!;
+      expect(settingsSearchItemTargetId(item, false)).toBe("legacy-sidebar");
+      expect(settingsSearchItemTargetId(item, true)).toBe(id);
+    },
+  );
+
+  it.each([false, true])(
+    "preserves ordinary search destinations with legacy mode %s",
+    (enabled) => {
+      expect(settingsSearchItemTargetId(ITEMS[0]!, enabled)).toBe("word-wrap");
+      const theme = SETTINGS_SEARCH_ITEMS.find((item) => item.id === "theme")!;
+      expect(settingsSearchItemTargetId(theme, enabled)).toBe("appearance");
+    },
+  );
+});
+
 describe("searchSettings", () => {
+  it.each(["auto expand workspace", "工作区 自动 展开"])(
+    "finds the workspace panel preference for %s",
+    (query) => {
+      expect(searchSettings(query, SETTINGS_SEARCH_ITEMS, zh).map((item) => item.id)).toContain(
+        "auto-expand-thread-details",
+      );
+    },
+  );
+
   it("gives localized catalog items stable typed message keys", () => {
     for (const item of SETTINGS_SEARCH_ITEMS) {
       if (!item.titleKey) continue;
@@ -82,6 +112,35 @@ describe("searchSettings", () => {
 
   it.each(["send shortcut", "multiline", "new line"])("finds Send shortcut for %s", (query) => {
     expect(searchSettings(query).map((item) => item.id)).toContain("send-shortcut");
+  });
+
+  it.each(["thread status dots", "对话 状态 圆点"])(
+    "finds the legacy thread status dots setting for %s",
+    (query) => {
+      expect(searchSettings(query, SETTINGS_SEARCH_ITEMS, zh).map((item) => item.id)).toContain(
+        "legacy-sidebar-thread-status-dots",
+      );
+    },
+  );
+
+  it.each(["project guides", "项目 竖线"])(
+    "finds the legacy project guide setting for %s",
+    (query) => {
+      expect(searchSettings(query, SETTINGS_SEARCH_ITEMS, zh).map((item) => item.id)).toContain(
+        "legacy-sidebar-project-guides",
+      );
+    },
+  );
+
+  it.each([
+    ["sidebar style", "legacy-sidebar"],
+    ["侧栏 样式", "legacy-sidebar"],
+    ["项目 竖线", "legacy-sidebar-project-guides"],
+    ["thread status dots", "legacy-sidebar-thread-status-dots"],
+  ])("routes sidebar appearance searches for %s to Appearance", (query, id) => {
+    expect(
+      searchSettings(query, SETTINGS_SEARCH_ITEMS, zh).find((item) => item.id === id),
+    ).toMatchObject({ to: "/settings/appearance" });
   });
 
   it("matches titles, sections, and remembered setting details", () => {

@@ -4,6 +4,7 @@ import {
   formatDayAwareTimestamp,
   formatElapsedDurationLabel,
   formatExpiresInLabel,
+  formatLegacySidebarTimeLabel,
   formatRelativeTime,
   formatRelativeTimeLabel,
   formatRelativeTimeUntil,
@@ -14,6 +15,31 @@ import {
   getRelativeTimeState,
   resolveTimestampLocale,
 } from "./timestampFormat";
+
+describe("formatLegacySidebarTimeLabel", () => {
+  const now = Date.parse("2026-09-30T12:00:00.000Z");
+
+  it.each([
+    [-60_000, "1m"],
+    [0, "1m"],
+    [1, "1m"],
+    [59_999, "1m"],
+    [60_000, "1m"],
+    [60_001, "2m"],
+    [59 * 60_000, "59m"],
+    [59 * 60_000 + 1, "1h"],
+    [60 * 60_000, "1h"],
+    [61 * 60_000, "1h"],
+    [24 * 60 * 60_000, "1d"],
+    [3 * 24 * 60 * 60_000, "3d"],
+  ])("formats an age of %i ms as %s", (ageMs, expected) => {
+    expect(formatLegacySidebarTimeLabel(new Date(now - ageMs).toISOString(), now)).toBe(expected);
+  });
+
+  it("leaves invalid timestamps blank", () => {
+    expect(formatLegacySidebarTimeLabel("invalid", now)).toBe("");
+  });
+});
 
 describe("resolveTimestampLocale", () => {
   it("defers to the runtime default when the host reports no locale", () => {

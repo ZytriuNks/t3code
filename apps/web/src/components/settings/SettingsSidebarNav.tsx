@@ -45,6 +45,7 @@ import {
   searchSettings,
   isSettingsOverviewVisible,
   settingsSearchItemTitle,
+  settingsSearchItemTargetId,
   SETTINGS_SECTION_LABELS,
   SETTINGS_SECTION_MESSAGE_KEYS,
   type SettingsPath,
@@ -53,6 +54,7 @@ import {
 import { useAvailableSettingsSearchItems } from "./useAvailableSettingsSearchItems";
 import { validateSettingsScopeSearch } from "./settingsScope";
 import { useI18n } from "../../i18n/I18nProvider";
+import { useClientSettings } from "../../hooks/useSettings";
 
 const SnapShotIcon = createLucideIcon("snap-shot", [
   [
@@ -111,6 +113,7 @@ function SettingsSectionIcon({ to }: { to: SettingsPath }) {
 
 export function SettingsSidebarNav({ pathname }: { pathname: string }) {
   const { t } = useI18n();
+  const legacySidebarEnabled = useClientSettings((settings) => settings.legacySidebarEnabled);
   const navigate = useNavigate();
   const currentHash = useLocation({ select: (location) => location.hash });
   const currentSearch = useLocation({ select: (location) => location.search });
@@ -123,7 +126,10 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
   const [query, setQuery] = useState("");
   const [activeResultIndex, setActiveResultIndex] = useState(0);
   const searchableItems = useAvailableSettingsSearchItems(scopeSearch);
-  const results = useMemo(() => searchSettings(query, searchableItems), [query, searchableItems]);
+  const results = useMemo(
+    () => searchSettings(query, searchableItems, t),
+    [query, searchableItems, t],
+  );
   const isSearching = query.trim().length > 0;
   const hasResults = results.length > 0;
 
@@ -195,7 +201,7 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
       if (isMobile) {
         setOpenMobile(false);
       }
-      const targetId = item.targetId ?? item.id;
+      const targetId = settingsSearchItemTargetId(item, legacySidebarEnabled);
       if (pathname === item.to && currentHash.replace(/^#/, "") === targetId) {
         scrollToSettingsTarget(targetId);
         return;
@@ -208,7 +214,7 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
         state: { settingsTargetHighlight: true },
       });
     },
-    [clearSearch, currentHash, isMobile, navigate, pathname, setOpenMobile],
+    [clearSearch, currentHash, isMobile, legacySidebarEnabled, navigate, pathname, setOpenMobile],
   );
   const handleSearchKeyDown = useCallback(
     (event: KeyboardEvent<HTMLInputElement>) => {
@@ -320,6 +326,11 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
                         <span className="block truncate text-2xs text-sidebar-muted-foreground/75">
                           {SETTINGS_SECTION_LABELS[item.to]}
                         </span>
+                        {item.requiresLegacySidebar && !legacySidebarEnabled ? (
+                          <span className="block text-2xs text-sidebar-muted-foreground/75">
+                            {t("settings.search.requiresLegacySidebar")}
+                          </span>
+                        ) : null}
                       </span>
                     </SidebarMenuButton>
                   </SidebarMenuItem>
