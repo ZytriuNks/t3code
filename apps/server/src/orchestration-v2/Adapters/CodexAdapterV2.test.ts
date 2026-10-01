@@ -31,6 +31,10 @@ import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hos
 import { SpawnExecutableResolution } from "@t3tools/shared/shell";
 import * as CodexClient from "effect-codex-app-server/client";
 import * as CodexReplay from "effect-codex-app-server/replay";
+import {
+  CodexAppServerRequestError,
+  type CodexAppServerError,
+} from "effect-codex-app-server/errors";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -1466,12 +1470,18 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     transcript: CodexReplay.CodexAppServerReplayTranscript,
     onEvent: (event: ProviderAdapterV2Event) => Effect.Effect<unknown> = () => Effect.void,
     onRequest: (method: string) => Effect.Effect<void> = () => Effect.void,
+    childMetadata: (
+      threadId: string,
+      params: unknown,
+    ) => Effect.Effect<unknown, CodexAppServerError> = (threadId) =>
+      Effect.succeed({ thread: { id: threadId }, model: "" }),
   ) =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const idAllocator = yield* IdAllocatorV2;
       const serverConfig = yield* makeReplayServerConfig(transcript.scenario).pipe(Effect.orDie);
       const continuationRequests: Array<ProviderContinuationRequest> = [];
+      let replayRootThreadId: string | undefined;
       const clientFactory: CodexAppServerClientFactoryShape = {
         open: (openInput) =>
           Layer.build(CodexReplay.layerReplay(transcript)).pipe(
@@ -1489,6 +1499,17 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                   (client) =>
                     ({
                       ...client,
+                      raw: {
+                        ...client.raw,
+                        request: (method, params) =>
+                          method === "thread/resume" &&
+                          Predicate.isObject(params) &&
+                          params.excludeTurns === true &&
+                          typeof params.threadId === "string" &&
+                          params.threadId !== replayRootThreadId
+                            ? childMetadata(params.threadId, params)
+                            : client.raw.request(method, params),
+                      },
                       request: (method, params) =>
                         onRequest(method).pipe(Effect.andThen(client.request(method, params))),
                     }) satisfies CodexClient.CodexAppServerClient["Service"],
@@ -1525,6 +1546,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         modelSelection: CODEX_TEST_MODEL_SELECTION,
         runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
       });
+      replayRootThreadId = providerThread.nativeThreadRef?.nativeId ?? undefined;
       const events: Array<ProviderAdapterV2Event> = [];
       const firstTerminal = yield* Deferred.make<void>();
       yield* runtime.events.pipe(
@@ -5597,6 +5619,195 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       childTurnCompleted(RESUME_CHILD_TURN_2),
     ],
   });
+
+  const nativeModelTranscript = {
+    ...resumeSubagentTranscript,
+    entries: resumeSubagentTranscript.entries
+      .slice(
+        0,
+        resumeSubagentTranscript.entries.findIndex(
+          (entry) => entry.type === "emit_inbound" && entry.label === "turn/completed/root",
+        ) + 1,
+      )
+      .map((entry) => (entry.type === "emit_inbound" ? { ...entry, afterMs: undefined } : entry))
+      .flatMap((entry) =>
+        entry.type === "emit_inbound" && entry.label === "item/completed/subAgentActivity-started"
+          ? [entry, entry]
+          : [entry],
+      ),
+  };
+
+  for (const [label, metadata, expected] of [
+    ["reported model", { thread: { id: RESUME_CHILD_THREAD }, model: "gpt-6-luna" }, "gpt-6-luna"],
+    [
+      "model whitespace",
+      { thread: { id: RESUME_CHILD_THREAD }, model: "  gpt-6.1-sol  " },
+      "gpt-6.1-sol",
+    ],
+    ["empty model", { thread: { id: RESUME_CHILD_THREAD }, model: "" }, null],
+    ["blank model", { thread: { id: RESUME_CHILD_THREAD }, model: "   " }, null],
+    ["invalid model", { thread: { id: RESUME_CHILD_THREAD }, model: 42 }, null],
+    ["different child", { thread: { id: "another-child" }, model: "gpt-6-luna" }, null],
+    ["RPC failure", null, null],
+  ] as const) {
+    it.effect(`handles native child metadata ${label} without inheriting the parent`, () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const modelReported = yield* Deferred.make<void>();
+          const metadataRequested = yield* Deferred.make<void>();
+          let metadataRequestCount = 0;
+          const harness = yield* makeCodexReplayHarness(
+            nativeModelTranscript,
+            (event) =>
+              event.type === "subagent.updated" && event.subagent.model === expected
+                ? Deferred.succeed(modelReported, undefined)
+                : Effect.void,
+            () => Effect.void,
+            (threadId, params) =>
+              Effect.gen(function* () {
+                assert.deepEqual(params, { threadId: RESUME_CHILD_THREAD, excludeTurns: true });
+                assert.equal(threadId, RESUME_CHILD_THREAD);
+                metadataRequestCount += 1;
+                yield* Deferred.succeed(metadataRequested, undefined);
+                return metadata === null
+                  ? yield* new CodexAppServerRequestError({
+                      code: -32601,
+                      errorMessage: "Metadata unavailable",
+                    })
+                  : metadata;
+              }),
+          );
+          yield* harness.runtime.startTurn(
+            makeCodexTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now: yield* DateTime.now,
+              attemptId: RunAttemptId.make(`child-model-${label}`),
+              text: RESUME_PROMPT,
+            }),
+          );
+          yield* harness.firstTerminal;
+          yield* Deferred.await(metadataRequested);
+          if (expected !== null) yield* Deferred.await(modelReported);
+          assert.equal(metadataRequestCount, 1);
+          assert.equal(harness.subagentUpdates().at(-1)?.subagent.model, expected);
+          assert.notEqual(harness.subagentUpdates().at(-1)?.subagent.model, "gpt-5.4");
+        }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      ),
+    );
+  }
+
+  it.effect("retains a completed child result when model metadata arrives after completion", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const metadataReply = yield* Deferred.make<unknown>();
+        const modelReported = yield* Deferred.make<void>();
+        const harness = yield* makeCodexReplayHarness(
+          nativeModelTranscript,
+          (event) =>
+            event.type === "subagent.updated" && event.subagent.model === "gpt-6-luna"
+              ? Deferred.succeed(modelReported, undefined)
+              : Effect.void,
+          () => Effect.void,
+          () => Deferred.await(metadataReply),
+        );
+        yield* harness.runtime.startTurn(
+          makeCodexTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("child-model-after-completion"),
+            text: RESUME_PROMPT,
+          }),
+        );
+        yield* harness.firstTerminal;
+        const completed = harness.subagentUpdates().at(-1)!.subagent;
+        assert.equal(completed.status, "completed");
+        assert.isNull(completed.model);
+        yield* Deferred.succeed(metadataReply, {
+          thread: { id: RESUME_CHILD_THREAD },
+          model: "gpt-6-luna",
+        });
+        yield* Deferred.await(modelReported);
+        const enriched = harness.subagentUpdates().at(-1)!.subagent;
+        assert.equal(enriched.status, "completed");
+        assert.equal(enriched.result, "CODEX_FIRST_DONE");
+        assert.deepEqual(enriched.completedAt, completed.completedAt);
+        assert.equal(enriched.model, "gpt-6-luna");
+      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+    ),
+  );
+
+  for (const activityFirst of [false, true]) {
+    it.effect(`uses an explicit native spawn model with activity first ${activityFirst}`, () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const firstActivityIndex = nativeModelTranscript.entries.findIndex(
+            (entry) =>
+              entry.type === "emit_inbound" &&
+              entry.label === "item/completed/subAgentActivity-started",
+          );
+          const transcript = {
+            ...nativeModelTranscript,
+            entries: nativeModelTranscript.entries.map((entry, index) =>
+              entry.type === "emit_inbound" &&
+              entry.label === "item/completed/subAgentActivity-started" &&
+              (!activityFirst || index !== firstActivityIndex)
+                ? {
+                    type: "emit_inbound" as const,
+                    label: "item/completed/spawn-model",
+                    frame: {
+                      method: "item/completed",
+                      params: {
+                        threadId: RESUME_NATIVE_THREAD,
+                        turnId: RESUME_NATIVE_TURN,
+                        item: {
+                          type: "collabAgentToolCall",
+                          id: "spawn-model",
+                          tool: "spawnAgent",
+                          status: "completed",
+                          senderThreadId: RESUME_NATIVE_THREAD,
+                          receiverThreadIds: [RESUME_CHILD_THREAD],
+                          model: "gpt-6-luna",
+                          agentsStates: {},
+                        },
+                      },
+                    },
+                  }
+                : entry,
+            ),
+          };
+          let metadataRequestCount = 0;
+          const harness = yield* makeCodexReplayHarness(
+            transcript,
+            () => Effect.void,
+            () => Effect.void,
+            () => {
+              metadataRequestCount += 1;
+              return Effect.fail(
+                new CodexAppServerRequestError({
+                  code: -32601,
+                  errorMessage: "Metadata unavailable",
+                }),
+              );
+            },
+          );
+          yield* harness.runtime.startTurn(
+            makeCodexTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now: yield* DateTime.now,
+              attemptId: RunAttemptId.make("explicit-child-model"),
+              text: RESUME_PROMPT,
+            }),
+          );
+          yield* harness.firstTerminal;
+          assert.equal(harness.subagentUpdates().at(-1)?.subagent.model, "gpt-6-luna");
+          assert.equal(metadataRequestCount, activityFirst ? 1 : 0);
+        }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      ),
+    );
+  }
 
   it.effect("preserves a subagent result across a trailing empty final and resume", () =>
     Effect.scoped(

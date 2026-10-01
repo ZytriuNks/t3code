@@ -3,6 +3,7 @@ import type {
   OrchestrationProjectShell,
   ServerProvider,
   ProviderDriverKind,
+  OrchestrationV2Subagent,
 } from "@t3tools/contracts";
 import { fileBasename } from "@t3tools/client-runtime/markdown-links";
 import { formatModelSlugName, resolveSelectableModel } from "@t3tools/shared/model";
@@ -26,6 +27,7 @@ import { cn } from "~/lib/utils";
 export function SubagentTooltipContent(props: {
   title: string;
   model: string | null;
+  origin?: OrchestrationV2Subagent["origin"] | undefined;
   provider?: ServerProvider | undefined;
   driver?: ProviderDriverKind | undefined;
   elapsed?: ReactNode;
@@ -39,7 +41,11 @@ export function SubagentTooltipContent(props: {
   result?: string | null | undefined;
   progress?: string | null | undefined;
 }) {
-  const model = props.model?.trim() || props.childThread?.modelSelection.model.trim();
+  const model =
+    props.model?.trim() ||
+    (props.origin === "provider_native"
+      ? undefined
+      : props.childThread?.modelSelection.model.trim());
   const modelSlug = props.provider
     ? resolveSelectableModel(props.provider.driver, model, props.provider.models)
     : model;

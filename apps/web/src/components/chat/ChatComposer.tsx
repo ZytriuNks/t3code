@@ -251,6 +251,7 @@ import {
 import { useEnvironmentQuery } from "~/state/query";
 import { useDebouncedValue } from "~/state/queries";
 import { ProviderModelPicker } from "./ProviderModelPicker";
+import { resolveNativeSubagentComposerModel } from "./nativeSubagentModel";
 import { resolveModelPickerSelectedModel } from "./ModelPickerContent";
 import { type ComposerCommandItem, ComposerCommandMenu } from "./ComposerCommandMenu";
 import { ComposerPendingApprovalActions } from "./ComposerPendingApprovalActions";
@@ -1566,6 +1567,7 @@ export interface ChatComposerProps {
   providerCatalogKnown: boolean;
   activeProjectDefaultModelSelection: ModelSelection | null | undefined;
   activeThreadModelSelection: ModelSelection | null | undefined;
+  nativeSubagentModel?: string | null | undefined;
 
   // Context window
   activeContextWindow: ContextWindowSnapshot | null;
@@ -1711,6 +1713,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     providerCatalogKnown,
     activeProjectDefaultModelSelection,
     activeThreadModelSelection,
+    nativeSubagentModel,
     activeContextWindow,
     compactThreadUnavailable,
     compactDisabled,
@@ -2056,7 +2059,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       ),
     [providerStatuses, settings],
   );
-  const selectedProviderByThreadId = composerDraft.activeProvider ?? null;
+  const selectedProviderByThreadId =
+    nativeSubagentModel !== undefined && !composerDraft.modelSelectionExplicit
+      ? (activeThreadModelSelection?.instanceId ?? null)
+      : (composerDraft.activeProvider ?? null);
   const {
     selectedProviderEntry,
     requestedDriverKind,
@@ -2122,21 +2128,31 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     ? runtimeMode
     : (compatibleRuntimeModeOptions[0]?.mode ?? runtimeMode);
 
-  const { modelOptions: composerModelOptions, selectedModel } = useEffectiveComposerModelState({
-    threadRef: composerDraftTarget,
-    providers: providerStatuses,
-    selectedProvider,
-    selectedInstanceId,
-    threadModelSelection: activeThreadModelSelection,
-    projectModelSelection: activeProjectDefaultModelSelection,
-    settings,
+  const { modelOptions: composerModelOptions, selectedModel: configuredModel } =
+    useEffectiveComposerModelState({
+      threadRef: composerDraftTarget,
+      providers: providerStatuses,
+      selectedProvider,
+      selectedInstanceId,
+      threadModelSelection: activeThreadModelSelection,
+      projectModelSelection: activeProjectDefaultModelSelection,
+      settings,
+    });
+  const nativeModelState = resolveNativeSubagentComposerModel({
+    reportedModel: nativeSubagentModel,
+    selectedModel: configuredModel,
+    explicitSelection: composerDraft.modelSelectionExplicit === true,
   });
+  const selectedModel = nativeModelState.model;
   const providerSendBlockReason = getAntigravitySendBlockReason(
     selectedProviderEntry?.snapshot,
     selectedModel,
   );
   const sendDisabledReason =
     externalSendDisabledReason ??
+    (nativeModelState.requiresModelSelection
+      ? "Select a model to continue this subagent."
+      : null) ??
     (multipleModelSelections?.length === 0 ? "Select at least one model." : null) ??
     (activePendingProgress
       ? attachmentBlockReason
@@ -5380,6 +5396,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             : selectedModelForPickerWithCustomFallback
         }
         lockedProvider={lockedProvider}
+        {...(nativeModelState.modelLabel === undefined
+          ? {}
+          : { triggerLabel: nativeModelState.modelLabel })}
         lockedContinuationGroupKey={lockedContinuationGroupKey}
         instanceEntries={providerInstanceEntries}
         keybindings={keybindings}
@@ -6378,8 +6397,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               )
             : null,
         providerAvailable:
-          multipleModelSelections !== null ||
-          (!noProviderAvailable && providerSendBlockReason === null),
+          !nativeModelState.requiresModelSelection &&
+          (multipleModelSelections !== null ||
+            (!noProviderAvailable && providerSendBlockReason === null)),
         selectedProvider,
         selectedModel,
         selectedProviderModels,
@@ -6435,6 +6455,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       setMultipleModelSelections,
       routeKind,
       noProviderAvailable,
+      nativeModelState.requiresModelSelection,
       providerSendBlockReason,
       selectedPromptEffort,
       selectedProvider,

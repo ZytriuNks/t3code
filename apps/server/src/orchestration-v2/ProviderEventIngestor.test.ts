@@ -10,6 +10,7 @@ import {
   type OrchestrationV2RuntimeRequest,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2Run,
+  type OrchestrationV2Subagent,
   type OrchestrationV2TurnItem,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -18,6 +19,7 @@ import {
   RunId,
   RuntimeRequestId,
   TurnItemId,
+  ThreadId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -231,6 +233,180 @@ it.effect("records accepted billed turn usage once without billing the context w
 });
 
 layer("ProviderEventIngestorV2", (it) => {
+  for (const scenario of [
+    "known",
+    "late",
+    "parent-model-changed",
+    "unknown",
+    "mismatch",
+    "user-selection",
+    "independent-run",
+    "app-owned",
+    "other-provider",
+    "same-model",
+    "missing-child",
+  ] as const) {
+    it.effect(`synchronizes native Codex child conversation models for ${scenario}`, () =>
+      Effect.gen(function* () {
+        const now = yield* DateTime.now;
+        const eventSink = yield* EventSinkV2;
+        const projections = yield* ProjectionStoreV2;
+        const ingestor = yield* ProviderEventIngestorV2;
+        const allocator = yield* IdAllocatorV2;
+        const parentEvent = yield* threadCreatedEvent(now);
+        yield* eventSink.write({ events: [parentEvent] });
+        const parent = yield* projections.getThread(parentEvent.threadId);
+        const childId = ThreadId.make(`native-model-child-${scenario}`);
+        const taskId = NodeId.make(`native-model-task-${scenario}`);
+        const selectedModel =
+          scenario === "user-selection"
+            ? "gpt-6.1-sol"
+            : scenario === "same-model"
+              ? "gpt-6-luna"
+              : "gpt-5.4";
+        const child: OrchestrationV2AppThread = {
+          ...parent,
+          id: childId,
+          createdBy: "agent",
+          creationSource: "provider",
+          title: "User-renamed child",
+          modelSelection: { ...parent.modelSelection, model: selectedModel },
+          lineage: {
+            parentThreadId: parent.id,
+            rootThreadId: parent.id,
+            relationshipToParent: "subagent",
+          },
+          forkedFrom: {
+            type: "node",
+            nodeId: scenario === "mismatch" ? NodeId.make("other-task") : taskId,
+          },
+          archivedAt: now,
+        };
+        if (scenario !== "missing-child") {
+          yield* eventSink.write({
+            events: [
+              {
+                id: yield* allocator.allocate.event({ threadId: childId }),
+                type: "thread.created",
+                threadId: childId,
+                occurredAt: now,
+                payload: child,
+              },
+            ],
+          });
+        }
+        if (scenario === "user-selection") {
+          yield* eventSink.write({
+            events: [
+              {
+                id: yield* allocator.allocate.event({ threadId: childId }),
+                type: "thread.model-selection-updated",
+                threadId: childId,
+                occurredAt: now,
+                payload: child,
+              },
+            ],
+          });
+        }
+        if (scenario === "parent-model-changed") {
+          yield* eventSink.write({
+            events: [
+              {
+                id: yield* allocator.allocate.event({ threadId: parent.id }),
+                type: "thread.model-selection-updated",
+                threadId: parent.id,
+                occurredAt: now,
+                payload: {
+                  ...parent,
+                  modelSelection: { ...parent.modelSelection, model: "gpt-6.1-sol" },
+                },
+              },
+            ],
+          });
+        }
+        if (scenario === "independent-run") {
+          yield* eventSink.write({
+            events: [
+              {
+                id: yield* allocator.allocate.event({ threadId: childId }),
+                type: "run.created",
+                threadId: childId,
+                occurredAt: now,
+                payload: {
+                  id: RunId.make("child-independent-run"),
+                  threadId: childId,
+                  ordinal: 1,
+                  providerInstanceId: modelSelection.instanceId,
+                  modelSelection,
+                  providerThreadId: null,
+                  userMessageId: MessageId.make("child-user-message"),
+                  rootNodeId: null,
+                  activeAttemptId: null,
+                  status: "completed",
+                  requestedAt: now,
+                  startedAt: now,
+                  completedAt: now,
+                  checkpointId: null,
+                  contextHandoffId: null,
+                },
+              },
+            ],
+          });
+        }
+        const providerSessionId = yield* allocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId: parent.id,
+        });
+        const task: OrchestrationV2Subagent = {
+          id: taskId,
+          threadId: parent.id,
+          runId: null,
+          parentNodeId: NodeId.make("parent-root"),
+          origin: scenario === "app-owned" ? "app_owned" : "provider_native",
+          createdBy: "agent",
+          driver: scenario === "other-provider" ? ProviderDriverKind.make("pi") : CODEX_DRIVER,
+          providerInstanceId: modelSelection.instanceId,
+          providerThreadId: null,
+          childThreadId: childId,
+          nativeTaskRef: null,
+          prompt: "Read files",
+          title: "Child",
+          model: scenario === "unknown" ? null : "gpt-6-luna",
+          status: "completed",
+          result: "Finished",
+          startedAt: now,
+          completedAt: now,
+          updatedAt: now,
+        };
+        const ingest = (subagent: OrchestrationV2Subagent) =>
+          ingestor.ingestNormalized({
+            providerSessionId,
+            providerInstanceId: modelSelection.instanceId,
+            threadId: parent.id,
+            event: { type: "subagent.updated", driver: task.driver, subagent },
+          });
+        if (scenario === "late") yield* ingest({ ...task, model: null });
+        const stored = yield* ingest(task);
+        const shouldSync =
+          scenario === "known" || scenario === "late" || scenario === "parent-model-changed";
+        assert.equal(
+          stored.filter((event) => event.event.type === "thread.model-selection-updated").length,
+          shouldSync ? 1 : 0,
+        );
+        if (scenario !== "missing-child") {
+          const updated = yield* projections.getThread(childId);
+          assert.equal(updated.modelSelection.model, shouldSync ? "gpt-6-luna" : selectedModel);
+          assert.equal(updated.title, "User-renamed child");
+          assert.deepEqual(updated.archivedAt, now);
+        }
+        const repeated = yield* ingest(task);
+        assert.equal(
+          repeated.filter((event) => event.event.type === "thread.model-selection-updated").length,
+          0,
+        );
+      }).pipe(Effect.provide(Layer.fresh(TestLayer))),
+    );
+  }
   it.effect("normalizes provider events through the real event log and projection store", () =>
     Effect.gen(function* () {
       const now = yield* DateTime.now;

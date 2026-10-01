@@ -282,6 +282,21 @@ it("shows readable models and only differing workspace details in agent tooltips
     expect(text()).not.toContain("Unknown");
   }
 
+  for (const [model, expected] of [
+    [null, "Not reported"],
+    ["", "Not reported"],
+    ["   ", "Not reported"],
+    ["gpt-6-luna", "GPT-6-Luna"],
+  ] as const) {
+    state.projection = {
+      ...projection,
+      subagents: [{ ...projection.subagents[0], origin: "provider_native", model }],
+    };
+    await act(async () => renderer.update(cloneElement(panel)));
+    expect(text()).toContain(expected);
+    expect(text()).not.toContain("My GPT");
+  }
+
   state.projection = {
     ...projection,
     subagents: [
