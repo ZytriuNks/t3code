@@ -446,6 +446,18 @@ export const makePiRpcConnection = Effect.fnUntraced(function* (options: PiRpcSp
       const id = `t3-${nextRequestId++}`;
       const deferred = yield* Deferred.make<unknown, PiRpcError>();
       pendingRequests.set(id, { deferred });
+      const startMs = yield* Clock.currentTimeMillis;
+      const operation = String(record["type"] ?? "request");
+      const logElapsed = (outcome: "ok" | "err") =>
+        Effect.gen(function* () {
+          const elapsedMs = yield* Clock.currentTimeMillis;
+          return yield* Effect.logDebug("pi-rpc.elapsed", {
+            operation,
+            outcome,
+            elapsedMs: elapsedMs - startMs,
+            timeoutMs,
+          });
+        });
       yield* send({ ...record, id }).pipe(
         Effect.tapError(() => Effect.sync(() => pendingRequests.delete(id))),
       );
@@ -459,13 +471,15 @@ export const makePiRpcConnection = Effect.fnUntraced(function* (options: PiRpcSp
           orElse: () =>
             Effect.fail(
               new PiRpcTimeoutError({
-                operation: String(record["type"] ?? "request"),
+                operation,
                 timeoutMs,
               }),
             ),
         }),
         Effect.onInterrupt(() => Effect.sync(() => pendingRequests.delete(id))),
         Effect.onError(() => Effect.sync(() => pendingRequests.delete(id))),
+        Effect.tap(() => logElapsed("ok")),
+        Effect.tapError(() => logElapsed("err")),
       );
     });
 
