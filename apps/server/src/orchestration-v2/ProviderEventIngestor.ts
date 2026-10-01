@@ -23,10 +23,12 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import { AnalyticsService } from "../telemetry/AnalyticsService.ts";
 import { EventSinkV2 } from "./EventSink.ts";
+import { EventStoreV2 } from "./EventStore.ts";
 import { ProjectionStoreV2 } from "./ProjectionStore.ts";
 import { IdAllocatorV2 } from "./IdAllocator.ts";
 import { ProviderAdapterV2Event } from "./ProviderAdapter.ts";
@@ -249,11 +251,12 @@ const decodeDomainEvent = Schema.decodeUnknownEffect(OrchestrationV2DomainEvent)
 export const layer: Layer.Layer<
   ProviderEventIngestorV2,
   never,
-  EventSinkV2 | IdAllocatorV2 | ProjectionStoreV2
+  EventSinkV2 | EventStoreV2 | IdAllocatorV2 | ProjectionStoreV2
 > = Layer.effect(
   ProviderEventIngestorV2,
   Effect.gen(function* () {
     const eventSink = yield* EventSinkV2;
+    const eventStore = yield* EventStoreV2;
     const projections = yield* ProjectionStoreV2;
     const idAllocator = yield* IdAllocatorV2;
     const analytics = yield* ProviderTurnAnalytics;
@@ -392,16 +395,67 @@ export const layer: Layer.Layer<
                 nodeId: input.event.node.id,
               }),
             ];
-          case "subagent.updated":
-            return [
+          case "subagent.updated": {
+            const subagent = input.event.subagent;
+            const events = [
               yield* makeDomainEvent(input, {
                 type: "subagent.updated",
-                threadId: input.event.subagent.threadId,
-                payload: input.event.subagent,
-                runId: input.event.subagent.runId,
-                nodeId: input.event.subagent.id,
+                threadId: subagent.threadId,
+                payload: subagent,
+                runId: subagent.runId,
+                nodeId: subagent.id,
               }),
             ];
+            const model = subagent.model?.trim();
+            if (
+              input.event.driver !== "codex" ||
+              subagent.origin !== "provider_native" ||
+              subagent.childThreadId === null ||
+              !model
+            )
+              return events;
+            const shell = yield* projections.getThreadShell(subagent.childThreadId);
+            if (
+              shell === null ||
+              shell.latestRunId !== null ||
+              shell.modelSelection.model === model ||
+              shell.providerInstanceId !== subagent.providerInstanceId ||
+              shell.lineage.parentThreadId !== subagent.threadId ||
+              shell.lineage.relationshipToParent !== "subagent" ||
+              shell.forkedFrom?.type !== "node" ||
+              shell.forkedFrom.nodeId !== subagent.id
+            )
+              return events;
+            // User configuration and independent turns take ownership of the child's selection.
+            const selectionEvents = yield* eventStore
+              .read({
+                threadId: subagent.childThreadId,
+                eventType: "thread.model-selection-updated",
+              })
+              .pipe(Stream.runCollect);
+            if (
+              shell.modelSelection.instanceId !== subagent.providerInstanceId ||
+              selectionEvents.some(
+                (stored) => stored.event.driver !== "codex" || stored.event.nodeId !== subagent.id,
+              )
+            )
+              return events;
+            const child = yield* projections.getThread(subagent.childThreadId);
+            events.push(
+              yield* makeDomainEvent(input, {
+                type: "thread.model-selection-updated",
+                threadId: child.id,
+                runId: null,
+                nodeId: subagent.id,
+                payload: {
+                  ...child,
+                  modelSelection: { ...child.modelSelection, model },
+                  updatedAt: yield* DateTime.now,
+                },
+              }),
+            );
+            return events;
+          }
           case "message.updated":
             return [
               yield* makeDomainEvent(input, {

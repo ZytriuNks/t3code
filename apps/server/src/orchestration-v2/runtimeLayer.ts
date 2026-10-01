@@ -93,7 +93,9 @@ export const ProjectServiceLayerLive = projectServiceLayer.pipe(
 );
 
 const providerEventIngestorProvided = providerEventIngestorLayer.pipe(
-  Layer.provide(Layer.mergeAll(eventSinkProvided, idAllocatorLayer, projectionStoreLayer)),
+  Layer.provide(
+    Layer.mergeAll(eventSinkProvided, eventStoreProvided, idAllocatorLayer, projectionStoreLayer),
+  ),
 );
 
 const checkpointServiceProvided = checkpointServiceLayer.pipe(Layer.provide(idAllocatorLayer));

@@ -300,6 +300,7 @@ import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { useRemoveClonedProject } from "../hooks/useRemoveClonedProject";
 import { useOpenPanelPullRequestUrl } from "../hooks/useOpenPanelPullRequestUrl";
 import { resolveAppModelSelectionForInstance } from "../modelSelection";
+import { resolveNativeSubagentConversationModel } from "./chat/nativeSubagentModel";
 import {
   getComposerPromptInjectionState,
   getComposerProviderState,
@@ -2039,6 +2040,7 @@ export default function ChatView(props: ChatViewProps) {
     return scopeThreadRef(parentSubagentEnvironmentId, parentSubagentThreadId);
   }, [parentSubagentEnvironmentId, parentSubagentThreadId]);
   const parentSubagentThread = useThreadShell(parentSubagentThreadRef);
+  const parentSubagentProjection = useThreadProjection(parentSubagentThreadRef)?.projection ?? null;
   const parentThreadLink = useMemo(
     () =>
       parentSubagentThreadRef === null
@@ -2805,6 +2807,15 @@ export default function ChatView(props: ChatViewProps) {
     ? (activeEnvironment?.serverConfig ?? null)
     : (primaryEnvironment?.serverConfig ?? null);
   const providerStatuses = serverConfig?.providers ?? EMPTY_PROVIDERS;
+  const nativeSubagentModel = resolveNativeSubagentConversationModel({
+    thread: serverProjection?.thread ?? null,
+    parent: parentSubagentProjection?.thread ?? null,
+    subagents: parentSubagentProjection?.subagents ?? [],
+    driver: providerStatuses.find(
+      (provider) => provider.instanceId === activeThread?.providerInstanceId,
+    )?.driver,
+    hasIndependentTurn: (serverProjection?.runs.length ?? 0) > 0,
+  });
   const selectedProviderByThreadId = composerActiveProvider ?? null;
   const threadProvider =
     activeThread?.modelSelection.instanceId ??
@@ -10790,6 +10801,7 @@ export default function ChatView(props: ChatViewProps) {
                             providerCatalogKnown={serverConfig !== null}
                             activeProjectDefaultModelSelection={activeProjectDefaultModelSelection}
                             activeThreadModelSelection={activeThread?.modelSelection}
+                            nativeSubagentModel={nativeSubagentModel}
                             activeContextWindow={activeContextWindow}
                             activeTasksProgress={activeComposerTasksProgress}
                             activeTaskSteps={activeComposerTaskSteps}

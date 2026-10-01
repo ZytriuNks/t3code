@@ -1165,6 +1165,10 @@ const decodeCodexResumeMetadata = Schema.decodeUnknownEffect(
   Schema.Struct({ thread: Schema.Struct({ id: Schema.String, updatedAt: Schema.Number }) }),
 );
 
+const decodeCodexSubagentModel = Schema.decodeUnknownEffect(
+  Schema.Struct({ thread: Schema.Struct({ id: Schema.String }), model: Schema.String }),
+);
+
 export const makeCodexAppServerSpawnCommand = Effect.fn(
   "CodexAdapterV2.makeCodexAppServerSpawnCommand",
 )(function* (input: {
@@ -1473,6 +1477,7 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
     planSelectionTransition: () => Effect.succeed(turnScopedSelectionTransition()),
     openSession: (input) =>
       Effect.gen(function* () {
+        const sessionScope = yield* Effect.scope;
         const client = yield* clientFactory.open({
           instanceId: adapterOptions.instanceId,
           threadId: input.threadId,
@@ -2289,7 +2294,12 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
         }) =>
           Effect.gen(function* () {
             const registeredSubagents = yield* Ref.get(subagentThreads);
-            if (registeredSubagents.has(input.nativeThreadId)) {
+            const existing = registeredSubagents.get(input.nativeThreadId);
+            if (existing !== undefined) {
+              if (existing.task.model === null && input.model !== null) {
+                existing.task = { ...existing.task, model: input.model };
+                yield* emitSubagentTaskUpdate({ subagent: existing, status: existing.task.status });
+              }
               return;
             }
 
@@ -2497,6 +2507,29 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
             });
             for (const pendingTurn of pendingTurns) {
               yield* emitSubagentProviderTurnStarted(subagent, pendingTurn);
+            }
+
+            if (task.model === null) {
+              // Rejoin the loaded child without overriding its model or replaying history.
+              yield* client.raw
+                .request("thread/resume", {
+                  threadId: input.nativeThreadId,
+                  excludeTurns: true,
+                })
+                .pipe(
+                  Effect.flatMap(decodeCodexSubagentModel),
+                  Effect.timeout("5 seconds"),
+                  Effect.flatMap((metadata) =>
+                    Effect.gen(function* () {
+                      const model = metadata.model.trim();
+                      if (metadata.thread.id !== input.nativeThreadId || model.length === 0) return;
+                      subagent.task = { ...subagent.task, model };
+                      yield* emitSubagentTaskUpdate({ subagent, status: subagent.task.status });
+                    }),
+                  ),
+                  Effect.ignore,
+                  Effect.forkIn(sessionScope),
+                );
             }
           });
 
