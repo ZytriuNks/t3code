@@ -57,12 +57,14 @@ interface EditorLaunch {
   readonly target: string;
   readonly command: string;
   readonly args: ReadonlyArray<string>;
+  readonly waitForExit?: boolean;
 }
 
 interface ProcessLaunch {
   readonly command: string;
   readonly args: ReadonlyArray<string>;
   readonly options: ChildProcess.CommandOptions;
+  readonly waitForExit?: boolean;
 }
 
 interface TargetPathAndPosition {
@@ -568,22 +570,30 @@ const resolveEditorLaunch = Effect.fn("resolveEditorLaunch")(function* (
   };
 });
 
-/**
- * PowerShell source that launches File Explorer with its raw selection
- * switch. Explorer's contract is the single argument `/select,"<path>"` with
- * only the path quoted; Node's default spawn quoting wraps the whole argument
- * when the path has spaces and Explorer misparses it, silently opening a
- * fallback folder. A single `-ArgumentList` string in Windows PowerShell 5.1
- * reaches the child's command line verbatim, preserving the raw switch.
- *
- * Exported so the Windows smoke test can drive the identical source through a
- * real PowerShell against a recording stub instead of Explorer.
- */
-export function buildFileExplorerRevealPowerShellSource(
-  explorerCommand: string,
-  target: string,
-): string {
-  return `$ProgressPreference = 'SilentlyContinue'; Start-Process ${escapePowerShellStringLiteral(explorerCommand)} -ArgumentList ('/select,"' + ${escapePowerShellStringLiteral(target)} + '"')`;
+/** Use the Unicode Shell API: Explorer's /select command can silently do nothing. */
+export function buildFileExplorerRevealPowerShellSource(target: string): string {
+  return `$ErrorActionPreference = 'Stop'
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class T3FileExplorerReveal {
+  [DllImport("shell32.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
+  private static extern int SHParseDisplayName(string name, IntPtr bindingContext, out IntPtr item, uint attributes, out uint resultAttributes);
+  [DllImport("shell32.dll")]
+  private static extern int SHOpenFolderAndSelectItems(IntPtr item, uint count, IntPtr children, uint flags);
+  public static void Reveal(string target) {
+    IntPtr item = IntPtr.Zero;
+    uint attributes;
+    try {
+      Marshal.ThrowExceptionForHR(SHParseDisplayName(target, IntPtr.Zero, out item, 0, out attributes));
+      Marshal.ThrowExceptionForHR(SHOpenFolderAndSelectItems(item, 0, IntPtr.Zero, 0));
+    } finally {
+      if (item != IntPtr.Zero) Marshal.FreeCoTaskMem(item);
+    }
+  }
+}
+'@
+[T3FileExplorerReveal]::Reveal(${escapePowerShellStringLiteral(target)})`;
 }
 
 function fileExplorerRevealLaunch(
@@ -595,9 +605,11 @@ function fileExplorerRevealLaunch(
     editor: "file-manager",
     target,
     command: powershellCommand,
+    waitForExit: true,
     args: [
+      "-STA",
       ...POWERSHELL_ARGUMENTS_PREFIX,
-      encodeUtf16LeBase64(buildFileExplorerRevealPowerShellSource("explorer.exe", explorerTarget)),
+      encodeUtf16LeBase64(buildFileExplorerRevealPowerShellSource(explorerTarget)),
     ],
   };
 }
@@ -637,10 +649,8 @@ const resolveFileManagerRevealLaunch = Effect.fn("resolveFileManagerRevealLaunch
   ) {
     const explorerTarget = resolveWslFileManagerPath(target, env.WSL_DISTRO_NAME);
     if (yield* isCommandAvailable(WSL_POWERSHELL_COMMAND, { env })) {
-      // Explorer's raw switch cannot express a double quote, and unlike
-      // Windows paths a WSL path may legally contain one: open the containing
-      // directory in File Explorer instead, matching the advertised
-      // "file-explorer" kind.
+      // Preserve the containing-directory fallback for WSL names that cannot
+      // be represented as ordinary Windows file names.
       if (explorerTarget.includes('"')) {
         const path = yield* Path.Path;
         return {
@@ -684,7 +694,17 @@ const launchAndUnref = Effect.fn("externalLauncher.launchAndUnref")(function* (
   const command = ChildProcess.make(launch.command, launch.args, launch.options);
 
   yield* spawner.spawn(command).pipe(
-    Effect.flatMap((handle) => handle.unref),
+    Effect.flatMap((handle) =>
+      launch.waitForExit
+        ? handle.exitCode.pipe(
+            Effect.flatMap((code) =>
+              code === 0
+                ? Effect.void
+                : Effect.fail(new Error(`Launcher exited with code ${code}`)),
+            ),
+          )
+        : handle.unref,
+    ),
     Effect.asVoid,
     Effect.scoped,
     Effect.mapError(onError),
@@ -727,12 +747,14 @@ const launchEditorProcess = Effect.fn("externalLauncher.launchEditorProcess")(fu
     {
       command: spawnCommand.command,
       args: spawnCommand.args,
+      ...(launch.waitForExit ? { waitForExit: true } : {}),
       options: {
         detached: true,
         shell: spawnCommand.shell,
         stdin: "ignore",
         stdout: "ignore",
         stderr: "ignore",
+        ...(launch.waitForExit ? { detached: false, windowsHide: true } : {}),
       },
     },
     (cause) =>
