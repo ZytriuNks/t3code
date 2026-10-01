@@ -2246,10 +2246,14 @@ export default function ChatView(props: ChatViewProps) {
   const rightPanelMaximized =
     canMaximizeRightPanel && maximizedRightPanelThreadKey === routeThreadKey;
   const inlineRightPanelOwnsTitleBar = rightPanelOpen && !shouldUsePlanSidebarSheet;
+  const autoExpandThreadDetailsPanel = useClientSettings(
+    (settings) => settings.autoExpandThreadDetailsPanel,
+  );
   const threadPanelPresentation = resolveThreadPanelPresentation(
     workspaceLayoutWidth,
     inlineRightPanelOwnsTitleBar ? previewPanelInlineSize.width : 0,
     rightPanelMaximized,
+    autoExpandThreadDetailsPanel,
   );
   const threadPanelOpen = useRightPanelStore((state) =>
     selectThreadPanelOpen(
@@ -5509,10 +5513,12 @@ export default function ChatView(props: ChatViewProps) {
     if (!activeThreadRef) return;
     useRightPanelStore.getState().toggleThreadPanel(activeThreadRef, threadPanelPresentation);
   }, [activeThreadRef, threadPanelPresentation]);
-  const closeThreadPanelPopover = useCallback(() => {
+  const closeThreadPanel = useCallback(() => {
     if (!activeThreadRef) return;
-    useRightPanelStore.getState().setThreadPanelOpen(activeThreadRef, "popover", false);
-  }, [activeThreadRef]);
+    useRightPanelStore
+      .getState()
+      .setThreadPanelOpen(activeThreadRef, threadPanelPresentation, false);
+  }, [activeThreadRef, threadPanelPresentation]);
   const toggleRightPanelMaximized = useCallback(() => {
     if (!canMaximizeRightPanel) return;
     setMaximizedRightPanelThreadKey((threadKey) =>
@@ -10271,6 +10277,7 @@ export default function ChatView(props: ChatViewProps) {
     ) : null
   ) : null;
   const threadDetailsPanelProps: Omit<ThreadDetailsPanelProps, "mode"> = {
+    onClose: closeThreadPanel,
     forceNewWorktree: multipleModelSelections !== null,
     environmentId: activeThread.environmentId,
     threadId: activeThread.id,
@@ -10332,11 +10339,7 @@ export default function ChatView(props: ChatViewProps) {
     ...(threadPanelPresentation === "popover"
       ? {
           threadPanelPopoverContent: (
-            <ThreadDetailsPanel
-              mode="popover"
-              onClose={closeThreadPanelPopover}
-              {...threadDetailsPanelProps}
-            />
+            <ThreadDetailsPanel mode="popover" {...threadDetailsPanelProps} />
           ),
         }
       : {}),

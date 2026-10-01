@@ -627,6 +627,55 @@ describe("ClientSettings environment identification", () => {
 });
 
 describe("ClientSettings sidebar", () => {
+  it("shows legacy project guides by default and persists either visibility", () => {
+    expect(decodeClientSettings({}).legacySidebarProjectGuides).toBe(true);
+    for (const visible of [false, true]) {
+      const patch = decodeClientSettingsPatch({ legacySidebarProjectGuides: visible });
+      expect(
+        decodeClientSettings({ ...decodeClientSettings({}), ...patch }).legacySidebarProjectGuides,
+      ).toBe(visible);
+    }
+    expect(() => decodeClientSettingsPatch({ legacySidebarProjectGuides: "false" })).toThrow();
+  });
+
+  it("preserves automatic workspace details and persists opting out", () => {
+    expect(decodeClientSettings({}).autoExpandThreadDetailsPanel).toBe(true);
+    for (const enabled of [false, true]) {
+      const patch = decodeClientSettingsPatch({ autoExpandThreadDetailsPanel: enabled });
+      expect(
+        decodeClientSettings({ ...decodeClientSettings({}), ...patch })
+          .autoExpandThreadDetailsPanel,
+      ).toBe(enabled);
+    }
+    expect(() => decodeClientSettingsPatch({ autoExpandThreadDetailsPanel: "false" })).toThrow();
+  });
+
+  it("keeps labels for existing dot preferences and allows hiding them", () => {
+    const stored = decodeClientSettings({ legacySidebarThreadStatusDots: true });
+    expect(stored.legacySidebarHideStatusLabels).toBe(false);
+    for (const hidden of [true, false]) {
+      const patch = decodeClientSettingsPatch({ legacySidebarHideStatusLabels: hidden });
+      expect(decodeClientSettings({ ...stored, ...patch }).legacySidebarHideStatusLabels).toBe(
+        hidden,
+      );
+    }
+    expect(() => decodeClientSettingsPatch({ legacySidebarHideStatusLabels: "true" })).toThrow();
+  });
+
+  it("keeps legacy thread status dots opt-in and preserves toggles", () => {
+    expect(decodeClientSettings({}).legacySidebarThreadStatusDots).toBe(false);
+
+    for (const enabled of [true, false]) {
+      const patch = decodeClientSettingsPatch({ legacySidebarThreadStatusDots: enabled });
+      expect(patch.legacySidebarThreadStatusDots).toBe(enabled);
+      expect(
+        decodeClientSettings({ ...decodeClientSettings({}), ...patch })
+          .legacySidebarThreadStatusDots,
+      ).toBe(enabled);
+    }
+    expect(() => decodeClientSettingsPatch({ legacySidebarThreadStatusDots: "true" })).toThrow();
+  });
+
   it("defaults to the current sidebar", () => {
     expect(decodeClientSettings({}).legacySidebarEnabled).toBe(false);
   });

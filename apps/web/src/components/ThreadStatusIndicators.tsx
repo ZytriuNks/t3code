@@ -822,9 +822,13 @@ export function ThreadWorktreeIndicator({
 export function ThreadStatusLabel({
   status,
   compact = false,
+  hideLabel = false,
+  reserveIconSpace = false,
 }: {
   status: ThreadStatusPill;
   compact?: boolean;
+  hideLabel?: boolean;
+  reserveIconSpace?: boolean;
 }) {
   if (compact) {
     return (
@@ -859,11 +863,19 @@ export function ThreadStatusLabel({
         }
       >
         <span
-          className={`h-1.5 w-1.5 rounded-full ${status.dotClass} ${
-            status.pulse ? "animate-status-pulse" : ""
-          }`}
-        />
-        <span className="hidden md:inline">{status.label}</span>
+          className={
+            reserveIconSpace
+              ? "inline-flex size-4 shrink-0 items-center justify-center"
+              : "contents"
+          }
+        >
+          <span
+            className={`h-1.5 w-1.5 rounded-full ${status.dotClass} ${
+              status.pulse ? "animate-status-pulse" : ""
+            }`}
+          />
+        </span>
+        {!hideLabel && <span className="hidden md:inline">{status.label}</span>}
       </TooltipTrigger>
       <TooltipPopup side="top">{status.label}</TooltipPopup>
     </Tooltip>

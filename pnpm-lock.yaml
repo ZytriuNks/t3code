@@ -694,6 +694,9 @@ importers:
       lucide-react:
         specifier: ^0.564.0
         version: 0.564.0(react@19.2.6)
+      morphicons:
+        specifier: 1.7.1
+        version: 1.7.1(react@19.2.6)
       react:
         specifier: 19.2.6
         version: 19.2.6
@@ -8987,6 +8990,26 @@ packages:
       snappy:
         optional: true
       socks:
+        optional: true
+
+  morphicons@1.7.1:
+    resolution: {integrity: sha512-q5ylxy5/d7vBg0OAzanlooXf05PekovMYDuuQVpr6vAQZxl99lrJbaIi+jJ32PXQf9WEEaDO2pbNBsx1ZhEnFQ==}
+    peerDependencies:
+      react: '>=18'
+      react-native: '>=0.71'
+      react-native-svg: '>=14'
+      svelte: '>=5'
+      vue: '>=3.3'
+    peerDependenciesMeta:
+      react:
+        optional: true
+      react-native:
+        optional: true
+      react-native-svg:
+        optional: true
+      svelte:
+        optional: true
+      vue:
         optional: true
 
   mrmime@2.0.1:
@@ -20114,6 +20137,10 @@ snapshots:
       '@aws-sdk/credential-providers': 3.1062.0
       socks: 2.8.9
     optional: true
+
+  morphicons@1.7.1(react@19.2.6):
+    optionalDependencies:
+      react: 19.2.6
 
   mrmime@2.0.1: {}
 

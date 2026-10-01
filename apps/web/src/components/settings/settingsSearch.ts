@@ -79,6 +79,7 @@ export interface SettingsSearchItem {
    */
   readonly secondary?: boolean;
   readonly requiresThreadAutoSettlement?: boolean;
+  readonly requiresLegacySidebar?: boolean;
 }
 
 type SettingsSearchItemDefinition = Omit<
@@ -420,6 +421,14 @@ const SETTINGS_SEARCH_ITEM_DEFINITIONS = [
     searchTerms: ["automatically open diff pull request pr right panel agent completion"],
   },
   {
+    id: "auto-expand-thread-details",
+    title: "Automatically expand workspace details",
+    to: "/settings/general",
+    searchTerms: [
+      "auto expand workspace thread details panel wide width toolbar popover collapse external app",
+    ],
+  },
+  {
     id: "skills-in-slash-menu",
     title: "Show skills in slash menu",
     to: "/settings/general",
@@ -559,9 +568,23 @@ const SETTINGS_SEARCH_ITEM_DEFINITIONS = [
   },
   {
     id: "legacy-sidebar",
-    title: "Sidebar (legacy)",
-    to: "/settings/general",
-    searchTerms: ["project thread tree old flat list"],
+    title: "Sidebar style",
+    to: "/settings/appearance",
+    searchTerms: ["sidebar style default legacy project thread tree old flat list"],
+  },
+  {
+    id: "legacy-sidebar-project-guides",
+    title: "Show project guides",
+    to: "/settings/appearance",
+    requiresLegacySidebar: true,
+    searchTerms: ["project guides vertical lines thread tree indent left align legacy sidebar"],
+  },
+  {
+    id: "legacy-sidebar-thread-status-dots",
+    title: "Thread status dots",
+    to: "/settings/appearance",
+    requiresLegacySidebar: true,
+    searchTerms: ["thread status dots idle gray working completed indicator"],
   },
   {
     id: "keybindings",
@@ -935,6 +958,15 @@ const SETTINGS_CATEGORY_SCOPES: Readonly<Record<SettingsPath, SettingsSearchScop
 
 export function settingsSearchItemTitle(item: SettingsSearchItem, t?: SettingsTranslator): string {
   return t && item.titleKey ? t(item.titleKey) : item.title;
+}
+
+export function settingsSearchItemTargetId(
+  item: SettingsSearchItem,
+  legacySidebarEnabled: boolean,
+): string {
+  return item.requiresLegacySidebar && !legacySidebarEnabled
+    ? "legacy-sidebar"
+    : (item.targetId ?? item.id);
 }
 
 /** Search keeps the selected target. A missing row can explain its owning scope instead. */

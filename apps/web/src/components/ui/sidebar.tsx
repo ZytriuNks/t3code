@@ -734,11 +734,19 @@ function SidebarMenuButton({
   );
 }
 
-function SidebarMenuSub({ className, ...props }: React.ComponentProps<"ul">) {
+function SidebarMenuSub({
+  className,
+  indented = true,
+  ...props
+}: React.ComponentProps<"ul"> & { indented?: boolean }) {
+  // Inset the guide by the padding so it shrinks to zero with an empty animated list.
   return (
     <ul
       className={cn(
-        "mx-3.5 flex min-w-0 translate-x-px flex-col gap-1 border-sidebar-border border-l px-2.5 py-0.5",
+        "relative flex min-w-0 flex-col gap-1 py-0.5",
+        indented
+          ? "mx-3.5 translate-x-px border-l border-transparent px-2.5 before:pointer-events-none before:absolute before:inset-y-0.5 before:left-0 before:w-px before:bg-sidebar-border"
+          : "mx-0 px-0",
         "group-data-[collapsible=icon]:hidden",
         className,
       )}

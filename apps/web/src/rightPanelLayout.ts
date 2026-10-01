@@ -8,7 +8,9 @@ export function resolveThreadPanelPresentation(
   workspaceWidth: number | null,
   occupiedRightPanelWidth: number,
   rightPanelMaximized: boolean,
+  autoExpandThreadDetailsPanel = true,
 ): ThreadPanelPresentation {
+  if (!autoExpandThreadDetailsPanel) return "popover";
   if (workspaceWidth === null) return "inline";
 
   const chatPaneWidth = rightPanelMaximized ? 0 : workspaceWidth - occupiedRightPanelWidth;
