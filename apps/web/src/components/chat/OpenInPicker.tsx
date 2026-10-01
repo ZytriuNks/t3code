@@ -6,6 +6,7 @@ import {
   type ResolvedKeybindingsConfig,
 } from "@t3tools/contracts";
 import { memo, useCallback, useEffect, useMemo, useRef } from "react";
+import { useAtomValue } from "@effect/atom-react";
 import { isOpenFavoriteEditorShortcut, shortcutLabelForCommand } from "../../keybindings";
 import { usePreferredEditor } from "../../editorPreferences";
 import { editorLabelForPlatform } from "../../editorLabels";
@@ -59,6 +60,7 @@ import {
 } from "../JetBrainsIcons";
 import { cn, isMacPlatform, isWindowsPlatform } from "~/lib/utils";
 import { shellEnvironment } from "~/state/shell";
+import { serverEnvironment } from "~/state/server";
 import { useAtomCommand } from "~/state/use-atom-command";
 import {
   THREAD_DETAILS_PANEL_CHEVRON_CLASS,
@@ -209,6 +211,7 @@ export const OpenInPicker = memo(function OpenInPicker({
   compact = false,
   enableShortcut = true,
   displayMode = "toolbar",
+  reveal = false,
 }: {
   environmentId: EnvironmentId;
   keybindings: ResolvedKeybindingsConfig;
@@ -218,18 +221,37 @@ export const OpenInPicker = memo(function OpenInPicker({
   compact?: boolean;
   enableShortcut?: boolean;
   displayMode?: "toolbar" | "panel";
+  reveal?: boolean;
 }) {
   const isPanel = displayMode === "panel";
   const ActionGroup = isPanel ? "div" : Group;
   const panelAnchorRef = useRef<HTMLDivElement | null>(null);
   const openInEditorMutation = useAtomCommand(shellEnvironment.openInEditor, "open in editor");
   const remote = useRemoteOpenState(environmentId);
+  const serverConfig = useAtomValue(serverEnvironment.configValueAtom(environmentId));
   const remoteCapableEditors = useRemoteCapableEditors();
   const [remoteHintSeen, markRemoteHintSeen] = useRemoteOpenHint();
   const environmentLabel = useEnvironment(environmentId)?.label ?? "this machine";
   // Remote mode ignores the server's PATH probe: what matters is what runs on
   // the viewing machine, which only the desktop app can probe.
-  const effectiveEditors = remote.mode === "local-exec" ? availableEditors : remoteCapableEditors;
+  const effectiveEditors = useMemo(
+    () =>
+      remote.mode === "local-exec"
+        ? availableEditors.filter(
+            (editor) =>
+              !reveal ||
+              editor !== "file-manager" ||
+              serverConfig?.shellRevealInFileManager === true,
+          )
+        : remoteCapableEditors,
+    [
+      availableEditors,
+      remote.mode,
+      remoteCapableEditors,
+      reveal,
+      serverConfig?.shellRevealInFileManager,
+    ],
+  );
   const [preferredEditor, setPreferredEditor] = usePreferredEditor(effectiveEditors);
   const options = useMemo(
     () => resolveOpenInOptions(navigator.platform, effectiveEditors),
@@ -264,6 +286,7 @@ export const OpenInPicker = memo(function OpenInPicker({
         input: {
           cwd: openInCwd,
           editor,
+          ...(editor === "file-manager" && reveal ? { reveal: true } : {}),
         },
       });
       setPreferredEditor(editor);
@@ -275,6 +298,7 @@ export const OpenInPicker = memo(function OpenInPicker({
       openInCwd,
       openInEditorMutation,
       preferredEditor,
+      reveal,
       remote,
       setPreferredEditor,
     ],

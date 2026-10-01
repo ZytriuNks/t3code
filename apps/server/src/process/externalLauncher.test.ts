@@ -1,8 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off - the Windows reveal smoke test drives a real PowerShell through Node process and filesystem APIs.
 import * as NodeChildProcess from "node:child_process";
-import * as NodeFS from "node:fs";
-import * as NodeOS from "node:os";
-import * as NodePath from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as ConfigProvider from "effect/ConfigProvider";
@@ -283,6 +280,37 @@ it.effect.skipIf(windowsHost)("reveals a file in Finder with open -R on macOS", 
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
+it.effect("reports a failed Windows reveal launcher instead of succeeding after spawn", () =>
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const binDir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-editors-" });
+    yield* fileSystem.writeFileString(path.join(binDir, "explorer.CMD"), "@echo off\r\n");
+    const systemRoot = path.join(binDir, "system-root");
+    const powershell = `${systemRoot}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`;
+    yield* fileSystem.makeDirectory(path.dirname(powershell), { recursive: true });
+    yield* fileSystem.writeFileString(powershell, "");
+    const result = yield* Effect.gen(function* () {
+      const launcher = yield* ExternalLauncher.ExternalLauncher;
+      return yield* launcher.launchEditor({
+        editor: "file-manager",
+        cwd: "C:/中文 workspace/报告.md",
+        reveal: true,
+      });
+    }).pipe(
+      Effect.provide(
+        testLayer({
+          platform: "win32",
+          env: { PATH: binDir, PATHEXT: ".COM;.EXE;.BAT;.CMD", SYSTEMROOT: systemRoot },
+          spawnResult: () => ({ exitCode: 1 }),
+        }),
+      ),
+      Effect.result,
+    );
+    assert.equal(result._tag, "Failure");
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
 it.effect("reveals a file in File Explorer through PowerShell on Windows", () =>
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem;
@@ -302,7 +330,7 @@ it.effect("reveals a file in File Explorer through PowerShell on Windows", () =>
       yield* launcher.launchEditor({
         editor: "file-manager",
         // Web file links normalize separators even when the server runs on
-        // Windows. Explorer's `/select` switch requires Windows separators.
+        // Windows. The Windows Shell API requires Windows separators.
         cwd: "C:/workspace with spaces/media/author's clip.mp4",
         reveal: true,
       });
@@ -323,6 +351,7 @@ it.effect("reveals a file in File Explorer through PowerShell on Windows", () =>
     assert.ok(spawned);
     assert.equal(spawned.command, powerShellPath);
     assert.deepEqual(spawned.args.slice(0, -1), [
+      "-STA",
       "-NoProfile",
       "-NonInteractive",
       "-ExecutionPolicy",
@@ -331,72 +360,38 @@ it.effect("reveals a file in File Explorer through PowerShell on Windows", () =>
     ]);
     const encodedCommand = spawned.args[spawned.args.length - 1] ?? "";
     const decodedCommand = Buffer.from(encodedCommand, "base64").toString("utf16le");
-    // explorer.exe expects `/select,"<path>"` with only the path quoted;
-    // PowerShell 5.1's Start-Process passes the argument string verbatim.
+    // The native Shell API receives the normalized path without CLI parsing.
     assert.equal(
       decodedCommand,
-      "$ProgressPreference = 'SilentlyContinue'; Start-Process 'explorer.exe' -ArgumentList ('/select,\"' + 'C:\\workspace with spaces\\media\\author''s clip.mp4' + '\"')",
+      ExternalLauncher.buildFileExplorerRevealPowerShellSource(
+        "C:\\workspace with spaces\\media\\author's clip.mp4",
+      ),
     );
     assert.equal(spawned.options.shell, false);
+    assert.equal(spawned.options.detached, false);
+    assert.equal(spawned.options.windowsHide, true);
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
-// Real-chain smoke check for the Explorer selection contract: runs the exact
-// PowerShell source the reveal launch encodes, against a stub that records
-// the raw argument tail it receives, and asserts a spaced path arrives as the
-// single `/select,"<path>"` switch. Mock argv assertions cannot prove this —
-// only Windows' own PowerShell -> CreateProcess quoting chain can, so the
-// test runs only where that chain exists.
-// oxlint-disable-next-line t3code/no-global-process-runtime -- the skip decision needs the real host platform, outside any Effect runtime.
-it.skipIf(process.platform !== "win32")(
-  "delivers the raw /select switch for spaced paths through real PowerShell",
-  { timeout: 60_000 },
-  async () => {
-    const tempDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-reveal-smoke-"));
-    try {
-      const recorderPath = NodePath.join(tempDir, "recorder.cmd");
-      const outputPath = NodePath.join(tempDir, "argv.txt");
-      NodeFS.writeFileSync(recorderPath, `@echo off\r\n>"${outputPath}" echo(%*\r\n`);
-
-      const target = "C:/workspace with spaces/media/author's clip.mp4";
-      const explorerTarget = target.replaceAll("/", "\\");
-      const source = ExternalLauncher.buildFileExplorerRevealPowerShellSource(
-        recorderPath,
-        explorerTarget,
-      );
-      const powerShellPath = `${process.env.SYSTEMROOT ?? "C:\\Windows"}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`;
-      NodeChildProcess.execFileSync(
-        powerShellPath,
-        [
-          "-NoProfile",
-          "-NonInteractive",
-          "-ExecutionPolicy",
-          "Bypass",
-          "-EncodedCommand",
-          Buffer.from(source, "utf16le").toString("base64"),
-        ],
-        { timeout: 30_000 },
-      );
-
-      // Start-Process returns before the recorder runs; wait for its output.
-      // The waits run outside the Effect runtime on purpose: the test
-      // exercises the real Windows process chain in real time.
-      // @effect-diagnostics-next-line globalTimers:off
-      const sleep = (millis: number) => new Promise((resolve) => setTimeout(resolve, millis));
-      // @effect-diagnostics-next-line globalDate:off
-      const deadline = Date.now() + 20_000;
-      // @effect-diagnostics-next-line globalDate:off
-      while (!NodeFS.existsSync(outputPath) && Date.now() < deadline) {
-        await sleep(100);
-      }
-      await sleep(200);
-      const recorded = NodeFS.readFileSync(outputPath, "utf8").trim();
-      assert.equal(recorded, `/select,"${explorerTarget}"`);
-    } finally {
-      NodeFS.rmSync(tempDir, { recursive: true, force: true });
-    }
-  },
-);
+// Exercise real PowerShell compilation and HRESULT propagation without opening a window.
+it.skipIf(!windowsHost)("reports a missing path through the native Windows reveal API", () => {
+  const source = ExternalLauncher.buildFileExplorerRevealPowerShellSource(
+    "C:\\t3-reveal-nonexistent-fixture-42d41e\\中文 空格.txt",
+  );
+  assert.throws(() =>
+    NodeChildProcess.execFileSync(
+      "powershell.exe",
+      [
+        "-STA",
+        "-NoProfile",
+        "-NonInteractive",
+        "-EncodedCommand",
+        Buffer.from(source, "utf16le").toString("base64"),
+      ],
+      { timeout: 30_000, windowsHide: true, stdio: "ignore" },
+    ),
+  );
+});
 
 it.effect("does not advertise reveal on Windows when PowerShell is missing", () =>
   Effect.gen(function* () {
@@ -474,14 +469,15 @@ it.effect.skipIf(windowsHost)(
       assert.equal(result.kind, "file-explorer");
       assert.equal(result.editors.includes("file-manager"), true);
       assert.ok(spawned);
-      // The reveal routes through interop PowerShell so Explorer receives its
-      // raw `/select,"<path>"` switch even for spaced paths.
+      // Interop PowerShell passes the UNC path to the native Windows Shell API.
       assert.equal(spawned.command, "powershell.exe");
       const encodedCommand = spawned.args[spawned.args.length - 1] ?? "";
       const decodedCommand = Buffer.from(encodedCommand, "base64").toString("utf16le");
       assert.equal(
         decodedCommand,
-        "$ProgressPreference = 'SilentlyContinue'; Start-Process 'explorer.exe' -ArgumentList ('/select,\"' + '\\\\wsl.localhost\\Ubuntu-24.04\\home\\t3\\workspace\\media\\clip.mp4' + '\"')",
+        ExternalLauncher.buildFileExplorerRevealPowerShellSource(
+          "\\\\wsl.localhost\\Ubuntu-24.04\\home\\t3\\workspace\\media\\clip.mp4",
+        ),
       );
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
