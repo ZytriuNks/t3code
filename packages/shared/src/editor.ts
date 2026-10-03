@@ -5,7 +5,7 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 
 import * as HostProcess from "./hostProcess.ts";
-import { isCommandAvailable } from "./shell.ts";
+import { isCommandAvailable, resolveCommandPath } from "./shell.ts";
 
 type Editor = (typeof EDITORS)[number];
 
@@ -19,17 +19,61 @@ const installNames: Partial<Record<Editor["id"], ReadonlyArray<string>>> = {
   rider: ["Rider", "JetBrains Rider"],
 };
 
+function isCursorCodeShim(commandPath: string): boolean {
+  return /(?:^|[\\/])cursor(?:[\\/]|$)/iu.test(commandPath);
+}
+
+const resolveNonCursorVscodePath = Effect.fn("editor.resolveNonCursorVscodePath")(function* (
+  env: NodeJS.ProcessEnv,
+  cursorPath: string,
+) {
+  const path = yield* Path.Path;
+  const pathValue = env.PATH ?? env.Path ?? env.path ?? "";
+  for (const rawEntry of pathValue.split(";")) {
+    const entry = rawEntry.trim().replace(/^"+|"+$/g, "");
+    if (entry.length === 0) continue;
+    const candidate = yield* resolveCommandPath(path.join(entry, "code"), { env }).pipe(
+      Effect.option,
+    );
+    if (Option.isSome(candidate) && candidate.value !== cursorPath) {
+      if (!isCursorCodeShim(candidate.value)) return Option.some(candidate.value);
+    }
+  }
+  return Option.none<string>();
+});
+
 export const resolveEditorCommand = Effect.fn("editor.resolveEditorCommand")(function* (
   editor: Editor,
   env: NodeJS.ProcessEnv,
 ) {
   if (editor.commands === null) return Option.none();
   const baseArgs = "baseArgs" in editor ? editor.baseArgs : [];
+  const platform = yield* HostProcess.HostProcessPlatform;
+  let skipBareVscodeCommand = false;
+
+  // Cursor ships a `code` compatibility shim. When it precedes the official
+  // VS Code CLI on Windows PATH, resolving the bare command silently opens
+  // Cursor even though the UI selected VS Code. Keep scanning PATH for the
+  // next non-Cursor `code` executable and return its concrete path so the
+  // later spawn cannot resolve the shim again.
+  if (editor.id === "vscode" && platform === "win32") {
+    const resolvedCode = yield* resolveCommandPath("code", { env }).pipe(Effect.option);
+    if (Option.isSome(resolvedCode) && isCursorCodeShim(resolvedCode.value)) {
+      skipBareVscodeCommand = true;
+      const officialCode = yield* resolveNonCursorVscodePath(env, resolvedCode.value);
+      if (Option.isSome(officialCode)) {
+        return Option.some({ command: officialCode.value, baseArgs });
+      }
+    } else if (Option.isSome(resolvedCode)) {
+      return Option.some({ command: "code", baseArgs });
+    }
+  }
+
   for (const command of editor.commands) {
+    if (skipBareVscodeCommand && editor.id === "vscode" && command === "code") continue;
     if (yield* isCommandAvailable(command, { env })) return Option.some({ command, baseArgs });
   }
 
-  const platform = yield* HostProcess.HostProcessPlatform;
   const path = yield* Path.Path;
   const fs = yield* FileSystem.FileSystem;
   const home = env.HOME;
