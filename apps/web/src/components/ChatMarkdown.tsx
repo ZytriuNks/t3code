@@ -176,7 +176,9 @@ import {
   claimWorkspaceBasenameLookup,
   needsWorkspaceBasenameLookup,
   pickWorkspaceBasenameMatch,
+  pickWorkspacePathMatch,
   WORKSPACE_BASENAME_LOOKUP_LIMIT,
+  workspacePathLookupQueries,
 } from "../workspaceBasenameLookup";
 import {
   parseChangeRequestUrl,
@@ -2577,6 +2579,28 @@ function useChatMarkdownState({
     },
     [cwd, environmentId, searchProjectEntries],
   );
+  const findWorkspacePathMatch = useCallback(
+    async (workspaceRelativePath: string) => {
+      if (!cwd || environmentId === null) return null;
+
+      for (const query of workspacePathLookupQueries(workspaceRelativePath, cwd)) {
+        const result = await searchProjectEntries({
+          environmentId,
+          input: {
+            cwd,
+            query,
+            limit: WORKSPACE_BASENAME_LOOKUP_LIMIT,
+            kind: "file",
+          },
+        });
+        if (result._tag !== "Success") continue;
+        const match = pickWorkspacePathMatch(query, result.value.entries);
+        if (match) return match;
+      }
+      return null;
+    },
+    [cwd, environmentId, searchProjectEntries],
+  );
   // A bare filename resolves to the workspace root, which is rarely where the
   // file is, so ask the index before opening. Absolute host paths open as-is.
   const openFileInPanel = useCallback(
@@ -2603,12 +2627,14 @@ function useChatMarkdownState({
     async (fileLinkMeta: MarkdownFileLinkMeta) => {
       const workspaceRelativePath = fileLinkMeta.workspaceRelativePath;
       const match = workspaceRelativePath
-        ? await findWorkspaceBasenameMatch(workspaceRelativePath)
+        ? needsWorkspaceBasenameLookup(workspaceRelativePath)
+          ? await findWorkspaceBasenameMatch(workspaceRelativePath)
+          : await findWorkspacePathMatch(workspaceRelativePath)
         : null;
       const filePath = match && cwd ? resolvePathLinkTarget(match, cwd) : fileLinkMeta.filePath;
       return revealFileInFileManager(filePath);
     },
-    [cwd, findWorkspaceBasenameMatch, revealFileInFileManager],
+    [cwd, findWorkspaceBasenameMatch, findWorkspacePathMatch, revealFileInFileManager],
   );
   const fileLinkChip = useCallback(
     (fileLinkMeta: MarkdownFileLinkMeta, copyMarkdown: string, mediaSource?: string) => {
