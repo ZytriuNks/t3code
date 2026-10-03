@@ -4,6 +4,8 @@ import {
   claimWorkspaceBasenameLookup,
   needsWorkspaceBasenameLookup,
   pickWorkspaceBasenameMatch,
+  pickWorkspacePathMatch,
+  workspacePathLookupQueries,
 } from "./workspaceBasenameLookup";
 
 describe("needsWorkspaceBasenameLookup", () => {
@@ -71,6 +73,33 @@ describe("pickWorkspaceBasenameMatch", () => {
         { path: "apps/web/src/components/ChatHeader.tsx", kind: "file" },
       ]),
     ).toBeNull();
+  });
+});
+
+describe("pickWorkspacePathMatch", () => {
+  const entries = [
+    { path: "AGENTS.md", kind: "file" as const },
+    { path: "docs/AGENTS.md", kind: "file" as const },
+  ];
+
+  it("matches the full workspace-relative path", () => {
+    expect(pickWorkspacePathMatch("docs\\AGENTS.md", entries)).toBe("docs/AGENTS.md");
+  });
+
+  it("does not choose a different directory when a path is missing", () => {
+    expect(pickWorkspacePathMatch("missing/AGENTS.md", entries)).toBeNull();
+  });
+});
+
+describe("workspacePathLookupQueries", () => {
+  it("tries a duplicated workspace prefix without changing normal paths", () => {
+    expect(workspacePathLookupQueries("t3code/AGENTS.md", "D:/projects/t3code")).toEqual([
+      "t3code/AGENTS.md",
+      "AGENTS.md",
+    ]);
+    expect(workspacePathLookupQueries("docs/AGENTS.md", "D:/projects/t3code")).toEqual([
+      "docs/AGENTS.md",
+    ]);
   });
 });
 
