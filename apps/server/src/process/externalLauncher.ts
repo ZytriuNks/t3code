@@ -614,7 +614,18 @@ public static class T3FileExplorerReveal {
   if (-not (Test-Path -LiteralPath $target)) {
     throw
   }
-  Start-Process -FilePath 'explorer.exe' -ArgumentList ('/select,"' + $target + '"') -WindowStyle Normal
+  $windowsRoot = $env:SystemRoot
+  if ([string]::IsNullOrWhiteSpace($windowsRoot)) {
+    $windowsRoot = $env:windir
+  }
+  if ([string]::IsNullOrWhiteSpace($windowsRoot)) {
+    $windowsRoot = 'C:\\Windows'
+  }
+  $explorerPath = Join-Path $windowsRoot 'explorer.exe'
+  if (-not (Test-Path -LiteralPath $explorerPath)) {
+    $explorerPath = 'explorer.exe'
+  }
+  Start-Process -FilePath $explorerPath -ArgumentList ('/select,"' + $target + '"') -WindowStyle Normal
 }
 exit 0`;
 }
