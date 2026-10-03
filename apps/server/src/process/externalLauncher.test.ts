@@ -118,6 +118,35 @@ it.effect("launches the default browser through the platform command", () => {
   );
 });
 
+it.effect("opens Windows browser URLs without overriding the host execution policy", () => {
+  let spawned: ChildProcess.StandardCommand | undefined;
+  return Effect.gen(function* () {
+    const launcher = yield* ExternalLauncher.ExternalLauncher;
+    yield* launcher.launchBrowser("https://example.com/author's-page?q=hello world");
+
+    assert.ok(spawned);
+    assert.deepEqual(spawned.args.slice(0, -1), [
+      "-NoProfile",
+      "-NonInteractive",
+      "-EncodedCommand",
+    ]);
+    const source = Buffer.from(spawned.args.at(-1) ?? "", "base64").toString("utf16le");
+    assert.equal(
+      source,
+      "$ProgressPreference = 'SilentlyContinue'; Start 'https://example.com/author''s-page?q=hello world'",
+    );
+  }).pipe(
+    Effect.provide(
+      testLayer({
+        platform: "win32",
+        onSpawn: (command) => {
+          spawned = command;
+        },
+      }),
+    ),
+  );
+});
+
 it.effect("launches an installed editor with platform-safe arguments", () =>
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem;
@@ -386,6 +415,11 @@ it.effect("reveals a file in File Explorer through PowerShell on Windows", () =>
           onSpawn: (command) => {
             spawned = command;
           },
+          // Reproduce hosts that terminate a policy-override launch before
+          // PowerShell can execute even a harmless inline command.
+          spawnResult: (command) => ({
+            exitCode: command.args.includes("-ExecutionPolicy") ? 0xffffffff : 0,
+          }),
         }),
       ),
     );
@@ -397,8 +431,6 @@ it.effect("reveals a file in File Explorer through PowerShell on Windows", () =>
       "-STA",
       "-NoProfile",
       "-NonInteractive",
-      "-ExecutionPolicy",
-      "Bypass",
       "-EncodedCommand",
     ]);
     const encodedCommand = spawned.args[spawned.args.length - 1] ?? "";
@@ -428,19 +460,20 @@ it.skipIf(!windowsHost)("reports a missing path through the native Windows revea
   const source = ExternalLauncher.buildFileExplorerRevealPowerShellSource(
     "C:\\t3-reveal-nonexistent-fixture-42d41e\\中文 空格.txt",
   );
-  assert.throws(() =>
-    NodeChildProcess.execFileSync(
-      "powershell.exe",
-      [
-        "-STA",
-        "-NoProfile",
-        "-NonInteractive",
-        "-EncodedCommand",
-        Buffer.from(source, "utf16le").toString("base64"),
-      ],
-      { timeout: 30_000, windowsHide: true, stdio: "ignore" },
-    ),
+  const result = NodeChildProcess.spawnSync(
+    "powershell.exe",
+    [
+      "-STA",
+      "-NoProfile",
+      "-NonInteractive",
+      "-EncodedCommand",
+      Buffer.from(source, "utf16le").toString("base64"),
+    ],
+    { timeout: 30_000, windowsHide: true, encoding: "utf8" },
   );
+  assert.isUndefined(result.error);
+  assert.equal(result.status, 1);
+  assert.include(result.stderr, "Reveal");
 });
 
 it.effect("does not advertise reveal on Windows when PowerShell is missing", () =>
