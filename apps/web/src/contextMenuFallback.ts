@@ -197,7 +197,7 @@ function isNodeWithinMenuStack(target: EventTarget | null, menuStack: readonly H
   return false;
 }
 
-// Only one fallback menu exists at a time in the renderer; the active one is
+// Only one renderer menu exists at a time; the active one is
 // tracked so a state change (for example a terminal selection clearing) can
 // dismiss it with the same result as an outside click or Escape.
 let activeContextMenuDismiss: (() => void) | null = null;
@@ -209,7 +209,7 @@ export function isContextMenuOpen(): boolean {
 /**
  * Closes the currently open fallback context menu, resolving its show() with
  * null (the same result as dismissing by outside click or Escape). No-op when
- * no fallback menu is open.
+ * no renderer menu is open.
  */
 export function dismissContextMenu(): void {
   activeContextMenuDismiss?.();
@@ -217,7 +217,7 @@ export function dismissContextMenu(): void {
 }
 
 /**
- * Imperative DOM-based context menu for non-Electron environments.
+ * Imperative DOM-based context menu shared by web and desktop renderers.
  * Supports nested submenus and resolves with the clicked leaf item id.
  */
 export function showContextMenuFallback<T extends string>(
@@ -295,18 +295,31 @@ export function showContextMenuFallback<T extends string>(
 
       const menu = document.createElement("div");
       menu.className =
-        "dropdown-glass fixed z-[10000] min-w-32 max-w-sm overflow-hidden rounded-lg bg-clip-padding text-popover-foreground outline-none";
+        "dropdown-glass fixed z-[10000] flex min-w-[min(10rem,calc(100vw-2rem))] max-w-[calc(100vw-2rem)] overflow-hidden rounded-lg bg-clip-padding text-popover-foreground shadow-[0_16px_40px_-18px_rgb(0_0_0/55%)] outline-none dark:shadow-[0_18px_44px_-18px_rgb(0_0_0/80%)] [-webkit-app-region:no-drag]";
       menu.style.cssText =
-        "position:fixed;z-index:10000;min-width:8rem;max-width:24rem;overflow:hidden;border-radius:var(--radius-lg);background-clip:padding-box;color:var(--contrast-popover-foreground);outline:none;pointer-events:auto;";
+        "position:fixed;z-index:10000;display:flex;min-width:min(10rem,calc(100vw - 2rem));max-width:calc(100vw - 2rem);overflow:hidden;border-radius:var(--radius-lg);background-clip:padding-box;color:var(--contrast-popover-foreground);box-shadow:0 16px 40px -18px rgb(0 0 0 / 55%);outline:none;pointer-events:auto;-webkit-app-region:no-drag;";
+      menu.setAttribute("role", "menu");
       menu.style.left = `${preferredLeft}px`;
       menu.style.top = `${preferredTop}px`;
       menu.dataset.level = String(level);
 
       const inner = document.createElement("div");
       inner.className =
-        "max-h-[min(24rem,70vh)] min-w-0 max-w-sm overflow-y-auto overflow-x-hidden p-1";
+        "max-h-[min(24rem,70vh)] w-full min-w-0 max-w-sm overflow-y-auto overflow-x-hidden p-1";
       inner.style.cssText =
-        "max-height:min(24rem,70vh);min-width:0;max-width:24rem;overflow-x:hidden;overflow-y:auto;padding:0.25rem;";
+        "width:100%;max-height:min(24rem,70vh);min-width:0;max-width:24rem;overflow-x:hidden;overflow-y:auto;padding:0.25rem;";
+
+      const enabledButtons = () =>
+        [...inner.querySelectorAll<HTMLButtonElement>("button")].filter(
+          (candidate) => !candidate.disabled,
+        );
+      const focusAdjacentButton = (button: HTMLButtonElement, direction: 1 | -1) => {
+        const buttons = enabledButtons();
+        const currentIndex = buttons.indexOf(button);
+        if (currentIndex < 0 || buttons.length === 0) return;
+        const nextIndex = (currentIndex + direction + buttons.length) % buttons.length;
+        buttons[nextIndex]?.focus({ preventScroll: true });
+      };
 
       for (const item of entries) {
         if (item.separatorBefore === true && inner.children.length > 0) {
@@ -335,15 +348,22 @@ export function showContextMenuFallback<T extends string>(
         button.type = "button";
         const isDisabled = item.disabled === true;
         button.disabled = isDisabled;
+        button.setAttribute(
+          "role",
+          typeof item.checked === "boolean" ? "menuitemradio" : "menuitem",
+        );
+        if (isDisabled) {
+          button.setAttribute("aria-disabled", "true");
+        }
         const rowBase =
-          "flex w-full cursor-default select-none items-center gap-2 rounded-sm px-2 py-1 text-left outline-none transition-colors sm:min-h-7 sm:text-sm min-h-8 text-base";
+          "flex w-full cursor-default select-none items-center gap-2 rounded-sm px-2 py-1 text-left text-base text-foreground outline-none transition-colors data-highlighted:bg-accent data-highlighted:text-accent-foreground sm:min-h-7 sm:text-sm";
         button.className = isDisabled
           ? `${rowBase} pointer-events-none cursor-not-allowed text-muted-foreground opacity-64`
           : isLeafDestructive
             ? `${rowBase} text-destructive-foreground hover:bg-destructive/10 hover:text-destructive-foreground`
             : `${rowBase} text-foreground hover:bg-accent hover:text-accent-foreground`;
         button.style.cssText =
-          "display:flex;width:100%;min-height:1.75rem;align-items:center;gap:0.5rem;border:0;border-radius:var(--radius-sm);background:transparent;padding:0.25rem 0.5rem;color:var(--contrast-foreground);font-family:var(--font-sans,system-ui,sans-serif);font-size:0.875rem;line-height:1.25rem;text-align:left;cursor:default;";
+          "border:0;background:transparent;color:var(--contrast-foreground);font-family:var(--font-sans,system-ui,sans-serif);text-align:left;";
         if (isLeafDestructive) {
           button.style.color = "var(--destructive-foreground)";
         }
@@ -395,6 +415,7 @@ export function showContextMenuFallback<T extends string>(
           }
         }
 
+        let openSubmenu: ((focusFirstItem?: boolean) => void) | undefined;
         if (!isDisabled) {
           let isHovered = false;
           let isFocused = false;
@@ -432,7 +453,7 @@ export function showContextMenuFallback<T extends string>(
           });
 
           if (hasChildren) {
-            const openSubmenu = (focusFirstItem = false) => {
+            openSubmenu = (focusFirstItem = false) => {
               const rect = button.getBoundingClientRect();
               const nextLeft = rect.right + 4;
               const nextTop = rect.top;
@@ -454,11 +475,11 @@ export function showContextMenuFallback<T extends string>(
               }
             };
             button.addEventListener("mouseenter", () => {
-              openSubmenu();
+              openSubmenu?.();
             });
             button.addEventListener("click", (event) => {
               event.preventDefault();
-              openSubmenu(true);
+              openSubmenu?.(true);
             });
           } else {
             button.addEventListener("mouseenter", () => {
@@ -468,6 +489,55 @@ export function showContextMenuFallback<T extends string>(
               if (canDismissFromPointer) cleanup(item.id);
             });
           }
+
+          button.addEventListener("keydown", (event) => {
+            switch (event.key) {
+              case "ArrowDown":
+                event.preventDefault();
+                focusAdjacentButton(button, 1);
+                return;
+              case "ArrowUp":
+                event.preventDefault();
+                focusAdjacentButton(button, -1);
+                return;
+              case "Home":
+                event.preventDefault();
+                enabledButtons()[0]?.focus({ preventScroll: true });
+                return;
+              case "End": {
+                event.preventDefault();
+                const buttons = enabledButtons();
+                buttons.at(-1)?.focus({ preventScroll: true });
+                return;
+              }
+              case "ArrowRight":
+                if (openSubmenu) {
+                  event.preventDefault();
+                  openSubmenu(true);
+                }
+                return;
+              case "ArrowLeft":
+                if (level > 0) {
+                  event.preventDefault();
+                  closeMenusFromLevel(level);
+                  parentTrigger?.focus({ preventScroll: true });
+                }
+                return;
+              case "Enter":
+              case " ":
+                event.preventDefault();
+                if (openSubmenu) {
+                  openSubmenu(true);
+                } else {
+                  cleanup(item.id);
+                }
+                return;
+              case "Tab":
+                event.preventDefault();
+                cleanup(null);
+                return;
+            }
+          });
         }
 
         inner.appendChild(button);
@@ -483,6 +553,10 @@ export function showContextMenuFallback<T extends string>(
       menuStack[level] = menu;
       submenuTriggerStack[level] = parentTrigger;
 
+      if (level === 0 || menuStack[level - 1] !== undefined) {
+        enabledButtons()[0]?.focus({ preventScroll: true });
+      }
+
       requestAnimationFrame(() => {
         clampMenuPosition(menu, preferredLeft, preferredTop);
       });
@@ -492,7 +566,7 @@ export function showContextMenuFallback<T extends string>(
     document.addEventListener("pointerdown", onPointerDown, true);
     document.addEventListener("contextmenu", onContextMenu, true);
     openMenu(items, position?.x ?? 0, position?.y ?? 0, 0);
-    // Only one fallback menu can be open at a time: a new show must dismiss
+    // Only one renderer menu can be open at a time: a new show must dismiss
     // any prior one, or its DOM and listeners leak and close() can only ever
     // reach the newest menu.
     if (activeContextMenuDismiss) {

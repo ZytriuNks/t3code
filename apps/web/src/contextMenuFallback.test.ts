@@ -247,6 +247,23 @@ describe("showContextMenuFallback", () => {
     await expect(selectionPromise).resolves.toBe("rename");
   });
 
+  it("supports keyboard navigation and activation", async () => {
+    const selectionPromise = showContextMenuFallback([
+      { id: "rename", label: "Rename" },
+      { id: "delete", label: "Delete" },
+    ]);
+
+    const renameButton = findButton("Rename");
+    const deleteButton = findButton("Delete");
+    expect(renameButton?.focused).toBe(true);
+
+    renameButton?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown" }));
+    expect(deleteButton?.focused).toBe(true);
+    deleteButton?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+
+    await expect(selectionPromise).resolves.toBe("delete");
+  });
+
   it("ignores a click from the gesture that opened the menu", async () => {
     let enablePointerSelection: ((time: number) => void) | undefined;
     vi.stubGlobal("requestAnimationFrame", (callback: (time: number) => void) => {
