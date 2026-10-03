@@ -74,13 +74,9 @@ interface TargetPathAndPosition {
 }
 
 const TARGET_WITH_POSITION_PATTERN = /^(.*?):(\d+)(?::(\d+))?$/;
-const POWERSHELL_ARGUMENTS_PREFIX = [
-  "-NoProfile",
-  "-NonInteractive",
-  "-ExecutionPolicy",
-  "Bypass",
-  "-EncodedCommand",
-] as const;
+// These are inline commands, not script files. Respect the host execution
+// policy; an unnecessary Bypass override can terminate the packaged launcher.
+const POWERSHELL_ARGUMENTS_PREFIX = ["-NoProfile", "-NonInteractive", "-EncodedCommand"] as const;
 
 const DETACHED_IGNORE_STDIO_OPTIONS = {
   detached: true,
