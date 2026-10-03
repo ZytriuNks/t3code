@@ -156,6 +156,49 @@ it.effect("launches an installed editor with platform-safe arguments", () =>
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
+it.effect("keeps the VS Code launch away from Cursor's code compatibility shim", () =>
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-vscode-priority-" });
+    const cursorCode = path.join(root, "Cursor/resources/app/codeBin/code.CMD");
+    const officialCode = path.join(root, "Microsoft VS Code/bin/code.CMD");
+    yield* fileSystem.makeDirectory(path.dirname(cursorCode), { recursive: true });
+    yield* fileSystem.makeDirectory(path.dirname(officialCode), { recursive: true });
+    yield* fileSystem.writeFileString(cursorCode, "@echo off\r\n");
+    yield* fileSystem.writeFileString(officialCode, "@echo off\r\n");
+
+    let spawned: ChildProcess.StandardCommand | undefined;
+    yield* Effect.gen(function* () {
+      const launcher = yield* ExternalLauncher.ExternalLauncher;
+      yield* launcher.launchEditor({
+        editor: "vscode",
+        cwd: "C:\\workspace with spaces\\src\\index.ts:12:4",
+      });
+    }).pipe(
+      Effect.provide(
+        testLayer({
+          platform: "win32",
+          env: {
+            PATH: `${path.dirname(cursorCode)};${path.dirname(officialCode)}`,
+            PATHEXT: ".COM;.EXE;.BAT;.CMD",
+          },
+          onSpawn: (command) => {
+            spawned = command;
+          },
+        }),
+      ),
+    );
+
+    assert.ok(spawned);
+    assert.equal(spawned.command, `^"${officialCode.replaceAll(" ", "^ ")}^"`);
+    assert.deepEqual(spawned.args, [
+      '^"--goto^"',
+      '^"C:\\workspace^ with^ spaces\\src\\index.ts:12:4^"',
+    ]);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
 for (const platform of ["darwin", "linux"] as const) {
   it.effect.skipIf(windowsHost)(`launches Cursor in classic IDE mode on ${platform}`, () =>
     Effect.gen(function* () {
@@ -370,7 +413,9 @@ it.effect("reveals a file in File Explorer through PowerShell on Windows", () =>
     assert.match(decodedCommand, /CoInitializeEx\(IntPtr\.Zero/);
     assert.match(decodedCommand, /RpcEChangedMode/);
     assert.match(decodedCommand, /CoUninitialize\(\)/);
+    assert.match(decodedCommand, /\[System\.IO\.Path\]::GetFullPath\(\$target\)/);
     assert.match(decodedCommand, /Start-Process -FilePath 'explorer\.exe'/);
+    assert.match(decodedCommand, /exit 0/);
     assert.equal(spawned.options.shell, false);
     assert.equal(spawned.options.detached, false);
     assert.equal(spawned.options.windowsHide, true);

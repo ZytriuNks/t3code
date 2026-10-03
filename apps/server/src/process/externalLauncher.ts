@@ -573,6 +573,9 @@ const resolveEditorLaunch = Effect.fn("resolveEditorLaunch")(function* (
 /** Use the Unicode Shell API: Explorer's /select command can silently do nothing. */
 export function buildFileExplorerRevealPowerShellSource(target: string): string {
   return `$ErrorActionPreference = 'Stop'
+$target = ${escapePowerShellStringLiteral(target)}
+try {
+$target = [System.IO.Path]::GetFullPath($target)
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -606,15 +609,14 @@ public static class T3FileExplorerReveal {
   }
 }
 '@
-$target = ${escapePowerShellStringLiteral(target)}
-try {
   [T3FileExplorerReveal]::Reveal($target)
 } catch {
   if (-not (Test-Path -LiteralPath $target)) {
     throw
   }
   Start-Process -FilePath 'explorer.exe' -ArgumentList ('/select,"' + $target + '"') -WindowStyle Normal
-}`;
+}
+exit 0`;
 }
 
 function fileExplorerRevealLaunch(

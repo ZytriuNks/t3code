@@ -118,6 +118,52 @@ function joinPath(base: string, next: string, separator: "/" | "\\"): string {
   return `${cleanBase}/${next.replace(/^\/+/, "")}`;
 }
 
+function normalizePathSegments(value: string, separator: "/" | "\\"): string {
+  const slashPath = value.replaceAll("\\", "/");
+  let root = "";
+  let remainder = slashPath;
+
+  const drive = slashPath.match(/^([A-Za-z]:)(?:\/|$)/);
+  if (drive) {
+    root = `${drive[1]}/`;
+    remainder = slashPath.slice(drive[0].length);
+  } else if (slashPath.startsWith("//")) {
+    const uncParts = slashPath.slice(2).split("/");
+    const server = uncParts.shift() ?? "";
+    const share = uncParts.shift() ?? "";
+    root = `//${server}/${share}`;
+    remainder = uncParts.join("/");
+  } else if (slashPath.startsWith("/")) {
+    root = "/";
+    remainder = slashPath.slice(1);
+  }
+
+  const segments: string[] = [];
+  for (const segment of remainder.split("/")) {
+    if (segment.length === 0 || segment === ".") continue;
+    if (segment === "..") {
+      if (segments.length > 0 && segments.at(-1) !== "..") {
+        segments.pop();
+      } else if (root.length === 0) {
+        segments.push(segment);
+      }
+      continue;
+    }
+    segments.push(segment);
+  }
+
+  const normalized = root.endsWith("/")
+    ? `${root}${segments.join("/")}`
+    : root.length > 0
+      ? `${root}${segments.length > 0 ? `/${segments.join("/")}` : ""}`
+      : segments.join("/");
+  return normalized.replaceAll("/", separator);
+}
+
+function hasDotPathSegment(value: string): boolean {
+  return /(?:^|[\\/])\.{1,2}(?:[\\/]|$)/.test(value);
+}
+
 function inferHomeFromCwd(cwd: string): string | undefined {
   const posixUser = cwd.match(/^\/Users\/([^/]+)/);
   if (posixUser?.[1]) {
@@ -209,15 +255,25 @@ export function resolvePathLinkTarget(rawPath: string, cwd: string): string {
   const { path } = position;
 
   let resolvedPath = path;
+  let shouldNormalize = false;
   if (path.startsWith("~/")) {
     const home = inferHomeFromCwd(cwd);
     if (home) {
       const separator: "/" | "\\" = isWindowsPathStyle(home) ? "\\" : "/";
       resolvedPath = joinPath(home, path.slice(2), separator);
+      shouldNormalize = true;
     }
   } else if (!isAbsolutePath(path)) {
     const separator: "/" | "\\" = isWindowsPathStyle(cwd) ? "\\" : "/";
     resolvedPath = joinPath(cwd, path, separator);
+    shouldNormalize = true;
+  } else if (hasDotPathSegment(path)) {
+    shouldNormalize = true;
+  }
+
+  if (shouldNormalize) {
+    const separator: "/" | "\\" = isWindowsPathStyle(resolvedPath) ? "\\" : "/";
+    resolvedPath = normalizePathSegments(resolvedPath, separator);
   }
 
   return formatFilePathPosition({ ...position, path: resolvedPath });

@@ -192,6 +192,21 @@ describe("resolvePathLinkTarget", () => {
     ).toBe("C:/Users/julius/project/src/main.ts:12");
   });
 
+  it("normalizes parent traversal before revealing an external Windows path", () => {
+    expect(
+      resolvePathLinkTarget(
+        "../installers/T3-Code-T3CodeExperimental.exe",
+        "D:\\Users\\julius\\t3code",
+      ),
+    ).toBe("D:\\Users\\julius\\installers\\T3-Code-T3CodeExperimental.exe");
+  });
+
+  it("normalizes parent traversal for POSIX paths", () => {
+    expect(resolvePathLinkTarget("../outside/report.md", "/home/julius/t3code")).toBe(
+      "/home/julius/outside/report.md",
+    );
+  });
+
   it("keeps the line and column of a compiler diagnostic", () => {
     const [link] = extractTerminalLinks("/Users/julius/project/main.c:10:5: error: expected ';'");
     expect(resolvePathLinkTarget(link?.text ?? "", "/Users/julius/project")).toBe(
