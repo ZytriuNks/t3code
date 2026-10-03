@@ -367,6 +367,8 @@ it.effect("reveals a file in File Explorer through PowerShell on Windows", () =>
         "C:\\workspace with spaces\\media\\author's clip.mp4",
       ),
     );
+    assert.match(decodedCommand, /CoInitializeEx\(IntPtr\.Zero/);
+    assert.match(decodedCommand, /CoUninitialize\(\)/);
     assert.equal(spawned.options.shell, false);
     assert.equal(spawned.options.detached, false);
     assert.equal(spawned.options.windowsHide, true);

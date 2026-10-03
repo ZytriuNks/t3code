@@ -577,6 +577,10 @@ Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 public static class T3FileExplorerReveal {
+  [DllImport("ole32.dll")]
+  private static extern int CoInitializeEx(IntPtr reserved, uint coInit);
+  [DllImport("ole32.dll")]
+  private static extern void CoUninitialize();
   [DllImport("shell32.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
   private static extern int SHParseDisplayName(string name, IntPtr bindingContext, out IntPtr item, uint attributes, out uint resultAttributes);
   [DllImport("shell32.dll")]
@@ -584,11 +588,14 @@ public static class T3FileExplorerReveal {
   public static void Reveal(string target) {
     IntPtr item = IntPtr.Zero;
     uint attributes;
+    int comResult = CoInitializeEx(IntPtr.Zero, 0x2);
     try {
+      Marshal.ThrowExceptionForHR(comResult);
       Marshal.ThrowExceptionForHR(SHParseDisplayName(target, IntPtr.Zero, out item, 0, out attributes));
       Marshal.ThrowExceptionForHR(SHOpenFolderAndSelectItems(item, 0, IntPtr.Zero, 0));
     } finally {
       if (item != IntPtr.Zero) Marshal.FreeCoTaskMem(item);
+      if (comResult >= 0) CoUninitialize();
     }
   }
 }
