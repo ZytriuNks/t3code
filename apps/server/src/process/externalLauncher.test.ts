@@ -368,7 +368,9 @@ it.effect("reveals a file in File Explorer through PowerShell on Windows", () =>
       ),
     );
     assert.match(decodedCommand, /CoInitializeEx\(IntPtr\.Zero/);
+    assert.match(decodedCommand, /RpcEChangedMode/);
     assert.match(decodedCommand, /CoUninitialize\(\)/);
+    assert.match(decodedCommand, /Start-Process -FilePath 'explorer\.exe'/);
     assert.equal(spawned.options.shell, false);
     assert.equal(spawned.options.detached, false);
     assert.equal(spawned.options.windowsHide, true);

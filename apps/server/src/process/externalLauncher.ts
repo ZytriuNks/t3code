@@ -589,8 +589,14 @@ public static class T3FileExplorerReveal {
     IntPtr item = IntPtr.Zero;
     uint attributes;
     int comResult = CoInitializeEx(IntPtr.Zero, 0x2);
+    const int RpcEChangedMode = unchecked((int)0x80010106);
     try {
-      Marshal.ThrowExceptionForHR(comResult);
+      // PowerShell can initialize the thread before this method runs. In
+      // that case COM is still usable, but CoInitializeEx reports that the
+      // apartment model cannot be changed.
+      if (comResult < 0 && comResult != RpcEChangedMode) {
+        Marshal.ThrowExceptionForHR(comResult);
+      }
       Marshal.ThrowExceptionForHR(SHParseDisplayName(target, IntPtr.Zero, out item, 0, out attributes));
       Marshal.ThrowExceptionForHR(SHOpenFolderAndSelectItems(item, 0, IntPtr.Zero, 0));
     } finally {
@@ -600,7 +606,15 @@ public static class T3FileExplorerReveal {
   }
 }
 '@
-[T3FileExplorerReveal]::Reveal(${escapePowerShellStringLiteral(target)})`;
+$target = ${escapePowerShellStringLiteral(target)}
+try {
+  [T3FileExplorerReveal]::Reveal($target)
+} catch {
+  if (-not (Test-Path -LiteralPath $target)) {
+    throw
+  }
+  Start-Process -FilePath 'explorer.exe' -ArgumentList ('/select,"' + $target + '"') -WindowStyle Normal
+}`;
 }
 
 function fileExplorerRevealLaunch(
