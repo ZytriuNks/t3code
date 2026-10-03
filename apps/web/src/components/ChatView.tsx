@@ -10646,23 +10646,27 @@ export default function ChatView(props: ChatViewProps) {
               {/* scroll to end pill — shown when user has scrolled away from the live edge */}
               {showScrollToBottom && (
                 <div
-                  className="chat-scroll-to-bottom pointer-events-none absolute z-30 flex justify-center py-1.5"
-                  style={{ bottom: scrollToEndClearance + 4 }}
+                  className="chat-scroll-to-bottom pointer-events-none absolute z-30"
+                  style={{ bottom: scrollToEndClearance - 4 }}
                 >
-                  <Button
-                    aria-label="Scroll to end"
-                    onPointerDown={(event) => event.preventDefault()}
-                    onClick={() => {
-                      composerRef.current?.restoreAfterTimelineReachedEnd();
-                      scrollToEnd(true);
-                    }}
-                    className="pointer-events-auto"
-                    size="xs"
-                    variant="glass"
-                  >
-                    <ChevronDownIcon className="size-3.5" />
-                    Scroll to end
-                  </Button>
+                  <div className="w-full ps-(--workspace-gutter-start) pe-(--workspace-gutter-end)">
+                    <div className="mx-auto w-full max-w-(--chat-max-width)">
+                      <Button
+                        aria-label="Scroll to end"
+                        onPointerDown={(event) => event.preventDefault()}
+                        onClick={() => {
+                          composerRef.current?.restoreAfterTimelineReachedEnd();
+                          scrollToEnd(true);
+                        }}
+                        className="pointer-events-auto"
+                        size="xs"
+                        variant="glass"
+                      >
+                        <ChevronDownIcon className="size-3.5" />
+                        Scroll to end
+                      </Button>
+                    </div>
+                  </div>
                 </div>
               )}
             </div>
