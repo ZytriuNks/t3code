@@ -10,6 +10,7 @@ import {
   splitFilePathPosition,
   workspaceRelativeFilePath,
 } from "@t3tools/client-runtime/markdown-links";
+import { filePreviewKind } from "@t3tools/shared/filePreview";
 
 import { formatWorkspaceRelativePath } from "./filePathDisplay";
 import { isTerminalLinkActivation, resolvePathLinkTarget } from "./terminal-links";
@@ -47,6 +48,11 @@ export function shouldOpenMarkdownFileLinkInEditor(
 
 export function shouldOpenMarkdownFileLinkInBrowserByDefault(path: string): boolean {
   return /\.pdf$/i.test(path.split(/[?#]/, 1)[0] ?? "");
+}
+
+/** Binary and otherwise unsupported files cannot be loaded by the text panel. */
+export function isUnsupportedMarkdownFileLink(path: string): boolean {
+  return filePreviewKind({ name: path }) === "unsupported";
 }
 
 export function isWindowsDrivePathHref(href: string): boolean {

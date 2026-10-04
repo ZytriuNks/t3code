@@ -10,6 +10,7 @@ import {
   resolveMarkdownFileLinkMeta,
   resolveMarkdownFileLinkTarget,
   rewriteMarkdownFileUriHref,
+  isUnsupportedMarkdownFileLink,
   shouldOpenMarkdownFileLinkInBrowserByDefault,
   shouldOpenMarkdownFileLinkInEditor,
 } from "./markdown-links";
@@ -87,6 +88,15 @@ describe("shouldOpenMarkdownFileLinkInBrowserByDefault", () => {
     expect(shouldOpenMarkdownFileLinkInBrowserByDefault("report.PDF?download=1")).toBe(true);
     expect(shouldOpenMarkdownFileLinkInBrowserByDefault("report.html")).toBe(false);
     expect(shouldOpenMarkdownFileLinkInBrowserByDefault("report.xml")).toBe(false);
+  });
+});
+
+describe("isUnsupportedMarkdownFileLink", () => {
+  it("identifies files that cannot be shown in the sidebar editor", () => {
+    expect(isUnsupportedMarkdownFileLink("D:/installers/T3-Code.exe")).toBe(true);
+    expect(isUnsupportedMarkdownFileLink("D:/installers/T3-Code.blockmap")).toBe(true);
+    expect(isUnsupportedMarkdownFileLink("D:/workspace/src/main.ts")).toBe(false);
+    expect(isUnsupportedMarkdownFileLink("D:/workspace/report.pdf")).toBe(false);
   });
 });
 

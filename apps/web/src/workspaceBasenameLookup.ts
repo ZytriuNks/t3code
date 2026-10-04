@@ -28,8 +28,8 @@ function normalizeWorkspacePath(path: string): string {
 }
 
 /**
- * Search the original relative path first, then a path with a duplicated
- * workspace directory prefix removed.
+ * Search only paths with an ambiguous workspace prefix. Ordinary full paths
+ * can open directly without waiting for the workspace index.
  */
 export function workspacePathLookupQueries(
   workspaceRelativePath: string,
@@ -37,7 +37,6 @@ export function workspacePathLookupQueries(
 ): ReadonlyArray<string> {
   const normalizedPath = normalizeWorkspacePath(workspaceRelativePath.trim());
   if (!normalizedPath) return [];
-  const queries = [normalizedPath];
   const workspaceName = workspaceRoot.split(/[\\/]/).findLast(Boolean);
   const segments = normalizedPath.split("/").filter(Boolean);
   if (
@@ -45,9 +44,9 @@ export function workspacePathLookupQueries(
     segments.length > 1 &&
     segments[0]?.toLowerCase() === workspaceName.toLowerCase()
   ) {
-    queries.push(segments.slice(1).join("/"));
+    return [normalizedPath, segments.slice(1).join("/")];
   }
-  return queries;
+  return [];
 }
 
 export function needsWorkspaceBasenameLookup(relativePath: string): boolean {

@@ -1,26 +1,44 @@
 import {
   AVAILABLE_CONNECTION_STATE,
   connectionProjectionPhase,
+  EnvironmentSupervisor,
 } from "@t3tools/client-runtime/connection";
 import {
   createEnvironmentShellAtoms,
   createEnvironmentSnapshotAtom,
-  createShellEnvironmentAtoms,
   type EnvironmentShellState,
 } from "@t3tools/client-runtime/state/shell";
 import {
   type EnvironmentCatalogState,
   enabledEnvironmentIds,
 } from "@t3tools/client-runtime/state/connections";
-import type { EnvironmentId } from "@t3tools/contracts";
+import { createEnvironmentRpcCommand } from "@t3tools/client-runtime/state/runtime";
+import { request } from "@t3tools/client-runtime/rpc";
+import { WS_METHODS, type EnvironmentId } from "@t3tools/contracts";
+import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/unstable/reactivity";
 
 import { environmentCatalog } from "../connection/catalog";
 import { connectionAtomRuntime } from "../connection/runtime";
 import { isHostedStaticApp } from "../hostedPairing";
+import { tryOpenDesktopFileManager } from "../desktopFileManager";
 
-export const shellEnvironment = createShellEnvironmentAtoms(connectionAtomRuntime);
+export const shellEnvironment = {
+  openInEditor: createEnvironmentRpcCommand(connectionAtomRuntime, {
+    label: "environment-data:shell:open-in-editor",
+    tag: WS_METHODS.shellOpenInEditor,
+    execute: (input) =>
+      Effect.gen(function* () {
+        const { target } = yield* EnvironmentSupervisor;
+        const opened = yield* Effect.promise(() =>
+          tryOpenDesktopFileManager(input, target, window.desktopBridge),
+        );
+        if (opened) return;
+        return yield* request(WS_METHODS.shellOpenInEditor, input);
+      }),
+  }),
+};
 export const environmentShell = createEnvironmentShellAtoms(connectionAtomRuntime);
 export const environmentSnapshotAtom = createEnvironmentSnapshotAtom(environmentShell.stateAtom);
 

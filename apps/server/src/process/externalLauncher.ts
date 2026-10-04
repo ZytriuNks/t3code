@@ -555,6 +555,14 @@ const resolveEditorLaunch = Effect.fn("resolveEditorLaunch")(function* (
     return yield* resolveFileManagerRevealLaunch(input.cwd, platform, env, command);
   }
 
+  if (platform === "win32") {
+    return fileManagerOpenLaunch(
+      input.cwd,
+      normalizeWindowsFileManagerPath(input.cwd),
+      resolvePowerShellPath(env),
+    );
+  }
+
   return {
     editor: editorDef.id,
     target: input.cwd,
@@ -566,11 +574,86 @@ const resolveEditorLaunch = Effect.fn("resolveEditorLaunch")(function* (
   };
 });
 
+/** Open a file through its system association without entering its containing directory. */
+export function buildFileManagerOpenPowerShellSource(target: string): string {
+  return `$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$target = ${escapePowerShellStringLiteral(target)}
+Start-Process -FilePath $target -WindowStyle Normal
+exit 0`;
+}
+
+function fileManagerOpenLaunch(
+  target: string,
+  powershellTarget: string,
+  powershellCommand: string,
+): EditorLaunch {
+  return {
+    editor: "file-manager",
+    target,
+    command: powershellCommand,
+    waitForExit: true,
+    args: [
+      "-STA",
+      ...POWERSHELL_ARGUMENTS_PREFIX,
+      encodeUtf16LeBase64(buildFileManagerOpenPowerShellSource(powershellTarget)),
+    ],
+  };
+}
+
 /** Use the Unicode Shell API: Explorer's /select command can silently do nothing. */
 export function buildFileExplorerRevealPowerShellSource(target: string): string {
   return `$ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $target = ${escapePowerShellStringLiteral(target)}
+function Test-ExplorerSelection([string]$expectedTarget) {
+  try {
+    $expected = [System.IO.Path]::GetFullPath($expectedTarget)
+    $expectedParent = [System.IO.Path]::GetDirectoryName($expected)
+    if ([String]::IsNullOrEmpty($expectedParent)) {
+      return $false
+    }
+    $shell = New-Object -ComObject Shell.Application
+    foreach ($window in @($shell.Windows())) {
+      if ($window.FullName -notlike '*explorer.exe') {
+        continue
+      }
+      if (-not $window.Visible) {
+        continue
+      }
+      try {
+        $folder = [System.IO.Path]::GetFullPath($window.Document.Folder.Self.Path)
+        if (-not [String]::Equals($folder, $expectedParent, [StringComparison]::OrdinalIgnoreCase)) {
+          continue
+        }
+        foreach ($item in @($window.Document.SelectedItems())) {
+          if ([String]::Equals($item.Path, $expected, [StringComparison]::OrdinalIgnoreCase)) {
+            return $true
+          }
+        }
+      } catch {
+        continue
+      }
+    }
+  } catch {
+    return $false
+  }
+  return $false
+}
+function Start-ExplorerSelect([string]$targetPath) {
+  $windowsRoot = $env:SystemRoot
+  if ([string]::IsNullOrWhiteSpace($windowsRoot)) {
+    $windowsRoot = $env:windir
+  }
+  if ([string]::IsNullOrWhiteSpace($windowsRoot)) {
+    $windowsRoot = 'C:\\Windows'
+  }
+  $explorerPath = Join-Path $windowsRoot 'explorer.exe'
+  if (-not (Test-Path -LiteralPath $explorerPath)) {
+    $explorerPath = 'explorer.exe'
+  }
+  Start-Process -FilePath $explorerPath -ArgumentList ('/select,"' + $targetPath + '"') -WindowStyle Normal
+}
 try {
 $target = [System.IO.Path]::GetFullPath($target)
 Add-Type -TypeDefinition @'
@@ -617,22 +700,27 @@ public static class T3FileExplorerReveal {
 }
 '@
   [T3FileExplorerReveal]::Reveal($target)
+  $selected = $false
+  # COM inspection time counts toward the budget; a fixed retry count can add seconds.
+  $selectionTimer = [Diagnostics.Stopwatch]::StartNew()
+  do {
+    if (Test-ExplorerSelection $target) {
+      $selected = $true
+      break
+    }
+    if ($selectionTimer.ElapsedMilliseconds -ge 500) {
+      break
+    }
+    Start-Sleep -Milliseconds 50
+  } while ($selectionTimer.ElapsedMilliseconds -lt 500)
+  if (-not $selected) {
+    Start-ExplorerSelect $target
+  }
 } catch {
   if (-not (Test-Path -LiteralPath $target)) {
     throw
   }
-  $windowsRoot = $env:SystemRoot
-  if ([string]::IsNullOrWhiteSpace($windowsRoot)) {
-    $windowsRoot = $env:windir
-  }
-  if ([string]::IsNullOrWhiteSpace($windowsRoot)) {
-    $windowsRoot = 'C:\\Windows'
-  }
-  $explorerPath = Join-Path $windowsRoot 'explorer.exe'
-  if (-not (Test-Path -LiteralPath $explorerPath)) {
-    $explorerPath = 'explorer.exe'
-  }
-  Start-Process -FilePath $explorerPath -ArgumentList ('/select,"' + $target + '"') -WindowStyle Normal
+  Start-ExplorerSelect $target
 }
 exit 0`;
 }

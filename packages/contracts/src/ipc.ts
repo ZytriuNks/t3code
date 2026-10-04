@@ -1221,6 +1221,8 @@ export interface DesktopBridge {
   receiveProviderAuthCallback?: (authorizationUrl: string) => Promise<string>;
   cancelProviderAuthCallback?: (authorizationUrl: string) => Promise<void>;
   openExternal: (url: string) => Promise<boolean>;
+  /** Native local path opening; false lets older/unsupported hosts use the backend. */
+  openLocalPath?: (input: { readonly path: string; readonly reveal: boolean }) => Promise<boolean>;
   /**
    * Open a System Settings pane by identifier. Optional: older desktop builds
    * lack it, and callers no-op when it is missing.

@@ -44,6 +44,7 @@ import {
   getSystemLocale,
   getWindowFullscreenState,
   openExternal,
+  openLocalPath,
   openSystemSettings,
   checkSystemPermission,
   pasteAsText,
@@ -71,9 +72,13 @@ import {
 import * as PreviewIpc from "./methods/preview.ts";
 import * as AppActivationIpc from "./methods/appActivation.ts";
 import { getWslState, setWslBackendEnabled, setWslDistro, setWslOnly } from "./methods/wsl.ts";
+import { startWindowsFileManager, stopWindowsFileManager } from "../electron/WindowsFileManager.ts";
 
 export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers")(function* () {
   const ipc = yield* DesktopIpc.DesktopIpc;
+  yield* Effect.acquireRelease(Effect.sync(startWindowsFileManager), () =>
+    Effect.sync(stopWindowsFileManager),
+  );
   yield* installNotificationBadge();
   yield* PreviewIpc.installPreviewEventForwarding();
 
@@ -132,6 +137,7 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
   yield* ipc.handle(setTheme);
   yield* ipc.handle(showContextMenu);
   yield* ipc.handle(openExternal);
+  yield* ipc.handle(openLocalPath);
   yield* ipc.handle(receiveProviderAuthCallback);
   yield* ipc.handle(cancelProviderAuthCallback);
   yield* ipc.handle(openSystemSettings);

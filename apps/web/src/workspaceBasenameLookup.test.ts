@@ -92,14 +92,19 @@ describe("pickWorkspacePathMatch", () => {
 });
 
 describe("workspacePathLookupQueries", () => {
-  it("tries a duplicated workspace prefix without changing normal paths", () => {
+  it("tries both possible targets when the workspace name is repeated", () => {
     expect(workspacePathLookupQueries("t3code/AGENTS.md", "D:/projects/t3code")).toEqual([
       "t3code/AGENTS.md",
       "AGENTS.md",
     ]);
-    expect(workspacePathLookupQueries("docs/AGENTS.md", "D:/projects/t3code")).toEqual([
-      "docs/AGENTS.md",
-    ]);
+  });
+
+  it("does not search the workspace index for an unambiguous path", () => {
+    expect(workspacePathLookupQueries("docs/AGENTS.md", "D:/projects/t3code")).toEqual([]);
+    expect(
+      workspacePathLookupQueries("apps\\web\\src\\ChatView.tsx", "D:/projects/t3code"),
+    ).toEqual([]);
+    expect(workspacePathLookupQueries("./docs/report.pdf", "D:/projects/t3code")).toEqual([]);
   });
 });
 

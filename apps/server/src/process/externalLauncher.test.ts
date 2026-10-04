@@ -412,8 +412,9 @@ it.effect.skipIf(!windowsHost)("passes a parent folder and selection to the Wind
             return count == 1 ? 0 : unchecked((int)0x80070057);
           }`,
       )
-      // A failing native call must never open a real window in this test.
-      .replace(/  Start-Process[^\n]+/, "  throw");
+      // Pretend the native call selected the item so the fallback cannot open a real window.
+      .replace(/if \(Test-ExplorerSelection \$target\)/, "if ($true)")
+      .replace(/  Start-ExplorerSelect \$target/g, "  throw");
     const result = NodeChildProcess.spawnSync(
       "powershell.exe",
       [
@@ -493,12 +494,59 @@ it.effect("reveals a file in File Explorer through PowerShell on Windows", () =>
     assert.match(decodedCommand, /RpcEChangedMode/);
     assert.match(decodedCommand, /CoUninitialize\(\)/);
     assert.match(decodedCommand, /\[System\.IO\.Path\]::GetFullPath\(\$target\)/);
+    assert.match(decodedCommand, /Test-ExplorerSelection/);
+    assert.match(decodedCommand, /if \(-not \$window\.Visible\)/);
+    assert.match(decodedCommand, /Start-ExplorerSelect \$target/);
     assert.match(decodedCommand, /\$explorerPath = Join-Path \$windowsRoot 'explorer\.exe'/);
     assert.match(decodedCommand, /Start-Process -FilePath \$explorerPath/);
     assert.match(decodedCommand, /exit 0/);
     assert.equal(spawned.options.shell, false);
     assert.equal(spawned.options.detached, false);
     assert.equal(spawned.options.windowsHide, true);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect.skipIf(!windowsHost)("falls back when the Explorer visibility budget is exhausted", () =>
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const directory = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-reveal-budget-" });
+    const target = path.join(directory, "fixture.txt");
+    yield* fileSystem.writeFileString(target, "reveal fixture");
+    const source = ExternalLauncher.buildFileExplorerRevealPowerShellSource(target)
+      .replace(
+        /\[DllImport\("shell32.dll"\)\]\s+private static extern int SHOpenFolderAndSelectItems\(([^;]+)\);/,
+        (_match, parameters: string) =>
+          `private static int SHOpenFolderAndSelectItems(${parameters}) { return 0; }`,
+      )
+      .replace(
+        "[T3FileExplorerReveal]::Reveal($target)",
+        `[T3FileExplorerReveal]::Reveal($target)
+  $script:selectionChecks = 0
+  function Test-ExplorerSelection([string]$target) {
+    $script:selectionChecks++
+    return $false
+  }
+  function Start-ExplorerSelect([string]$target) {
+    [Console]::Out.WriteLine("selectionChecks=$script:selectionChecks")
+  }`,
+      )
+      // Simulate a COM inspection consuming the budget without waiting on wall time.
+      .replace("[Diagnostics.Stopwatch]::StartNew()", "@{ ElapsedMilliseconds = 500 }");
+    const result = NodeChildProcess.spawnSync(
+      "powershell.exe",
+      [
+        "-STA",
+        "-NoProfile",
+        "-NonInteractive",
+        "-EncodedCommand",
+        Buffer.from(source, "utf16le").toString("base64"),
+      ],
+      { timeout: 30_000, windowsHide: true, encoding: "utf8" },
+    );
+    assert.isUndefined(result.error);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout.trim(), "selectionChecks=1");
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
@@ -555,6 +603,57 @@ it.effect("does not advertise reveal on Windows when PowerShell is missing", () 
     assert.isUndefined(result.kind);
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
+
+it.effect("opens a file through its Windows association without reveal", () => {
+  let spawned: ChildProcess.StandardCommand | undefined;
+  return Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const binDir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-file-open-" });
+    yield* fileSystem.writeFileString(path.join(binDir, "explorer.CMD"), "@echo off\r\n");
+    const systemRoot = path.join(binDir, "system-root");
+    const powershell = `${systemRoot}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`;
+    yield* fileSystem.makeDirectory(path.dirname(powershell), { recursive: true });
+    yield* fileSystem.writeFileString(powershell, "");
+
+    yield* Effect.gen(function* () {
+      const launcher = yield* ExternalLauncher.ExternalLauncher;
+      yield* launcher.launchEditor({
+        editor: "file-manager",
+        cwd: "C:/installers/T3-Code-Setup.exe",
+      });
+    }).pipe(
+      Effect.provide(
+        testLayer({
+          platform: "win32",
+          env: {
+            PATH: binDir,
+            PATHEXT: ".COM;.EXE;.BAT;.CMD",
+            SYSTEMROOT: systemRoot,
+          },
+          onSpawn: (command) => {
+            spawned = command;
+          },
+        }),
+      ),
+    );
+
+    assert.ok(spawned);
+    assert.equal(spawned.command, powershell);
+    assert.deepEqual(spawned.args.slice(0, -1), [
+      "-STA",
+      "-NoProfile",
+      "-NonInteractive",
+      "-EncodedCommand",
+    ]);
+    assert.equal(
+      Buffer.from(spawned.args.at(-1) ?? "", "base64").toString("utf16le"),
+      ExternalLauncher.buildFileManagerOpenPowerShellSource("C:\\installers\\T3-Code-Setup.exe"),
+    );
+    assert.equal(spawned.options.detached, false);
+    assert.equal(spawned.options.windowsHide, true);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer));
+});
 
 it.effect.skipIf(windowsHost)(
   "reveals a WSL file in Windows File Explorer through its UNC path",
