@@ -535,7 +535,7 @@ export function showContextMenuFallback<T extends string>(
               isHovered || isFocused || (options.preserveFocus && virtualFocusedButton === button);
             button.style.background = isHighlighted
               ? isLeafDestructive
-                ? "color-mix(in srgb, var(--destructive) 30%, transparent)"
+                ? "color-mix(in srgb, var(--destructive) 10%, transparent)"
                 : "var(--accent)"
               : "transparent";
             button.style.color = isHighlighted
