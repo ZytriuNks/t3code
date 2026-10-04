@@ -86,6 +86,8 @@ import { isMacPlatform } from "../lib/utils";
 import { useSidebarPendingFileDropStore } from "../sidebarPendingFileDropStore";
 import { makeWorkspaceFileDropHandlers } from "./chat/workspaceFileDrop";
 import {
+  readEnvironmentSupportsPinning,
+  readEnvironmentSupportsTitleRegeneration,
   readThreadShell,
   useProjects,
   useThreadShells,
@@ -176,9 +178,16 @@ import {
   getThreadKeysToDeselectAfterDelete,
   useThreadSelectionStore,
 } from "../threadSelectionStore";
+import { buildLegacySidebarThreadActionMenuItems } from "./threadActionMenu.logic";
+import {
+  archiveLegacySidebarContextMenuThread,
+  getLegacySidebarPinFailureMessage,
+} from "./LegacySidebar.menu.logic";
 import { isCommandPaletteOpen, openCommandPalette } from "../commandPaletteBus";
 import {
   archiveSelectedThreadEntries,
+  buildBulkTitleRegenerationContextMenuItem,
+  buildBulkUnpinContextMenuItem,
   buildMultiSelectThreadContextMenuItems,
   deleteSelectedThreadEntries,
   getSidebarThreadIdsToPrewarm,
@@ -1167,6 +1176,8 @@ interface SidebarProjectItemProps {
   archiveThread: ReturnType<typeof useThreadActions>["archiveThread"];
   deleteThread: ReturnType<typeof useThreadActions>["deleteThread"];
   markThreadUnread: ReturnType<typeof useThreadActions>["markThreadUnread"];
+  pinThread: ReturnType<typeof useThreadActions>["pinThread"];
+  confirmAndUnpinThread: ReturnType<typeof useThreadActions>["confirmAndUnpinThread"];
   threadJumpLabelByKey: ReadonlyMap<string, string>;
   attachThreadListAutoAnimateRef: (node: HTMLElement | null) => void;
   expandThreadListForProject: (projectKey: string) => void;
@@ -1189,6 +1200,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     archiveThread,
     deleteThread,
     markThreadUnread,
+    pinThread,
+    confirmAndUnpinThread,
     threadJumpLabelByKey,
     attachThreadListAutoAnimateRef,
     expandThreadListForProject,
@@ -1252,6 +1265,20 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         stackedThreadToast({
           type: "error",
           title: "Failed to copy thread ID",
+          description: error instanceof Error ? error.message : "An error occurred.",
+        }),
+      );
+    },
+  });
+  const { copyToClipboard: copyBranchToClipboard } = useCopyToClipboard<{ branch: string }>({
+    onCopy: (ctx) => {
+      toastManager.add({ type: "success", title: "Branch copied", description: ctx.branch });
+    },
+    onError: (error) => {
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: "Failed to copy branch",
           description: error instanceof Error ? error.message : "An error occurred.",
         }),
       );
@@ -1931,11 +1958,71 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       const hasRunningThread = selectedThreadEntries.some(
         ({ thread }) => !threadRuntimeCanArchive(thread.runtime),
       );
-
+      const pinnedSelectedThreads = selectedThreadEntries.filter(
+        ({ thread }) =>
+          readEnvironmentSupportsPinning(thread.environmentId) && thread.pinnedAt != null,
+      );
+      const titleRegenerationThreads = selectedThreadEntries.filter(({ thread }) =>
+        readEnvironmentSupportsTitleRegeneration(thread.environmentId),
+      );
+      const regeneratableTitleThreads = titleRegenerationThreads.filter(
+        ({ thread }) => thread.titleRegeneration == null,
+      );
       const clicked = await api.contextMenu.show(
-        buildMultiSelectThreadContextMenuItems({ count, hasRunningThread }),
+        buildMultiSelectThreadContextMenuItems({
+          count,
+          hasRunningThread,
+          unpinItem: buildBulkUnpinContextMenuItem({
+            pinnedCount: pinnedSelectedThreads.length,
+          }),
+          titleRegenerationItem: buildBulkTitleRegenerationContextMenuItem({
+            supportedCount: titleRegenerationThreads.length,
+            actionableCount: regeneratableTitleThreads.length,
+          }),
+        }),
         position,
       );
+
+      if (clicked === "unpin") {
+        for (const { threadRef } of pinnedSelectedThreads) {
+          const result = await confirmAndUnpinThread(threadRef);
+          const failureMessage = getLegacySidebarPinFailureMessage(result);
+          if (failureMessage !== null) {
+            toastManager.add(
+              stackedThreadToast({
+                type: "error",
+                title: "Failed to unpin thread",
+                description: failureMessage,
+              }),
+            );
+          }
+        }
+        clearSelection();
+        return;
+      }
+
+      if (clicked === "regenerate-title") {
+        for (const { thread } of regeneratableTitleThreads) {
+          const result = await updateThreadMetadata({
+            environmentId: thread.environmentId,
+            input: { threadId: thread.id, regenerateTitle: true },
+          });
+          if (result._tag === "Success") continue;
+          if (!isAtomCommandInterrupted(result)) {
+            const error = squashAtomCommandFailure(result);
+            toastManager.add(
+              stackedThreadToast({
+                type: "error",
+                title: "Failed to regenerate thread titles",
+                description: error instanceof Error ? error.message : "An error occurred.",
+              }),
+            );
+          }
+          return;
+        }
+        clearSelection();
+        return;
+      }
 
       if (clicked === "mark-unread") {
         for (const { threadRef } of selectedThreadEntries) {
@@ -2026,9 +2113,11 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       appSettingsConfirmThreadDelete,
       archiveThread,
       clearSelection,
+      confirmAndUnpinThread,
       deleteThread,
       markThreadUnread,
       removeFromSelection,
+      updateThreadMetadata,
     ],
   );
 
@@ -2274,18 +2363,19 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       );
       const threadWorkspacePath =
         thread.worktreePath ?? threadProject?.workspaceRoot ?? project.workspaceRoot ?? null;
+      const supportsPinning = readEnvironmentSupportsPinning(thread.environmentId);
+      const supportsTitleRegeneration = readEnvironmentSupportsTitleRegeneration(
+        thread.environmentId,
+      );
       const clicked = await api.contextMenu.show(
-        [
-          ...(thread.branch
-            ? [{ id: "new-thread-on-branch", label: `New thread on ${thread.branch}` }]
-            : []),
-          { id: "rename", label: "Rename thread" },
-          { id: "mark-unread", label: "Mark unread" },
-          { id: "copy-path", label: "Copy Path" },
-          { id: "copy-thread-id", label: "Copy Thread ID" },
-          { id: "project-settings", label: "Project settings" },
-          { id: "delete", label: "Delete", destructive: true, icon: "trash" },
-        ],
+        buildLegacySidebarThreadActionMenuItems({
+          branch: thread.branch ?? null,
+          isPinned: thread.pinnedAt != null,
+          supportsPinning,
+          supportsTitleRegeneration,
+          isRegeneratingTitle: thread.titleRegeneration != null,
+          isRunning: !threadRuntimeCanArchive(thread.runtime),
+        }),
         position,
       );
 
@@ -2322,6 +2412,41 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         return;
       }
 
+      if (clicked === "pin" || clicked === "unpin") {
+        const result =
+          clicked === "pin" ? await pinThread(threadRef) : await confirmAndUnpinThread(threadRef);
+        const failureMessage = getLegacySidebarPinFailureMessage(result);
+        if (failureMessage !== null) {
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: clicked === "pin" ? "Failed to pin thread" : "Failed to unpin thread",
+              description: failureMessage,
+            }),
+          );
+        }
+        return;
+      }
+
+      if (clicked === "regenerate-title") {
+        if (thread.titleRegeneration != null) return;
+        const result = await updateThreadMetadata({
+          environmentId: threadRef.environmentId,
+          input: { threadId: threadRef.threadId, regenerateTitle: true },
+        });
+        if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+          const error = squashAtomCommandFailure(result);
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Failed to regenerate thread title",
+              description: error instanceof Error ? error.message : "An error occurred.",
+            }),
+          );
+        }
+        return;
+      }
+
       if (clicked === "rename") {
         startThreadRename(threadKey, thread.title);
         return;
@@ -2345,10 +2470,39 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         copyPathToClipboard(threadWorkspacePath, { path: threadWorkspacePath });
         return;
       }
+      if (clicked === "copy-branch") {
+        if (thread.branch) {
+          copyBranchToClipboard(thread.branch, { branch: thread.branch });
+        }
+        return;
+      }
       if (clicked === "copy-thread-id") {
         copyThreadIdToClipboard(thread.id, { threadId: thread.id });
         return;
       }
+      if (clicked === "archive") {
+        const outcome = await archiveLegacySidebarContextMenuThread({
+          confirmationEnabled: appSettingsConfirmThreadArchive,
+          confirm: () => api.dialogs.confirm(`Archive thread "${thread.title}"?`),
+          archive: (onArchived) => archiveThread(threadRef, { onArchived }),
+        });
+        if (outcome._tag === "ArchiveFailure" || outcome._tag === "FollowupFailure") {
+          if (isAtomCommandInterrupted(outcome.failure)) return;
+          const error = squashAtomCommandFailure(outcome.failure);
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title:
+                outcome._tag === "FollowupFailure"
+                  ? "Thread archived, but navigation failed"
+                  : "Failed to archive thread",
+              description: error instanceof Error ? error.message : "An error occurred.",
+            }),
+          );
+        }
+        return;
+      }
+
       if (clicked !== "delete") return;
       if (appSettingsConfirmThreadDelete) {
         const confirmed = await api.dialogs.confirm(
@@ -2375,7 +2529,11 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       }
     },
     [
+      appSettingsConfirmThreadArchive,
       appSettingsConfirmThreadDelete,
+      archiveThread,
+      confirmAndUnpinThread,
+      copyBranchToClipboard,
       copyPathToClipboard,
       copyThreadIdToClipboard,
       deleteThread,
@@ -2383,11 +2541,13 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       isMobile,
       markThreadUnread,
       memberProjectByScopedKey,
+      pinThread,
       project.projectKey,
       project.workspaceRoot,
       router,
       setOpenMobile,
       startThreadRename,
+      updateThreadMetadata,
     ],
   );
 
@@ -2900,6 +3060,8 @@ interface SidebarProjectsContentProps {
   archiveThread: ReturnType<typeof useThreadActions>["archiveThread"];
   deleteThread: ReturnType<typeof useThreadActions>["deleteThread"];
   markThreadUnread: ReturnType<typeof useThreadActions>["markThreadUnread"];
+  pinThread: ReturnType<typeof useThreadActions>["pinThread"];
+  confirmAndUnpinThread: ReturnType<typeof useThreadActions>["confirmAndUnpinThread"];
   sortedProjects: readonly SidebarProjectSnapshot[];
   expandedThreadListsByProject: ReadonlySet<string>;
   activeRouteProjectKey: string | null;
@@ -2943,6 +3105,8 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
     archiveThread,
     deleteThread,
     markThreadUnread,
+    pinThread,
+    confirmAndUnpinThread,
     sortedProjects,
     expandedThreadListsByProject,
     activeRouteProjectKey,
@@ -3084,6 +3248,8 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                         archiveThread={archiveThread}
                         deleteThread={deleteThread}
                         markThreadUnread={markThreadUnread}
+                        pinThread={pinThread}
+                        confirmAndUnpinThread={confirmAndUnpinThread}
                         threadJumpLabelByKey={threadJumpLabelByKey}
                         attachThreadListAutoAnimateRef={attachThreadListAutoAnimateRef}
                         expandThreadListForProject={expandThreadListForProject}
@@ -3118,6 +3284,8 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                 archiveThread={archiveThread}
                 deleteThread={deleteThread}
                 markThreadUnread={markThreadUnread}
+                pinThread={pinThread}
+                confirmAndUnpinThread={confirmAndUnpinThread}
                 threadJumpLabelByKey={threadJumpLabelByKey}
                 attachThreadListAutoAnimateRef={attachThreadListAutoAnimateRef}
                 expandThreadListForProject={expandThreadListForProject}
@@ -3153,7 +3321,8 @@ export default function LegacySidebar() {
   const sidebarThreadPreviewCount = useClientSettings((s) => s.sidebarThreadPreviewCount);
   const updateSettings = useUpdateClientSettings();
   const handleNewThread = useNewThreadHandler();
-  const { archiveThread, deleteThread, markThreadUnread } = useThreadActions();
+  const { archiveThread, deleteThread, markThreadUnread, pinThread, confirmAndUnpinThread } =
+    useThreadActions();
   const { isMobile, setOpenMobile } = useSidebar();
   const routeTarget = useParams({
     strict: false,
@@ -3807,6 +3976,8 @@ export default function LegacySidebar() {
         archiveThread={archiveThread}
         deleteThread={deleteThread}
         markThreadUnread={markThreadUnread}
+        pinThread={pinThread}
+        confirmAndUnpinThread={confirmAndUnpinThread}
         sortedProjects={sortedProjects}
         expandedThreadListsByProject={expandedThreadListsByProject}
         activeRouteProjectKey={activeRouteProjectKey}

@@ -1,6 +1,8 @@
 import { RouterProvider } from "@tanstack/react-router";
 import { useEffect } from "react";
 
+import { installDesktopSystemContextMenu } from "./lib/desktopSystemContextMenu";
+
 import { ElectronBrowserHost } from "./browser/ElectronBrowserHost";
 import { PreviewAutomationHosts } from "./components/preview/PreviewAutomationHosts";
 import { QuitHoldOverlay } from "./components/QuitHoldOverlay";

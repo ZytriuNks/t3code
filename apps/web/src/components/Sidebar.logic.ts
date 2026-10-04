@@ -491,8 +491,14 @@ export async function archiveSelectedThreadEntries<
 export function buildMultiSelectThreadContextMenuItems(input: {
   count: number;
   hasRunningThread: boolean;
-}): readonly ContextMenuItem<"mark-unread" | "archive" | "delete">[] {
+  unpinItem?: ContextMenuItem<"unpin"> | null;
+  titleRegenerationItem?: ContextMenuItem<"regenerate-title"> | null;
+}): readonly ContextMenuItem<
+  "unpin" | "regenerate-title" | "mark-unread" | "archive" | "delete"
+>[] {
   return [
+    ...(input.unpinItem ? [input.unpinItem] : []),
+    ...(input.titleRegenerationItem ? [input.titleRegenerationItem] : []),
     { id: "mark-unread", label: `Mark unread (${input.count})` },
     {
       id: "archive",

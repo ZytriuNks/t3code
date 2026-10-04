@@ -5,6 +5,7 @@ import type {
   DesktopPreviewRecordingFrame,
   DesktopPreviewTabState,
   DesktopSnapShotEvent,
+  DesktopSystemContextMenuRequest,
 } from "@t3tools/contracts";
 import { exposeClerkBridge } from "@clerk/electron/preload";
 import { contextBridge, ipcRenderer, webFrame, webUtils } from "electron";
@@ -182,6 +183,17 @@ contextBridge.exposeInMainWorld("desktopBridge", {
       items,
       ...(position === undefined ? {} : { position }),
     }),
+  onSystemContextMenu: (listener) => {
+    const wrappedListener = (
+      _event: Electron.IpcRendererEvent,
+      request: DesktopSystemContextMenuRequest,
+    ) => listener(request);
+    ipcRenderer.on(IpcChannels.SYSTEM_CONTEXT_MENU_CHANNEL, wrappedListener);
+    return () =>
+      ipcRenderer.removeListener(IpcChannels.SYSTEM_CONTEXT_MENU_CHANNEL, wrappedListener);
+  },
+  resolveSystemContextMenu: (response) =>
+    ipcRenderer.invoke(IpcChannels.RESOLVE_SYSTEM_CONTEXT_MENU_CHANNEL, response),
   receiveProviderAuthCallback: (url: string) =>
     ipcRenderer.invoke(IpcChannels.RECEIVE_PROVIDER_AUTH_CALLBACK_CHANNEL, url),
   cancelProviderAuthCallback: (url: string) =>
