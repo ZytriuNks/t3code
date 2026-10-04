@@ -262,6 +262,7 @@ export function showContextMenuFallback<T extends string>(
     const highlightUpdates = new Map<HTMLButtonElement, () => void>();
     const keyboardHandlers = new Map<HTMLButtonElement, (event: KeyboardEvent) => void>();
     let virtualFocusedButton: HTMLButtonElement | undefined;
+    let hoveredButton: HTMLButtonElement | undefined;
     const focusButton = (button: HTMLButtonElement | undefined) => {
       if (!button) return;
       if (!options.preserveFocus) {
@@ -548,12 +549,21 @@ export function showContextMenuFallback<T extends string>(
           };
           highlightUpdates.set(button, updateHighlight);
           button.addEventListener("mouseenter", () => {
-            focusButton(button);
+            // Pointer hover transfers real DOM focus to the row, matching
+            // native menu behaviour where the highlighted row is also the
+            // document.activeElement. This is the trigger that lets keyboard
+            // activation (Enter/Space) act on the highlighted row.
+            button.focus({ preventScroll: true });
+            hoveredButton = button;
             isHovered = true;
             updateHighlight();
           });
           button.addEventListener("mouseleave", () => {
             isHovered = false;
+            if (hoveredButton === button) hoveredButton = undefined;
+            // Drop DOM focus the pointer transferred so the row stops
+            // highlighting once the cursor leaves the menu.
+            if (document.activeElement === button) button.blur();
             updateHighlight();
           });
           button.addEventListener("focus", () => {
