@@ -22,6 +22,7 @@ export interface WindowsForegroundApi {
     attach: boolean,
   ) => boolean;
   readonly setForegroundWindow: (windowHandle: bigint) => boolean;
+  readonly restoreWindow?: (windowHandle: bigint) => void;
 }
 
 const WINDOWS_SHELL_HOSTED_WINDOW_CLASSES = new Set(["ApplicationFrameWindow"]);
@@ -208,6 +209,15 @@ export function loadWindowsForegroundApi(): Promise<WindowsForegroundApi> {
           paramsType: [DataType.BigInt],
           paramsValue: [windowHandle],
         }),
+      restoreWindow: (windowHandle) => {
+        load({
+          library: user32,
+          funcName: "ShowWindow",
+          retType: DataType.Boolean,
+          paramsType: [DataType.BigInt, DataType.I32],
+          paramsValue: [windowHandle, 9], // SW_RESTORE also restores minimized Explorer windows.
+        });
+      },
     } satisfies WindowsForegroundApi;
   });
   return windowsForegroundApiPromise;

@@ -555,6 +555,14 @@ const resolveEditorLaunch = Effect.fn("resolveEditorLaunch")(function* (
     return yield* resolveFileManagerRevealLaunch(input.cwd, platform, env, command);
   }
 
+  if (platform === "win32") {
+    return fileManagerOpenLaunch(
+      input.cwd,
+      normalizeWindowsFileManagerPath(input.cwd),
+      resolvePowerShellPath(env),
+    );
+  }
+
   return {
     editor: editorDef.id,
     target: input.cwd,
@@ -566,10 +574,86 @@ const resolveEditorLaunch = Effect.fn("resolveEditorLaunch")(function* (
   };
 });
 
+/** Open a file through its system association without entering its containing directory. */
+export function buildFileManagerOpenPowerShellSource(target: string): string {
+  return `$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$target = ${escapePowerShellStringLiteral(target)}
+Start-Process -FilePath $target -WindowStyle Normal
+exit 0`;
+}
+
+function fileManagerOpenLaunch(
+  target: string,
+  powershellTarget: string,
+  powershellCommand: string,
+): EditorLaunch {
+  return {
+    editor: "file-manager",
+    target,
+    command: powershellCommand,
+    waitForExit: true,
+    args: [
+      "-STA",
+      ...POWERSHELL_ARGUMENTS_PREFIX,
+      encodeUtf16LeBase64(buildFileManagerOpenPowerShellSource(powershellTarget)),
+    ],
+  };
+}
+
 /** Use the Unicode Shell API: Explorer's /select command can silently do nothing. */
 export function buildFileExplorerRevealPowerShellSource(target: string): string {
   return `$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 $target = ${escapePowerShellStringLiteral(target)}
+function Test-ExplorerSelection([string]$expectedTarget) {
+  try {
+    $expected = [System.IO.Path]::GetFullPath($expectedTarget)
+    $expectedParent = [System.IO.Path]::GetDirectoryName($expected)
+    if ([String]::IsNullOrEmpty($expectedParent)) {
+      return $false
+    }
+    $shell = New-Object -ComObject Shell.Application
+    foreach ($window in @($shell.Windows())) {
+      if ($window.FullName -notlike '*explorer.exe') {
+        continue
+      }
+      if (-not $window.Visible) {
+        continue
+      }
+      try {
+        $folder = [System.IO.Path]::GetFullPath($window.Document.Folder.Self.Path)
+        if (-not [String]::Equals($folder, $expectedParent, [StringComparison]::OrdinalIgnoreCase)) {
+          continue
+        }
+        foreach ($item in @($window.Document.SelectedItems())) {
+          if ([String]::Equals($item.Path, $expected, [StringComparison]::OrdinalIgnoreCase)) {
+            return $true
+          }
+        }
+      } catch {
+        continue
+      }
+    }
+  } catch {
+    return $false
+  }
+  return $false
+}
+function Start-ExplorerSelect([string]$targetPath) {
+  $windowsRoot = $env:SystemRoot
+  if ([string]::IsNullOrWhiteSpace($windowsRoot)) {
+    $windowsRoot = $env:windir
+  }
+  if ([string]::IsNullOrWhiteSpace($windowsRoot)) {
+    $windowsRoot = 'C:\\Windows'
+  }
+  $explorerPath = Join-Path $windowsRoot 'explorer.exe'
+  if (-not (Test-Path -LiteralPath $explorerPath)) {
+    $explorerPath = 'explorer.exe'
+  }
+  Start-Process -FilePath $explorerPath -ArgumentList ('/select,"' + $targetPath + '"') -WindowStyle Normal
+}
 try {
 $target = [System.IO.Path]::GetFullPath($target)
 Add-Type -TypeDefinition @'
@@ -583,9 +667,10 @@ public static class T3FileExplorerReveal {
   [DllImport("shell32.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
   private static extern int SHParseDisplayName(string name, IntPtr bindingContext, out IntPtr item, uint attributes, out uint resultAttributes);
   [DllImport("shell32.dll")]
-  private static extern int SHOpenFolderAndSelectItems(IntPtr item, uint count, IntPtr children, uint flags);
+  private static extern int SHOpenFolderAndSelectItems(IntPtr folder, uint count, [MarshalAs(UnmanagedType.LPArray, SizeParamIndex = 1)] IntPtr[] children, uint flags);
   public static void Reveal(string target) {
     IntPtr item = IntPtr.Zero;
+    IntPtr folder = IntPtr.Zero;
     uint attributes;
     int comResult = CoInitializeEx(IntPtr.Zero, 0x2);
     const int RpcEChangedMode = unchecked((int)0x80010106);
@@ -597,8 +682,17 @@ public static class T3FileExplorerReveal {
         Marshal.ThrowExceptionForHR(comResult);
       }
       Marshal.ThrowExceptionForHR(SHParseDisplayName(target, IntPtr.Zero, out item, 0, out attributes));
-      Marshal.ThrowExceptionForHR(SHOpenFolderAndSelectItems(item, 0, IntPtr.Zero, 0));
+      string parent = System.IO.Path.GetDirectoryName(target.TrimEnd(System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar));
+      if (String.IsNullOrEmpty(parent)) {
+        Marshal.ThrowExceptionForHR(SHOpenFolderAndSelectItems(item, 0, null, 0));
+      } else {
+        // Match Electron's explicit parent-and-selection form. The single-item
+        // cidl=0 form can return S_OK without opening Explorer on some hosts.
+        Marshal.ThrowExceptionForHR(SHParseDisplayName(parent, IntPtr.Zero, out folder, 0, out attributes));
+        Marshal.ThrowExceptionForHR(SHOpenFolderAndSelectItems(folder, 1, new IntPtr[] { item }, 0));
+      }
     } finally {
+      if (folder != IntPtr.Zero) Marshal.FreeCoTaskMem(folder);
       if (item != IntPtr.Zero) Marshal.FreeCoTaskMem(item);
       if (comResult >= 0) CoUninitialize();
     }
@@ -606,22 +700,27 @@ public static class T3FileExplorerReveal {
 }
 '@
   [T3FileExplorerReveal]::Reveal($target)
+  $selected = $false
+  # COM inspection time counts toward the budget; a fixed retry count can add seconds.
+  $selectionTimer = [Diagnostics.Stopwatch]::StartNew()
+  do {
+    if (Test-ExplorerSelection $target) {
+      $selected = $true
+      break
+    }
+    if ($selectionTimer.ElapsedMilliseconds -ge 500) {
+      break
+    }
+    Start-Sleep -Milliseconds 50
+  } while ($selectionTimer.ElapsedMilliseconds -lt 500)
+  if (-not $selected) {
+    Start-ExplorerSelect $target
+  }
 } catch {
   if (-not (Test-Path -LiteralPath $target)) {
     throw
   }
-  $windowsRoot = $env:SystemRoot
-  if ([string]::IsNullOrWhiteSpace($windowsRoot)) {
-    $windowsRoot = $env:windir
-  }
-  if ([string]::IsNullOrWhiteSpace($windowsRoot)) {
-    $windowsRoot = 'C:\\Windows'
-  }
-  $explorerPath = Join-Path $windowsRoot 'explorer.exe'
-  if (-not (Test-Path -LiteralPath $explorerPath)) {
-    $explorerPath = 'explorer.exe'
-  }
-  Start-Process -FilePath $explorerPath -ArgumentList ('/select,"' + $target + '"') -WindowStyle Normal
+  Start-ExplorerSelect $target
 }
 exit 0`;
 }
@@ -726,11 +825,17 @@ const launchAndUnref = Effect.fn("externalLauncher.launchAndUnref")(function* (
   yield* spawner.spawn(command).pipe(
     Effect.flatMap((handle) =>
       launch.waitForExit
-        ? handle.exitCode.pipe(
-            Effect.flatMap((code) =>
+        ? Effect.all([handle.exitCode, handle.stderr.pipe(Stream.decodeText(), Stream.mkString)], {
+            concurrency: "unbounded",
+          }).pipe(
+            Effect.flatMap(([code, stderr]) =>
               code === 0
                 ? Effect.void
-                : Effect.fail(new Error(`Launcher exited with code ${code}`)),
+                : Effect.fail({
+                    message: `Launcher exited with code ${code}`,
+                    exitCode: code,
+                    stderr: stderr.trim().slice(0, 4096),
+                  }),
             ),
           )
         : handle.unref,
@@ -784,7 +889,7 @@ const launchEditorProcess = Effect.fn("externalLauncher.launchEditorProcess")(fu
         stdin: "ignore",
         stdout: "ignore",
         stderr: "ignore",
-        ...(launch.waitForExit ? { detached: false, windowsHide: true } : {}),
+        ...(launch.waitForExit ? { detached: false, windowsHide: true, stderr: "pipe" } : {}),
       },
     },
     (cause) =>

@@ -35,6 +35,7 @@ import * as ElectronMenu from "../../electron/ElectronMenu.ts";
 import * as ElectronShell from "../../electron/ElectronShell.ts";
 import * as ElectronTheme from "../../electron/ElectronTheme.ts";
 import * as ElectronWindow from "../../electron/ElectronWindow.ts";
+import { focusExistingWindowsFolder } from "../../electron/WindowsFileManager.ts";
 import * as Electron from "electron";
 import * as MacPermissions from "../../permissions/MacPermissions.ts";
 import { safariPermissionCheck } from "../../preview/BrowserImport/SafariPermission.ts";
@@ -308,6 +309,40 @@ export const openExternal = DesktopIpc.makeIpcMethod({
   handler: Effect.fn("desktop.ipc.window.openExternal")(function* (url) {
     const shell = yield* ElectronShell.ElectronShell;
     return yield* shell.openExternal(url);
+  }),
+});
+
+export const openLocalPath = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.OPEN_LOCAL_PATH_CHANNEL,
+  payload: Schema.Struct({ path: Schema.String, reveal: Schema.Boolean }),
+  result: Schema.Boolean,
+  handler: Effect.fn("desktop.ipc.window.openLocalPath")(function* (input, event) {
+    const platform = yield* HostProcess.HostProcessPlatform;
+    const electronWindow = yield* ElectronWindow.ElectronWindow;
+    const window = yield* electronWindow.main;
+    if (
+      platform !== "win32" ||
+      event === undefined ||
+      Option.isNone(window) ||
+      window.value.isDestroyed() ||
+      window.value.webContents.id !== event.sender.id ||
+      !/^(?:[a-z]:[\\/]|\\\\[^\\]+\\[^\\]+)/i.test(input.path)
+    ) {
+      return false;
+    }
+    const fs = yield* FileSystem.FileSystem;
+    if (!(yield* fs.exists(input.path))) return false;
+    if ((yield* fs.stat(input.path)).type === "Directory") {
+      if (yield* focusExistingWindowsFolder(input.path)) return true;
+      return (yield* Effect.promise(() => Electron.shell.openPath(input.path))) === "";
+    }
+    if (input.reveal) {
+      const path = yield* Path.Path;
+      if (yield* focusExistingWindowsFolder(path.dirname(input.path), input.path)) return true;
+      yield* Effect.sync(() => Electron.shell.showItemInFolder(input.path));
+      return true;
+    }
+    return (yield* Effect.promise(() => Electron.shell.openPath(input.path))) === "";
   }),
 });
 

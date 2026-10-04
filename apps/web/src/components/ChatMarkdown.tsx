@@ -154,6 +154,7 @@ import {
   resolveInlineCodeFileLinkMeta,
   resolveMarkdownFileLinkMeta,
   rewriteMarkdownFileUriHref,
+  isUnsupportedMarkdownFileLink,
   shouldOpenMarkdownFileLinkInBrowserByDefault,
   shouldOpenMarkdownFileLinkInEditor,
   type MarkdownFileLinkMeta,
@@ -1947,6 +1948,10 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
   revealLabel,
 }: MarkdownFileLinkProps) {
   const handleOpenInEditor = useCallback(() => {
+    if (threadRef && panelPath) {
+      onOpenInPanel(panelPath, line);
+      return;
+    }
     if (!onOpen) {
       return;
     }
@@ -1982,19 +1987,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
         );
       }
     })();
-  }, [onOpen, targetPath]);
-
-  const handleOpenInFilePreview = useCallback(() => {
-    if (threadRef && panelPath) {
-      onOpenInPanel(panelPath, line);
-      return;
-    }
-    if (onOpenMedia) {
-      onOpenMedia();
-      return;
-    }
-    handleOpenInEditor();
-  }, [handleOpenInEditor, line, onOpenInPanel, onOpenMedia, panelPath, threadRef]);
+  }, [line, onOpen, onOpenInPanel, panelPath, targetPath, threadRef]);
 
   const handleOpenInBrowser = useCallback(() => {
     if (!onOpenInBrowser) {
@@ -2072,6 +2065,18 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
     })();
   }, [onReveal, targetPath]);
 
+  const handleOpenInFilePreview = useCallback(() => {
+    if (threadRef && panelPath) {
+      onOpenInPanel(panelPath, line);
+      return;
+    }
+    if (onOpenMedia) {
+      onOpenMedia();
+      return;
+    }
+    handleOpenInEditor();
+  }, [handleOpenInEditor, line, onOpenInPanel, onOpenMedia, panelPath, threadRef]);
+
   const handleCopy = useCallback(
     (value: string, title: string) => {
       if (typeof window === "undefined" || !navigator.clipboard?.writeText) {
@@ -2120,7 +2125,9 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
         const clicked = await api.contextMenu.show(
           [
             ...(onOpenMedia ? ([{ id: "preview-media", label: "Preview media" }] as const) : []),
-            ...(onOpen ? ([{ id: "open", label: openInEditorMenuLabel }] as const) : []),
+            ...(onOpen || (threadRef && panelPath)
+              ? ([{ id: "open", label: openInEditorMenuLabel }] as const)
+              : []),
             ...(onOpenInBrowser
               ? ([{ id: "open-in-browser", label: "Open in integrated browser" }] as const)
               : []),
@@ -2172,7 +2179,9 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
       onOpen,
       onReveal,
       openInEditorMenuLabel,
+      panelPath,
       revealLabel,
+      threadRef,
       targetPath,
     ],
   );
@@ -2193,9 +2202,9 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
     [showFileContextMenu],
   );
 
-  const canOpenInEditor = onOpen !== undefined;
   const canOpenInBrowser = onOpenInBrowser !== undefined;
   const canOpenInPanel = threadRef !== undefined && Boolean(panelPath);
+  const canOpenInEditor = onOpen !== undefined || canOpenInPanel;
   const hasPrimaryAction = hasMarkdownFilePrimaryAction({
     canOpenInEditor,
     canOpenInBrowser,
@@ -2386,6 +2395,22 @@ function useChatMarkdownState({
   const openInEditor = useAtomCommand(shellEnvironment.openInEditor, {
     reportFailure: false,
   });
+  const openWithDefaultApplication = useCallback(
+    (targetPath: string) => {
+      if (environmentId === null) {
+        return Promise.resolve(
+          AsyncResult.failure<void, PreferredEditorEnvironmentRequiredError>(
+            Cause.fail(new PreferredEditorEnvironmentRequiredError({ targetPath })),
+          ),
+        );
+      }
+      return openInEditor({
+        environmentId,
+        input: { cwd: targetPath, editor: "file-manager" },
+      });
+    },
+    [environmentId, openInEditor],
+  );
   const revealInFileManagerLabel =
     environmentId !== null &&
     serverConfig?.shellRevealInFileManager === true &&
@@ -2655,11 +2680,16 @@ function useChatMarkdownState({
         mediaMimeTypeFromExtension(
           fileLinkMeta.basename.slice(fileLinkMeta.basename.lastIndexOf(".")),
         ) !== null;
+      const unsupportedFile = isUnsupportedMarkdownFileLink(fileLinkMeta.filePath);
+      const fileManagerAvailable = availableEditors.includes("file-manager");
       // Media outside the workspace keeps the expanded preview; other host
       // files (a report in a temp dir) open read-only in the files panel.
-      const panelPath =
-        fileLinkMeta.workspaceRelativePath ??
-        (!canPreviewMedia && isAbsolutePath(fileLinkMeta.filePath) ? fileLinkMeta.filePath : null);
+      const panelPath = unsupportedFile
+        ? null
+        : (fileLinkMeta.workspaceRelativePath ??
+          (!canPreviewMedia && isAbsolutePath(fileLinkMeta.filePath)
+            ? fileLinkMeta.filePath
+            : null));
 
       return (
         <MarkdownFileLink
@@ -2673,7 +2703,11 @@ function useChatMarkdownState({
           copyMarkdown={copyMarkdown}
           theme={resolvedTheme}
           threadRef={threadRef}
-          {...(canUseShellActions ? { onOpen: openInPreferredEditor } : {})}
+          {...(canUseShellActions && (!unsupportedFile || fileManagerAvailable)
+            ? {
+                onOpen: unsupportedFile ? openWithDefaultApplication : openInPreferredEditor,
+              }
+            : {})}
           onOpenInPanel={openFileInPanel}
           onOpenMedia={
             threadRef && canPreviewMedia
@@ -2698,9 +2732,11 @@ function useChatMarkdownState({
       );
     },
     [
+      availableEditors,
       canUseShellActions,
       fileLinkParentSuffixByPath,
       openFileInPanel,
+      openWithDefaultApplication,
       openInPreferredEditor,
       openMarkdownFileInPreview,
       openMarkdownMedia,
