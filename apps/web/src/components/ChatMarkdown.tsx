@@ -3323,7 +3323,7 @@ const CHAT_MARKDOWN_COMPONENTS = {
               it, so plain text never flashes before the highlighted version. */}
           <Suspense
             fallback={
-              <pre {...props} className="invisible" aria-hidden>
+              <pre {...props} className="invisible" aria-hidden data-markdown-code-pending="">
                 {children}
               </pre>
             }

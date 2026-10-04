@@ -507,18 +507,22 @@ export function isSidebarSubagentThread(thread: Pick<SidebarThreadSummary, "line
   return thread.lineage.relationshipToParent === "subagent";
 }
 
+export function filterSidebarVisibleThreads<
+  T extends Pick<SidebarThreadSummary, "archivedAt" | "lineage">,
+>(threads: readonly T[]): T[] {
+  return threads.filter((thread) => thread.archivedAt === null && !isSidebarSubagentThread(thread));
+}
+
 export function filterSidebarV2VisibleThreads<
   T extends Pick<SidebarThreadSummary, "archivedAt" | "lineage"> & {
     environmentId: string;
     projectId: string;
   },
 >(threads: readonly T[], scopedProjectKeys: ReadonlySet<string> | null): T[] {
-  return threads.filter(
+  return filterSidebarVisibleThreads(threads).filter(
     (thread) =>
-      thread.archivedAt === null &&
-      !isSidebarSubagentThread(thread) &&
-      (scopedProjectKeys === null ||
-        scopedProjectKeys.has(`${thread.environmentId}:${thread.projectId}`)),
+      scopedProjectKeys === null ||
+      scopedProjectKeys.has(`${thread.environmentId}:${thread.projectId}`),
   );
 }
 
