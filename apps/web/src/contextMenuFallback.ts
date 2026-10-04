@@ -263,6 +263,7 @@ export function showContextMenuFallback<T extends string>(
     const keyboardHandlers = new Map<HTMLButtonElement, (event: KeyboardEvent) => void>();
     let virtualFocusedButton: HTMLButtonElement | undefined;
     let hoveredButton: HTMLButtonElement | undefined;
+    let keyboardFocusNavigationActive = false;
     const focusButton = (button: HTMLButtonElement | undefined) => {
       if (!button) return;
       if (!options.preserveFocus) {
@@ -530,10 +531,16 @@ export function showContextMenuFallback<T extends string>(
         let openSubmenu: ((focusFirstItem?: boolean) => void) | undefined;
         if (!isDisabled) {
           let isHovered = false;
-          let isFocused = false;
+          let isKeyboardFocused = false;
           const updateHighlight = () => {
+            // Pointer hover and keyboard-driven focus both paint the row.
+            // Open-time focus and pointer-driven focus do not — they leave
+            // the menu quiet until the user actually engages with it.
             const isHighlighted =
-              isHovered || isFocused || (options.preserveFocus && virtualFocusedButton === button);
+              isHovered ||
+              isKeyboardFocused ||
+              (options.preserveFocus && virtualFocusedButton === button);
+            isHovered || (options.preserveFocus && virtualFocusedButton === button);
             button.style.background = isHighlighted
               ? isLeafDestructive
                 ? "color-mix(in srgb, var(--destructive) 10%, transparent)"
@@ -549,10 +556,14 @@ export function showContextMenuFallback<T extends string>(
           };
           highlightUpdates.set(button, updateHighlight);
           button.addEventListener("mouseenter", () => {
-            // Pointer hover transfers real DOM focus to the row, matching
-            // native menu behaviour where the highlighted row is also the
-            // document.activeElement. This is the trigger that lets keyboard
-            // activation (Enter/Space) act on the highlighted row.
+            // Pointer hover transfers real DOM focus to the row so keyboard
+            // activation still works, but `isKeyboardFocused` stays false so
+            // the highlight is purely visual. Blur whichever row currently
+            // owns focus so opening a nested submenu doesn't leave its first
+            // row focused.
+            if (document.activeElement && document.activeElement !== button) {
+              (document.activeElement as HTMLElement).blur();
+            }
             button.focus({ preventScroll: true });
             hoveredButton = button;
             isHovered = true;
@@ -567,11 +578,17 @@ export function showContextMenuFallback<T extends string>(
             updateHighlight();
           });
           button.addEventListener("focus", () => {
-            isFocused = true;
+            // `tabindex` is `0`, so DOM focus can also arrive from a
+            // pointer-driven call to `focusButton(...)` (open time, sibling
+            // mouseenter, ArrowLeft returning to the parent trigger). Treat
+            // those as silent — only real keyboard navigation should paint.
+            if (keyboardFocusNavigationActive) {
+              isKeyboardFocused = true;
+            }
             updateHighlight();
           });
           button.addEventListener("blur", () => {
-            isFocused = false;
+            isKeyboardFocused = false;
             updateHighlight();
           });
 
@@ -616,6 +633,7 @@ export function showContextMenuFallback<T extends string>(
           }
 
           const onButtonKeyDown = (event: KeyboardEvent) => {
+            keyboardFocusNavigationActive = true;
             switch (event.key) {
               case "ArrowDown":
                 event.preventDefault();
@@ -677,6 +695,22 @@ export function showContextMenuFallback<T extends string>(
       }
 
       menu.addEventListener("mouseenter", () => {
+        closeMenusFromLevel(level + 1);
+      });
+      // Mouse leaving this menu dismisses any nested menus below it so a
+      // parent row that was no longer hovered does not leave its submenu
+      // orphaned on screen. We only react when the pointer actually
+      // leaves the menu tree — moving into a nested submenu reports a
+      // `relatedTarget` that lives inside the submenu tree, which we
+      // explicitly skip.
+      menu.addEventListener("mouseleave", (event) => {
+        const related = event.relatedTarget as Node | null;
+        // Ignore moves into the parent menu or any sibling at the same level.
+        if (related) {
+          for (let l = 0; l <= level; l++) {
+            if (menuStack[l]?.contains(related)) return;
+          }
+        }
         closeMenusFromLevel(level + 1);
       });
 
