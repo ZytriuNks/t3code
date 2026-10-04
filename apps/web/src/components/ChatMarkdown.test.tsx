@@ -5,6 +5,7 @@ import { create, type ReactTestRenderer } from "react-test-renderer";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import { getSyntaxHighlighterPromise } from "../lib/syntaxHighlighting";
+import * as syntaxHighlighting from "../lib/syntaxHighlighting";
 import { GitHubIcon } from "./Icons";
 import { Button } from "./ui/button";
 import { setMarkdownTaskChecked } from "./files/filePreviewMode";
@@ -179,6 +180,34 @@ describe("ChatMarkdown favicon privacy", () => {
 });
 
 describe("ChatMarkdown streaming", () => {
+  it("marks pending code until the highlighter renders its text", async () => {
+    const highlighter = await getSyntaxHighlighterPromise("text");
+    let resolveHighlight!: (value: typeof highlighter) => void;
+    const pendingHighlight = new Promise<typeof highlighter>((resolve) => {
+      resolveHighlight = resolve;
+    });
+    vi.spyOn(syntaxHighlighting, "getSyntaxHighlighterPromise").mockReturnValue(pendingHighlight);
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    let renderer: ReactTestRenderer | undefined;
+    try {
+      await act(async () => {
+        renderer = create(<ChatMarkdown cwd={undefined} text={"```text\ncold panel code\n```"} />);
+      });
+      expect(renderer!.root.findAllByProps({ "data-markdown-code-pending": "" })).toHaveLength(1);
+      expect(renderer!.root.findAllByProps({ className: "chat-markdown-shiki" })).toHaveLength(0);
+      await act(async () => resolveHighlight(highlighter));
+      expect(renderer!.root.findAllByProps({ "data-markdown-code-pending": "" })).toHaveLength(0);
+      expect(
+        renderer!.root.findByProps({ className: "chat-markdown-shiki" }).props
+          .dangerouslySetInnerHTML.__html,
+      ).toContain("cold panel code");
+    } finally {
+      await act(() => renderer?.unmount());
+      vi.restoreAllMocks();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("runs only a complete single-line shell block after a click", async () => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     const onRunShellCommand = vi.fn();

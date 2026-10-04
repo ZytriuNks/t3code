@@ -385,40 +385,62 @@ describe("rightPanelStore", () => {
     });
   });
 
-  it.each([
-    { kind: "plan", isOpen: true },
-    { kind: "agents", isOpen: true },
-    { kind: "agents", isOpen: false },
-  ])("drops $kind with isOpen=$isOpen and falls back", ({ kind, isOpen }) => {
+  it.each([{ kind: "plan", isOpen: true }])(
+    "drops $kind with isOpen=$isOpen and falls back",
+    ({ kind, isOpen }) => {
+      expect(
+        migratePersistedRightPanelState({
+          byThreadKey: {
+            "env-1:thread-A": {
+              isOpen,
+              activeSurfaceId: kind,
+              surfaces: [{ id: kind, kind }],
+            },
+            "env-1:thread-B": {
+              isOpen,
+              activeSurfaceId: kind,
+              surfaces: [
+                { id: kind, kind },
+                { id: "diff", kind: "diff" },
+              ],
+            },
+          },
+        }),
+      ).toEqual({
+        byThreadKey: {
+          "env-1:thread-A": {
+            isOpen: false,
+            activeSurfaceId: null,
+            surfaces: [],
+          },
+          "env-1:thread-B": {
+            isOpen,
+            activeSurfaceId: "diff",
+            surfaces: [{ id: "diff", kind: "diff" }],
+          },
+        },
+        threadPanelVisibilityByThreadKey: {},
+      });
+    },
+  );
+
+  it("keeps the agents surface during persistence migration", () => {
     expect(
       migratePersistedRightPanelState({
         byThreadKey: {
           "env-1:thread-A": {
-            isOpen,
-            activeSurfaceId: kind,
-            surfaces: [{ id: kind, kind }],
-          },
-          "env-1:thread-B": {
-            isOpen,
-            activeSurfaceId: kind,
-            surfaces: [
-              { id: kind, kind },
-              { id: "diff", kind: "diff" },
-            ],
+            isOpen: true,
+            activeSurfaceId: "agents",
+            surfaces: [{ id: "agents", kind: "agents" }],
           },
         },
       }),
     ).toEqual({
       byThreadKey: {
         "env-1:thread-A": {
-          isOpen: false,
-          activeSurfaceId: null,
-          surfaces: [],
-        },
-        "env-1:thread-B": {
-          isOpen,
-          activeSurfaceId: "diff",
-          surfaces: [{ id: "diff", kind: "diff" }],
+          isOpen: true,
+          activeSurfaceId: "agents",
+          surfaces: [{ id: "agents", kind: "agents" }],
         },
       },
       threadPanelVisibilityByThreadKey: {},
@@ -765,6 +787,16 @@ describe("rightPanelStore", () => {
     useRightPanelStore.getState().toggle(refA, "preview");
     useRightPanelStore.getState().toggle(refA, "device");
     expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, refA)).toBe("device");
+  });
+
+  it("opens agents as a singleton surface", () => {
+    useRightPanelStore.getState().open(refA, "agents");
+    useRightPanelStore.getState().open(refA, "agents");
+    expect(selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA)).toEqual({
+      isOpen: true,
+      activeSurfaceId: "agents",
+      surfaces: [{ id: "agents", kind: "agents" }],
+    });
   });
 
   it("removeThread clears persisted state", () => {

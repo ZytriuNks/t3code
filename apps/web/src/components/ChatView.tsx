@@ -249,6 +249,8 @@ import { PullRequestDetailPanel } from "./pullRequest/PullRequestDetailPanel";
 import { PullRequestDetailGhost } from "./pullRequest/PullRequestGhosts";
 import { PullRequestsUnavailableState } from "./pullRequest/PullRequestsUnavailableState";
 import { RightPanelTabs } from "./RightPanelTabs";
+import { ThreadAgentsPanel } from "./ThreadAgentsPanel";
+import { SubagentConversationPanel } from "./SubagentConversationPanel";
 import { LinkPullRequestDialogHost } from "./pullRequest/LinkPullRequestDialog";
 import { ThreadPullRequestsPanel } from "./pullRequest/ThreadPullRequestsPanel";
 import { useDeviceState } from "~/state/device";
@@ -1593,6 +1595,13 @@ export default function ChatView(props: ChatViewProps) {
     readonly existingAttachments: ReadonlyArray<ContractChatAttachment>;
     readonly context?: import("@t3tools/contracts").OrchestrationMessageContext | undefined;
   } | null>(null);
+  const [embeddedSubagentRef, setEmbeddedSubagentRef] = useState<ScopedThreadRef | null>(null);
+  const [closingEmbeddedSubagentRef, setClosingEmbeddedSubagentRef] =
+    useState<ScopedThreadRef | null>(null);
+  useEffect(() => {
+    setEmbeddedSubagentRef(null);
+    setClosingEmbeddedSubagentRef(null);
+  }, [routeThreadKey]);
   const queuedEditDraftTargetFor = useCallback(
     (runId: RunId) => DraftId.make(`queued-edit:${scopedThreadKey(routeThreadRef)}:${runId}`),
     [routeThreadRef],
@@ -1881,6 +1890,7 @@ export default function ChatView(props: ChatViewProps) {
   const composerTimelineInsetRef = useRef(0);
   const composerRestingRef = useRef(false);
   const [scrollToEndClearance, setScrollToEndClearance] = useState(0);
+  const [subagentPanelBottom, setSubagentPanelBottom] = useState(0);
   const isAtEndRef = useRef(true);
   const isTimelineAtLogicalEnd = useCallback(
     () => resolveTimelineIsAtEnd(legendListRef.current?.getState()) ?? isAtEndRef.current,
@@ -2042,6 +2052,8 @@ export default function ChatView(props: ChatViewProps) {
   }, [parentSubagentEnvironmentId, parentSubagentThreadId]);
   const parentSubagentThread = useThreadShell(parentSubagentThreadRef);
   const parentSubagentProjection = useThreadProjection(parentSubagentThreadRef)?.projection ?? null;
+  const displayedEmbeddedSubagentRef = embeddedSubagentRef ?? closingEmbeddedSubagentRef;
+  const embeddedSubagentShell = useThreadShell(displayedEmbeddedSubagentRef);
   const parentThreadLink = useMemo(
     () =>
       parentSubagentThreadRef === null
@@ -4975,6 +4987,10 @@ export default function ChatView(props: ChatViewProps) {
     if (!activeThreadRef || !activeProject) return;
     useRightPanelStore.getState().open(activeThreadRef, "files");
   }, [activeProject, activeThreadRef]);
+  const addAgentsSurface = useCallback(() => {
+    if (!activeThreadRef || !isServerThread) return;
+    useRightPanelStore.getState().open(activeThreadRef, "agents");
+  }, [activeThreadRef, isServerThread]);
   const supportsThreadPullRequests =
     serverConfig?.environment.capabilities.threadPullRequests === true;
   const visiblePullRequests = visibleThreadPullRequests(
@@ -6447,6 +6463,14 @@ export default function ChatView(props: ChatViewProps) {
       const mainSurface = composerOverlayElement?.querySelector<HTMLElement>(
         '[data-chat-composer-main-surface="true"]',
       );
+      if (composerOverlayElement?.parentElement && mainSurface) {
+        setSubagentPanelBottom(
+          Math.ceil(
+            composerOverlayElement.parentElement.getBoundingClientRect().bottom -
+              mainSurface.getBoundingClientRect().top,
+          ),
+        );
+      }
       const button = composerOverlayElement?.parentElement?.querySelector<HTMLElement>(
         'button[aria-label="Scroll to end"]',
       );
@@ -6501,6 +6525,11 @@ export default function ChatView(props: ChatViewProps) {
       resizeObserver.disconnect();
     };
   }, [composerOverlayElement, publishComposerOverlayHeight, showScrollToBottom]);
+  useLayoutEffect(() => {
+    if (embeddedSubagentRef !== null && composerOverlayElement) {
+      publishComposerOverlayHeight(composerOverlayElement.getBoundingClientRect().height);
+    }
+  }, [embeddedSubagentRef, composerOverlayElement, publishComposerOverlayHeight]);
   const openPanelPullRequestUrl = useOpenPanelPullRequestUrl(activeThreadRef);
   const activeThreadReferenceCopyTarget = useMemo(
     () =>
@@ -7778,12 +7807,29 @@ export default function ChatView(props: ChatViewProps) {
 
   const onOpenRelatedThread = useCallback(
     (threadId: ThreadId) => {
+      const isDirectSubagent =
+        serverProjection?.subagents.some((subagent) => subagent.childThreadId === threadId) ??
+        false;
+      if (isDirectSubagent) {
+        setClosingEmbeddedSubagentRef(null);
+        setEmbeddedSubagentRef(scopeThreadRef(environmentId, threadId));
+        return;
+      }
       void navigate({
         to: "/$environmentId/$threadId",
         params: buildThreadRouteParams(scopeThreadRef(environmentId, threadId)),
       });
     },
-    [environmentId, navigate],
+    [environmentId, navigate, serverProjection],
+  );
+  const onOpenThreadRef = useCallback(
+    (threadRef: ScopedThreadRef) => {
+      void navigate({
+        to: "/$environmentId/$threadId",
+        params: buildThreadRouteParams(threadRef),
+      });
+    },
+    [navigate],
   );
 
   const onForkFromRun = useCallback(
@@ -10173,6 +10219,15 @@ export default function ChatView(props: ChatViewProps) {
           workspaceMutationId={workspaceMutationId}
         />
       </Suspense>
+    ) : renderedRightPanelSurface?.kind === "agents" ? (
+      <ThreadAgentsPanel
+        key={activeThreadKey}
+        environmentId={activeThread.environmentId}
+        threadId={activeThread.id}
+        projection={serverProjection}
+        shell={activeThreadShell}
+        onOpenThread={onOpenThreadRef}
+      />
     ) : renderedRightPanelSurface?.kind === "pull-request" && !pullRequestsCapabilityKnown ? (
       <PullRequestDetailGhost />
     ) : renderedRightPanelSurface?.kind === "pull-request" && !supportsPullRequests ? (
@@ -10486,6 +10541,17 @@ export default function ChatView(props: ChatViewProps) {
             activeProject={activeProject ?? null}
             rightPanelOpen={inlineRightPanelOwnsTitleBar}
             onNewThreadInProject={handleNewThreadInActiveProject}
+            parentThreadTitle={parentThreadLink?.title ?? null}
+            onOpenParentThread={
+              parentSubagentThreadRef === null
+                ? undefined
+                : () => {
+                    void navigate({
+                      to: "/$environmentId/$threadId",
+                      params: buildThreadRouteParams(parentSubagentThreadRef),
+                    });
+                  }
+            }
             {...(activeDraftLogicalProjectKey
               ? { onOpenProjectSettings: handleOpenDraftProjectSettings }
               : {})}
@@ -10643,8 +10709,42 @@ export default function ChatView(props: ChatViewProps) {
                   : { historyControls: threadHistoryControls })}
               />
 
+              {displayedEmbeddedSubagentRef !== null ? (
+                <div
+                  className="pointer-events-none absolute inset-x-0 top-4 z-30 flex min-h-0 ps-(--workspace-gutter-start) pe-(--workspace-gutter-end)"
+                  style={{ bottom: subagentPanelBottom + 16 }}
+                >
+                  <div className="pointer-events-auto mx-auto flex min-h-0 min-w-0 w-full max-w-(--chat-max-width)">
+                    <SubagentConversationPanel
+                      threadRef={displayedEmbeddedSubagentRef}
+                      mode="overlay"
+                      title={embeddedSubagentShell?.title ?? "Subagent conversation"}
+                      closing={closingEmbeddedSubagentRef !== null}
+                      onClose={() => {
+                        if (embeddedSubagentRef !== null) {
+                          setClosingEmbeddedSubagentRef(embeddedSubagentRef);
+                          setEmbeddedSubagentRef(null);
+                        }
+                      }}
+                      onClosed={() => setClosingEmbeddedSubagentRef(null)}
+                      onMaximize={() => {
+                        const target = displayedEmbeddedSubagentRef;
+                        if (target === null) return;
+                        setEmbeddedSubagentRef(null);
+                        setClosingEmbeddedSubagentRef(null);
+                        void navigate({
+                          to: "/$environmentId/$threadId",
+                          params: buildThreadRouteParams(target),
+                        });
+                      }}
+                      onOpenThread={onOpenThreadRef}
+                    />
+                  </div>
+                </div>
+              ) : null}
+
               {/* scroll to end pill — shown when user has scrolled away from the live edge */}
-              {showScrollToBottom && (
+              {showScrollToBottom && displayedEmbeddedSubagentRef === null && (
                 <div
                   className="chat-scroll-to-bottom pointer-events-none absolute z-30"
                   style={{ bottom: scrollToEndClearance - 4 }}
@@ -11078,6 +11178,7 @@ export default function ChatView(props: ChatViewProps) {
           onAddPullRequest={addPullRequestSurface}
           onAddPullRequests={addPullRequestsSurface}
           onAddDevice={addDeviceSurface}
+          onAddAgents={addAgentsSurface}
           browserAvailable={isPreviewSupportedInRuntime()}
           terminalAvailable={activeProject !== null}
           diffAvailable={isServerThread && isGitRepo}
@@ -11085,6 +11186,7 @@ export default function ChatView(props: ChatViewProps) {
           pullRequestAvailable={pullRequestSurfaceAvailable}
           pullRequestsAvailable={pullRequestsSurfaceAvailable}
           deviceAvailable={activeThreadRef !== null}
+          agentsAvailable={isServerThread && activeThreadRef !== null}
         >
           {rightPanelContent}
         </RightPanelTabs>
@@ -11132,6 +11234,7 @@ export default function ChatView(props: ChatViewProps) {
             onAddPullRequest={addPullRequestSurface}
             onAddPullRequests={addPullRequestsSurface}
             onAddDevice={addDeviceSurface}
+            onAddAgents={addAgentsSurface}
             browserAvailable={isPreviewSupportedInRuntime()}
             terminalAvailable={activeProject !== null}
             diffAvailable={isServerThread && isGitRepo}
@@ -11139,6 +11242,7 @@ export default function ChatView(props: ChatViewProps) {
             pullRequestAvailable={pullRequestSurfaceAvailable}
             pullRequestsAvailable={pullRequestsSurfaceAvailable}
             deviceAvailable={activeThreadRef !== null}
+            agentsAvailable={isServerThread && activeThreadRef !== null}
           >
             {rightPanelContent}
           </RightPanelTabs>

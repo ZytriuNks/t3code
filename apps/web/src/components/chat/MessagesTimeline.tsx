@@ -492,6 +492,7 @@ interface MessagesTimelineProps {
   onAnchorReady: (messageId: MessageId, anchorIndex: number) => void;
   onAnchorSizeChanged: (messageId: MessageId, size: number) => void;
   contentInsetEndAdjustment: number;
+  onInitialLayout?: (() => void) | undefined;
   onIsAtEndChange: (isAtEnd: boolean) => void;
   /**
    * Whether the timeline should keep pinning to the live edge as content
@@ -567,6 +568,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   onAnchorReady,
   onAnchorSizeChanged,
   contentInsetEndAdjustment,
+  onInitialLayout,
   onIsAtEndChange,
   onContentOverflowChange,
   liveFollowEnabled,
@@ -597,6 +599,13 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     rememberedPosition?.atEnd === false ? null : listIdentityKey,
   );
   const restoringThreadPosition = positionedThreadKey !== listIdentityKey;
+  const loadedThreadKeyRef = useRef<string | null>(null);
+  const initialLayoutSignaledThreadKeyRef = useRef<string | null>(null);
+  const signalInitialLayout = useCallback(() => {
+    if (initialLayoutSignaledThreadKeyRef.current === listIdentityKey) return;
+    initialLayoutSignaledThreadKeyRef.current = listIdentityKey;
+    onInitialLayout?.();
+  }, [listIdentityKey, onInitialLayout]);
   const prefersReducedMotion = useMediaQuery("(prefers-reduced-motion: reduce)");
   const listIdentityRef = useRef(listIdentityKey);
   const previousLatestRunRef = useRef(latestRun);
@@ -816,6 +825,16 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     worktreeSetup,
   ]);
   const rows = useStableRows(rawRows, listIdentityKey);
+  useLayoutEffect(() => {
+    if (rows.length !== 0) return;
+    loadedThreadKeyRef.current = listIdentityKey;
+    if (!restoringThreadPosition) signalInitialLayout();
+  }, [listIdentityKey, restoringThreadPosition, rows.length, signalInitialLayout]);
+  useLayoutEffect(() => {
+    if (loadedThreadKeyRef.current === listIdentityKey && !restoringThreadPosition) {
+      signalInitialLayout();
+    }
+  }, [listIdentityKey, restoringThreadPosition, signalInitialLayout]);
   // Run status/timestamps churn on every stream event; the shared row context
   // must not change with them or every timeline row re-renders per event.
   const runs = useStableHandoffRuns(runsProp);
@@ -965,6 +984,11 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     onExpandTurn: expandCitedRun,
     onManualNavigation,
   });
+  const onTimelineLoad = useCallback(() => {
+    onCitationListLoad();
+    loadedThreadKeyRef.current = listIdentityKey;
+    if (!restoringThreadPosition) signalInitialLayout();
+  }, [listIdentityKey, onCitationListLoad, restoringThreadPosition, signalInitialLayout]);
   const [minimapHasPersistentGutter, setMinimapHasPersistentGutter] = useState(false);
   const alwaysRender = citationAlwaysRender ?? restoringAlwaysRender;
   const [minimapHitStripWidth, setMinimapHitStripWidth] = useState(0);
@@ -1324,10 +1348,16 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     if (hideEmptyPlaceholder) {
       // Occupy the pane with the theme surface so a thread switch cannot
       // punch a hole through to the window chrome (white in light mode).
-      return <div className="h-full min-h-0 bg-background" data-timeline-loading="true" />;
+      return (
+        <div
+          className="h-full min-h-0 bg-background"
+          data-timeline-loading="true"
+          data-timeline-empty="true"
+        />
+      );
     }
     return (
-      <div className="flex h-full items-center justify-center">
+      <div className="flex h-full items-center justify-center" data-timeline-empty="true">
         <p className="text-sm text-muted-foreground/30">
           Send a message to start the conversation.
         </p>
@@ -1342,6 +1372,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
           ref={setTimelineViewportElement}
           className="relative h-full min-h-0"
           data-assistant-citation-viewport="true"
+          data-timeline-empty={rows.length === 0 ? "true" : undefined}
         >
           {onCiteAssistantText && citationThreadRef ? (
             <AssistantSelectionToolbar
@@ -1362,7 +1393,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
             // Legend needs a data refresh to mount new pins without a scroll event.
             dataVersion={readyCitationRequest?.key ?? listIdentityKey}
             {...(alwaysRender ? { alwaysRender } : {})}
-            onLoad={onCitationListLoad}
+            onLoad={onTimelineLoad}
             {...(anchoredEndSpace ? { anchoredEndSpace } : {})}
             contentInsetEndAdjustment={anchoredEndSpace ? contentInsetEndAdjustment : 0}
             maintainScrollAtEnd={

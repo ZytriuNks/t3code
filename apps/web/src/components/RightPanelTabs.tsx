@@ -14,6 +14,7 @@ import type {
 } from "@t3tools/contracts";
 import { getTerminalLabel } from "@t3tools/shared/terminalLabels";
 import {
+  Bot,
   Smartphone,
   ChevronDown,
   ChevronLeft,
@@ -123,6 +124,7 @@ interface RightPanelTabsProps {
   onAddPullRequest: () => void;
   onAddPullRequests: () => void;
   onAddDevice: () => void;
+  onAddAgents: () => void;
   browserAvailable: boolean;
   terminalAvailable: boolean;
   diffAvailable: boolean;
@@ -130,6 +132,7 @@ interface RightPanelTabsProps {
   pullRequestAvailable: boolean;
   pullRequestsAvailable: boolean;
   deviceAvailable: boolean;
+  agentsAvailable: boolean;
   pullRequestStatusSeeds?: Readonly<Record<string, PullRequestTabStatusSeed>>;
   children: ReactNode;
 }
@@ -158,6 +161,7 @@ const SURFACE_DISABLED_REASONS = {
   pullRequest: "This thread's branch has no pull request yet.",
   pullRequests: "No linked pull requests are available for this thread.",
   device: "Devices are only available from a thread.",
+  agents: "Agents are only available from a server thread.",
 } as const;
 
 /** Overlays that must win over the launcher's letter shortcuts. */
@@ -181,6 +185,7 @@ const SURFACE_UNAVAILABLE_HINTS = {
   pullRequest: "No pull request on this branch yet.",
   pullRequests: "No linked pull requests available.",
   device: "Available from a thread.",
+  agents: "Available from a server thread.",
 } as const;
 
 type TabContextMenuAction =
@@ -320,6 +325,7 @@ function RightPanelEmptyState(props: {
   onAddPullRequest: () => void;
   onAddPullRequests: () => void;
   onAddDevice: () => void;
+  onAddAgents: () => void;
   browserAvailable: boolean;
   terminalAvailable: boolean;
   diffAvailable: boolean;
@@ -327,6 +333,7 @@ function RightPanelEmptyState(props: {
   pullRequestAvailable: boolean;
   pullRequestsAvailable: boolean;
   deviceAvailable: boolean;
+  agentsAvailable: boolean;
 }) {
   // -1 means no highlight: it only appears on hover or arrow use.
   const [highlight, setHighlight] = useState(-1);
@@ -388,6 +395,14 @@ function RightPanelEmptyState(props: {
       available: props.deviceAvailable,
       disabledReason: SURFACE_UNAVAILABLE_HINTS.device,
       onClick: props.onAddDevice,
+    },
+    {
+      label: "Agents",
+      icon: Bot,
+      shortcut: "A",
+      available: props.agentsAvailable,
+      disabledReason: SURFACE_UNAVAILABLE_HINTS.agents,
+      onClick: props.onAddAgents,
     },
   ] as const;
 
@@ -596,6 +611,8 @@ function surfaceTitle(
       return `#${surface.number}`;
     case "pull-requests":
       return "Pull requests";
+    case "agents":
+      return "Agents";
     case "device":
       return surface.title ?? surface.target?.name ?? "Device";
     case "preview": {
@@ -679,6 +696,8 @@ function SurfaceIcon({
       );
     case "pull-requests":
       return <PullRequestGlyph.link className="size-3 shrink-0" />;
+    case "agents":
+      return <Bot className="size-3 shrink-0" />;
     case "device":
       return surface.target?.platform === "ios" ? (
         <AppleIcon className="size-3 shrink-0" />
@@ -888,6 +907,14 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
       available: props.deviceAvailable,
       disabledReason: SURFACE_DISABLED_REASONS.device,
       onClick: props.onAddDevice,
+    },
+    {
+      label: "Agents",
+      icon: Bot,
+      shortcut: "A",
+      available: props.agentsAvailable,
+      disabledReason: SURFACE_DISABLED_REASONS.agents,
+      onClick: props.onAddAgents,
     },
   ] as const;
 
@@ -1372,6 +1399,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
             onAddPullRequest={props.onAddPullRequest}
             onAddPullRequests={props.onAddPullRequests}
             onAddDevice={props.onAddDevice}
+            onAddAgents={props.onAddAgents}
             browserAvailable={props.browserAvailable}
             terminalAvailable={props.terminalAvailable}
             diffAvailable={props.diffAvailable}
@@ -1379,6 +1407,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
             pullRequestAvailable={props.pullRequestAvailable}
             pullRequestsAvailable={props.pullRequestsAvailable}
             deviceAvailable={props.deviceAvailable}
+            agentsAvailable={props.agentsAvailable}
           />
         ) : (
           props.children

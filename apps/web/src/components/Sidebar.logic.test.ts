@@ -4,6 +4,7 @@ import { defaultAnimateLayoutChanges, type AnimateLayoutChanges } from "@dnd-kit
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/unstable/reactivity";
 import {
+  applySidebarThreadDrop,
   animateSidebarLayoutChanges,
   archiveSelectedThreadEntries,
   buildBulkTitleRegenerationContextMenuItem,
@@ -12,6 +13,7 @@ import {
   createThreadJumpHintVisibilityController,
   deleteSelectedThreadEntries,
   filterSidebarProjectScopeItems,
+  filterSidebarVisibleThreads,
   filterSidebarV2VisibleThreads,
   formatWorkingDurationLabel,
   getFallbackThreadIdAfterDelete,
@@ -29,10 +31,11 @@ import {
   resolveAdjacentThreadId,
   resolveProjectStatusIndicator,
   resolveSidebarRowAccessibility,
+  resolveSidebarStageBadgeLabel,
   resolveSidebarThreadStatus,
+  resolveSidebarThreadSection,
   resolveSidebarV2TopStatus,
   resolveThreadLastVisitedAt,
-  resolveThreadRowClassName,
   resolveThreadStatusPill,
   resolveWorkingStartedAt,
   searchSidebarThreads,
@@ -41,15 +44,12 @@ import {
   shouldRecedeSidebarThread,
   sortLogicalProjectsForSidebar,
   resolveSidebarDropTarget,
-  pinOrderKeyBetween,
-  planPinnedReorder,
   planSidebarThreadDrop,
   sidebarMarkerId,
   sidebarListItemId,
   sortPinnedThreadsForSidebar,
   sortProjectsForSidebar,
   sortScopedProjectsForSidebar,
-  sortSettledThreadsForSidebar,
   sortSidebarV2ProjectGroups,
   sortThreadsForSidebar,
   shouldCreateNewThreadInCurrentProject,
@@ -67,6 +67,7 @@ import {
   OrchestrationLatestTurn,
   ProjectId,
   ProviderInstanceId,
+  RunId,
   ThreadId,
 } from "@t3tools/contracts";
 
@@ -74,6 +75,7 @@ import {
   DEFAULT_INTERACTION_MODE,
   DEFAULT_RUNTIME_MODE,
   type Project,
+  type SidebarThreadSummary,
   type Thread,
 } from "../types";
 import { makeThreadFixture, type ThreadFixtureOverrides } from "../test-fixtures";
@@ -403,6 +405,25 @@ describe("resolveSidebarStageBadgeLabel", () => {
 });
 
 describe("sidebar thread lineage helpers", () => {
+  it("filters subagents from the shared sidebar thread collection", () => {
+    const parentId = ThreadId.make("thread-parent");
+    const visible = makeThreadFixture({ id: parentId });
+    const subagent = makeThreadFixture({
+      id: ThreadId.make("thread-subagent"),
+      lineage: {
+        rootThreadId: parentId,
+        parentThreadId: parentId,
+        relationshipToParent: "subagent",
+      },
+    });
+    const archived = makeThreadFixture({
+      id: ThreadId.make("thread-archived"),
+      archivedAt: "2026-01-02T00:00:00.000Z",
+    });
+
+    expect(filterSidebarVisibleThreads([visible, subagent, archived])).toEqual([visible]);
+  });
+
   it("keeps only top-level, unarchived threads in the Sidebar V2 project scope", () => {
     const parentId = ThreadId.make("thread-parent");
     const projectId = ProjectId.make("project-visible");
@@ -1775,6 +1796,7 @@ describe("applySidebarThreadDrop", () => {
     settledOverride: null,
     unsettledAt: null,
     ...overrides,
+    latestRun: null,
   });
   const newer = thread({ id: ThreadId.make("newer"), createdAt: "2026-03-09T11:00:00.000Z" });
 

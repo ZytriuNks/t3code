@@ -328,6 +328,106 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   }
 }
 
+.subagent-conversation-overlay {
+  border: 1px solid var(--chat-composer-outline);
+}
+
+.subagent-conversation-panel[data-subagent-panel-ready="false"] {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.subagent-conversation-panel[data-subagent-panel-ready="true"] {
+  visibility: visible;
+}
+
+.subagent-conversation-panel[data-subagent-panel-ready="false"] .chat-markdown[data-streaming] > *,
+.subagent-conversation-panel[data-subagent-panel-ready="false"]
+  .chat-markdown[data-streaming]
+  .chat-markdown-shiki {
+  transition: none;
+}
+
+/* Keep the Shell and its backdrop-filter out of the animated compositing layer.
+   The material is visible on the first frame; only the already-painted content
+   moves in, so the entrance cannot flash an unblurred panel. */
+.subagent-conversation-overlay-content {
+  transform-origin: center bottom;
+}
+
+.subagent-conversation-overlay[data-subagent-panel-ready="true"]
+  > .subagent-conversation-overlay-content {
+  animation: subagent-conversation-enter 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.subagent-conversation-overlay[data-subagent-panel-closing="true"] {
+  pointer-events: none;
+  animation: subagent-conversation-surface-exit 120ms linear forwards;
+}
+
+.subagent-conversation-overlay[data-subagent-panel-closing="true"]
+  > .subagent-conversation-overlay-content {
+  animation: subagent-conversation-exit 120ms cubic-bezier(0.4, 0, 1, 1) forwards;
+}
+
+@keyframes subagent-conversation-enter {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes subagent-conversation-exit {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+  to {
+    opacity: 0;
+    transform: translateY(8px) scale(0.985);
+  }
+}
+
+@keyframes subagent-conversation-surface-exit {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .subagent-conversation-overlay[data-subagent-panel-ready="true"]
+    > .subagent-conversation-overlay-content {
+    animation: none;
+  }
+
+  .subagent-conversation-overlay[data-subagent-panel-closing="true"]
+    > .subagent-conversation-overlay-content {
+    animation: subagent-conversation-exit 1ms linear forwards;
+  }
+
+  .subagent-conversation-overlay[data-subagent-panel-closing="true"] {
+    animation: subagent-conversation-surface-exit 1ms linear forwards;
+  }
+}
+
+/* The Shell already supplies the one backdrop-filter for this pane. Keep the
+   nested message and code surfaces translucent so that material shows through
+   without stacking a second blur layer. */
+.subagent-conversation-overlay .bg-message {
+  background-color: color-mix(in srgb, var(--message-surface) 48%, transparent);
+}
+
+.subagent-conversation-overlay .chat-markdown-codeblock {
+  background-color: color-mix(in srgb, var(--code-background) 58%, transparent) !important;
+}
+
 @utility alert-glass {
   --alert-glass-tint: transparent;
   background:

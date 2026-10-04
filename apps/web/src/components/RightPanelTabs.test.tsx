@@ -1,5 +1,6 @@
 import { EnvironmentId, type ThreadPullRequestLink } from "@t3tools/contracts";
 import type { DesktopPreviewFavicon, PreviewSessionSnapshot } from "@t3tools/contracts";
+import type { RightPanelSurface } from "~/rightPanelStore";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -94,13 +95,19 @@ function renderTabs(
   second?: DesktopPreviewFavicon,
   audio?: { audible?: boolean; audioMuted?: boolean },
   previewRuntimeTabId: ((tabId: string) => string) | null = (tabId) => `runtime:${tabId}`,
+  options: { empty?: boolean; agentsAvailable?: boolean } = {},
 ) {
+  const surfaces: readonly RightPanelSurface[] = options.empty
+    ? []
+    : second
+      ? [previewSurface, secondSurface]
+      : [previewSurface];
   return renderToStaticMarkup(
     <RightPanelTabs
       mode="inline"
-      surfaces={second ? [previewSurface, secondSurface] : [previewSurface]}
+      surfaces={surfaces}
       environmentId={null}
-      activeSurfaceId={previewSurface.id}
+      activeSurfaceId={options.empty ? null : previewSurface.id}
       pendingSurfaceIds={new Set()}
       previewSessions={sessions}
       desktopByTabId={{
@@ -123,6 +130,7 @@ function renderTabs(
       onAddDiff={() => undefined}
       onAddFiles={() => undefined}
       onAddDevice={() => undefined}
+      onAddAgents={() => undefined}
       browserAvailable
       terminalAvailable={false}
       diffAvailable={false}
@@ -130,11 +138,22 @@ function renderTabs(
       pullRequestAvailable={false}
       pullRequestsAvailable={false}
       deviceAvailable={false}
+      agentsAvailable={options.agentsAvailable ?? false}
     >
       <div>content</div>
     </RightPanelTabs>,
   );
 }
+
+describe("Agents surface entry", () => {
+  it("appears in the empty launcher when a server thread is active", () => {
+    const html = renderTabs(null, undefined, undefined, undefined, {
+      empty: true,
+      agentsAvailable: true,
+    });
+    expect(html).toContain("Agents");
+  });
+});
 
 describe("RightPanelTabs preview favicon", () => {
   it("prefers a live capture and never asks Google about a private hostname", () => {

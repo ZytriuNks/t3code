@@ -19,6 +19,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { create, type ReactTestRenderer } from "react-test-renderer";
 import { shouldUseRestingComposerLayout } from "../composerFooterLayout";
 import { useComposerFocusState } from "./useComposerFocusState";
+import { rememberTimelinePosition } from "./timelineScrollAnchoring";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import type { LegendListRef } from "@legendapp/list/react";
 
@@ -26,6 +27,7 @@ const activityTestState = vi.hoisted(() => ({
   expanded: false,
   expandedRuns: false,
   subagentTooltips: false,
+  listOnLoad: null as (() => void) | null,
 }));
 
 // Expose tooltip contents in the renderer without requiring a browser portal.
@@ -82,6 +84,7 @@ beforeEach(() => {
   activityTestState.subagentTooltips = false;
   activityTestState.expanded = false;
   activityTestState.expandedRuns = false;
+  activityTestState.listOnLoad = null;
 });
 
 vi.mock("@legendapp/list/react", async () => {
@@ -119,8 +122,10 @@ vi.mock("@legendapp/list/react", async () => {
         };
     className?: string;
     contentInsetEndAdjustment?: number;
+    onLoad?: () => void;
     ref?: Ref<LegendListRef>;
   }) => {
+    activityTestState.listOnLoad = props.onLoad ?? null;
     if (props.anchoredEndSpace) {
       props.anchoredEndSpace.onSizeChanged?.(240);
       props.anchoredEndSpace.onReady?.({ anchorIndex: props.anchoredEndSpace.anchorIndex });
@@ -362,6 +367,114 @@ function buildSnapShotTimelineEntry(previewUrl?: string) {
 }
 
 describe("MessagesTimeline", () => {
+  it("signals initial layout after a populated list loads", async () => {
+    const onInitialLayout = vi.fn();
+    let renderer: ReactTestRenderer | null = null;
+    try {
+      await act(() => {
+        renderer = create(
+          <MessagesTimeline
+            {...buildProps()}
+            timelineEntries={[buildAssistantTimelineEntry("Ready")]}
+            onInitialLayout={onInitialLayout}
+          />,
+        );
+      });
+      expect(onInitialLayout).not.toHaveBeenCalled();
+      expect(activityTestState.listOnLoad).not.toBeNull();
+      await act(() => {
+        activityTestState.listOnLoad?.();
+      });
+      expect(onInitialLayout).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(() => renderer?.unmount());
+    }
+  });
+
+  it.each(["before", "after"] as const)(
+    "waits for the saved scroll position to settle when the list loads %s restoration",
+    async (loadOrder) => {
+      const frames = new Map<number, FrameRequestCallback>();
+      let nextFrame = 0;
+      vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+        frames.set(++nextFrame, callback);
+        return nextFrame;
+      });
+      vi.stubGlobal("cancelAnimationFrame", (frame: number) => frames.delete(frame));
+      const flushFrame = () =>
+        act(() => {
+          const callbacks = [...frames.values()];
+          frames.clear();
+          callbacks.forEach((callback) => callback(0));
+        });
+      const props = buildProps();
+      props.routeThreadKey = `environment-local:restore-before-reveal-${loadOrder}`;
+      rememberTimelinePosition(props.routeThreadKey, {
+        rowId: "entry-1",
+        offsetWithinRow: 24,
+        scrollOffset: 504,
+        atEnd: false,
+      });
+      const viewport = {
+        scrollTop: 0,
+        scrollHeight: 1200,
+        clientHeight: 300,
+        getBoundingClientRect: () => ({ top: 0 }),
+        addEventListener: () => {},
+        removeEventListener: () => {},
+        ownerDocument: {
+          addEventListener: () => {},
+          removeEventListener: () => {},
+        },
+      };
+      props.listRef.current = {
+        getState: () => ({
+          indexByKey: () => 0,
+          elementAtIndex: () => ({
+            getBoundingClientRect: () => ({ top: 480 - viewport.scrollTop }),
+          }),
+        }),
+        getScrollableNode: () => viewport,
+        scrollToIndex: async () => {
+          viewport.scrollTop = 200;
+        },
+        scrollToOffset: async ({ offset }: { offset: number }) => {
+          viewport.scrollTop = offset;
+        },
+      } as unknown as LegendListRef;
+      const onInitialLayout = vi.fn(() => {
+        expect(viewport.scrollTop).toBe(504);
+      });
+      let renderer: ReactTestRenderer | null = null;
+      try {
+        await act(() => {
+          renderer = create(
+            <MessagesTimeline
+              {...props}
+              timelineEntries={[buildAssistantTimelineEntry("Saved response")]}
+              onInitialLayout={onInitialLayout}
+            />,
+          );
+        });
+        if (loadOrder === "before") await act(() => activityTestState.listOnLoad?.());
+        expect(onInitialLayout).not.toHaveBeenCalled();
+        await flushFrame();
+        expect(viewport.scrollTop).toBe(504);
+        expect(onInitialLayout).not.toHaveBeenCalled();
+        await flushFrame();
+        expect(onInitialLayout).not.toHaveBeenCalled();
+        await flushFrame();
+        if (loadOrder === "after") {
+          expect(onInitialLayout).not.toHaveBeenCalled();
+          await act(() => activityTestState.listOnLoad?.());
+        }
+        expect(onInitialLayout).toHaveBeenCalledTimes(1);
+      } finally {
+        await act(() => renderer?.unmount());
+      }
+    },
+  );
+
   it("shows a local queued message with send and cancel actions", async () => {
     const queuedMessage: QueuedComposerMessage = {
       id: "queued-1",

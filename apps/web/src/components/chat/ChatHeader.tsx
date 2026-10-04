@@ -42,6 +42,8 @@ interface ChatHeaderProps {
   rightPanelOpen: boolean;
   onNewThreadInProject: () => void;
   onOpenProjectSettings?: (() => void) | undefined;
+  parentThreadTitle?: string | null;
+  onOpenParentThread?: (() => void) | undefined;
 }
 
 /**
@@ -74,6 +76,8 @@ export const ChatHeader = memo(function ChatHeader({
   rightPanelOpen,
   onNewThreadInProject,
   onOpenProjectSettings,
+  parentThreadTitle = null,
+  onOpenParentThread,
 }: ChatHeaderProps) {
   const activeProjectName = activeProject?.title;
   const activeProjectCwd = activeProject?.workspaceRoot ?? null;
@@ -264,6 +268,25 @@ export const ChatHeader = memo(function ChatHeader({
                 </TooltipTrigger>
                 <TooltipPopup side="top">New thread in {activeProjectName}</TooltipPopup>
               </Tooltip>
+            </WorkspaceBreadcrumbItem>
+            <WorkspaceBreadcrumbSeparator>
+              <WorkspaceBreadcrumbText>/</WorkspaceBreadcrumbText>
+            </WorkspaceBreadcrumbSeparator>
+          </>
+        ) : null}
+        {parentThreadTitle !== null ? (
+          <>
+            <WorkspaceBreadcrumbItem className="min-w-0 shrink">
+              <button
+                type="button"
+                aria-label={`Open parent conversation ${parentThreadTitle}`}
+                onClick={onOpenParentThread}
+                className="inline-flex min-w-0 max-w-40 cursor-pointer rounded-sm text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <WorkspaceBreadcrumbText className="truncate">
+                  {parentThreadTitle}
+                </WorkspaceBreadcrumbText>
+              </button>
             </WorkspaceBreadcrumbItem>
             <WorkspaceBreadcrumbSeparator>
               <WorkspaceBreadcrumbText>/</WorkspaceBreadcrumbText>
