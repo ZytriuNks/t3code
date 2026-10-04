@@ -569,6 +569,7 @@ const resolveEditorLaunch = Effect.fn("resolveEditorLaunch")(function* (
 /** Use the Unicode Shell API: Explorer's /select command can silently do nothing. */
 export function buildFileExplorerRevealPowerShellSource(target: string): string {
   return `$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 $target = ${escapePowerShellStringLiteral(target)}
 try {
 $target = [System.IO.Path]::GetFullPath($target)
@@ -583,9 +584,10 @@ public static class T3FileExplorerReveal {
   [DllImport("shell32.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
   private static extern int SHParseDisplayName(string name, IntPtr bindingContext, out IntPtr item, uint attributes, out uint resultAttributes);
   [DllImport("shell32.dll")]
-  private static extern int SHOpenFolderAndSelectItems(IntPtr item, uint count, IntPtr children, uint flags);
+  private static extern int SHOpenFolderAndSelectItems(IntPtr folder, uint count, [MarshalAs(UnmanagedType.LPArray, SizeParamIndex = 1)] IntPtr[] children, uint flags);
   public static void Reveal(string target) {
     IntPtr item = IntPtr.Zero;
+    IntPtr folder = IntPtr.Zero;
     uint attributes;
     int comResult = CoInitializeEx(IntPtr.Zero, 0x2);
     const int RpcEChangedMode = unchecked((int)0x80010106);
@@ -597,8 +599,17 @@ public static class T3FileExplorerReveal {
         Marshal.ThrowExceptionForHR(comResult);
       }
       Marshal.ThrowExceptionForHR(SHParseDisplayName(target, IntPtr.Zero, out item, 0, out attributes));
-      Marshal.ThrowExceptionForHR(SHOpenFolderAndSelectItems(item, 0, IntPtr.Zero, 0));
+      string parent = System.IO.Path.GetDirectoryName(target.TrimEnd(System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar));
+      if (String.IsNullOrEmpty(parent)) {
+        Marshal.ThrowExceptionForHR(SHOpenFolderAndSelectItems(item, 0, null, 0));
+      } else {
+        // Match Electron's explicit parent-and-selection form. The single-item
+        // cidl=0 form can return S_OK without opening Explorer on some hosts.
+        Marshal.ThrowExceptionForHR(SHParseDisplayName(parent, IntPtr.Zero, out folder, 0, out attributes));
+        Marshal.ThrowExceptionForHR(SHOpenFolderAndSelectItems(folder, 1, new IntPtr[] { item }, 0));
+      }
     } finally {
+      if (folder != IntPtr.Zero) Marshal.FreeCoTaskMem(folder);
       if (item != IntPtr.Zero) Marshal.FreeCoTaskMem(item);
       if (comResult >= 0) CoUninitialize();
     }
@@ -726,11 +737,17 @@ const launchAndUnref = Effect.fn("externalLauncher.launchAndUnref")(function* (
   yield* spawner.spawn(command).pipe(
     Effect.flatMap((handle) =>
       launch.waitForExit
-        ? handle.exitCode.pipe(
-            Effect.flatMap((code) =>
+        ? Effect.all([handle.exitCode, handle.stderr.pipe(Stream.decodeText(), Stream.mkString)], {
+            concurrency: "unbounded",
+          }).pipe(
+            Effect.flatMap(([code, stderr]) =>
               code === 0
                 ? Effect.void
-                : Effect.fail(new Error(`Launcher exited with code ${code}`)),
+                : Effect.fail({
+                    message: `Launcher exited with code ${code}`,
+                    exitCode: code,
+                    stderr: stderr.trim().slice(0, 4096),
+                  }),
             ),
           )
         : handle.unref,
@@ -784,7 +801,7 @@ const launchEditorProcess = Effect.fn("externalLauncher.launchEditorProcess")(fu
         stdin: "ignore",
         stdout: "ignore",
         stderr: "ignore",
-        ...(launch.waitForExit ? { detached: false, windowsHide: true } : {}),
+        ...(launch.waitForExit ? { detached: false, windowsHide: true, stderr: "pipe" } : {}),
       },
     },
     (cause) =>
