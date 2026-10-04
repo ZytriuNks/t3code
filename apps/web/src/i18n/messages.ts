@@ -313,6 +313,12 @@ export const EN_MESSAGES = {
     "Ask before deleting a thread and its chat history.",
   "settings.general.confirmDelete.ariaLabel": "Confirm thread deletion",
   "settings.general.confirmDelete.resetLabel": "delete confirmation",
+  "settings.general.hideUnavailableContextMenuItems.description":
+    "Hide unavailable entries from context menus instead of showing them disabled.",
+  "settings.general.hideUnavailableContextMenuItems.ariaLabel":
+    "Hide unavailable context menu items",
+  "settings.general.hideUnavailableContextMenuItems.resetLabel":
+    "hide unavailable context menu items",
   "settings.general.confirmQuit.description": "Hold mode also quits on two quick presses.",
   "settings.general.confirmQuit.ariaLabel": "Quit shortcut behavior",
   "settings.general.confirmQuit.resetLabel": "quit shortcut behavior",
@@ -2861,6 +2867,10 @@ export const ZH_CN_MESSAGES = {
   "settings.general.confirmDelete.description": "删除线程及其聊天记录前先询问。",
   "settings.general.confirmDelete.ariaLabel": "确认删除线程",
   "settings.general.confirmDelete.resetLabel": "删除确认",
+  "settings.general.hideUnavailableContextMenuItems.description":
+    "右键菜单中不显示不可用的条目,而不是以灰态展示。",
+  "settings.general.hideUnavailableContextMenuItems.ariaLabel": "隐藏不可用的右键菜单项",
+  "settings.general.hideUnavailableContextMenuItems.resetLabel": "隐藏不可用的右键菜单项",
   "settings.general.confirmQuit.description": "长按模式下，快速按两次也会退出。",
   "settings.general.confirmQuit.ariaLabel": "退出快捷键行为",
   "settings.general.confirmQuit.resetLabel": "退出快捷键行为",

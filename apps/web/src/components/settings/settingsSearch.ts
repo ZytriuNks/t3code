@@ -530,6 +530,14 @@ const SETTINGS_SEARCH_ITEM_DEFINITIONS = [
     searchTerms: ["ask before thread chat history"],
   },
   {
+    id: "hide-unavailable-context-menu-items",
+    title: "Hide unavailable context menu items",
+    to: "/settings/general",
+    searchTerms: [
+      "right click context menu items unavailable disabled greyed hidden hide show filter",
+    ],
+  },
+  {
     id: "quit-confirmation",
     title: "Quit shortcut",
     to: "/settings/general",

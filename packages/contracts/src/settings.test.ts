@@ -20,6 +20,15 @@ const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
 
+describe("ClientSettings context menu visibility", () => {
+  it("defaults to showing unavailable context menu items", () => {
+    expect(decodeClientSettings({}).hideUnavailableContextMenuItems).toBe(false);
+    expect(decodeClientSettingsPatch({ hideUnavailableContextMenuItems: true })).toEqual({
+      hideUnavailableContextMenuItems: true,
+    });
+  });
+});
+
 describe("ServerSettings response streaming", () => {
   it("defaults to paragraph buffering", () => {
     expect(decodeServerSettings({}).responseStreamingMode).toBe("paragraph");

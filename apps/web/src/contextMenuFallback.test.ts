@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
+import type { DesktopSystemContextMenuRequest } from "@t3tools/contracts";
+import { setHideUnavailableContextMenuItems } from "./contextMenuPreferences";
 import { dismissContextMenu, showContextMenuFallback } from "./contextMenuFallback";
 
 type FakeListener = (event: FakeDomEvent) => void;
@@ -186,6 +188,7 @@ function findButton(label: string): FakeElement | undefined {
 }
 
 beforeEach(() => {
+  setHideUnavailableContextMenuItems(false);
   vi.stubGlobal("document", new FakeDocument());
   vi.stubGlobal("HTMLElement", FakeElement);
   vi.stubGlobal("window", {
@@ -215,6 +218,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  setHideUnavailableContextMenuItems(false);
   vi.unstubAllGlobals();
 });
 
@@ -247,6 +251,128 @@ describe("showContextMenuFallback", () => {
     await expect(selectionPromise).resolves.toBe("rename");
   });
 
+  it.each(["delete", "remove:project-a"])(
+    "highlights destructive action %s immediately on hover and focus",
+    async (id) => {
+      const selectionPromise = showContextMenuFallback([
+        { id: "rename", label: "Rename" },
+        { id, label: "Remove", destructive: true },
+      ]);
+      const renameButton = findButton("Rename");
+      const removeButton = findButton("Remove");
+      expect(removeButton?.style.background).not.toBe(
+        "color-mix(in srgb, var(--destructive) 10%, transparent)",
+      );
+      removeButton?.dispatchEvent(new MouseEvent("mouseenter"));
+      expect(removeButton?.style.background).toBe(
+        "color-mix(in srgb, var(--destructive) 10%, transparent)",
+      );
+      expect(removeButton?.style.color).toBe("var(--destructive-foreground)");
+      renameButton?.focus();
+      removeButton?.dispatchEvent(new MouseEvent("mouseleave"));
+      expect(removeButton?.style.background).toBe("transparent");
+      renameButton?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown" }));
+      expect(removeButton?.style.background).toBe(
+        "color-mix(in srgb, var(--destructive) 10%, transparent)",
+      );
+      removeButton?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+      await expect(selectionPromise).resolves.toBe(id);
+    },
+  );
+
+  it("restores selected content before resolving an editing action", async () => {
+    const invoker = (document as unknown as FakeDocument).createElement("input");
+    (document as unknown as FakeDocument).body.appendChild(invoker);
+    invoker.focus();
+    const capturedRange = { startContainer: invoker, endContainer: invoker };
+    const selection = {
+      rangeCount: 1,
+      getRangeAt: vi.fn(() => ({ cloneRange: () => capturedRange })),
+      removeAllRanges: vi.fn(),
+      addRange: vi.fn(),
+    };
+    Object.assign(document, { getSelection: () => selection });
+    const selectionPromise = showContextMenuFallback([{ id: "copy", label: "Copy" }]);
+    findButton("Copy")?.dispatchEvent(new MouseEvent("click"));
+    await expect(selectionPromise).resolves.toBe("copy");
+    expect(invoker.focused).toBe(true);
+    expect(selection.removeAllRanges).toHaveBeenCalledOnce();
+    expect(selection.addRange.mock.calls).toHaveLength(1);
+    expect(selection.addRange.mock.calls[0]?.[0] === capturedRange).toBe(true);
+  });
+
+  it.each([
+    { id: "copy", shortcut: "Ctrl+C", key: "c", ctrlKey: true },
+    { id: "paste", shortcut: "⌘V", key: "v", metaKey: true },
+  ])(
+    "activates enabled editing shortcut $shortcut and restores focus",
+    async ({ id, shortcut, ...key }) => {
+      const input = (document as unknown as FakeDocument).createElement("input");
+      (document as unknown as FakeDocument).body.appendChild(input);
+      input.focus();
+      const selectionPromise = showContextMenuFallback([{ id, label: id, shortcut }]);
+      const event = new KeyboardEvent("keydown", key);
+      (document as unknown as FakeDocument).dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(true);
+      await expect(selectionPromise).resolves.toBe(id);
+      expect(input.focused).toBe(true);
+    },
+  );
+
+  it("does not activate a disabled editing shortcut", async () => {
+    const selectionPromise = showContextMenuFallback([
+      { id: "cut", label: "Cut", shortcut: "Ctrl+X", disabled: true },
+      { id: "copy", label: "Copy", shortcut: "Ctrl+C" },
+    ]);
+    const event = new KeyboardEvent("keydown", { key: "x", ctrlKey: true });
+    (document as unknown as FakeDocument).dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
+    expect(findButton("Copy")).toBeDefined();
+    findButton("Copy")?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+    await expect(selectionPromise).resolves.toBe("copy");
+  });
+
+  it("clears a hover highlight when the pointer leaves the menu", async () => {
+    const selectionPromise = showContextMenuFallback([
+      { id: "rename", label: "Rename" },
+      { id: "delete", label: "Delete", destructive: true },
+    ]);
+    const renameButton = findButton("Rename");
+    const deleteButton = findButton("Delete");
+    deleteButton?.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+    expect(deleteButton?.style.background).toBe(
+      "color-mix(in srgb, var(--destructive) 10%, transparent)",
+    );
+    // Mouse leaving the menu moves focus off the destructive button, mirroring
+    // the real browser behavior the same way `highlights destructive action`
+    // does before its mouseleave assertion.
+    renameButton?.focus();
+    deleteButton?.dispatchEvent(
+      new MouseEvent("mouseleave", { bubbles: true, relatedTarget: document.body }),
+    );
+    expect(deleteButton?.style.background).toBe("transparent");
+    dismissContextMenu();
+    await expect(selectionPromise).resolves.toBeNull();
+  });
+
+  it("hides disabled items when the preference is enabled", async () => {
+    setHideUnavailableContextMenuItems(true);
+    const selectionPromise = showContextMenuFallback([
+      { id: "copy", label: "Copy", disabled: true },
+      { id: "rename", label: "Rename" },
+    ]);
+    expect(findButton("Copy")).toBeUndefined();
+    expect(findButton("Rename")).toBeDefined();
+    findButton("Rename")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await expect(selectionPromise).resolves.toBe("rename");
+  });
+
+  it("resolves immediately when every item is disabled and hidden", async () => {
+    setHideUnavailableContextMenuItems(true);
+    await expect(
+      showContextMenuFallback([{ id: "copy", label: "Copy", disabled: true }]),
+    ).resolves.toBeNull();
+  });
   it("supports keyboard navigation and activation", async () => {
     const selectionPromise = showContextMenuFallback([
       { id: "rename", label: "Rename" },

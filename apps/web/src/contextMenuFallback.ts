@@ -1,5 +1,7 @@
 import type { ContextMenuItem } from "@t3tools/contracts";
 
+import { shouldHideUnavailableContextMenuItems } from "./contextMenuPreferences";
+
 const SVG_NS = "http://www.w3.org/2000/svg";
 
 // Inline Lucide-style icon paths (stroke-based, viewBox 0 0 24 24, strokeWidth 2).
@@ -200,6 +202,23 @@ function isNodeWithinMenuStack(target: EventTarget | null, menuStack: readonly H
 // Only one renderer menu exists at a time; the active one is
 // tracked so a state change (for example a terminal selection clearing) can
 // dismiss it with the same result as an outside click or Escape.
+function filterUnavailableContextMenuItems<T extends string>(
+  items: readonly ContextMenuItem<T>[],
+): ReadonlyArray<ContextMenuItem<T>> {
+  if (!shouldHideUnavailableContextMenuItems()) return items;
+
+  const visible = items.flatMap((item) => {
+    if (item.disabled) return [];
+    if (!item.children) return [item];
+    const children = filterUnavailableContextMenuItems(item.children);
+    return children.length > 0 ? [{ ...item, children }] : [];
+  });
+  const first = visible[0];
+  if (!first?.separatorBefore) return visible;
+  const { separatorBefore: _separatorBefore, ...withoutSeparator } = first;
+  return [withoutSeparator, ...visible.slice(1)];
+}
+
 let activeContextMenuDismiss: (() => void) | null = null;
 
 export function isContextMenuOpen(): boolean {
@@ -224,6 +243,8 @@ export function showContextMenuFallback<T extends string>(
   items: readonly ContextMenuItem<T>[],
   position?: { x: number; y: number },
 ): Promise<T | null> {
+  const visibleItems = filterUnavailableContextMenuItems(items);
+  if (visibleItems.length === 0) return Promise.resolve(null);
   return new Promise<T | null>((resolve) => {
     const previouslyFocusedElement =
       document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -565,7 +586,7 @@ export function showContextMenuFallback<T extends string>(
     document.addEventListener("keydown", onKeyDown);
     document.addEventListener("pointerdown", onPointerDown, true);
     document.addEventListener("contextmenu", onContextMenu, true);
-    openMenu(items, position?.x ?? 0, position?.y ?? 0, 0);
+    openMenu(visibleItems, position?.x ?? 0, position?.y ?? 0, 0);
     // Only one renderer menu can be open at a time: a new show must dismiss
     // any prior one, or its DOM and listeners leak and close() can only ever
     // reach the newest menu.

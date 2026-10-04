@@ -1748,6 +1748,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         const buildTargetedItem = (
           action: "rename" | "grouping" | "copy-path" | "delete",
           label: string,
+          icon: string,
           options?: {
             destructive?: boolean;
             isDisabled?: (member: SidebarProjectGroupMember) => boolean;
@@ -1761,14 +1762,14 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
                 ...(options?.isDisabled?.(singleMember) ? { disabled: true } : {}),
               }),
               label,
-              ...(action === "delete" ? { icon: "trash" } : {}),
+              icon,
             };
           }
 
           return {
             id: `${action}:submenu`,
             label,
-            ...(action === "delete" ? { icon: "trash" } : {}),
+            icon,
             children: project.memberProjects.map((member) =>
               makeLeaf(action, member, {
                 ...(options?.destructive ? { destructive: true } : {}),
@@ -1788,11 +1789,11 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
 
         const clicked = await api.contextMenu.show(
           [
-            buildTargetedItem("rename", "Rename"),
-            buildTargetedItem("grouping", "Group into..."),
-            buildTargetedItem("copy-path", "Copy Path"),
+            buildTargetedItem("rename", "Rename", "pencil"),
+            buildTargetedItem("grouping", "Group into...", "folder-tree"),
+            buildTargetedItem("copy-path", "Copy Path", "folder"),
             { id: "project-settings", label: "Project settings", icon: "settings" },
-            buildTargetedItem("delete", "Remove", {
+            buildTargetedItem("delete", "Remove", "trash", {
               destructive: true,
             }),
           ],
