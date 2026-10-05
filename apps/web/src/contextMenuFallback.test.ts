@@ -9,6 +9,7 @@ type FakeListener = (event: FakeDomEvent) => void;
 
 class FakeDomEvent {
   defaultPrevented = false;
+  timeStamp = 0;
 
   constructor(
     readonly type: string,
@@ -128,6 +129,16 @@ class FakeElement {
     return matches;
   }
 
+  contains(target: Node | null): boolean {
+    let current: unknown = target;
+    while (current) {
+      if (current === this) return true;
+      const parent = (current as { parent?: unknown }).parent;
+      current = (parent ?? null) as Node | null;
+    }
+    return false;
+  }
+
   getBoundingClientRect() {
     const left = Number.parseInt(this.style.left ?? "0", 10) || 0;
     const top = Number.parseInt(this.style.top ?? "0", 10) || 0;
@@ -214,21 +225,22 @@ beforeEach(() => {
     callback(0);
     return 0;
   });
-  // performance.now() advances far enough between samples that the
-  // suppress-hover grace window the renderer opens on every menu mount
-  // has always expired by the time a test fires a synthetic mouseenter.
-  let nowCalls = 0;
+  // Anchor the renderer's synthetic-mouseenter suppression on
+  // `performance.now()`. Each sample advances far past the 200ms grace
+  // window so any synthetic mouseenter fired afterwards is treated as a
+  // real hover gesture.
+  let nowSample = 0;
   vi.stubGlobal("performance", {
     now: () => {
-      nowCalls += 1;
-      return nowCalls * 1000;
+      nowSample += 1_000;
+      return nowSample;
     },
   });
   vi.stubGlobal(
     "MouseEvent",
     class extends FakeDomEvent {
       constructor(type: string, init: Record<string, unknown> = {}) {
-        super(type, init);
+        super(type, { timeStamp: nowSample + 500, ...init });
       }
     },
   );
@@ -472,6 +484,53 @@ describe("showContextMenuFallback", () => {
       new MouseEvent("mouseleave", { bubbles: true, relatedTarget: document.body }),
     );
     expect(deleteButton?.style.background).toBe("transparent");
+    dismissContextMenu();
+    await expect(selectionPromise).resolves.toBeNull();
+  });
+
+  it("dismisses the root menu when the pointer leaves the menu tree", async () => {
+    const selectionPromise = showContextMenuFallback([
+      {
+        id: "copy:submenu",
+        label: "Copy",
+        children: [
+          { id: "copy:path", label: "Path" },
+          { id: "copy:branch", label: "Branch" },
+        ],
+      },
+    ]);
+    const rootMenu = (document as unknown as FakeDocument).body.children[0];
+    expect(rootMenu).toBeTruthy();
+    rootMenu?.dispatchEvent(
+      new MouseEvent("mouseleave", { bubbles: true, relatedTarget: document.body }),
+    );
+    await expect(selectionPromise).resolves.toBeNull();
+    expect((document as unknown as FakeDocument).body.children).toHaveLength(0);
+  });
+
+  it("keeps the parent menu open when the pointer leaves only the nested submenu", async () => {
+    const selectionPromise = showContextMenuFallback([
+      {
+        id: "copy:submenu",
+        label: "Copy",
+        children: [
+          { id: "copy:path", label: "Path" },
+          { id: "copy:branch", label: "Branch" },
+        ],
+      },
+    ]);
+    const rootMenu = (document as unknown as FakeDocument).body.children[0];
+    expect(rootMenu).toBeTruthy();
+    const parentButton = findButton("Copy");
+    parentButton?.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+    const childMenu = (document as unknown as FakeDocument).body.children[1];
+    expect(childMenu).toBeTruthy();
+    // Pointer leaves the submenu but stays inside the document. The root
+    // menu must remain mounted.
+    childMenu?.dispatchEvent(
+      new MouseEvent("mouseleave", { bubbles: true, relatedTarget: document.body }),
+    );
+    expect((document as unknown as FakeDocument).body.children.length).toBeGreaterThan(0);
     dismissContextMenu();
     await expect(selectionPromise).resolves.toBeNull();
   });

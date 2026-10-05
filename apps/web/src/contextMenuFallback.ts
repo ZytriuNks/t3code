@@ -267,18 +267,17 @@ export function showContextMenuFallback<T extends string>(
     // When a menu mounts, the browser dispatches a synthetic mouseenter to
     // whichever row the right-click cursor landed on. That event reflects
     // the cursor's resting position, not a deliberate hover gesture, and
-    // we want the menu to start pristine. Track an absolute wall-clock
-    // deadline until which any incoming mouseenter is treated as that
-    // synthetic event and silently dropped.
-    let suppressUntil: number | undefined;
+    // we want the menu to start pristine. We compare the mouseenter's
+    // own event time stamp against the menu's mount time stamp so the
+    // window is anchored to the browser's own clock, not to wall time
+    // that may pause between the menu opening and the cursor settling.
+    let menuMountTimeStamp: number | undefined;
     const markMenuJustOpened = () => {
-      suppressUntil = nowMs() + 80;
+      menuMountTimeStamp = performance.now();
     };
-    const nowMs = () => {
-      if (typeof performance !== "undefined" && typeof performance.now === "function") {
-        return performance.now();
-      }
-      return Date.now();
+    const isSyntheticMouseEnter = (event: MouseEvent): boolean => {
+      if (menuMountTimeStamp === undefined) return false;
+      return event.timeStamp - menuMountTimeStamp < 200;
     };
     const focusButton = (button: HTMLButtonElement | undefined) => {
       if (!button) return;
@@ -571,7 +570,7 @@ export function showContextMenuFallback<T extends string>(
                 : "var(--contrast-foreground)";
           };
           highlightUpdates.set(button, updateHighlight);
-          button.addEventListener("mouseenter", () => {
+          button.addEventListener("mouseenter", (event: MouseEvent) => {
             // Pointer hover transfers real DOM focus to the row so keyboard
             // activation still works, but `isKeyboardFocused` stays false so
             // the highlight is purely visual. Blur whichever row currently
@@ -588,7 +587,7 @@ export function showContextMenuFallback<T extends string>(
             // hover, so we want the row to stay quiet. Real pointer
             // movement arrives after the suppress window expires and
             // paints normally.
-            if (suppressUntil !== undefined && nowMs() < suppressUntil) {
+            if (isSyntheticMouseEnter(event)) {
               return;
             }
             isHovered = true;
@@ -719,23 +718,23 @@ export function showContextMenuFallback<T extends string>(
         menu.addEventListener("pointerdown", (event) => event.preventDefault());
       }
 
-      // Mouse leaving this menu dismisses any nested menus below it AND this
-      // menu itself, so a parent row that was no longer hovered does not
-      // leave its submenu orphaned on screen. We only react when the
-      // pointer actually leaves the menu tree — moving into a parent or
-      // sibling menu reports a `relatedTarget` that lives inside that
-      // menu, which we explicitly skip.
+      // Mouse leaving the root menu dismisses the whole context menu — the
+      // user moved their pointer away from any visible row. Mouse leaving
+      // a nested submenu only dismisses the submenu tree, leaving the
+      // parent menu open. In both cases we ignore moves that stay inside
+      // the menu tree (parent menu, sibling submenus).
       menu.addEventListener("mouseleave", (event) => {
         const related = event.relatedTarget as Node | null;
-        // Ignore moves into any menu in the tree, including parent
-        // menus and sibling submenus at any level. The pointer is
-        // travelling through the menu tree, not away from it.
         if (related) {
           for (let l = 0; l < menuStack.length; l++) {
             if (menuStack[l]?.contains(related)) return;
           }
         }
-        closeMenusFromLevel(level);
+        if (level === 0) {
+          cleanup(null);
+        } else {
+          closeMenusFromLevel(level);
+        }
       });
 
       document.body.appendChild(menu);
