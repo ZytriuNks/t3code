@@ -1,5 +1,7 @@
 import type { ContextMenuItem } from "@t3tools/contracts";
 
+import { shouldHideUnavailableContextMenuItems } from "./contextMenuPreferences";
+
 const SVG_NS = "http://www.w3.org/2000/svg";
 
 // Inline Lucide-style icon paths (stroke-based, viewBox 0 0 24 24, strokeWidth 2).
@@ -197,10 +199,28 @@ function isNodeWithinMenuStack(target: EventTarget | null, menuStack: readonly H
   return false;
 }
 
-// Only one fallback menu exists at a time in the renderer; the active one is
+// Only one renderer menu exists at a time; the active one is
 // tracked so a state change (for example a terminal selection clearing) can
 // dismiss it with the same result as an outside click or Escape.
+function filterUnavailableContextMenuItems<T extends string>(
+  items: readonly ContextMenuItem<T>[],
+): ReadonlyArray<ContextMenuItem<T>> {
+  if (!shouldHideUnavailableContextMenuItems()) return items;
+
+  const visible = items.flatMap((item) => {
+    if (item.disabled) return [];
+    if (!item.children) return [item];
+    const children = filterUnavailableContextMenuItems(item.children);
+    return children.length > 0 ? [{ ...item, children }] : [];
+  });
+  const first = visible[0];
+  if (!first?.separatorBefore) return visible;
+  const { separatorBefore: _separatorBefore, ...withoutSeparator } = first;
+  return [withoutSeparator, ...visible.slice(1)];
+}
+
 let activeContextMenuDismiss: (() => void) | null = null;
+let contextMenuSequence = 0;
 
 export function isContextMenuOpen(): boolean {
   return activeContextMenuDismiss !== null;
@@ -209,7 +229,7 @@ export function isContextMenuOpen(): boolean {
 /**
  * Closes the currently open fallback context menu, resolving its show() with
  * null (the same result as dismissing by outside click or Escape). No-op when
- * no fallback menu is open.
+ * no renderer menu is open.
  */
 export function dismissContextMenu(): void {
   activeContextMenuDismiss?.();
@@ -217,17 +237,46 @@ export function dismissContextMenu(): void {
 }
 
 /**
- * Imperative DOM-based context menu for non-Electron environments.
+ * Imperative DOM-based context menu shared by web and desktop renderers.
  * Supports nested submenus and resolves with the clicked leaf item id.
  */
 export function showContextMenuFallback<T extends string>(
   items: readonly ContextMenuItem<T>[],
   position?: { x: number; y: number },
+  options: { preserveFocus?: boolean } = {},
 ): Promise<T | null> {
+  const visibleItems = filterUnavailableContextMenuItems(items);
+  if (visibleItems.length === 0) return Promise.resolve(null);
   return new Promise<T | null>((resolve) => {
     const previouslyFocusedElement =
       document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const menuId = `context-menu-${++contextMenuSequence}`;
+    const previousActiveDescendant =
+      previouslyFocusedElement?.getAttribute("aria-activedescendant");
+    const previousControls = previouslyFocusedElement?.getAttribute("aria-controls");
+    const previousSelection = document.getSelection?.();
+    const previousRanges = Array.from({ length: previousSelection?.rangeCount ?? 0 }, (_, index) =>
+      previousSelection!.getRangeAt(index).cloneRange(),
+    );
     const menuStack: HTMLDivElement[] = [];
+    const highlightUpdates = new Map<HTMLButtonElement, () => void>();
+    const keyboardHandlers = new Map<HTMLButtonElement, (event: KeyboardEvent) => void>();
+    let virtualFocusedButton: HTMLButtonElement | undefined;
+    let hoveredButton: HTMLButtonElement | undefined;
+    let keyboardFocusNavigationActive = false;
+    const focusButton = (button: HTMLButtonElement | undefined) => {
+      if (!button) return;
+      if (!options.preserveFocus) {
+        button.focus({ preventScroll: true });
+        return;
+      }
+      const previousButton = virtualFocusedButton;
+      virtualFocusedButton = button;
+      previouslyFocusedElement?.setAttribute("aria-controls", `${menuId}-0`);
+      previouslyFocusedElement?.setAttribute("aria-activedescendant", button.id);
+      if (previousButton) highlightUpdates.get(previousButton)?.();
+      highlightUpdates.get(button)?.();
+    };
     const submenuTriggerStack: Array<HTMLButtonElement | undefined> = [];
     let isDisposed = false;
     let canDismissFromPointer = false;
@@ -242,7 +291,7 @@ export function showContextMenuFallback<T extends string>(
       if (activeContextMenuDismiss === dismiss) {
         activeContextMenuDismiss = null;
       }
-      document.removeEventListener("keydown", onKeyDown);
+      document.removeEventListener("keydown", onKeyDown, options.preserveFocus === true);
       document.removeEventListener("pointerdown", onPointerDown, true);
       document.removeEventListener("contextmenu", onContextMenu, true);
       const shouldRestoreFocus = isNodeWithinMenuStack(document.activeElement, menuStack);
@@ -251,14 +300,64 @@ export function showContextMenuFallback<T extends string>(
       }
       if (shouldRestoreFocus && previouslyFocusedElement?.isConnected) {
         previouslyFocusedElement.focus({ preventScroll: true });
+        if (previousRanges.length > 0) {
+          const selection = document.getSelection?.();
+          selection?.removeAllRanges();
+          for (const range of previousRanges) {
+            if (range.startContainer.isConnected && range.endContainer.isConnected) {
+              selection?.addRange(range);
+            }
+          }
+        }
+      }
+      if (options.preserveFocus && previouslyFocusedElement) {
+        if (previousActiveDescendant)
+          previouslyFocusedElement.setAttribute("aria-activedescendant", previousActiveDescendant);
+        else previouslyFocusedElement.removeAttribute("aria-activedescendant");
+        if (previousControls)
+          previouslyFocusedElement.setAttribute("aria-controls", previousControls);
+        else previouslyFocusedElement.removeAttribute("aria-controls");
       }
       resolve(result);
     };
 
     const onKeyDown = (event: KeyboardEvent) => {
+      const modifier = event.metaKey ? "⌘" : event.ctrlKey ? "Ctrl+" : null;
+      if (modifier && !event.altKey && !event.shiftKey) {
+        const shortcut = `${modifier}${event.key.toUpperCase()}`;
+        const item = items.find(
+          (candidate) =>
+            candidate.shortcut === shortcut && !candidate.header && !candidate.children?.length,
+        );
+        if (item) {
+          event.preventDefault();
+          if (options.preserveFocus) event.stopPropagation();
+          if (!item.disabled) cleanup(item.id);
+          return;
+        }
+      }
       if (event.key === "Escape") {
         event.preventDefault();
+        if (options.preserveFocus) event.stopPropagation();
         cleanup(null);
+        return;
+      }
+      if (options.preserveFocus) {
+        if (virtualFocusedButton) keyboardHandlers.get(virtualFocusedButton)?.(event);
+        const editsSelection = [
+          "ArrowLeft",
+          "ArrowRight",
+          "Backspace",
+          "Delete",
+          "PageUp",
+          "PageDown",
+          "Insert",
+          "Clear",
+        ].includes(event.key);
+        if (event.defaultPrevented || editsSelection || (!modifier && event.key.length === 1)) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
       }
     };
 
@@ -270,9 +369,11 @@ export function showContextMenuFallback<T extends string>(
     };
 
     const onContextMenu = (event: MouseEvent) => {
-      if (!canDismissFromPointer || isNodeWithinMenuStack(event.target, menuStack)) {
+      if (isNodeWithinMenuStack(event.target, menuStack)) {
+        event.preventDefault();
         return;
       }
+      if (!canDismissFromPointer) return;
       event.preventDefault();
       cleanup(null);
     };
@@ -295,18 +396,32 @@ export function showContextMenuFallback<T extends string>(
 
       const menu = document.createElement("div");
       menu.className =
-        "dropdown-glass fixed z-[10000] min-w-32 max-w-sm overflow-hidden rounded-lg bg-clip-padding text-popover-foreground outline-none";
+        "dropdown-glass fixed z-[10000] flex min-w-[min(10rem,calc(100vw-2rem))] max-w-[calc(100vw-2rem)] overflow-hidden rounded-lg bg-clip-padding text-popover-foreground shadow-[0_16px_40px_-18px_rgb(0_0_0/55%)] outline-none dark:shadow-[0_18px_44px_-18px_rgb(0_0_0/80%)] [-webkit-app-region:no-drag]";
       menu.style.cssText =
-        "position:fixed;z-index:10000;min-width:8rem;max-width:24rem;overflow:hidden;border-radius:var(--radius-lg);background-clip:padding-box;color:var(--contrast-popover-foreground);outline:none;pointer-events:auto;";
+        "position:fixed;z-index:10000;display:flex;min-width:min(10rem,calc(100vw - 2rem));max-width:calc(100vw - 2rem);overflow:hidden;border-radius:var(--radius-lg);background-clip:padding-box;color:var(--contrast-popover-foreground);box-shadow:0 16px 40px -18px rgb(0 0 0 / 55%);outline:none;pointer-events:auto;-webkit-app-region:no-drag;";
+      menu.id = `${menuId}-${level}`;
+      menu.setAttribute("role", "menu");
       menu.style.left = `${preferredLeft}px`;
       menu.style.top = `${preferredTop}px`;
       menu.dataset.level = String(level);
 
       const inner = document.createElement("div");
       inner.className =
-        "max-h-[min(24rem,70vh)] min-w-0 max-w-sm overflow-y-auto overflow-x-hidden p-1";
+        "max-h-[min(24rem,70vh)] w-full min-w-0 max-w-sm overflow-y-auto overflow-x-hidden p-1";
       inner.style.cssText =
-        "max-height:min(24rem,70vh);min-width:0;max-width:24rem;overflow-x:hidden;overflow-y:auto;padding:0.25rem;";
+        "width:100%;max-height:min(24rem,70vh);min-width:0;max-width:24rem;overflow-x:hidden;overflow-y:auto;padding:0.25rem;";
+
+      const enabledButtons = () =>
+        [...inner.querySelectorAll<HTMLButtonElement>("button")].filter(
+          (candidate) => !candidate.disabled,
+        );
+      const focusAdjacentButton = (button: HTMLButtonElement, direction: 1 | -1) => {
+        const buttons = enabledButtons();
+        const currentIndex = buttons.indexOf(button);
+        if (currentIndex < 0 || buttons.length === 0) return;
+        const nextIndex = (currentIndex + direction + buttons.length) % buttons.length;
+        focusButton(buttons[nextIndex]);
+      };
 
       for (const item of entries) {
         if (item.separatorBefore === true && inner.children.length > 0) {
@@ -333,17 +448,28 @@ export function showContextMenuFallback<T extends string>(
 
         const button = document.createElement("button");
         button.type = "button";
+        if (options.preserveFocus) {
+          button.id = `${menu.id}-item-${inner.children.length}`;
+          button.tabIndex = -1;
+        }
         const isDisabled = item.disabled === true;
         button.disabled = isDisabled;
+        button.setAttribute(
+          "role",
+          typeof item.checked === "boolean" ? "menuitemradio" : "menuitem",
+        );
+        if (isDisabled) {
+          button.setAttribute("aria-disabled", "true");
+        }
         const rowBase =
-          "flex w-full cursor-default select-none items-center gap-2 rounded-sm px-2 py-1 text-left outline-none transition-colors sm:min-h-7 sm:text-sm min-h-8 text-base";
+          "flex w-full cursor-default select-none items-center gap-2 rounded-sm px-2 py-1 text-left text-base text-foreground outline-none data-highlighted:bg-accent data-highlighted:text-accent-foreground sm:min-h-7 sm:text-sm";
         button.className = isDisabled
           ? `${rowBase} pointer-events-none cursor-not-allowed text-muted-foreground opacity-64`
           : isLeafDestructive
-            ? `${rowBase} text-destructive-foreground hover:bg-destructive/10 hover:text-destructive-foreground`
+            ? `${rowBase} text-destructive-foreground hover:bg-destructive/30 hover:text-destructive-foreground`
             : `${rowBase} text-foreground hover:bg-accent hover:text-accent-foreground`;
         button.style.cssText =
-          "display:flex;width:100%;min-height:1.75rem;align-items:center;gap:0.5rem;border:0;border-radius:var(--radius-sm);background:transparent;padding:0.25rem 0.5rem;color:var(--contrast-foreground);font-family:var(--font-sans,system-ui,sans-serif);font-size:0.875rem;line-height:1.25rem;text-align:left;cursor:default;";
+          "border:0;background:transparent;color:var(--contrast-foreground);font-family:var(--font-sans,system-ui,sans-serif);text-align:left;";
         if (isLeafDestructive) {
           button.style.color = "var(--destructive-foreground)";
         }
@@ -380,6 +506,13 @@ export function showContextMenuFallback<T extends string>(
         label.textContent = item.label;
         button.appendChild(label);
 
+        if (item.shortcut) {
+          const shortcut = document.createElement("span");
+          shortcut.className = "ms-auto ps-4 text-xs tracking-widest text-muted-foreground";
+          shortcut.textContent = item.shortcut;
+          button.appendChild(shortcut);
+        }
+
         if (hasChildren) {
           button.setAttribute("aria-haspopup", "menu");
           button.setAttribute("aria-expanded", "false");
@@ -395,14 +528,29 @@ export function showContextMenuFallback<T extends string>(
           }
         }
 
+        let openSubmenu: ((focusFirstItem?: boolean) => void) | undefined;
         if (!isDisabled) {
           let isHovered = false;
-          let isFocused = false;
+          let isKeyboardFocused = false;
           const updateHighlight = () => {
-            const isHighlighted = isHovered || isFocused;
+            // Pointer hover and keyboard-driven focus both paint the row.
+            // The `aria-activedescendant` virtual focus only paints once
+            // the user has actually driven focus with the keyboard, so the
+            // menu starts quiet even when the shell routes the request
+            // through the preserve-focus path (native editing menus).
+            const isHighlighted =
+              isHovered ||
+              isKeyboardFocused ||
+              (keyboardFocusNavigationActive &&
+                options.preserveFocus &&
+                virtualFocusedButton === button);
+            isHovered ||
+              (keyboardFocusNavigationActive &&
+                options.preserveFocus &&
+                virtualFocusedButton === button);
             button.style.background = isHighlighted
               ? isLeafDestructive
-                ? "color-mix(in srgb, var(--destructive) 10%, transparent)"
+                ? "color-mix(in srgb, var(--destructive) 30%, transparent)"
                 : "var(--accent)"
               : "transparent";
             button.style.color = isHighlighted
@@ -413,26 +561,46 @@ export function showContextMenuFallback<T extends string>(
                 ? "var(--destructive-foreground)"
                 : "var(--contrast-foreground)";
           };
+          highlightUpdates.set(button, updateHighlight);
           button.addEventListener("mouseenter", () => {
+            // Pointer hover transfers real DOM focus to the row so keyboard
+            // activation still works, but `isKeyboardFocused` stays false so
+            // the highlight is purely visual. Blur whichever row currently
+            // owns focus so opening a nested submenu doesn't leave its first
+            // row focused.
+            if (document.activeElement && document.activeElement !== button) {
+              (document.activeElement as HTMLElement).blur();
+            }
             button.focus({ preventScroll: true });
+            hoveredButton = button;
             isHovered = true;
             updateHighlight();
           });
           button.addEventListener("mouseleave", () => {
             isHovered = false;
+            if (hoveredButton === button) hoveredButton = undefined;
+            // Drop DOM focus the pointer transferred so the row stops
+            // highlighting once the cursor leaves the menu.
+            if (document.activeElement === button) button.blur();
             updateHighlight();
           });
           button.addEventListener("focus", () => {
-            isFocused = true;
+            // `tabindex` is `0`, so DOM focus can also arrive from a
+            // pointer-driven call to `focusButton(...)` (open time, sibling
+            // mouseenter, ArrowLeft returning to the parent trigger). Treat
+            // those as silent — only real keyboard navigation should paint.
+            if (keyboardFocusNavigationActive) {
+              isKeyboardFocused = true;
+            }
             updateHighlight();
           });
           button.addEventListener("blur", () => {
-            isFocused = false;
+            isKeyboardFocused = false;
             updateHighlight();
           });
 
           if (hasChildren) {
-            const openSubmenu = (focusFirstItem = false) => {
+            openSubmenu = (focusFirstItem = false) => {
               const rect = button.getBoundingClientRect();
               const nextLeft = rect.right + 4;
               const nextTop = rect.top;
@@ -448,17 +616,19 @@ export function showContextMenuFallback<T extends string>(
                 clampMenuPosition(childMenu, rect.left - childRect.width - 4, rect.top);
               }
               if (focusFirstItem) {
-                [...childMenu.querySelectorAll<HTMLButtonElement>("button")]
-                  .find((childButton) => !childButton.disabled)
-                  ?.focus();
+                focusButton(
+                  [...childMenu.querySelectorAll<HTMLButtonElement>("button")].find(
+                    (childButton) => !childButton.disabled,
+                  ),
+                );
               }
             };
             button.addEventListener("mouseenter", () => {
-              openSubmenu();
+              openSubmenu?.();
             });
             button.addEventListener("click", (event) => {
               event.preventDefault();
-              openSubmenu(true);
+              openSubmenu?.(true);
             });
           } else {
             button.addEventListener("mouseenter", () => {
@@ -468,31 +638,106 @@ export function showContextMenuFallback<T extends string>(
               if (canDismissFromPointer) cleanup(item.id);
             });
           }
+
+          const onButtonKeyDown = (event: KeyboardEvent) => {
+            keyboardFocusNavigationActive = true;
+            switch (event.key) {
+              case "ArrowDown":
+                event.preventDefault();
+                focusAdjacentButton(button, 1);
+                return;
+              case "ArrowUp":
+                event.preventDefault();
+                focusAdjacentButton(button, -1);
+                return;
+              case "Home":
+                event.preventDefault();
+                focusButton(enabledButtons()[0]);
+                return;
+              case "End": {
+                event.preventDefault();
+                const buttons = enabledButtons();
+                focusButton(buttons.at(-1));
+                return;
+              }
+              case "ArrowRight":
+                if (openSubmenu) {
+                  event.preventDefault();
+                  openSubmenu(true);
+                }
+                return;
+              case "ArrowLeft":
+                if (level > 0) {
+                  event.preventDefault();
+                  closeMenusFromLevel(level);
+                  focusButton(parentTrigger);
+                }
+                return;
+              case "Enter":
+              case " ":
+                event.preventDefault();
+                if (openSubmenu) {
+                  openSubmenu(true);
+                } else {
+                  cleanup(item.id);
+                }
+                return;
+              case "Tab":
+                event.preventDefault();
+                cleanup(null);
+                return;
+            }
+          };
+          keyboardHandlers.set(button, onButtonKeyDown);
+          button.addEventListener("keydown", onButtonKeyDown);
         }
 
         inner.appendChild(button);
       }
 
       menu.appendChild(inner);
+      if (options.preserveFocus) {
+        // Native editing menus must not blur inputs that commit/reset drafts on blur.
+        menu.addEventListener("pointerdown", (event) => event.preventDefault());
+      }
 
-      menu.addEventListener("mouseenter", () => {
-        closeMenusFromLevel(level + 1);
+      // Mouse leaving a submenu dismisses that submenu (and any deeper
+      // submenus it owned) so the user does not leave an orphaned menu
+      // on screen. The root menu stays mounted until the user clicks
+      // outside, presses Escape, or another dismissal path fires; only
+      // moves into another menu in the tree are ignored.
+      menu.addEventListener("mouseleave", (event) => {
+        const related = event.relatedTarget as Node | null;
+        if (related) {
+          for (let l = 0; l < menuStack.length; l++) {
+            if (menuStack[l]?.contains(related)) return;
+          }
+        }
+        if (level === 0) {
+          closeMenusFromLevel(level + 1);
+        } else {
+          closeMenusFromLevel(level);
+        }
       });
 
       document.body.appendChild(menu);
       menuStack[level] = menu;
       submenuTriggerStack[level] = parentTrigger;
 
+      if (level === 0 || menuStack[level - 1] !== undefined) {
+        focusButton(enabledButtons()[0]);
+      }
+
       requestAnimationFrame(() => {
         clampMenuPosition(menu, preferredLeft, preferredTop);
       });
     };
 
-    document.addEventListener("keydown", onKeyDown);
+    document.addEventListener("keydown", onKeyDown, options.preserveFocus === true);
     document.addEventListener("pointerdown", onPointerDown, true);
     document.addEventListener("contextmenu", onContextMenu, true);
-    openMenu(items, position?.x ?? 0, position?.y ?? 0, 0);
-    // Only one fallback menu can be open at a time: a new show must dismiss
+    openMenu(visibleItems, position?.x ?? 0, position?.y ?? 0, 0);
+    // Only one renderer menu can be open at a time: a new show must dismiss
     // any prior one, or its DOM and listeners leak and close() can only ever
     // reach the newest menu.
     if (activeContextMenuDismiss) {

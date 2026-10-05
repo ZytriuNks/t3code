@@ -1,11 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
+import type { DesktopSystemContextMenuRequest } from "@t3tools/contracts";
+import { setHideUnavailableContextMenuItems } from "./contextMenuPreferences";
 import { dismissContextMenu, showContextMenuFallback } from "./contextMenuFallback";
+import { installDesktopSystemContextMenu } from "./lib/desktopSystemContextMenu";
 
 type FakeListener = (event: FakeDomEvent) => void;
 
 class FakeDomEvent {
   defaultPrevented = false;
+  timeStamp = 0;
 
   constructor(
     readonly type: string,
@@ -17,6 +21,8 @@ class FakeDomEvent {
   preventDefault() {
     this.defaultPrevented = true;
   }
+
+  stopPropagation() {}
 }
 
 class FakeElement {
@@ -69,6 +75,14 @@ class FakeElement {
     this.attributes.set(name, value);
   }
 
+  getAttribute(name: string) {
+    return this.attributes.get(name) ?? null;
+  }
+
+  removeAttribute(name: string) {
+    this.attributes.delete(name);
+  }
+
   dispatchEvent(event: FakeDomEvent) {
     for (const listener of this.listeners.get(event.type) ?? []) {
       listener(event);
@@ -113,6 +127,16 @@ class FakeElement {
       matches.push(...child.querySelectorAll(tagName));
     }
     return matches;
+  }
+
+  contains(target: Node | null): boolean {
+    let current: unknown = target;
+    while (current) {
+      if (current === this) return true;
+      const parent = (current as { parent?: unknown }).parent;
+      current = (parent ?? null) as Node | null;
+    }
+    return false;
   }
 
   getBoundingClientRect() {
@@ -163,6 +187,10 @@ class FakeDocument {
     this.listeners.set(type, existing);
   }
 
+  dispatchEvent(event: FakeDomEvent) {
+    for (const listener of this.listeners.get(event.type) ?? []) listener(event);
+  }
+
   removeEventListener(type: string, listener: FakeListener) {
     const existing = this.listeners.get(type);
     if (!existing) {
@@ -186,6 +214,7 @@ function findButton(label: string): FakeElement | undefined {
 }
 
 beforeEach(() => {
+  setHideUnavailableContextMenuItems(false);
   vi.stubGlobal("document", new FakeDocument());
   vi.stubGlobal("HTMLElement", FakeElement);
   vi.stubGlobal("window", {
@@ -215,6 +244,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  setHideUnavailableContextMenuItems(false);
   vi.unstubAllGlobals();
 });
 
@@ -245,6 +275,104 @@ describe("showContextMenuFallback", () => {
     renameButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
 
     await expect(selectionPromise).resolves.toBe("rename");
+  });
+
+  it.each(["delete", "remove:project-a"])(
+    "highlights destructive action %s immediately on hover and focus",
+    async (id) => {
+      const selectionPromise = showContextMenuFallback([
+        { id: "rename", label: "Rename" },
+        { id, label: "Remove", destructive: true },
+      ]);
+      const renameButton = findButton("Rename");
+      const removeButton = findButton("Remove");
+      expect(removeButton?.style.background).not.toBe(
+        "color-mix(in srgb, var(--destructive) 30%, transparent)",
+      );
+      removeButton?.dispatchEvent(new MouseEvent("mouseenter"));
+      expect(removeButton?.style.background).toBe(
+        "color-mix(in srgb, var(--destructive) 30%, transparent)",
+      );
+      expect(removeButton?.style.color).toBe("var(--destructive-foreground)");
+      renameButton?.focus();
+      removeButton?.dispatchEvent(new MouseEvent("mouseleave"));
+      expect(removeButton?.style.background).toBe("transparent");
+      renameButton?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown" }));
+      expect(removeButton?.style.background).toBe(
+        "color-mix(in srgb, var(--destructive) 30%, transparent)",
+      );
+      removeButton?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+      await expect(selectionPromise).resolves.toBe(id);
+    },
+  );
+
+  it("restores selected content before resolving an editing action", async () => {
+    const invoker = (document as unknown as FakeDocument).createElement("input");
+    (document as unknown as FakeDocument).body.appendChild(invoker);
+    invoker.focus();
+    const capturedRange = { startContainer: invoker, endContainer: invoker };
+    const selection = {
+      rangeCount: 1,
+      getRangeAt: vi.fn(() => ({ cloneRange: () => capturedRange })),
+      removeAllRanges: vi.fn(),
+      addRange: vi.fn(),
+    };
+    Object.assign(document, { getSelection: () => selection });
+    const selectionPromise = showContextMenuFallback([{ id: "copy", label: "Copy" }]);
+    findButton("Copy")?.dispatchEvent(new MouseEvent("click"));
+    await expect(selectionPromise).resolves.toBe("copy");
+    expect(invoker.focused).toBe(true);
+    expect(selection.removeAllRanges).toHaveBeenCalledOnce();
+    expect(selection.addRange.mock.calls).toHaveLength(1);
+    expect(selection.addRange.mock.calls[0]?.[0] === capturedRange).toBe(true);
+  });
+
+  it.each([
+    { id: "copy", shortcut: "Ctrl+C", key: "c", ctrlKey: true },
+    { id: "paste", shortcut: "⌘V", key: "v", metaKey: true },
+  ])(
+    "activates enabled editing shortcut $shortcut and restores focus",
+    async ({ id, shortcut, ...key }) => {
+      const input = (document as unknown as FakeDocument).createElement("input");
+      (document as unknown as FakeDocument).body.appendChild(input);
+      input.focus();
+      const selectionPromise = showContextMenuFallback([{ id, label: id, shortcut }]);
+      const event = new KeyboardEvent("keydown", key);
+      (document as unknown as FakeDocument).dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(true);
+      await expect(selectionPromise).resolves.toBe(id);
+      expect(input.focused).toBe(true);
+    },
+  );
+
+  it("does not activate a disabled editing shortcut", async () => {
+    const selectionPromise = showContextMenuFallback([
+      { id: "cut", label: "Cut", shortcut: "Ctrl+X", disabled: true },
+      { id: "copy", label: "Copy", shortcut: "Ctrl+C" },
+    ]);
+    const event = new KeyboardEvent("keydown", { key: "x", ctrlKey: true });
+    (document as unknown as FakeDocument).dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
+    expect(findButton("Copy")).toBeDefined();
+    findButton("Copy")?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+    await expect(selectionPromise).resolves.toBe("copy");
+  });
+
+  it("supports keyboard navigation and activation", async () => {
+    const selectionPromise = showContextMenuFallback([
+      { id: "rename", label: "Rename" },
+      { id: "delete", label: "Delete" },
+    ]);
+
+    const renameButton = findButton("Rename");
+    const deleteButton = findButton("Delete");
+    expect(renameButton?.focused).toBe(true);
+
+    renameButton?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown" }));
+    expect(deleteButton?.focused).toBe(true);
+    deleteButton?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+
+    await expect(selectionPromise).resolves.toBe("delete");
   });
 
   it("ignores a click from the gesture that opened the menu", async () => {
@@ -314,8 +442,8 @@ describe("showContextMenuFallback", () => {
     expect(childButton).toBeTruthy();
     expect(siblingButton).toBeTruthy();
     expect(childButton?.focused).toBe(true);
-    expect(childButton?.style.background).toBe("var(--accent)");
-    expect(childButton?.style.color).toBe("var(--contrast-accent-foreground)");
+    expect(childButton?.style.background).toBe("transparent");
+    expect(childButton?.style.color).toBe("var(--contrast-foreground)");
     siblingButton?.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
     expect(childButton?.focused).toBe(false);
     expect(childButton?.style.background).toBe("transparent");
@@ -325,6 +453,190 @@ describe("showContextMenuFallback", () => {
 
     await expect(selectionPromise).resolves.toBe("copy:branch");
     expect(invoker.focused).toBe(true);
+  });
+
+  it("does not highlight the first enabled row on open under preserveFocus", async () => {
+    // The shell hands shell-owned editing menus to the renderer with
+    // preserveFocus: true so the input keeps focus. The first enabled
+    // row must not be painted as a hover target until the user actually
+    // engages with the menu.
+    const selectionPromise = showContextMenuFallback(
+      [
+        { id: "cut", label: "Cut", disabled: true },
+        { id: "copy", label: "Copy", disabled: true },
+        { id: "paste", label: "Paste" },
+      ],
+      undefined,
+      { preserveFocus: true },
+    );
+    const pasteButton = findButton("Paste");
+    expect(pasteButton).toBeTruthy();
+    expect(pasteButton?.style.background).toBe("transparent");
+    expect(pasteButton?.style.color).toBe("var(--contrast-foreground)");
+    pasteButton?.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+    expect(pasteButton?.style.background).toBe("var(--accent)");
+    dismissContextMenu();
+    await expect(selectionPromise).resolves.toBeNull();
+  });
+
+  it("clears a hover highlight when the pointer leaves the menu", async () => {
+    const selectionPromise = showContextMenuFallback([
+      { id: "rename", label: "Rename" },
+      { id: "delete", label: "Delete", destructive: true },
+    ]);
+    const renameButton = findButton("Rename");
+    const deleteButton = findButton("Delete");
+    deleteButton?.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+    expect(deleteButton?.style.background).toBe(
+      "color-mix(in srgb, var(--destructive) 30%, transparent)",
+    );
+    // Move focus off the destructive row so the highlight drops when its
+    // hover state is cleared (real browsers behave the same way).
+    renameButton?.focus();
+    deleteButton?.dispatchEvent(
+      new MouseEvent("mouseleave", { bubbles: true, relatedTarget: document.body }),
+    );
+    expect(deleteButton?.style.background).toBe("transparent");
+    dismissContextMenu();
+    await expect(selectionPromise).resolves.toBeNull();
+  });
+
+  it("keeps the root menu mounted but dismisses its submenu when the pointer leaves the root menu tree", async () => {
+    const selectionPromise = showContextMenuFallback([
+      {
+        id: "copy:submenu",
+        label: "Copy",
+        children: [
+          { id: "copy:path", label: "Path" },
+          { id: "copy:branch", label: "Branch" },
+        ],
+      },
+    ]);
+    const rootMenu = (document as unknown as FakeDocument).body.children[0];
+    expect(rootMenu).toBeTruthy();
+    const parentButton = findButton("Copy");
+    parentButton?.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+    expect((document as unknown as FakeDocument).body.children.length).toBe(2);
+    // Pointer leaves the root menu; root stays mounted, submenu closes.
+    rootMenu?.dispatchEvent(
+      new MouseEvent("mouseleave", { bubbles: true, relatedTarget: document.body }),
+    );
+    expect((document as unknown as FakeDocument).body.children.length).toBe(1);
+    dismissContextMenu();
+    await expect(selectionPromise).resolves.toBeNull();
+  });
+
+  it("dismisses the submenu but keeps the root menu when the pointer leaves only the submenu", async () => {
+    const selectionPromise = showContextMenuFallback([
+      {
+        id: "copy:submenu",
+        label: "Copy",
+        children: [
+          { id: "copy:path", label: "Path" },
+          { id: "copy:branch", label: "Branch" },
+        ],
+      },
+    ]);
+    const parentButton = findButton("Copy");
+    parentButton?.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+    const childMenu = (document as unknown as FakeDocument).body.children[1];
+    expect(childMenu).toBeTruthy();
+    // Pointer leaves the submenu; the submenu closes but the root menu
+    // stays mounted so the user can move back into a row.
+    childMenu?.dispatchEvent(
+      new MouseEvent("mouseleave", { bubbles: true, relatedTarget: document.body }),
+    );
+    expect((document as unknown as FakeDocument).body.children.length).toBe(1);
+    dismissContextMenu();
+    await expect(selectionPromise).resolves.toBeNull();
+  });
+
+  it("hides disabled items when the preference is enabled", async () => {
+    setHideUnavailableContextMenuItems(true);
+    const selectionPromise = showContextMenuFallback([
+      { id: "copy", label: "Copy", disabled: true },
+      { id: "rename", label: "Rename" },
+    ]);
+    expect(findButton("Copy")).toBeUndefined();
+    expect(findButton("Rename")).toBeDefined();
+    findButton("Rename")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await expect(selectionPromise).resolves.toBe("rename");
+  });
+
+  it("resolves immediately when every item is disabled and hidden", async () => {
+    setHideUnavailableContextMenuItems(true);
+    await expect(
+      showContextMenuFallback([{ id: "copy", label: "Copy", disabled: true }]),
+    ).resolves.toBeNull();
+  });
+});
+
+describe("desktop editing menu", () => {
+  function installBridge() {
+    let listener: ((request: DesktopSystemContextMenuRequest) => void) | undefined;
+    let complete: ((response: { requestId: string; itemId: string | null }) => void) | undefined;
+    const completed = new Promise<{ requestId: string; itemId: string | null }>((resolve) => {
+      complete = resolve;
+    });
+    const unsubscribe = installDesktopSystemContextMenu({
+      onSystemContextMenu: (callback) => {
+        listener = callback;
+        return () => {
+          listener = undefined;
+        };
+      },
+      resolveSystemContextMenu: async (response) => {
+        complete?.(response);
+        return true;
+      },
+    });
+    return {
+      receive: (request: DesktopSystemContextMenuRequest) => listener?.(request),
+      unsubscribe,
+      completed,
+    };
+  }
+
+  const request: DesktopSystemContextMenuRequest = {
+    requestId: "native:1",
+    position: { x: 120, y: 80 },
+    items: [
+      { id: "cut", label: "Cut", shortcut: "Ctrl+X", disabled: true },
+      { id: "copy", label: "Copy", shortcut: "Ctrl+C" },
+    ],
+  };
+
+  it("draws editing shortcuts and restores input focus before dispatching the native action", async () => {
+    const bridge = installBridge();
+    const input = (document as unknown as FakeDocument).createElement("input");
+    (document as unknown as FakeDocument).body.appendChild(input);
+    input.focus();
+    bridge.receive(request);
+    expect(findButton("Cut")?.disabled).toBe(true);
+    expect(findButton("Copy")?.textContent).toBe("CopyCtrl+C");
+    findButton("Copy")?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+    await expect(bridge.completed).resolves.toEqual({ requestId: "native:1", itemId: "copy" });
+    expect(input.focused).toBe(true);
+    bridge.unsubscribe?.();
+  });
+
+  it("keeps an application-specific menu instead of overriding it with editing actions", async () => {
+    const appSelection = showContextMenuFallback([{ id: "rename", label: "Rename thread" }]);
+    const bridge = installBridge();
+    bridge.receive(request);
+    await expect(bridge.completed).resolves.toEqual({ requestId: "native:1", itemId: null });
+    expect(findButton("Copy")).toBeUndefined();
+    findButton("Rename thread")?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+    await expect(appSelection).resolves.toBe("rename");
+    bridge.unsubscribe?.();
+  });
+
+  it("stops accepting shell menu requests after unmount", () => {
+    const bridge = installBridge();
+    bridge.unsubscribe?.();
+    bridge.receive(request);
+    expect(findButton("Copy")).toBeUndefined();
+    expect(installDesktopSystemContextMenu(undefined)).toBeUndefined();
   });
 });
 

@@ -8,7 +8,12 @@ import * as Ref from "effect/Ref";
 
 import * as Electron from "electron";
 
-import { type DesktopSnapShotEvent, DEFAULT_CLIENT_SETTINGS } from "@t3tools/contracts";
+import {
+  type ContextMenuItem,
+  type DesktopSnapShotEvent,
+  type DesktopSystemContextMenuResponse,
+  DEFAULT_CLIENT_SETTINGS,
+} from "@t3tools/contracts";
 
 import * as DesktopAssets from "../app/DesktopAssets.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
@@ -20,6 +25,7 @@ import * as ElectronTheme from "../electron/ElectronTheme.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import {
   MENU_ACTION_CHANNEL,
+  SYSTEM_CONTEXT_MENU_CHANNEL,
   QUIT_SHORTCUT_CHANNEL,
   SNAP_SHOT_EVENT_CHANNEL,
   TRACKPAD_SCROLL_END_CHANNEL,
@@ -135,6 +141,10 @@ export class DesktopWindow extends Context.Service<
     // guest page instead of the app UI. The menu routes here to always target
     // the main window.
     readonly zoomMain: (direction: MainWindowZoomDirection) => Effect.Effect<void>;
+    readonly resolveSystemContextMenu: (
+      response: DesktopSystemContextMenuResponse,
+      senderId: number,
+    ) => Effect.Effect<boolean>;
     readonly syncAppearance: Effect.Effect<void>;
   }
 >()("@t3tools/desktop/window/DesktopWindow") {}
@@ -335,6 +345,42 @@ export const make = Effect.gen(function* () {
   const runFork = Effect.runForkWith(context);
   const runPromise = Effect.runPromiseWith(context);
   let flushMainWindowBounds: Effect.Effect<void> = Effect.void;
+  let contextMenuSequence = 0;
+  let pendingSystemContextMenu:
+    | {
+        requestId: string;
+        contents: Electron.WebContents;
+        actions: ReadonlyMap<string, () => void>;
+      }
+    | undefined;
+
+  const clearSystemContextMenu = () => {
+    const pending = pendingSystemContextMenu;
+    pendingSystemContextMenu = undefined;
+    if (pending && !pending.contents.isDestroyed()) pending.contents.setIgnoreMenuShortcuts(false);
+  };
+
+  const resolveSystemContextMenu = (response: DesktopSystemContextMenuResponse, senderId: number) =>
+    Effect.sync(() => {
+      const pending = pendingSystemContextMenu;
+      if (!pending || pending.requestId !== response.requestId || pending.contents.id !== senderId)
+        return false;
+      if (pending.contents.isDestroyed()) {
+        clearSystemContextMenu();
+        return false;
+      }
+      if (response.itemId === null) {
+        clearSystemContextMenu();
+        return true;
+      }
+      const action = pending.actions.get(response.itemId);
+      if (!action) return false;
+      clearSystemContextMenu();
+      // The renderer restores its focused element and selection before replying.
+      pending.contents.focus();
+      action();
+      return true;
+    });
 
   const dismissConnectingSplash = Effect.gen(function* () {
     const splash = yield* Ref.getAndSet(splashWindowRef, Option.none());
@@ -535,6 +581,11 @@ export const make = Effect.gen(function* () {
     ): void => {
       if (contextMenuContents.has(contents)) return;
       contextMenuContents.add(contents);
+      const clearPendingMenu = () => {
+        if (pendingSystemContextMenu?.contents === contents) clearSystemContextMenu();
+      };
+      contents.on("did-start-navigation", clearPendingMenu);
+      contents.on("destroyed", clearPendingMenu);
       contents.on("context-menu", (event, params) => {
         event.preventDefault();
         if (contents.isDestroyed() || ownerWindow.isDestroyed()) return;
@@ -542,7 +593,9 @@ export const make = Effect.gen(function* () {
         // the host renderer when the user right-clicks inside a browser guest.
         contents.focus();
 
-        const menuTemplate: Electron.MenuItemConstructorOptions[] = [];
+        const menuTemplate: Array<
+          Omit<Electron.MenuItemConstructorOptions, "click"> & { click?: () => void }
+        > = [];
 
         if (params.misspelledWord) {
           for (const suggestion of params.dictionarySuggestions.slice(0, 5)) {
@@ -587,6 +640,54 @@ export const make = Effect.gen(function* () {
           { role: "paste", enabled: params.editFlags.canPaste },
           { role: "selectAll", enabled: params.editFlags.canSelectAll },
         );
+
+        if (contents === window.webContents) {
+          const modifier = environment.platform === "darwin" ? "⌘" : "Ctrl+";
+          const edits = [
+            { id: "cut", label: "Cut", shortcut: `${modifier}X`, run: () => contents.cut() },
+            { id: "copy", label: "Copy", shortcut: `${modifier}C`, run: () => contents.copy() },
+            { id: "paste", label: "Paste", shortcut: `${modifier}V`, run: () => contents.paste() },
+            {
+              id: "selectAll",
+              label: "Select All",
+              shortcut: `${modifier}A`,
+              run: () => contents.selectAll(),
+            },
+          ];
+          const items: ContextMenuItem[] = [];
+          const actions = new Map<string, () => void>();
+          let separatorBefore = false;
+          for (const [index, item] of menuTemplate.entries()) {
+            if (item.type === "separator") {
+              separatorBefore = true;
+              continue;
+            }
+            const edit = edits.find((candidate) => candidate.id === item.role);
+            const id = edit?.id ?? `item:${index}`;
+            const action = item.click ?? edit?.run;
+            items.push({
+              id,
+              label: item.label ?? edit?.label ?? "",
+              disabled: item.enabled === false,
+              ...(edit ? { shortcut: edit.shortcut } : {}),
+              ...(separatorBefore ? { separatorBefore: true } : {}),
+            });
+            if (action && item.enabled !== false) actions.set(id, action);
+            separatorBefore = false;
+          }
+          const requestId = String(++contextMenuSequence);
+          clearSystemContextMenu();
+          pendingSystemContextMenu = { requestId, contents, actions };
+          // Let DOM shortcuts restore the editing target before native cut/copy/paste.
+          contents.setIgnoreMenuShortcuts(true);
+          const zoomFactor = contents.getZoomFactor();
+          contents.send(SYSTEM_CONTEXT_MENU_CHANNEL, {
+            requestId,
+            items,
+            position: { x: params.x / zoomFactor, y: params.y / zoomFactor },
+          });
+          return;
+        }
 
         void runPromise(
           electronMenu.popupTemplate({
@@ -658,6 +759,15 @@ export const make = Effect.gen(function* () {
       },
     });
     window.webContents.on("before-input-event", (event, input) => {
+      if (pendingSystemContextMenu?.contents === window.webContents) {
+        const editingModifier = environment.platform === "darwin" ? input.meta : input.control;
+        window.webContents.setIgnoreMenuShortcuts(
+          editingModifier &&
+            !input.alt &&
+            !input.shift &&
+            ["x", "c", "v", "a"].includes(input.key.toLowerCase()),
+        );
+      }
       quitShortcutHandler(event, input);
       if (input.type !== "keyDown" || !input.isAutoRepeat) return;
       const modifier = environment.platform === "darwin" ? input.meta : input.control;
@@ -951,6 +1061,7 @@ export const make = Effect.gen(function* () {
   });
 
   return DesktopWindow.of({
+    resolveSystemContextMenu,
     createMain,
     ensureMain,
     revealOrCreateMain,

@@ -30,6 +30,40 @@ export type ThreadActionMenuId =
   | "archive"
   | "delete";
 
+export interface LegacySidebarThreadActionMenuInput {
+  readonly branch: string | null;
+  readonly isPinned: boolean;
+  readonly supportsPinning: boolean;
+  readonly supportsTitleRegeneration: boolean;
+  readonly isRegeneratingTitle: boolean;
+  readonly isRunning: boolean;
+}
+
+/** Keep the legacy project-group layout while sharing single-thread menu content and ordering. */
+export function buildLegacySidebarThreadActionMenuItems(
+  input: LegacySidebarThreadActionMenuInput,
+): ReadonlyArray<ContextMenuItem<ThreadActionMenuId>> {
+  return buildThreadActionMenuItems({
+    branch: input.branch,
+    projectFilter: null,
+    isPinned: input.isPinned,
+    isSettled: false,
+    autoSettleEnabled: true,
+    isSnoozed: false,
+    canSnoozeNow: false,
+    isRegeneratingTitle: input.isRegeneratingTitle,
+    isRunning: input.isRunning,
+    supports: {
+      settlement: false,
+      autoSettleOptOut: false,
+      snooze: false,
+      pinning: input.supportsPinning,
+      titleRegeneration: input.supportsTitleRegeneration,
+    },
+    snoozePresets: [],
+  });
+}
+
 export interface ThreadActionMenuState {
   readonly branch: string | null;
   /**

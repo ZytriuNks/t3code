@@ -34,10 +34,12 @@ export interface ContextMenuItem<T extends string = string> {
   label: string;
   destructive?: boolean;
   disabled?: boolean;
-  /** Renders as a non-interactive section header label. Web fallback only — stripped on desktop native menus. */
+  /** Renders as a non-interactive section header label in the renderer menu. */
   header?: boolean;
-  /** Icon keyword resolved by the web fallback. Stripped on desktop native menus. */
+  /** Icon keyword resolved by the renderer menu. */
   icon?: string;
+  /** Keyboard shortcut hint; the action itself remains owned by its caller. */
+  shortcut?: string;
   /** Inserts a visual section divider immediately before this item. */
   separatorBefore?: boolean;
   /** Shows a check mark. Used to mark the current option inside a submenu. */
@@ -56,6 +58,7 @@ export interface ContextMenuItemSchemaType {
   readonly disabled?: boolean;
   readonly header?: boolean;
   readonly icon?: string;
+  readonly shortcut?: string;
   readonly separatorBefore?: boolean;
   readonly checked?: boolean;
   readonly children?: readonly ContextMenuItemSchemaType[];
@@ -68,6 +71,7 @@ export const ContextMenuItemSchema: Schema.Codec<ContextMenuItemSchemaType> = Sc
   disabled: Schema.optionalKey(Schema.Boolean),
   header: Schema.optionalKey(Schema.Boolean),
   icon: Schema.optionalKey(Schema.String),
+  shortcut: Schema.optionalKey(Schema.String),
   separatorBefore: Schema.optionalKey(Schema.Boolean),
   checked: Schema.optionalKey(Schema.Boolean),
   children: Schema.optionalKey(
@@ -76,6 +80,19 @@ export const ContextMenuItemSchema: Schema.Codec<ContextMenuItemSchemaType> = Sc
     ),
   ),
 });
+
+export const DesktopSystemContextMenuRequestSchema = Schema.Struct({
+  requestId: Schema.String,
+  items: Schema.Array(ContextMenuItemSchema),
+  position: Schema.Struct({ x: Schema.Number, y: Schema.Number }),
+});
+export type DesktopSystemContextMenuRequest = typeof DesktopSystemContextMenuRequestSchema.Type;
+
+export const DesktopSystemContextMenuResponseSchema = Schema.Struct({
+  requestId: Schema.String,
+  itemId: Schema.NullOr(Schema.String),
+});
+export type DesktopSystemContextMenuResponse = typeof DesktopSystemContextMenuResponseSchema.Type;
 
 export type DesktopUpdateStatus =
   | "disabled"
@@ -1217,6 +1234,11 @@ export interface DesktopBridge {
     items: readonly ContextMenuItem<T>[],
     position?: { x: number; y: number },
   ) => Promise<T | null>;
+  /** Optional while older desktop shells still own their native editing menus. */
+  onSystemContextMenu?: (
+    listener: (request: DesktopSystemContextMenuRequest) => void,
+  ) => () => void;
+  resolveSystemContextMenu?: (response: DesktopSystemContextMenuResponse) => Promise<boolean>;
   /** Receives a local OAuth code for a sign-in owned by a remote environment. */
   receiveProviderAuthCallback?: (authorizationUrl: string) => Promise<string>;
   cancelProviderAuthCallback?: (authorizationUrl: string) => Promise<void>;

@@ -3,6 +3,7 @@ import {
   DesktopAppBrandingSchema,
   DesktopEnvironmentBootstrapSchema,
   DesktopThemeSchema,
+  DesktopSystemContextMenuResponseSchema,
   EDITORS,
   EditorId,
   PickedThemeFileSchema,
@@ -36,6 +37,7 @@ import * as ElectronShell from "../../electron/ElectronShell.ts";
 import * as ElectronTheme from "../../electron/ElectronTheme.ts";
 import * as ElectronWindow from "../../electron/ElectronWindow.ts";
 import { focusExistingWindowsFolder } from "../../electron/WindowsFileManager.ts";
+import * as DesktopWindow from "../../window/DesktopWindow.ts";
 import * as Electron from "electron";
 import * as MacPermissions from "../../permissions/MacPermissions.ts";
 import { safariPermissionCheck } from "../../preview/BrowserImport/SafariPermission.ts";
@@ -299,6 +301,16 @@ export const showContextMenu = DesktopIpc.makeIpcMethod({
       position: Option.fromNullishOr(input.position),
     });
     return Option.getOrNull(selectedItemId);
+  }),
+});
+
+export const resolveSystemContextMenu = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.RESOLVE_SYSTEM_CONTEXT_MENU_CHANNEL,
+  payload: DesktopSystemContextMenuResponseSchema,
+  result: Schema.Boolean,
+  handler: Effect.fn("desktop.ipc.window.resolveSystemContextMenu")(function* (response, event) {
+    const window = yield* DesktopWindow.DesktopWindow;
+    return yield* window.resolveSystemContextMenu(response, event?.sender.id ?? -1);
   }),
 });
 

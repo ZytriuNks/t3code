@@ -3644,6 +3644,34 @@ function GeneralSettingsRows() {
           }
         />
 
+        <SettingsRow
+          {...searchableSetting("hide-unavailable-context-menu-items", t)}
+          description={t("settings.general.hideUnavailableContextMenuItems.description")}
+          resetAction={
+            settings.hideUnavailableContextMenuItems !==
+            DEFAULT_UNIFIED_SETTINGS.hideUnavailableContextMenuItems ? (
+              <SettingResetButton
+                label={t("settings.general.hideUnavailableContextMenuItems.resetLabel")}
+                onClick={() =>
+                  updateSettings({
+                    hideUnavailableContextMenuItems:
+                      DEFAULT_UNIFIED_SETTINGS.hideUnavailableContextMenuItems,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Switch
+              checked={settings.hideUnavailableContextMenuItems}
+              onCheckedChange={(checked) =>
+                updateSettings({ hideUnavailableContextMenuItems: Boolean(checked) })
+              }
+              aria-label={t("settings.general.hideUnavailableContextMenuItems.ariaLabel")}
+            />
+          }
+        />
+
         {isElectron ? (
           <SettingsRow
             {...searchableSetting("quit-confirmation", t)}

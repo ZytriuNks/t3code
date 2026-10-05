@@ -313,6 +313,12 @@ export const EN_MESSAGES = {
     "Ask before deleting a thread and its chat history.",
   "settings.general.confirmDelete.ariaLabel": "Confirm thread deletion",
   "settings.general.confirmDelete.resetLabel": "delete confirmation",
+  "settings.general.hideUnavailableContextMenuItems.description":
+    "Hide unavailable entries from context menus instead of showing them disabled.",
+  "settings.general.hideUnavailableContextMenuItems.ariaLabel":
+    "Hide unavailable context menu items",
+  "settings.general.hideUnavailableContextMenuItems.resetLabel":
+    "hide unavailable context menu items",
   "settings.general.confirmQuit.description": "Hold mode also quits on two quick presses.",
   "settings.general.confirmQuit.ariaLabel": "Quit shortcut behavior",
   "settings.general.confirmQuit.resetLabel": "quit shortcut behavior",
@@ -943,6 +949,10 @@ export const EN_MESSAGES = {
     "ask before thread second click inline action",
   "settings.search.item.delete-confirmation.title": "Delete confirmation",
   "settings.search.item.delete-confirmation.keywords": "ask before thread chat history",
+  "settings.search.item.hide-unavailable-context-menu-items.title":
+    "Hide unavailable context menu items",
+  "settings.search.item.hide-unavailable-context-menu-items.keywords":
+    "right click context menu items unavailable disabled greyed hidden hide show filter",
   "settings.search.item.quit-confirmation.title": "Quit shortcut",
   "settings.search.item.quit-confirmation.keywords":
     "confirmation desktop app exit direct hold double click press twice",
@@ -2861,6 +2871,10 @@ export const ZH_CN_MESSAGES = {
   "settings.general.confirmDelete.description": "删除线程及其聊天记录前先询问。",
   "settings.general.confirmDelete.ariaLabel": "确认删除线程",
   "settings.general.confirmDelete.resetLabel": "删除确认",
+  "settings.general.hideUnavailableContextMenuItems.description":
+    "右键菜单中不显示不可用的条目,而不是以灰态展示。",
+  "settings.general.hideUnavailableContextMenuItems.ariaLabel": "隐藏不可用的右键菜单项",
+  "settings.general.hideUnavailableContextMenuItems.resetLabel": "隐藏不可用的右键菜单项",
   "settings.general.confirmQuit.description": "长按模式下，快速按两次也会退出。",
   "settings.general.confirmQuit.ariaLabel": "退出快捷键行为",
   "settings.general.confirmQuit.resetLabel": "退出快捷键行为",
@@ -3430,6 +3444,9 @@ export const ZH_CN_MESSAGES = {
   "settings.search.item.archive-confirmation.keywords": "询问 线程 二次点击 行内操作",
   "settings.search.item.delete-confirmation.title": "删除确认",
   "settings.search.item.delete-confirmation.keywords": "询问 线程 聊天记录 历史",
+  "settings.search.item.hide-unavailable-context-menu-items.title": "隐藏不可用的右键菜单项",
+  "settings.search.item.hide-unavailable-context-menu-items.keywords":
+    "右键 上下文菜单 条目 不可用 禁用 灰色 隐藏 显示 过滤",
   "settings.search.item.quit-confirmation.title": "退出快捷键",
   "settings.search.item.quit-confirmation.keywords": "确认 桌面 应用 退出 直接 长按 双击 按两次",
   "settings.search.item.text-generation-model.title": "文本生成模型",

@@ -96,6 +96,7 @@ function makeDesktopWindowLayer(
     dispatchMenuAction: () => Effect.void,
     dispatchSnapShotEvent: () => Effect.void,
     zoomMain: () => Effect.void,
+    resolveSystemContextMenu: () => Effect.die("unexpected system context menu"),
     syncAppearance: Effect.void,
   });
 }

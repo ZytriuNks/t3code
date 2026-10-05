@@ -46,18 +46,16 @@ function createBrowserLocalApi(): LocalApi {
         items: readonly ContextMenuItem<T>[],
         position?: { x: number; y: number },
       ): Promise<T | null> => {
-        if (window.desktopBridge) {
-          return window.desktopBridge.showContextMenu(items, position) as Promise<T | null>;
-        }
+        // Keep application menus in the renderer so they share the same themed
+        // surface and interaction states as dropdown menus in every client.
+        // System-owned menus (editing, links, images) remain handled by the
+        // desktop shell independently of this app menu facade.
         return showContextMenuFallback(items, position);
       },
-      // A native desktop menu blocks keyboard input and closes on outside
-      // interaction, so nothing to do there; the DOM fallback needs an explicit
-      // dismiss when the state behind it goes away.
+      // The renderer menu needs an explicit dismiss when the state behind it
+      // goes away.
       close: async () => {
-        if (!window.desktopBridge) {
-          dismissContextMenu();
-        }
+        dismissContextMenu();
       },
     },
     persistence: {

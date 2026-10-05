@@ -55,7 +55,7 @@ function failureToast(title: string, error: unknown) {
 /**
  * The per-thread action menu (pin, settle, snooze, rename, copy, delete…) as
  * a self-contained hook, for surfaces other than the sidebar row — today the
- * chat header. Renders through the native context-menu bridge and dispatches
+ * chat header. Renders through the themed renderer context menu and dispatches
  * through the same mutations the sidebar uses.
  *
  * Unlike the sidebar, settle and snooze here never navigate away: the caller

@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { buildThreadActionMenuItems, type ThreadActionMenuState } from "./threadActionMenu.logic";
+import {
+  buildLegacySidebarThreadActionMenuItems,
+  buildThreadActionMenuItems,
+  type ThreadActionMenuState,
+} from "./threadActionMenu.logic";
 
 const baseState: ThreadActionMenuState = {
   branch: null,
@@ -32,6 +36,65 @@ function allIds(state: ThreadActionMenuState): string[] {
   const flatten = (items: ReturnType<typeof buildThreadActionMenuItems>): string[] =>
     items.flatMap((item) => [item.id, ...(item.children ? flatten(item.children) : [])]);
   return flatten(buildThreadActionMenuItems(state));
+}
+
+describe("buildLegacySidebarThreadActionMenuItems", () => {
+  it("matches the shared single-thread structure without settlement, snooze, or project filtering", () => {
+    const items = buildLegacySidebarThreadActionMenuItems({
+      branch: "feat/menu",
+      isPinned: true,
+      supportsPinning: true,
+      supportsTitleRegeneration: true,
+      isRegeneratingTitle: false,
+      isRunning: true,
+    });
+
+    expect(items.map((item) => item.id)).toEqual([
+      "new-thread-on-branch",
+      "unpin",
+      "rename",
+      "regenerate-title",
+      "mark-unread",
+      "copy",
+      "project-settings",
+      "archive",
+      "delete",
+    ]);
+    expect(items[0]).toMatchObject({
+      label: "New thread on feat/menu",
+      icon: "message-square-plus",
+    });
+    expect(items[1]).toMatchObject({ label: "Unpin thread", icon: "pin-off" });
+    expect(items[5]?.children?.map(({ id, label }) => [id, label])).toEqual([
+      ["copy-path", "Path"],
+      ["copy-branch", "Branch"],
+      ["copy-thread-id", "Thread ID"],
+    ]);
+    expect(items.at(-2)).toMatchObject({ id: "archive", disabled: true, separatorBefore: true });
+    expect(allIdsFrom(items)).not.toContain("settle");
+    expect(allIdsFrom(items)).not.toContain("snooze");
+    expect(allIdsFrom(items)).not.toContain("auto-settle");
+    expect(allIdsFrom(items)).not.toContain("filter-by-project");
+  });
+
+  it("respects each thread environment's pinning and title regeneration capabilities", () => {
+    expect(
+      buildLegacySidebarThreadActionMenuItems({
+        branch: null,
+        isPinned: false,
+        supportsPinning: false,
+        supportsTitleRegeneration: false,
+        isRegeneratingTitle: false,
+        isRunning: false,
+      }).map((item) => item.id),
+    ).toEqual(["rename", "mark-unread", "copy", "project-settings", "archive", "delete"]);
+  });
+});
+
+function allIdsFrom(
+  items: ReadonlyArray<{ id: string; children?: ReadonlyArray<{ id: string }> }>,
+) {
+  return items.flatMap((item) => [item.id, ...(item.children?.map((child) => child.id) ?? [])]);
 }
 
 describe("buildThreadActionMenuItems", () => {
