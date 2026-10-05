@@ -949,6 +949,10 @@ export const EN_MESSAGES = {
     "ask before thread second click inline action",
   "settings.search.item.delete-confirmation.title": "Delete confirmation",
   "settings.search.item.delete-confirmation.keywords": "ask before thread chat history",
+  "settings.search.item.hide-unavailable-context-menu-items.title":
+    "Hide unavailable context menu items",
+  "settings.search.item.hide-unavailable-context-menu-items.keywords":
+    "right click context menu items unavailable disabled greyed hidden hide show filter",
   "settings.search.item.quit-confirmation.title": "Quit shortcut",
   "settings.search.item.quit-confirmation.keywords":
     "confirmation desktop app exit direct hold double click press twice",
@@ -3440,6 +3444,9 @@ export const ZH_CN_MESSAGES = {
   "settings.search.item.archive-confirmation.keywords": "询问 线程 二次点击 行内操作",
   "settings.search.item.delete-confirmation.title": "删除确认",
   "settings.search.item.delete-confirmation.keywords": "询问 线程 聊天记录 历史",
+  "settings.search.item.hide-unavailable-context-menu-items.title": "隐藏不可用的右键菜单项",
+  "settings.search.item.hide-unavailable-context-menu-items.keywords":
+    "右键 上下文菜单 条目 不可用 禁用 灰色 隐藏 显示 过滤",
   "settings.search.item.quit-confirmation.title": "退出快捷键",
   "settings.search.item.quit-confirmation.keywords": "确认 桌面 应用 退出 直接 长按 双击 按两次",
   "settings.search.item.text-generation-model.title": "文本生成模型",
