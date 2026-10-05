@@ -214,6 +214,16 @@ beforeEach(() => {
     callback(0);
     return 0;
   });
+  // performance.now() advances far enough between samples that the
+  // suppress-hover grace window the renderer opens on every menu mount
+  // has always expired by the time a test fires a synthetic mouseenter.
+  let nowCalls = 0;
+  vi.stubGlobal("performance", {
+    now: () => {
+      nowCalls += 1;
+      return nowCalls * 1000;
+    },
+  });
   vi.stubGlobal(
     "MouseEvent",
     class extends FakeDomEvent {
@@ -276,11 +286,11 @@ describe("showContextMenuFallback", () => {
       const renameButton = findButton("Rename");
       const removeButton = findButton("Remove");
       expect(removeButton?.style.background).not.toBe(
-        "color-mix(in srgb, var(--destructive) 10%, transparent)",
+        "color-mix(in srgb, var(--destructive) 30%, transparent)",
       );
       removeButton?.dispatchEvent(new MouseEvent("mouseenter"));
       expect(removeButton?.style.background).toBe(
-        "color-mix(in srgb, var(--destructive) 10%, transparent)",
+        "color-mix(in srgb, var(--destructive) 30%, transparent)",
       );
       expect(removeButton?.style.color).toBe("var(--destructive-foreground)");
       renameButton?.focus();
@@ -288,7 +298,7 @@ describe("showContextMenuFallback", () => {
       expect(removeButton?.style.background).toBe("transparent");
       renameButton?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown" }));
       expect(removeButton?.style.background).toBe(
-        "color-mix(in srgb, var(--destructive) 10%, transparent)",
+        "color-mix(in srgb, var(--destructive) 30%, transparent)",
       );
       removeButton?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
       await expect(selectionPromise).resolves.toBe(id);
@@ -453,7 +463,7 @@ describe("showContextMenuFallback", () => {
     const deleteButton = findButton("Delete");
     deleteButton?.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
     expect(deleteButton?.style.background).toBe(
-      "color-mix(in srgb, var(--destructive) 10%, transparent)",
+      "color-mix(in srgb, var(--destructive) 30%, transparent)",
     );
     // Move focus off the destructive row so the highlight drops when its
     // hover state is cleared (real browsers behave the same way).

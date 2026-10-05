@@ -264,6 +264,22 @@ export function showContextMenuFallback<T extends string>(
     let virtualFocusedButton: HTMLButtonElement | undefined;
     let hoveredButton: HTMLButtonElement | undefined;
     let keyboardFocusNavigationActive = false;
+    // When a menu mounts, the browser dispatches a synthetic mouseenter to
+    // whichever row the right-click cursor landed on. That event reflects
+    // the cursor's resting position, not a deliberate hover gesture, and
+    // we want the menu to start pristine. Track an absolute wall-clock
+    // deadline until which any incoming mouseenter is treated as that
+    // synthetic event and silently dropped.
+    let suppressUntil: number | undefined;
+    const markMenuJustOpened = () => {
+      suppressUntil = nowMs() + 80;
+    };
+    const nowMs = () => {
+      if (typeof performance !== "undefined" && typeof performance.now === "function") {
+        return performance.now();
+      }
+      return Date.now();
+    };
     const focusButton = (button: HTMLButtonElement | undefined) => {
       if (!button) return;
       if (!options.preserveFocus) {
@@ -543,7 +559,7 @@ export function showContextMenuFallback<T extends string>(
             isHovered || (options.preserveFocus && virtualFocusedButton === button);
             button.style.background = isHighlighted
               ? isLeafDestructive
-                ? "color-mix(in srgb, var(--destructive) 10%, transparent)"
+                ? "color-mix(in srgb, var(--destructive) 30%, transparent)"
                 : "var(--accent)"
               : "transparent";
             button.style.color = isHighlighted
@@ -566,6 +582,15 @@ export function showContextMenuFallback<T extends string>(
             }
             button.focus({ preventScroll: true });
             hoveredButton = button;
+            // Drop the synthetic mouseenter the browser dispatches when a
+            // freshly-mounted menu lands under the pointer. That event
+            // reflects the cursor's resting position, not a deliberate
+            // hover, so we want the row to stay quiet. Real pointer
+            // movement arrives after the suppress window expires and
+            // paints normally.
+            if (suppressUntil !== undefined && nowMs() < suppressUntil) {
+              return;
+            }
             isHovered = true;
             updateHighlight();
           });
@@ -694,29 +719,34 @@ export function showContextMenuFallback<T extends string>(
         menu.addEventListener("pointerdown", (event) => event.preventDefault());
       }
 
-      menu.addEventListener("mouseenter", () => {
-        closeMenusFromLevel(level + 1);
-      });
-      // Mouse leaving this menu dismisses any nested menus below it so a
-      // parent row that was no longer hovered does not leave its submenu
-      // orphaned on screen. We only react when the pointer actually
-      // leaves the menu tree — moving into a nested submenu reports a
-      // `relatedTarget` that lives inside the submenu tree, which we
-      // explicitly skip.
+      // Mouse leaving this menu dismisses any nested menus below it AND this
+      // menu itself, so a parent row that was no longer hovered does not
+      // leave its submenu orphaned on screen. We only react when the
+      // pointer actually leaves the menu tree — moving into a parent or
+      // sibling menu reports a `relatedTarget` that lives inside that
+      // menu, which we explicitly skip.
       menu.addEventListener("mouseleave", (event) => {
         const related = event.relatedTarget as Node | null;
-        // Ignore moves into the parent menu or any sibling at the same level.
+        // Ignore moves into any menu in the tree, including parent
+        // menus and sibling submenus at any level. The pointer is
+        // travelling through the menu tree, not away from it.
         if (related) {
-          for (let l = 0; l <= level; l++) {
+          for (let l = 0; l < menuStack.length; l++) {
             if (menuStack[l]?.contains(related)) return;
           }
         }
-        closeMenusFromLevel(level + 1);
+        closeMenusFromLevel(level);
       });
 
       document.body.appendChild(menu);
       menuStack[level] = menu;
       submenuTriggerStack[level] = parentTrigger;
+
+      // Defer painting any hover highlight until the browser has had a
+      // chance to dispatch the synthetic mouseenter for the pointer's
+      // resting position. Without this, the row the cursor landed on
+      // would already be highlighted before the user has moved at all.
+      markMenuJustOpened();
 
       if (level === 0 || menuStack[level - 1] !== undefined) {
         focusButton(enabledButtons()[0]);
