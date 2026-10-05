@@ -526,7 +526,7 @@ describe("showContextMenuFallback", () => {
     await expect(selectionPromise).resolves.toBeNull();
   });
 
-  it("keeps every mounted menu open when the pointer leaves only the deepest submenu", async () => {
+  it("dismisses the submenu but keeps the root menu when the pointer leaves only the submenu", async () => {
     const selectionPromise = showContextMenuFallback([
       {
         id: "copy:submenu",
@@ -541,12 +541,12 @@ describe("showContextMenuFallback", () => {
     parentButton?.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
     const childMenu = (document as unknown as FakeDocument).body.children[1];
     expect(childMenu).toBeTruthy();
-    // Pointer leaves the deepest submenu; nothing else exists below it,
-    // so both menus stay mounted.
+    // Pointer leaves the submenu; the submenu closes but the root menu
+    // stays mounted so the user can move back into a row.
     childMenu?.dispatchEvent(
       new MouseEvent("mouseleave", { bubbles: true, relatedTarget: document.body }),
     );
-    expect((document as unknown as FakeDocument).body.children.length).toBe(2);
+    expect((document as unknown as FakeDocument).body.children.length).toBe(1);
     dismissContextMenu();
     await expect(selectionPromise).resolves.toBeNull();
   });

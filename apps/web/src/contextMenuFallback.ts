@@ -701,12 +701,11 @@ export function showContextMenuFallback<T extends string>(
         menu.addEventListener("pointerdown", (event) => event.preventDefault());
       }
 
-      // Mouse leaving a menu dismisses any nested menus below it. The menu
-      // the cursor was on stays mounted so the user can move back into it;
-      // only the submenus it owned get torn down. The root menu stays
-      // mounted until the user clicks outside, presses Escape, or another
-      // dismissal path fires — a parent row that was no longer hovered
-      // does not destroy it.
+      // Mouse leaving a submenu dismisses that submenu (and any deeper
+      // submenus it owned) so the user does not leave an orphaned menu
+      // on screen. The root menu stays mounted until the user clicks
+      // outside, presses Escape, or another dismissal path fires; only
+      // moves into another menu in the tree are ignored.
       menu.addEventListener("mouseleave", (event) => {
         const related = event.relatedTarget as Node | null;
         if (related) {
@@ -714,7 +713,11 @@ export function showContextMenuFallback<T extends string>(
             if (menuStack[l]?.contains(related)) return;
           }
         }
-        closeMenusFromLevel(level + 1);
+        if (level === 0) {
+          closeMenusFromLevel(level + 1);
+        } else {
+          closeMenusFromLevel(level);
+        }
       });
 
       document.body.appendChild(menu);
