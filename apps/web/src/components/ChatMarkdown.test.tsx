@@ -876,6 +876,37 @@ describe("ChatMarkdown Windows file links", () => {
     expect(html).toContain("chat-markdown-file-link");
   });
 
+  it.each([true, false])(
+    "keeps CommonMark escape characters in authored Windows destinations with raw HTML=%s",
+    async (parseRawHtml) => {
+      let renderer: ReactTestRenderer | null = null;
+      try {
+        await act(() => {
+          renderer = create(
+            <ChatMarkdown
+              cwd="C:/workspace"
+              environmentId={environmentId}
+              parseRawHtml={parseRawHtml}
+              text={String.raw`[Config](C:\workspace\.t3\_cache\settings.json)
+
+[Reference][config]
+
+[config]: C:\workspace\.t3\settings.json
+
+[Escaped](C:/workspace/a&amp;b.json)`}
+            />,
+          );
+        });
+        const links = renderer!.root.findAllByType("a").map((link) => link.props.href);
+        expect(links).toContain("C:/workspace/.t3/_cache/settings.json");
+        expect(links).toContain("C:/workspace/.t3/settings.json");
+        expect(links).toContain("C:/workspace/a&b.json");
+      } finally {
+        await act(() => renderer?.unmount());
+      }
+    },
+  );
+
   it.each([true, false])("normalizes backslashes with parseRawHtml=%s", (parseRawHtml) => {
     const html = renderToStaticMarkup(
       <ChatMarkdown

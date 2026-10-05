@@ -1,3 +1,4 @@
+import * as ProjectFolders from "../project/ProjectFolders.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as WorktreeSetupTracker from "../project/WorktreeSetupTracker.ts";
 import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
@@ -95,6 +96,7 @@ const adapter = {
 } as ProviderAdapterV2Shape;
 
 interface HarnessOptions {
+  readonly prepareThreadFolder?: ProjectFolders.ProjectFolders["Service"]["prepareThreadFolder"];
   readonly createWorktree?: GitWorkflow.GitWorkflowService["Service"]["createWorktree"];
   readonly fetchRemote?: GitWorkflow.GitWorkflowService["Service"]["fetchRemote"];
   readonly renameBranch?: GitWorkflow.GitWorkflowService["Service"]["renameBranch"];
@@ -136,6 +138,11 @@ function makeHarness(options: HarnessOptions = {}) {
     options.generateTitle ?? (() => Effect.succeed({ title: "Generated title" })),
   );
   const externalServices = Layer.mergeAll(
+    Layer.mock(ProjectFolders.ProjectFolders)({
+      newProjectsRoot: "/unused-projects",
+      prepareThreadFolder:
+        options.prepareThreadFolder ?? ((input) => Effect.succeed(input.worktreePath)),
+    }),
     WorktreeSetupTracker.layer,
     Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({ get: () => Effect.succeed(null) }),
     Layer.mock(TerminalManager.TerminalManager)({ close: () => Effect.void }),
@@ -2001,3 +2008,39 @@ for (const exitCode of [0, 1]) {
     }),
   );
 }
+
+it.effect(
+  "stores the scratch folder before preparing the V2 run and keeps it on launch replay",
+  () =>
+    Effect.gen(function* () {
+      const setupEntered = yield* Deferred.make<void>();
+      const allowSetup = yield* Deferred.make<void>();
+      const prepareFolder = vi.fn(() => Effect.succeed("/scratch/isolated-thread"));
+      const harness = makeHarness({
+        prepareThreadFolder: prepareFolder,
+        runSetup: () =>
+          Deferred.succeed(setupEntered, undefined).pipe(
+            Effect.andThen(Deferred.await(allowSetup)),
+            Effect.as({ status: "no-script" as const }),
+          ),
+      });
+      yield* Effect.gen(function* () {
+        const launches = yield* ThreadLaunch.ThreadLaunchService;
+        const threads = yield* ThreadManagement.ThreadManagementService;
+        const input = launchInput({
+          command: "scratch-launch",
+          thread: "scratch-thread",
+          message: "Review this",
+        });
+        const result = yield* launches.launch(input);
+        yield* Deferred.await(setupEntered);
+        assert.equal(
+          (yield* threads.getThreadProjection(result.threadId)).thread.worktreePath,
+          "/scratch/isolated-thread",
+        );
+        yield* launches.launch(input);
+        assert.equal(prepareFolder.mock.calls.length, 1);
+        yield* Deferred.succeed(allowSetup, undefined);
+      }).pipe(Effect.provide(harness.layer));
+    }),
+);

@@ -199,6 +199,7 @@ import { linkCreatedPullRequest } from "./git/linkCreatedPullRequest.ts";
 import * as ReviewService from "./review/ReviewService.ts";
 import * as ProjectEnrichmentService from "./project/ProjectEnrichmentService.ts";
 import * as ProjectService from "./project/ProjectService.ts";
+import * as ProjectFolders from "./project/ProjectFolders.ts";
 import { projectMutationOperation } from "./project/ProjectMutation.ts";
 import * as ProjectSetupScriptRunner from "./project/ProjectSetupScriptRunner.ts";
 import * as ProjectCloneTracker from "./project/ProjectCloneTracker.ts";
@@ -1079,6 +1080,7 @@ const makeWsRpcLayer = (
       const threadManagement = yield* ThreadManagementService.ThreadManagementService;
       const intakeContext = yield* Effect.context<
         | ThreadManagementService.ThreadManagementService
+        | ProjectFolders.ProjectFolders
         | ThreadLaunchService.ThreadLaunchService
         | FileSystem.FileSystem
         | ServerConfig.ServerConfig
@@ -1132,6 +1134,7 @@ const makeWsRpcLayer = (
       const repositoryIdentityResolver =
         yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
       const projectService = yield* ProjectService.ProjectService;
+      const projectFolders = yield* ProjectFolders.ProjectFolders;
       const agentSessionScanner = yield* AgentSessionScanner.AgentSessionScanner;
       const agentSessionImporter = yield* AgentSessionImporter;
       const checkpointDiffQuery = yield* CheckpointDiffQuery.CheckpointDiffQuery;
@@ -1603,6 +1606,7 @@ const makeWsRpcLayer = (
           );
           const environment = yield* serverEnvironment.getDescriptor;
           const auth = yield* serverAuth.getDescriptor();
+          const scratchWorkspaceRoot = yield* projectFolders.scratchWorkspaceRoot;
           const availableEditors: ReadonlyArray<EditorId> = yield* resolveAvailableEditorsForConfig(
             externalLauncher.resolveAvailableEditors(),
           );
@@ -1650,6 +1654,8 @@ const makeWsRpcLayer = (
                 }),
             threadResumeCompletionMarker: true,
             threadSnapshotPagination: true,
+            ...(scratchWorkspaceRoot === undefined ? {} : { scratchWorkspaceRoot }),
+            newProjectsRoot: projectFolders.newProjectsRoot,
           };
         });
 
@@ -2209,6 +2215,7 @@ const makeWsRpcLayer = (
                 ? providerRegistry.refreshWorkspaceSnapshot({
                     instanceId: input.instanceId,
                     cwd: input.cwd,
+                    fresh: input.fresh === true,
                   })
                 : input.instanceId !== undefined
                   ? providerRegistry.refreshInstance(input.instanceId)
@@ -2997,6 +3004,29 @@ const makeWsRpcLayer = (
             ),
             { "rpc.aggregate": "workspace" },
           ),
+        [WS_METHODS.projectsEnsureScratch]: () =>
+          observeRpcEffect(
+            WS_METHODS.projectsEnsureScratch,
+            projectFolders.ensureScratch.pipe(
+              Effect.mapError(
+                (cause) => new OrchestrationDispatchCommandError({ message: cause.message, cause }),
+              ),
+            ),
+            { "rpc.aggregate": "orchestration" },
+          ),
+        [WS_METHODS.projectsCreateNew]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.projectsCreateNew,
+            projectFolders
+              .createNamedProject(input)
+              .pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new OrchestrationDispatchCommandError({ message: cause.message, cause }),
+                ),
+              ),
+            { "rpc.aggregate": "orchestration" },
+          ),
         [WS_METHODS.projectsMutate]: (mutation) =>
           observeRpcEffect(
             WS_METHODS.projectsMutate,
@@ -3094,8 +3124,13 @@ const makeWsRpcLayer = (
                     resource: input.resource,
                   });
                 }
+                const clone = yield* projectCloneTracker.get(project.value.id);
                 return yield* issueAssetUrl({
                   resource: input.resource,
+                  projectCheckoutPending:
+                    clone !== null &&
+                    clone.phase !== "done" &&
+                    clone.destinationPath === project.value.workspaceRoot,
                   ...(project.value.faviconPath
                     ? { projectFaviconPath: project.value.faviconPath }
                     : {}),

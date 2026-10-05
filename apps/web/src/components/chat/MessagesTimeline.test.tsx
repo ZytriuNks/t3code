@@ -1,4 +1,5 @@
 import {
+  ApprovalRequestId,
   CheckpointRef,
   EnvironmentId,
   MessageId,
@@ -526,6 +527,52 @@ describe("MessagesTimeline", () => {
       await act(() => renderer?.unmount());
     }
   });
+  it("leads user-input rows with the question and reveals the answer on expansion", async () => {
+    let renderer: ReactTestRenderer | null = null;
+    try {
+      await act(() => {
+        renderer = create(
+          <MessagesTimeline
+            {...buildProps()}
+            timelineEntries={[
+              {
+                id: "question",
+                kind: "work",
+                createdAt: MESSAGE_CREATED_AT,
+                entry: {
+                  id: "question",
+                  createdAt: MESSAGE_CREATED_AT,
+                  label: "User input submitted",
+                  tone: "tool",
+                  toolLifecycleStatus: "completed",
+                  questionAnswer: {
+                    requestId: ApprovalRequestId.make("question"),
+                    questionTextById: { scope: "Which repository?" },
+                    answers: { scope: "The fork" },
+                    attachmentsByQuestionId: {},
+                  },
+                },
+              },
+            ]}
+          />,
+        );
+      });
+      const row = renderer!.root.find(
+        (node) =>
+          node.props["aria-label"]?.startsWith("Which repository?") &&
+          node.props["aria-expanded"] === false,
+      );
+      expect(row.props["aria-label"]).toContain("The fork");
+      await act(() => row.props.onClick());
+      expect(JSON.stringify(renderer!.toJSON())).toContain("Which repository?");
+      expect(JSON.stringify(renderer!.toJSON())).toContain("The fork");
+      await act(() => row.props.onClick());
+      expect(JSON.stringify(renderer!.toJSON())).toContain("Which repository?");
+    } finally {
+      await act(() => renderer?.unmount());
+    }
+  });
+
   it("shows dynamic tool input without cached output when the row is expanded", async () => {
     activityTestState.expanded = true;
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);

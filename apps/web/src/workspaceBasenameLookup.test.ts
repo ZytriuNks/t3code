@@ -17,6 +17,8 @@ describe("needsWorkspaceBasenameLookup", () => {
   it("leaves anything with a directory alone", () => {
     expect(needsWorkspaceBasenameLookup("apps/web/src/components/ChatView.tsx")).toBe(false);
     expect(needsWorkspaceBasenameLookup("apps\\web\\ChatView.tsx")).toBe(false);
+    expect(needsWorkspaceBasenameLookup(".")).toBe(false);
+    expect(needsWorkspaceBasenameLookup("..")).toBe(false);
     expect(needsWorkspaceBasenameLookup("   ")).toBe(false);
   });
 });

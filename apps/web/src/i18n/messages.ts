@@ -220,7 +220,7 @@ export const EN_MESSAGES = {
   "settings.general.providerUpdateChecks.ariaLabel": "Check provider versions",
   "settings.general.providerUpdateChecks.resetLabel": "provider update checks",
   "settings.general.continueThreads.description":
-    "Automatically resume interrupted threads after an update, crash, or machine restart on the selected environments. Update older servers first.",
+    "Automatically resume interrupted threads after an update, crash, or machine restart on the selected environments.",
   "settings.general.continueThreads.unsupported":
     "All selected connected environments must support restart continuation.",
   "settings.general.continueThreads.ariaLabel": "Continue threads after restarts",
@@ -1820,6 +1820,19 @@ export const EN_MESSAGES = {
     "Type your own answer, or leave this blank to use the selected option",
   "composer.placeholder.planFollowUp":
     "Add feedback to refine the plan, or leave this blank to implement it",
+  "settings.general.workingShelf.description":
+    "Fold working and monitoring threads into a Working section. They return to the top of the inbox when they need you.",
+  "settings.general.workingShelf.label": "Working section (beta)",
+  "settings.search.item.working-shelf.title": "Working section (beta)",
+  "settings.search.item.working-shelf.terms":
+    "hide fold running monitoring threads inbox sidebar shelf",
+  "sidebar.workingShelf": "Working",
+  "commandPalette.restartAgent.title": "Restart agent session",
+  "commandPalette.restartAgent.success": "Agent session will restart",
+  "commandPalette.restartAgent.description": "Your next message starts a fresh session.",
+  "composer.hero.noProject": "No project",
+  "composer.hero.scratchQuestion": "What should we work on?",
+  "composer.hero.startWithoutProject": "or start without a project",
   "composer.hero.buildIn": "What should we build in {project}?",
   "composer.hero.buildPrefix": "What should we build in",
   "composer.hero.buildSuffix": "?",
@@ -2793,7 +2806,7 @@ export const ZH_CN_MESSAGES = {
   "settings.general.providerUpdateChecks.ariaLabel": "检查提供商版本",
   "settings.general.providerUpdateChecks.resetLabel": "提供商更新检查",
   "settings.general.continueThreads.description":
-    "在所选环境发生更新、崩溃或机器重启后，自动恢复被中断的线程。请先更新较旧的服务器。",
+    "在所选环境发生更新、崩溃或机器重启后，自动恢复被中断的线程。",
   "settings.general.continueThreads.unsupported": "所有已连接的所选环境都必须支持重启后继续线程。",
   "settings.general.continueThreads.ariaLabel": "重启后继续线程",
   "settings.general.continueThreads.resetLabel": "重启后继续线程",
@@ -4264,6 +4277,18 @@ export const ZH_CN_MESSAGES = {
   "composer.placeholder.chooseOption": "请在上方选择一个选项",
   "composer.placeholder.customAnswer": "输入自定义回答；留空则使用所选选项",
   "composer.placeholder.planFollowUp": "添加反馈以完善计划；留空则直接执行计划",
+  "settings.general.workingShelf.description":
+    "将工作中和监控中的线程收进“工作中”分组；需要你处理时，它们会回到收件箱顶部。",
+  "settings.general.workingShelf.label": "工作中分组（测试版）",
+  "settings.search.item.working-shelf.title": "工作中分组（测试版）",
+  "settings.search.item.working-shelf.terms": "隐藏 折叠 工作 监控 线程 收件箱 侧栏 分组",
+  "sidebar.workingShelf": "工作中",
+  "commandPalette.restartAgent.title": "重启代理会话",
+  "commandPalette.restartAgent.success": "代理会话将重启",
+  "commandPalette.restartAgent.description": "发送下一条消息时将启动新的代理会话。",
+  "composer.hero.noProject": "无项目",
+  "composer.hero.scratchQuestion": "我们来做些什么？",
+  "composer.hero.startWithoutProject": "或不选项目直接开始",
   "composer.hero.buildIn": "在 {project} 中构建什么？",
   "composer.hero.buildPrefix": "在",
   "composer.hero.buildSuffix": "中构建什么？",

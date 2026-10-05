@@ -1,3 +1,4 @@
+import { randomUuidV4 } from "../RandomUuid.ts";
 import { makeProviderTextDeltaCoalescer } from "./ProviderTextDeltaCoalescer.ts";
 import { isWorkspaceImagePreviewPath } from "@t3tools/shared/filePreview";
 import { normalizeClaudeTurnTokenUsage } from "../../provider/ClaudeTurnTokenUsage.ts";
@@ -2363,6 +2364,8 @@ interface ActiveClaudeTurnContext {
   readonly subagentsByToolUseId: Map<string, ActiveClaudeSubagent>;
   readonly subagentNodesByTaskId: Map<string, OrchestrationV2ExecutionNode["id"]>;
   readonly pendingSubagentModelsByToolUseId: Map<string, string>;
+  readonly subagentToolParents: Map<string, string>;
+  readonly promptUuids: Set<string>;
 }
 
 interface ActiveClaudeProviderRetry {
@@ -2405,7 +2408,7 @@ interface ActiveClaudeToolCall {
   readonly startedAt: DateTime.Utc;
 }
 
-const PENDING_CLAUDE_SUBAGENT_MODEL_CAP = 64;
+const PENDING_CLAUDE_SUBAGENT_MODEL_CAP = 256;
 
 function rememberPendingClaudeSubagentModel(
   pending: Map<string, string>,
@@ -4951,6 +4954,17 @@ export function makeClaudeAdapterV2(
               });
             }
             const parentToolUseId = message.parent_tool_use_id;
+            if (parentToolUseId !== null && Array.isArray(message.message.content)) {
+              for (const block of message.message.content) {
+                if (block.type === "tool_use") {
+                  rememberPendingClaudeSubagentModel(
+                    context.subagentToolParents,
+                    block.id,
+                    parentToolUseId,
+                  );
+                }
+              }
+            }
             const snapshotModel =
               typeof message.message.model === "string" ? message.message.model.trim() : "";
             const model = snapshotModel.length === 0 ? undefined : snapshotModel;
@@ -4992,10 +5006,22 @@ export function makeClaudeAdapterV2(
                 activeContext: context,
               });
             } else {
-              const model =
+              const ownerToolUseId =
                 message.tool_use_id === undefined
                   ? undefined
-                  : context.pendingSubagentModelsByToolUseId.get(message.tool_use_id);
+                  : context.subagentToolParents.get(message.tool_use_id);
+              const owner =
+                ownerToolUseId === undefined
+                  ? undefined
+                  : context.subagentsByToolUseId.get(ownerToolUseId);
+              const model =
+                (message.tool_use_id === undefined
+                  ? undefined
+                  : context.pendingSubagentModelsByToolUseId.get(message.tool_use_id)) ??
+                owner?.task.model ??
+                undefined;
+              if (message.tool_use_id !== undefined)
+                context.subagentToolParents.delete(message.tool_use_id);
               if (message.tool_use_id !== undefined) {
                 context.pendingSubagentModelsByToolUseId.delete(message.tool_use_id);
               }
@@ -5168,12 +5194,27 @@ export function makeClaudeAdapterV2(
           // not a causal link to the prompt this turn is waiting on. A genuine
           // wake that fails before any model turn also reports zero, and is
           // dropped here, so that turn hangs until query exit. Narrowing the
-          // drop to zero-turn results only shrinks a pre-existing drop; closing
-          // the residue needs a correlation id on the result, which the wire
-          // does not carry today.
+          // drop to zero-turn results only shrinks a pre-existing drop; newer
+          // CLIs echo the prompt identity, which takes precedence below.
+          const echoedPromptIds =
+            message.type === "result"
+              ? [
+                  ...(message.user_message_uuids ?? []),
+                  ...(message.user_message_uuid ? [message.user_message_uuid] : []),
+                ]
+              : [];
+          if (
+            message.type === "result" &&
+            !isClaudeProviderContinuationTurn(context.input) &&
+            echoedPromptIds.length > 0 &&
+            !echoedPromptIds.some((uuid) => context.promptUuids.has(uuid))
+          )
+            return;
+
           if (
             isClaudeTaskNotificationOriginResult(message) &&
             !isClaudeProviderContinuationTurn(context.input) &&
+            echoedPromptIds.length === 0 &&
             message.num_turns === 0
           ) {
             // Routine lifecycle noise, so debug rather than warning: interrupt
@@ -5750,6 +5791,8 @@ export function makeClaudeAdapterV2(
               subagentsByToolUseId: new Map(),
               subagentNodesByTaskId: new Map(),
               pendingSubagentModelsByToolUseId: new Map(),
+              subagentToolParents: new Map(),
+              promptUuids: new Set(),
             };
             // Continuation turns attach to the wake output the CLI already
             // produced instead of prompting it again: drain the buffered wake
@@ -5783,7 +5826,9 @@ export function makeClaudeAdapterV2(
               // A user turn that races a wake leaves the buffer alone: the
               // continuation run the worker queued behind this run drains it
               // afterwards with correct attribution.
-              yield* querySession.query.offer(userMessage);
+              const promptUuid = yield* randomUuidV4;
+              context.promptUuids.add(promptUuid);
+              yield* querySession.query.offer({ ...userMessage, uuid: promptUuid });
               return;
             }
             const drained = yield* Ref.modify(wakeBuffers, (current) => {
@@ -5947,7 +5992,9 @@ export function makeClaudeAdapterV2(
               next.add(turnInput.providerTurnId);
               return next;
             });
-            yield* existing.query.offer(userMessage);
+            const promptUuid = yield* randomUuidV4;
+            currentTurn.promptUuids.add(promptUuid);
+            yield* existing.query.offer({ ...userMessage, uuid: promptUuid });
           },
           (effect, turnInput) =>
             effect.pipe(

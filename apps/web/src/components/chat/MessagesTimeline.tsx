@@ -5,6 +5,7 @@ import { useRightPanelStore } from "~/rightPanelStore";
 import {
   getQuestionAnswerPreview,
   getQuestionAnswerText,
+  getQuestionTextPreview,
   hasQuestionAnswer,
 } from "@t3tools/client-runtime/work-log/user-input";
 import {
@@ -3739,7 +3740,10 @@ function LiveActivityContent({
 
 function LiveWorkEntryTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "work-live" }> }) {
   const ctx = use(TimelineRowCtx);
-  const label = liveWorkEntryLabel(row.entry, ctx.workspaceRoot, row.active);
+  const questionHeading = row.entry.questionAnswer
+    ? getQuestionTextPreview(row.entry.questionAnswer)
+    : "";
+  const label = questionHeading || liveWorkEntryLabel(row.entry, ctx.workspaceRoot, row.active);
   const failed = workEntryDisplayIndicatesToolFailure(row.entry);
 
   return (
@@ -3752,17 +3756,10 @@ function LiveWorkEntryTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "
     >
       <LiveActivityRow
         label={
-          row.entry.questionAnswer ? (
+          row.entry.questionAnswer && hasQuestionAnswer(row.entry.questionAnswer) ? (
             <span className="flex min-w-0 gap-1.5">
-              <span className="shrink-0">{label}</span>
-              <span
-                className={cn(
-                  "truncate",
-                  !row.expanded && hasQuestionAnswer(row.entry.questionAnswer)
-                    ? "text-foreground"
-                    : "text-muted-foreground",
-                )}
-              >
+              <span className="min-w-0 truncate">{label}</span>
+              <span className="min-w-0 truncate text-foreground">
                 {getQuestionAnswerPreview(row.entry.questionAnswer)}
               </span>
             </span>
@@ -5165,15 +5162,22 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
       ? undefined
       : (workEntry.toolIcon ?? workEntry.toolSource?.icon);
   const isReasoning = workEntry.itemType === "reasoning";
+  // The question is the row's identity: a generic "User input submitted"
+  // label buries what was asked, so lead with the question text and keep the
+  // answer as the trailing preview.
+  const questionHeading = workEntry.questionAnswer
+    ? getQuestionTextPreview(workEntry.questionAnswer)
+    : "";
   const previewText =
     isReasoning && expanded
       ? workEntry.toolLifecycleStatus === "inProgress"
         ? "Thinking"
         : "Thought"
-      : (displayLabel ?? workEntryDisplayLabel(workEntry, workspaceRoot));
-  const answerPreview = workEntry.questionAnswer
-    ? getQuestionAnswerPreview(workEntry.questionAnswer)
-    : null;
+      : questionHeading || displayLabel || workEntryDisplayLabel(workEntry, workspaceRoot);
+  const answerPreview =
+    workEntry.questionAnswer && hasQuestionAnswer(workEntry.questionAnswer)
+      ? getQuestionAnswerPreview(workEntry.questionAnswer)
+      : null;
   const viewedImagePath = workEntryViewedImagePath(workEntry);
   const viewedImage =
     viewedImagePath && threadRef
@@ -5289,12 +5293,9 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
             {answerPreview ? (
               <span
                 className={cn(
-                  "min-w-0 truncate",
-                  !expanded &&
-                    workEntry.questionAnswer &&
-                    hasQuestionAnswer(workEntry.questionAnswer)
-                    ? "text-foreground"
-                    : "text-muted-foreground",
+                  answerPreview ? "min-w-0" : "min-w-0 flex-1",
+                  expanded ? "whitespace-pre-wrap break-words select-text" : "truncate",
+                  headingClass,
                 )}
               >
                 {answerPreview}

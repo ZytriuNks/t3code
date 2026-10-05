@@ -1,3 +1,4 @@
+import * as ProjectFolders from "../project/ProjectFolders.ts";
 import * as UsageLimitRecoveryWorker from "./UsageLimitRecoveryWorker.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as Layer from "effect/Layer";
@@ -226,7 +227,10 @@ const threadManagementProvided = threadManagementServiceLayer.pipe(
 export const ProjectSetupScriptRunnerLayerLive = projectSetupScriptRunnerLayer.pipe(
   Layer.provide(ProjectServiceLayerLive),
 );
+const projectFoldersProvided = ProjectFolders.layer.pipe(Layer.provide(ProjectServiceLayerLive));
+
 const threadLaunchProvided = threadLaunchServiceLayer.pipe(
+  Layer.provide(projectFoldersProvided),
   Layer.provide(
     Layer.mergeAll(
       ProjectServiceLayerLive,
@@ -297,6 +301,7 @@ export const OrchestrationV2ProductionLayerLive = Layer.mergeAll(
   OrchestrationV2LayerLive.pipe(Layer.provide(ProjectServiceLayerLive)),
   ProjectServiceLayerLive,
   threadLaunchProvided,
+  projectFoldersProvided,
   threadLifecycleProvided,
   scheduledTaskProvided,
   UsageLimitRecoveryWorker.workerLive.pipe(

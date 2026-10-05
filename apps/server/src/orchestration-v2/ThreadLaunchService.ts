@@ -1,3 +1,4 @@
+import * as ProjectFolders from "../project/ProjectFolders.ts";
 import * as WorktreeSetupTracker from "../project/WorktreeSetupTracker.ts";
 import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
@@ -21,6 +22,7 @@ import {
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
@@ -143,6 +145,7 @@ function failureDetail(error: unknown): string {
 
 const make = Effect.gen(function* () {
   const projects = yield* ProjectService.ProjectService;
+  const projectFolders = yield* ProjectFolders.ProjectFolders;
   const setupTracker = yield* WorktreeSetupTracker.WorktreeSetupTracker;
   const cloneTracker = yield* ProjectCloneTracker.ProjectCloneTracker;
   const terminals = yield* TerminalManager.TerminalManager;
@@ -267,6 +270,22 @@ const make = Effect.gen(function* () {
         input.workspaceStrategy.type === "existing_worktree"
           ? input.workspaceStrategy.worktreePath
           : null;
+      if (input.workspaceStrategy.type === "root") {
+        const shell = yield* threads
+          .getThreadShell(threadId)
+          .pipe(Effect.mapError(mapError(input, "resolve-project", threadId)));
+        if (shell === null)
+          return yield* mapError(input, "resolve-project", threadId)("Thread no longer exists.");
+        worktreePath = yield* projectFolders
+          .prepareThreadFolder({
+            threadId,
+            workspaceRoot: project.workspaceRoot,
+            worktreePath: shell.worktreePath,
+            createdAt: DateTime.formatIso(shell.createdAt),
+            text: input.initialMessage?.text ?? input.title,
+          })
+          .pipe(Effect.mapError(mapError(input, "provision-worktree", threadId)));
+      }
       if (input.workspaceStrategy.type === "worktree") {
         if (runId !== null) {
           yield* threads

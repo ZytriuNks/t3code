@@ -51,7 +51,13 @@ export function workspacePathLookupQueries(
 
 export function needsWorkspaceBasenameLookup(relativePath: string): boolean {
   const trimmed = relativePath.trim();
-  return trimmed.length > 0 && !trimmed.includes("/") && !trimmed.includes("\\");
+  return (
+    trimmed !== "." &&
+    trimmed !== ".." &&
+    trimmed.length > 0 &&
+    !trimmed.includes("/") &&
+    !trimmed.includes("\\")
+  );
 }
 
 export function pickWorkspaceBasenameMatch(

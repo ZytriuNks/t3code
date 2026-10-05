@@ -2273,7 +2273,11 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       if (terminal.status !== "failed") return;
       assert.include(terminal.failure.message, "run `claude auth login`");
       assert.include(terminal.failure.message, configDir);
-      assert.include(terminal.failure.message, cwd);
+      assert.include(
+        terminal.failure.message,
+        // @effect-diagnostics-next-line preferSchemaOverJson:off
+        JSON.stringify((yield* Path.Path).resolve(cwd)).slice(1, -1),
+      );
       assert.notInclude(terminal.failure.message, "repeated API errors");
     }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
   );
@@ -3911,6 +3915,76 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     ),
   );
 
+  it.effect(
+    "correlates compact results with the submitted prompt across racing background turns",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const harness = yield* makeWakeHarness;
+          yield* harness.runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now: yield* DateTime.now,
+              attemptId: RunAttemptId.make("attempt-compact-correlated"),
+              text: "/compact",
+              attachments: [],
+            }),
+          );
+          const promptUuid = harness.offeredMessages[0]?.uuid;
+          assert.isDefined(promptUuid);
+          yield* Queue.offer(
+            harness.sdkMessages,
+            claudeSdkFrame({
+              ...makeResultFrame({
+                uuid: "00000000-0000-4000-8000-0000000001f0",
+                result: "Stale background result",
+                numTurns: 1,
+              }),
+              user_message_uuids: ["00000000-0000-4000-8000-0000000001f1"],
+            }),
+          );
+          yield* Queue.offer(
+            harness.sdkMessages,
+            claudeSdkFrame({
+              type: "assistant",
+              message: {
+                role: "assistant",
+                content: [{ type: "text", text: "Compaction in progress" }],
+              },
+              parent_tool_use_id: null,
+              uuid: "00000000-0000-4000-8000-0000000001f2",
+              session_id: WAKE_NATIVE_SESSION,
+            }),
+          );
+          yield* awaitUntil(
+            () =>
+              harness.events.some(
+                (event) =>
+                  event.type === "message.updated" &&
+                  event.message.text === "Compaction in progress",
+              ),
+            "queued result consumed",
+          );
+          assert.lengthOf(harness.terminalEvents(), 0);
+          yield* Queue.offer(
+            harness.sdkMessages,
+            claudeSdkFrame({
+              ...makeResultFrame({
+                uuid: "00000000-0000-4000-8000-0000000001f3",
+                result: "Compacted",
+                numTurns: 0,
+                origin: { kind: "task-notification" },
+              }),
+              user_message_uuids: [promptUuid!],
+            }),
+          );
+          yield* awaitUntil(() => harness.terminalEvents().length === 1, "matching compact result");
+          assert.equal(harness.terminalEvents()[0]?.status, "completed");
+        }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      ),
+  );
+
   it.effect("ignores a zero-turn task-notification origin result during a normal user turn", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -4572,6 +4646,73 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           assert.equal(child?.appThread.modelSelection?.model, initialModel);
         }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
       ),
+  );
+
+  it.effect("inherits the owning subagent model for a nested agent without an override", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("nested-agent-model"),
+            text: "Delegate",
+            attachments: [],
+          }),
+        );
+        yield* Queue.offerAll(harness.sdkMessages, [
+          claudeSdkFrame({
+            type: "system",
+            subtype: "task_started",
+            task_id: "owner",
+            tool_use_id: "tool-owner",
+            task_type: "local_agent",
+            description: "Owner",
+            uuid: "00000000-0000-4000-8000-0000000002a1",
+            session_id: WAKE_NATIVE_SESSION,
+          }),
+          claudeSdkFrame({
+            type: "assistant",
+            parent_tool_use_id: "tool-owner",
+            message: {
+              model: "claude-haiku-4-5",
+              content: [
+                {
+                  type: "tool_use",
+                  id: "tool-child",
+                  name: "Agent",
+                  input: { description: "Child", prompt: "Review" },
+                },
+              ],
+            },
+            uuid: "00000000-0000-4000-8000-0000000002a2",
+            session_id: WAKE_NATIVE_SESSION,
+          }),
+          claudeSdkFrame({
+            type: "system",
+            subtype: "task_started",
+            task_id: "child",
+            tool_use_id: "tool-child",
+            task_type: "local_agent",
+            description: "Child",
+            uuid: "00000000-0000-4000-8000-0000000002a3",
+            session_id: WAKE_NATIVE_SESSION,
+          }),
+          makeResultFrame({ uuid: "00000000-0000-4000-8000-0000000002a4", result: "Delegated" }),
+        ]);
+        yield* Queue.take(harness.terminalReceipts);
+        const child = harness.events.find(
+          (event) =>
+            event.type === "subagent.updated" && event.subagent.nativeTaskRef?.nativeId === "child",
+        );
+        assert.equal(
+          child?.type === "subagent.updated" ? child.subagent.model : undefined,
+          "claude-haiku-4-5",
+        );
+      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+    ),
   );
 
   it.effect("extracts text from direct content-block subagent results", () =>
