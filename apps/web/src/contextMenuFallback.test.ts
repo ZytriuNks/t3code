@@ -225,22 +225,11 @@ beforeEach(() => {
     callback(0);
     return 0;
   });
-  // Anchor the renderer's synthetic-mouseenter suppression on
-  // `performance.now()`. Each sample advances far past the 200ms grace
-  // window so any synthetic mouseenter fired afterwards is treated as a
-  // real hover gesture.
-  let nowSample = 0;
-  vi.stubGlobal("performance", {
-    now: () => {
-      nowSample += 1_000;
-      return nowSample;
-    },
-  });
   vi.stubGlobal(
     "MouseEvent",
     class extends FakeDomEvent {
       constructor(type: string, init: Record<string, unknown> = {}) {
-        super(type, { timeStamp: nowSample + 500, ...init });
+        super(type, init);
       }
     },
   );
@@ -466,6 +455,30 @@ describe("showContextMenuFallback", () => {
     expect(invoker.focused).toBe(true);
   });
 
+  it("does not highlight the first enabled row on open under preserveFocus", async () => {
+    // The shell hands shell-owned editing menus to the renderer with
+    // preserveFocus: true so the input keeps focus. The first enabled
+    // row must not be painted as a hover target until the user actually
+    // engages with the menu.
+    const selectionPromise = showContextMenuFallback(
+      [
+        { id: "cut", label: "Cut", disabled: true },
+        { id: "copy", label: "Copy", disabled: true },
+        { id: "paste", label: "Paste" },
+      ],
+      undefined,
+      { preserveFocus: true },
+    );
+    const pasteButton = findButton("Paste");
+    expect(pasteButton).toBeTruthy();
+    expect(pasteButton?.style.background).toBe("transparent");
+    expect(pasteButton?.style.color).toBe("var(--contrast-foreground)");
+    pasteButton?.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+    expect(pasteButton?.style.background).toBe("var(--accent)");
+    dismissContextMenu();
+    await expect(selectionPromise).resolves.toBeNull();
+  });
+
   it("clears a hover highlight when the pointer leaves the menu", async () => {
     const selectionPromise = showContextMenuFallback([
       { id: "rename", label: "Rename" },
@@ -488,27 +501,7 @@ describe("showContextMenuFallback", () => {
     await expect(selectionPromise).resolves.toBeNull();
   });
 
-  it("dismisses the root menu when the pointer leaves the menu tree", async () => {
-    const selectionPromise = showContextMenuFallback([
-      {
-        id: "copy:submenu",
-        label: "Copy",
-        children: [
-          { id: "copy:path", label: "Path" },
-          { id: "copy:branch", label: "Branch" },
-        ],
-      },
-    ]);
-    const rootMenu = (document as unknown as FakeDocument).body.children[0];
-    expect(rootMenu).toBeTruthy();
-    rootMenu?.dispatchEvent(
-      new MouseEvent("mouseleave", { bubbles: true, relatedTarget: document.body }),
-    );
-    await expect(selectionPromise).resolves.toBeNull();
-    expect((document as unknown as FakeDocument).body.children).toHaveLength(0);
-  });
-
-  it("keeps the parent menu open when the pointer leaves only the nested submenu", async () => {
+  it("keeps the root menu mounted but dismisses its submenu when the pointer leaves the root menu tree", async () => {
     const selectionPromise = showContextMenuFallback([
       {
         id: "copy:submenu",
@@ -523,14 +516,37 @@ describe("showContextMenuFallback", () => {
     expect(rootMenu).toBeTruthy();
     const parentButton = findButton("Copy");
     parentButton?.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+    expect((document as unknown as FakeDocument).body.children.length).toBe(2);
+    // Pointer leaves the root menu; root stays mounted, submenu closes.
+    rootMenu?.dispatchEvent(
+      new MouseEvent("mouseleave", { bubbles: true, relatedTarget: document.body }),
+    );
+    expect((document as unknown as FakeDocument).body.children.length).toBe(1);
+    dismissContextMenu();
+    await expect(selectionPromise).resolves.toBeNull();
+  });
+
+  it("keeps every mounted menu open when the pointer leaves only the deepest submenu", async () => {
+    const selectionPromise = showContextMenuFallback([
+      {
+        id: "copy:submenu",
+        label: "Copy",
+        children: [
+          { id: "copy:path", label: "Path" },
+          { id: "copy:branch", label: "Branch" },
+        ],
+      },
+    ]);
+    const parentButton = findButton("Copy");
+    parentButton?.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
     const childMenu = (document as unknown as FakeDocument).body.children[1];
     expect(childMenu).toBeTruthy();
-    // Pointer leaves the submenu but stays inside the document. The root
-    // menu must remain mounted.
+    // Pointer leaves the deepest submenu; nothing else exists below it,
+    // so both menus stay mounted.
     childMenu?.dispatchEvent(
       new MouseEvent("mouseleave", { bubbles: true, relatedTarget: document.body }),
     );
-    expect((document as unknown as FakeDocument).body.children.length).toBeGreaterThan(0);
+    expect((document as unknown as FakeDocument).body.children.length).toBe(2);
     dismissContextMenu();
     await expect(selectionPromise).resolves.toBeNull();
   });

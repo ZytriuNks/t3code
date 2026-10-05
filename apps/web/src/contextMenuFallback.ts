@@ -264,21 +264,6 @@ export function showContextMenuFallback<T extends string>(
     let virtualFocusedButton: HTMLButtonElement | undefined;
     let hoveredButton: HTMLButtonElement | undefined;
     let keyboardFocusNavigationActive = false;
-    // When a menu mounts, the browser dispatches a synthetic mouseenter to
-    // whichever row the right-click cursor landed on. That event reflects
-    // the cursor's resting position, not a deliberate hover gesture, and
-    // we want the menu to start pristine. We compare the mouseenter's
-    // own event time stamp against the menu's mount time stamp so the
-    // window is anchored to the browser's own clock, not to wall time
-    // that may pause between the menu opening and the cursor settling.
-    let menuMountTimeStamp: number | undefined;
-    const markMenuJustOpened = () => {
-      menuMountTimeStamp = performance.now();
-    };
-    const isSyntheticMouseEnter = (event: MouseEvent): boolean => {
-      if (menuMountTimeStamp === undefined) return false;
-      return event.timeStamp - menuMountTimeStamp < 200;
-    };
     const focusButton = (button: HTMLButtonElement | undefined) => {
       if (!button) return;
       if (!options.preserveFocus) {
@@ -549,13 +534,20 @@ export function showContextMenuFallback<T extends string>(
           let isKeyboardFocused = false;
           const updateHighlight = () => {
             // Pointer hover and keyboard-driven focus both paint the row.
-            // Open-time focus and pointer-driven focus do not — they leave
-            // the menu quiet until the user actually engages with it.
+            // The `aria-activedescendant` virtual focus only paints once
+            // the user has actually driven focus with the keyboard, so the
+            // menu starts quiet even when the shell routes the request
+            // through the preserve-focus path (native editing menus).
             const isHighlighted =
               isHovered ||
               isKeyboardFocused ||
-              (options.preserveFocus && virtualFocusedButton === button);
-            isHovered || (options.preserveFocus && virtualFocusedButton === button);
+              (keyboardFocusNavigationActive &&
+                options.preserveFocus &&
+                virtualFocusedButton === button);
+            isHovered ||
+              (keyboardFocusNavigationActive &&
+                options.preserveFocus &&
+                virtualFocusedButton === button);
             button.style.background = isHighlighted
               ? isLeafDestructive
                 ? "color-mix(in srgb, var(--destructive) 30%, transparent)"
@@ -570,7 +562,7 @@ export function showContextMenuFallback<T extends string>(
                 : "var(--contrast-foreground)";
           };
           highlightUpdates.set(button, updateHighlight);
-          button.addEventListener("mouseenter", (event: MouseEvent) => {
+          button.addEventListener("mouseenter", () => {
             // Pointer hover transfers real DOM focus to the row so keyboard
             // activation still works, but `isKeyboardFocused` stays false so
             // the highlight is purely visual. Blur whichever row currently
@@ -581,15 +573,6 @@ export function showContextMenuFallback<T extends string>(
             }
             button.focus({ preventScroll: true });
             hoveredButton = button;
-            // Drop the synthetic mouseenter the browser dispatches when a
-            // freshly-mounted menu lands under the pointer. That event
-            // reflects the cursor's resting position, not a deliberate
-            // hover, so we want the row to stay quiet. Real pointer
-            // movement arrives after the suppress window expires and
-            // paints normally.
-            if (isSyntheticMouseEnter(event)) {
-              return;
-            }
             isHovered = true;
             updateHighlight();
           });
@@ -718,11 +701,12 @@ export function showContextMenuFallback<T extends string>(
         menu.addEventListener("pointerdown", (event) => event.preventDefault());
       }
 
-      // Mouse leaving the root menu dismisses the whole context menu — the
-      // user moved their pointer away from any visible row. Mouse leaving
-      // a nested submenu only dismisses the submenu tree, leaving the
-      // parent menu open. In both cases we ignore moves that stay inside
-      // the menu tree (parent menu, sibling submenus).
+      // Mouse leaving a menu dismisses any nested menus below it. The menu
+      // the cursor was on stays mounted so the user can move back into it;
+      // only the submenus it owned get torn down. The root menu stays
+      // mounted until the user clicks outside, presses Escape, or another
+      // dismissal path fires — a parent row that was no longer hovered
+      // does not destroy it.
       menu.addEventListener("mouseleave", (event) => {
         const related = event.relatedTarget as Node | null;
         if (related) {
@@ -730,22 +714,12 @@ export function showContextMenuFallback<T extends string>(
             if (menuStack[l]?.contains(related)) return;
           }
         }
-        if (level === 0) {
-          cleanup(null);
-        } else {
-          closeMenusFromLevel(level);
-        }
+        closeMenusFromLevel(level + 1);
       });
 
       document.body.appendChild(menu);
       menuStack[level] = menu;
       submenuTriggerStack[level] = parentTrigger;
-
-      // Defer painting any hover highlight until the browser has had a
-      // chance to dispatch the synthetic mouseenter for the pointer's
-      // resting position. Without this, the row the cursor landed on
-      // would already be highlighted before the user has moved at all.
-      markMenuJustOpened();
 
       if (level === 0 || menuStack[level - 1] !== undefined) {
         focusButton(enabledButtons()[0]);
