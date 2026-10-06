@@ -35,8 +35,8 @@ export function LegacySidebarDraftRow(props: { draftId: DraftId; isActive: boole
           void navigate({ to: "/draft/$draftId", params: { draftId: props.draftId } });
         }}
       >
-        <span aria-hidden="true" className="flex size-3.5 shrink-0 items-center justify-center">
-          <span className="size-1.5 rounded-full border border-current" />
+        <span aria-hidden="true" className="flex size-4 shrink-0 items-center justify-center">
+          <span className="size-1.5 rounded-full border border-sidebar-muted-foreground/15" />
         </span>
         <span className="min-w-0 flex-1 truncate">{t("sidebar.newThread")}</span>
         <span aria-hidden="true" className="w-4 shrink-0" />

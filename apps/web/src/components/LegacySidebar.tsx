@@ -16,7 +16,7 @@ import * as Schema from "effect/Schema";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { useScratchProject } from "../hooks/useScratchProject";
 import { useI18n } from "../i18n/I18nProvider";
-import { LegacySidebarSection } from "./LegacySidebarSection";
+import { LEGACY_SIDEBAR_SECTION_ACTION_CLASS, LegacySidebarSection } from "./LegacySidebarSection";
 import { LegacySidebarDraftRow } from "./LegacySidebarDraftRow";
 import { LegacySidebarPinButton } from "./LegacySidebarPinButton";
 import {
@@ -1027,7 +1027,6 @@ interface SidebarProjectThreadListProps {
   confirmAndUnpinThread: SidebarProjectItemProps["confirmAndUnpinThread"];
   draftIds: readonly DraftId[];
   activeDraftId: DraftId | null;
-  flat: boolean;
   projectKey: string;
   projectExpanded: boolean;
   hasOverflowingThreads: boolean;
@@ -1087,7 +1086,6 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
     confirmAndUnpinThread,
     draftIds,
     activeDraftId,
-    flat,
     projectKey,
     projectExpanded,
     hasOverflowingThreads,
@@ -1126,8 +1124,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
   const showMoreButtonRender = useMemo(() => <button type="button" />, []);
   const showLessButtonRender = useMemo(() => <button type="button" />, []);
   const attachThreadListAutoAnimateRef = useLegacySidebarListAnimation();
-  const projectGuidesEnabled = useClientSettings((settings) => settings.legacySidebarProjectGuides);
-  const showProjectGuides = projectGuidesEnabled && !flat;
+  const showProjectGuides = useClientSettings((settings) => settings.legacySidebarProjectGuides);
 
   return (
     <SidebarMenuSub
@@ -2734,7 +2731,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         confirmAndUnpinThread={confirmAndUnpinThread}
         draftIds={draftIds}
         activeDraftId={activeDraftId}
-        flat={section !== "projects"}
         projectKey={project.projectKey}
         projectExpanded={projectExpanded}
         hasOverflowingThreads={hasOverflowingThreads}
@@ -3008,7 +3004,17 @@ function ProjectSortMenu({
     <Menu>
       <Tooltip>
         <TooltipTrigger
-          render={<MenuTrigger render={<Button size="icon-xs" variant="ghost-muted" />} />}
+          render={
+            <MenuTrigger
+              render={
+                <button
+                  type="button"
+                  aria-label="Sidebar options"
+                  className={LEGACY_SIDEBAR_SECTION_ACTION_CLASS}
+                />
+              }
+            />
+          }
         >
           <ArrowUpDownIcon className="size-3.5" />
         </TooltipTrigger>
@@ -3337,9 +3343,9 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
             <Tooltip>
               <TooltipTrigger
                 render={
-                  <Button
-                    size="icon-xs"
-                    variant="ghost-muted"
+                  <button
+                    type="button"
+                    className={LEGACY_SIDEBAR_SECTION_ACTION_CLASS}
                     aria-label="Add project"
                     data-testid="sidebar-add-project-trigger"
                     onClick={openAddProject}
@@ -3445,14 +3451,14 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
         onToggle={() => props.toggleSection("unassigned")}
         actions={
           props.onNewUnassignedThread && (
-            <div className="pointer-events-none opacity-0 transition-opacity duration-150 max-sm:pointer-events-auto max-sm:opacity-100 group-hover/section-header:pointer-events-auto group-hover/section-header:opacity-100 group-focus-within/section-header:pointer-events-auto group-focus-within/section-header:opacity-100">
+            <div className="pointer-events-none opacity-0 transition-opacity duration-150 max-sm:pointer-events-auto max-sm:opacity-100 group-hover/section-header:pointer-events-auto group-hover/section-header:opacity-100 group-has-[:focus-visible]/section-header:pointer-events-auto group-has-[:focus-visible]/section-header:opacity-100">
               <Tooltip>
                 <TooltipTrigger
                   render={
                     <button
                       type="button"
                       aria-label={t("sidebar.newThread")}
-                      className={SIDEBAR_ICON_ACTION_BUTTON_CLASS}
+                      className={LEGACY_SIDEBAR_SECTION_ACTION_CLASS}
                       onClick={props.onNewUnassignedThread}
                     />
                   }

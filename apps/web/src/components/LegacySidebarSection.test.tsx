@@ -1,7 +1,7 @@
 import { act, useEffect, useState, type ReactNode } from "react";
 import { create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
-import { LegacySidebarSection } from "./LegacySidebarSection";
+import { LEGACY_SIDEBAR_SECTION_ACTION_CLASS, LegacySidebarSection } from "./LegacySidebarSection";
 
 vi.mock("./ui/sidebar", () => ({
   SidebarGroup: ({ children }: { children: ReactNode }) => <div>{children}</div>,
@@ -18,6 +18,10 @@ afterEach(async () => {
 });
 
 describe("legacy sidebar section disclosure", () => {
+  it("keeps section actions large enough for coarse pointers", () => {
+    expect(LEGACY_SIDEBAR_SECTION_ACTION_CLASS).toContain("pointer-coarse:after:min-h-11");
+    expect(LEGACY_SIDEBAR_SECTION_ACTION_CLASS).toContain("pointer-coarse:after:min-w-11");
+  });
   it("removes collapsed content and reintroduces it for list enter/leave animation while keeping header actions available", async () => {
     let contentMounted = false;
     let actionCount = 0;

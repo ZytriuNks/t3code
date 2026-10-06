@@ -458,7 +458,7 @@ export const EN_MESSAGES = {
   "settings.appearance.sidebar.description":
     "Choose the default flat list or the legacy per-project thread tree.",
   "settings.appearance.sidebarProjectGuides.description":
-    "Show vertical guides and indent conversations beneath each project. Turn off to align conversation rows with project rows.",
+    "Show indentation guides for conversations and drafts in Pinned, Projects and No project. Turn off to remove the guides and indentation.",
   "settings.appearance.sidebarThreadStatusDots.description":
     "Show dim gray dots for idle threads and colored dots for other statuses in the legacy sidebar. Choose whether to show status text such as Working.",
   "settings.appearance.sidebarThreadStatusDots.off": "Off",
@@ -978,9 +978,9 @@ export const EN_MESSAGES = {
   "settings.search.item.legacy-sidebar.title": "Sidebar style",
   "settings.search.item.legacy-sidebar.keywords":
     "sidebar style default legacy project thread tree old flat list",
-  "settings.search.item.legacy-sidebar-project-guides.title": "Show project guides",
+  "settings.search.item.legacy-sidebar-project-guides.title": "Indentation guides",
   "settings.search.item.legacy-sidebar-project-guides.keywords":
-    "project guides vertical lines thread tree indent left align legacy sidebar",
+    "project guides vertical lines thread tree indentation indent left align legacy sidebar pinned no project drafts",
   "settings.search.item.legacy-sidebar-thread-status-dots.title": "Thread status dots",
   "settings.search.item.legacy-sidebar-thread-status-dots.keywords":
     "thread status dots idle gray working completed indicator",
@@ -3024,7 +3024,7 @@ export const ZH_CN_MESSAGES = {
   "settings.appearance.sidebar.option.legacy": "旧版",
   "settings.appearance.sidebar.description": "选择默认的扁平列表，或旧版按项目分组的对话树。",
   "settings.appearance.sidebarProjectGuides.description":
-    "显示项目下方的竖线并缩进对话列表。关闭后，对话条目与项目条目统一左对齐。",
+    "统一显示置顶、项目和无项目下对话与草稿的缩进竖线。关闭后，移除竖线并取消列表缩进。",
   "settings.appearance.sidebarThreadStatusDots.description":
     "在旧版侧栏中为空闲对话显示深灰色圆点，其他状态沿用原有圆点颜色，可选择是否显示 Working 等状态文字。",
   "settings.appearance.sidebarThreadStatusDots.off": "关闭",
@@ -3495,9 +3495,9 @@ export const ZH_CN_MESSAGES = {
     "输入区 指示器 用量 token 圆环 旧版",
   "settings.search.item.legacy-sidebar.title": "侧栏样式",
   "settings.search.item.legacy-sidebar.keywords": "侧栏 样式 外观 默认 项目 线程 树 旧版 扁平列表",
-  "settings.search.item.legacy-sidebar-project-guides.title": "显示项目竖线",
+  "settings.search.item.legacy-sidebar-project-guides.title": "缩进竖线",
   "settings.search.item.legacy-sidebar-project-guides.keywords":
-    "项目 竖线 引导线 对话 线程 树 缩进 左对齐 旧版 侧栏",
+    "项目 竖线 引导线 对话 线程 树 缩进 左对齐 旧版 侧栏 置顶 无项目 草稿",
   "settings.search.item.legacy-sidebar-thread-status-dots.title": "对话状态圆点",
   "settings.search.item.legacy-sidebar-thread-status-dots.keywords":
     "对话 线程 状态 圆点 空闲 灰色 运行 完成 指示器",
