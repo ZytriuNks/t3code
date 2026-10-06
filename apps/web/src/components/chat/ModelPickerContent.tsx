@@ -1083,8 +1083,9 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
               <OverlayScrollbar
                 scrollable={modelListScrollableNode}
                 visible={modelListScrollbarVisible}
-                width="4px"
+                width="6px"
                 thumbInset="gutter"
+                bottomGap="roomy"
               />
             </div>
             {providerSetupEntries.length > 0 ? (

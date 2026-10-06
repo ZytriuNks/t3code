@@ -22,15 +22,17 @@ const THUMB_CLASS = "w-[var(--app-scrollbar-thumb-width)]";
  */
 const LANE_CLASS = "w-3";
 
-/** Inset of the thumb and triangles from the lane's right edge.
- *
- * The lane sits flush with the viewport, so this inset *is* the visible gap
- * between the bar and the window's right edge. "edge" keeps it 1px, matching
- * the 1px the lane already leaves at the bottom so the two read as the same
- * gap; "gutter" pushes it further in, to sit centred inside a reserved content
- * gutter like the model picker's.
+/** Inset of the thumb and triangles from the lane's right edge. The lane sits
+ * flush with the viewport, so this inset *is* the visible gap between the bar
+ * and the edge. "edge" keeps a 1px hairline; "gutter" pushes the bar further
+ * in so it sits centred inside a content gutter reserved by the host.
  */
 type ThumbInset = "edge" | "gutter";
+
+/** Gap left below the bar. A surface whose content ends flush with the panel
+ * floor needs more clearance here, or the thumb reads as touching it.
+ */
+type BottomGap = "hairline" | "roomy";
 
 /** Height reserved at each end for a step triangle. */
 const TRIANGLE_SIZE_PX = 12;
@@ -61,6 +63,8 @@ type OverlayScrollbarProps = {
   width?: string;
   /** Inset of the thumb and triangles from the lane's right edge. */
   thumbInset?: ThumbInset;
+  /** Clearance kept below the bar and above the bottom edge. */
+  bottomGap?: BottomGap;
   className?: string;
 };
 
@@ -114,6 +118,7 @@ function OverlayScrollbar({
   onStep,
   width,
   thumbInset = "edge",
+  bottomGap = "hairline",
   className,
 }: OverlayScrollbarProps) {
   const laneRef = useRef<HTMLDivElement | null>(null);
@@ -121,7 +126,6 @@ function OverlayScrollbar({
   const trackHeightRef = useRef(0);
   const [laneElement, setLaneElement] = useState<HTMLDivElement | null>(null);
   const [geometry, setGeometry] = useState<ScrollbarGeometry | null>(null);
-  const [hovered, setHovered] = useState(false);
   const [dragging, setDragging] = useState(false);
 
   // The lane is measured in the effect below, so the element has to exist
@@ -237,8 +241,7 @@ function OverlayScrollbar({
         const laneRect = lane.getBoundingClientRect();
         const trackHeight =
           laneRect.height - (triangles ? TRIANGLE_SIZE_PX * 2 : 0);
-        const top =
-          laneRect.top + (triangles ? TRIANGLE_SIZE_PX : 0) + pointerOffset;
+        const trackTop = laneRect.top + (triangles ? TRIANGLE_SIZE_PX : 0);
         const next = scrollbarOffsetAtPointer(
           {
             total: scrollable.scrollHeight,
@@ -246,7 +249,12 @@ function OverlayScrollbar({
             len: scrollable.clientHeight,
           },
           trackHeight,
-          moveEvent.clientY - top,
+          moveEvent.clientY - trackTop,
+          // Where inside the thumb the pointer grabbed it. This must be the
+          // offset from the thumb's top, unchanged since pointerdown —
+          // subtracting it from the pointer position beforehand as well made
+          // the thumb accelerate away from the cursor and come to rest at the
+          // wrong offset, which then read as a jump on the next hover.
           pointerOffset,
         );
         scrollable.scrollTop = next;
@@ -305,7 +313,9 @@ function OverlayScrollbar({
   // rather than to the lane, so the lane's own className never changes and
   // hovering cannot make the track itself jump.
   const shown = visible ?? true;
-  const contentsVisible = shown || hovered || dragging;
+  // Hover is handled entirely in CSS (`group-hover`), so no React state is
+  // involved and crossing the lane cannot restart a transition.
+  const contentsVisible = shown || dragging;
   // The lane itself must always mount: it is what the measuring effect reads
   // its height from, so returning early on a null geometry would leave the
   // thumb permanently unmeasured. Only the thumb and triangles wait for it.
@@ -325,21 +335,20 @@ function OverlayScrollbar({
           : Math.round(geometry.maxOffset * (geometry.thumbTop / travel))
       }
       tabIndex={ready ? 0 : -1}
-      onPointerEnter={() => setHovered(true)}
-      onPointerLeave={() => setHovered(false)}
       onKeyDown={onLaneKeyDown}
       className={cn(
-        // The lane sits flush with the viewport's right edge and 1px above the
-        // bottom, so the gap the user sees under the thumb matches the gap on
-        // its right. The 1px bottom inset also keeps the bar off the window
-        // edge when scrolled to the end.
-        "group absolute right-0 bottom-px top-0 z-30 flex touch-none flex-col items-end outline-none",
+        // The lane sits flush with the viewport's right edge; `bottomGap` sets how
+        // much clearance is kept below the bar. A surface whose content runs to
+        // the panel floor needs the roomier value or the thumb reads as
+        // touching it when scrolled to the end.
+        "group absolute right-0 top-0 z-30 flex touch-none flex-col items-end outline-none",
+        bottomGap === "roomy" ? "bottom-2" : "bottom-px",
         LANE_CLASS,
-        // The lane is a transparent hit target at all times — never
-        // `pointer-events-none`, which made the bar impossible to hover into
-        // existence because the first hover could not reach a lane that
-        // refused pointer events. Opacity tracks only the host's `visible`,
-        // so the lane's own className is stable across pointer movement.
+        // Visibility is expressed through a CSS variable rather than a conditional
+        // class, so the lane and its contents can respond to hover purely in
+        // CSS (`group-hover`) without a React re-render. Routing hover through
+        // state instead made every pointer crossing restart the opacity
+        // transition, which read as the bar jumping.
         ready && shown ? "opacity-100" : "opacity-0",
         className,
       )}
@@ -349,7 +358,7 @@ function OverlayScrollbar({
             width ?? "var(--app-scrollbar-width)",
           // One knob for both the thumb and the triangles, so they can never
           // drift out of alignment with each other.
-          "--overlay-scrollbar-edge": thumbInset === "gutter" ? "0.5rem" : "1px",
+          "--overlay-scrollbar-edge": thumbInset === "gutter" ? "0.625rem" : "0px",
         } as React.CSSProperties
       }
     >
@@ -366,6 +375,9 @@ function OverlayScrollbar({
           className={cn(
             "flex shrink-0 items-center justify-center text-[var(--app-scrollbar-thumb)] transition-[opacity,color] duration-150 mr-[var(--overlay-scrollbar-edge)]",
             contentsVisible ? "opacity-100" : "opacity-0",
+            // Pure-CSS hover reveal: no state, no re-render, no transition
+            // restart when the pointer crosses the lane.
+            "group-hover:opacity-100",
             "group-hover:text-[var(--app-scrollbar-thumb-hover)]",
           )}
           style={{ height: TRIANGLE_SIZE_PX }}
@@ -383,6 +395,9 @@ function OverlayScrollbar({
             "group-hover:bg-[var(--app-scrollbar-thumb-hover)]",
             dragging && "bg-[var(--app-scrollbar-thumb-hover)]",
             contentsVisible ? "opacity-100" : "opacity-0",
+            // Pure-CSS hover reveal: no state, no re-render, no transition
+            // restart when the pointer crosses the lane.
+            "group-hover:opacity-100",
             THUMB_CLASS,
           )}
           style={{
@@ -405,6 +420,9 @@ function OverlayScrollbar({
           className={cn(
             "mt-auto flex shrink-0 items-center justify-center text-[var(--app-scrollbar-thumb)] transition-[opacity,color] duration-150 mr-[var(--overlay-scrollbar-edge)]",
             contentsVisible ? "opacity-100" : "opacity-0",
+            // Pure-CSS hover reveal: no state, no re-render, no transition
+            // restart when the pointer crosses the lane.
+            "group-hover:opacity-100",
             "group-hover:text-[var(--app-scrollbar-thumb-hover)]",
           )}
           style={{ height: TRIANGLE_SIZE_PX }}

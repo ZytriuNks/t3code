@@ -92,15 +92,6 @@ describe("OverlayScrollbar", () => {
     expect(labels).toEqual(["Scroll up", "Scroll down"]);
   });
 
-  it("reports the hovered state through the lane's opacity", () => {
-    const scrollable = createScrollable(1000);
-    act(() => {
-      root.render(<OverlayScrollbar scrollable={scrollable} />);
-    });
-    const lane = container.querySelector("[role='scrollbar']");
-    expect(lane?.className).toContain("opacity-100");
-  });
-
   it("stays hit-testable while faded out so a hover can reach it", () => {
     const scrollable = createScrollable(1000);
     act(() => {
@@ -113,32 +104,38 @@ describe("OverlayScrollbar", () => {
     expect(lane?.className).not.toContain("pointer-events-none");
   });
 
-  it("reveals the thumb on hover even while the host reports it hidden", () => {
+  it("reveals the thumb on hover purely in CSS, with no React state", () => {
     const scrollable = createScrollable(1000);
     act(() => {
       root.render(<OverlayScrollbar scrollable={scrollable} visible={false} />);
     });
     const thumb = container.querySelector<HTMLElement>(".rounded-\\[3px\\]");
     expect(thumb?.className).toContain("opacity-0");
-    const lane = container.querySelector("[role='scrollbar']");
-    // React derives onPointerEnter from pointerover, not pointerenter.
-    act(() => {
-      lane?.dispatchEvent(new Event("pointerover", { bubbles: true }));
-    });
-    expect(thumb?.className).toContain("opacity-100");
+    // Hover is a `group-hover` rule rather than a state flip. Routing it
+    // through state re-rendered on every pointer crossing and restarted the
+    // opacity transition, which read as the bar jumping.
+    expect(thumb?.className).toContain("group-hover:opacity-100");
   });
 
-  it("leaves a matching gap on the right and below the thumb", () => {
+  it("flushes the bar against the right edge by default", () => {
     const scrollable = createScrollable(1000);
     act(() => {
       root.render(<OverlayScrollbar scrollable={scrollable} />);
     });
     const lane = container.querySelector<HTMLElement>("[role='scrollbar']");
-    // The lane is flush with the viewport's right edge; the visible gap comes
-    // from the thumb's own inset, which must match the lane's bottom inset.
     expect(lane?.className).toContain("right-0");
     expect(lane?.className).toContain("bottom-px");
-    expect(lane?.style.getPropertyValue("--overlay-scrollbar-edge")).toBe("1px");
+    expect(lane?.style.getPropertyValue("--overlay-scrollbar-edge")).toBe("0px");
+  });
+
+  it("opens the bottom clearance for surfaces that need it", () => {
+    const scrollable = createScrollable(1000);
+    act(() => {
+      root.render(<OverlayScrollbar scrollable={scrollable} bottomGap="roomy" />);
+    });
+    const lane = container.querySelector<HTMLElement>("[role='scrollbar']");
+    expect(lane?.className).toContain("bottom-2");
+    expect(lane?.className).not.toContain("bottom-px");
   });
 
   it("pushes the bar into a content gutter when asked", () => {
@@ -147,7 +144,7 @@ describe("OverlayScrollbar", () => {
       root.render(<OverlayScrollbar scrollable={scrollable} thumbInset="gutter" />);
     });
     const lane = container.querySelector<HTMLElement>("[role='scrollbar']");
-    expect(lane?.style.getPropertyValue("--overlay-scrollbar-edge")).toBe("0.5rem");
+    expect(lane?.style.getPropertyValue("--overlay-scrollbar-edge")).toBe("0.625rem");
   });
 
   it("coasts at a steady rate while a triangle is held", () => {
