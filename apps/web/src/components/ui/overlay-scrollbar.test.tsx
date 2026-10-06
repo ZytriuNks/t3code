@@ -100,4 +100,62 @@ describe("OverlayScrollbar", () => {
     const lane = container.querySelector("[role='scrollbar']");
     expect(lane?.className).toContain("opacity-100");
   });
+
+  it("stays hit-testable while faded out so a hover can reach it", () => {
+    const scrollable = createScrollable(1000);
+    act(() => {
+      root.render(<OverlayScrollbar scrollable={scrollable} visible={false} />);
+    });
+    const lane = container.querySelector("[role='scrollbar']");
+    expect(lane?.className).toContain("opacity-0");
+    // The regression: `pointer-events-none` here meant the first hover could
+    // never arrive, so the bar could never be revealed.
+    expect(lane?.className).not.toContain("pointer-events-none");
+  });
+
+  it("reveals the thumb on hover even while the host reports it hidden", () => {
+    const scrollable = createScrollable(1000);
+    act(() => {
+      root.render(<OverlayScrollbar scrollable={scrollable} visible={false} />);
+    });
+    const thumb = container.querySelector<HTMLElement>(".rounded-\\[3px\\]");
+    expect(thumb?.className).toContain("opacity-0");
+    const lane = container.querySelector("[role='scrollbar']");
+    // React derives onPointerEnter from pointerover, not pointerenter.
+    act(() => {
+      lane?.dispatchEvent(new Event("pointerover", { bubbles: true }));
+    });
+    expect(thumb?.className).toContain("opacity-100");
+  });
+
+  it("holds the lane one pixel off the right and bottom edges", () => {
+    const scrollable = createScrollable(1000);
+    act(() => {
+      root.render(<OverlayScrollbar scrollable={scrollable} />);
+    });
+    const lane = container.querySelector("[role='scrollbar']");
+    expect(lane?.className).toContain("right-px");
+    expect(lane?.className).toContain("bottom-px");
+    expect(lane?.className).not.toContain("inset-y-0");
+  });
+
+  it("narrows the thumb when a width is given", () => {
+    const scrollable = createScrollable(1000);
+    act(() => {
+      root.render(<OverlayScrollbar scrollable={scrollable} width="4px" />);
+    });
+    const lane = container.querySelector<HTMLElement>("[role='scrollbar']");
+    expect(lane?.style.getPropertyValue("--app-scrollbar-thumb-width")).toBe("4px");
+  });
+
+  it("defaults the thumb width to the shared scrollbar token", () => {
+    const scrollable = createScrollable(1000);
+    act(() => {
+      root.render(<OverlayScrollbar scrollable={scrollable} />);
+    });
+    const lane = container.querySelector<HTMLElement>("[role='scrollbar']");
+    expect(lane?.style.getPropertyValue("--app-scrollbar-thumb-width")).toBe(
+      "var(--app-scrollbar-width)",
+    );
+  });
 });

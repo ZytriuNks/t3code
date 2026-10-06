@@ -9,11 +9,13 @@ import {
   type ScrollbarGeometry,
 } from "~/lib/scrollbar-geometry";
 
-/** Visual thumb width. Kept equal to --app-scrollbar-width because the
- * virtualized-list fade masks carve out a lane of exactly that width to keep
- * the gradient from dimming the scrollbar.
+/** Visual thumb width. Reads --app-scrollbar-thumb-width, which the lane
+ * initialises from the shared --app-scrollbar-width and a host may narrow via
+ * the `width` prop. The default must stay equal to --app-scrollbar-width
+ * because the virtualized-list fade masks carve out a lane of exactly that
+ * width to keep the gradient from dimming the scrollbar.
  */
-const THUMB_CLASS = "w-[var(--app-scrollbar-width)]";
+const THUMB_CLASS = "w-[var(--app-scrollbar-thumb-width)]";
 
 /** The lane is twice the thumb width so the whole strip is an easy hover and
  * grab target, while the thumb itself stays flush against the right edge.
@@ -37,25 +39,43 @@ type OverlayScrollbarProps = {
   triangles?: boolean;
   /** Fired on triangle click and repeatedly while it is held. */
   onStep?: (direction: StepDirection) => void;
+  /**
+   * Thumb width. Defaults to the shared --app-scrollbar-width. The model
+   * picker passes a thinner bar: it sits over dense two-line rows, where a
+   * 6px thumb reads as heavier than it needs to be.
+   */
+  width?: string;
   className?: string;
 };
 
-/** Triangle path in a 6x5 box, stroked with a round join so all three corners
- * read as rounded. Sized to the thumb width.
+/** Up/down triangle in a box as wide as the thumb.
+ *
+ * Drawn as an equilateral triangle (apex centred, base corners pulled in by
+ * half the height so the three sides are equal) rather than the squat arrow
+ * used before. The corners are rounded by stroking the path in the same
+ * colour with a round line join, which rounds all three vertices at once
+ * without needing a filter or a per-corner arc.
  */
 function StepTriangle({ direction }: { direction: StepDirection }) {
+  // 6 wide x 5.196 tall: the exact height of an equilateral triangle with a
+  // 6px side, so the shape reads as a triangle and not a chevron.
+  const height = 5.196;
   return (
     <svg
       aria-hidden="true"
-      className="h-3 w-[var(--app-scrollbar-width)]"
-      viewBox="0 0 6 5"
+      className="h-[calc(var(--app-scrollbar-thumb-width)*0.866)] w-[var(--app-scrollbar-thumb-width)]"
+      viewBox="0 0 6 5.196"
       preserveAspectRatio="none"
     >
       <path
-        d={direction === -1 ? "M3 1 L5.3 4.2 L.7 4.2 Z" : "M3 4 L5.3 .8 L.7 .8 Z"}
+        d={
+          direction === -1
+            ? `M3 .4 L5.55 ${height - 0.4} L.45 ${height - 0.4} Z`
+            : `M3 ${height - 0.4} L5.55 .4 L.45 .4 Z`
+        }
         fill="currentColor"
         stroke="currentColor"
-        strokeWidth=".9"
+        strokeWidth=".8"
         strokeLinejoin="round"
       />
     </svg>
@@ -76,6 +96,7 @@ function OverlayScrollbar({
   visible,
   triangles,
   onStep,
+  width,
   className,
 }: OverlayScrollbarProps) {
   const laneRef = useRef<HTMLDivElement | null>(null);
@@ -242,10 +263,13 @@ function OverlayScrollbar({
     [geometry, scrollable],
   );
 
-  // Only render when there is something to scroll. `visible` lets a host keep
-  // the bar hidden until it decides otherwise; hover reveals it regardless so
-  // the whole lane stays an easy grab target.
+  // The lane itself is always hit-testable so a hover can reach a bar that is
+  // currently faded out; only its contents fade. That makes the hover branch
+  // load-bearing again, but it is applied to the thumb and triangles below
+  // rather than to the lane, so the lane's own className never changes and
+  // hovering cannot make the track itself jump.
   const shown = visible ?? true;
+  const contentsVisible = shown || hovered || dragging;
   // The lane itself must always mount: it is what the measuring effect reads
   // its height from, so returning early on a null geometry would leave the
   // thumb permanently unmeasured. Only the thumb and triangles wait for it.
@@ -269,14 +293,25 @@ function OverlayScrollbar({
       onPointerLeave={() => setHovered(false)}
       onKeyDown={onLaneKeyDown}
       className={cn(
-        "group absolute inset-y-0 right-0 z-30 flex touch-none flex-col items-end outline-none",
+        // 1px short of the right and bottom edges: the thumb should meet the
+        // viewport with an even hairline gap, not touch it. `inset-y-0` plus
+        // `right-0` made both run flush into the window corner.
+        "group absolute right-px bottom-px top-0 z-30 flex touch-none flex-col items-end outline-none",
         LANE_CLASS,
-        "transition-opacity duration-150 ease-out",
-        ready && (shown || hovered || dragging)
-          ? "opacity-100"
-          : "pointer-events-none opacity-0",
+        // The lane is a transparent hit target at all times — never
+        // `pointer-events-none`, which made the bar impossible to hover into
+        // existence because the first hover could not reach a lane that
+        // refused pointer events. Opacity tracks only the host's `visible`,
+        // so the lane's own className is stable across pointer movement.
+        ready && shown ? "opacity-100" : "opacity-0",
         className,
       )}
+      style={
+        {
+          "--app-scrollbar-thumb-width":
+            width ?? "var(--app-scrollbar-width)",
+        } as React.CSSProperties
+      }
     >
       {triangles && ready ? (
         <button
@@ -289,7 +324,8 @@ function OverlayScrollbar({
             startHold(-1);
           }}
           className={cn(
-            "flex shrink-0 items-center justify-center text-[var(--app-scrollbar-thumb)] transition-colors duration-150",
+            "flex shrink-0 items-center justify-center text-[var(--app-scrollbar-thumb)] transition-[opacity,color] duration-150",
+            contentsVisible ? "opacity-100" : "opacity-0",
             "group-hover:text-[var(--app-scrollbar-thumb-hover)]",
           )}
           style={{ height: TRIANGLE_SIZE_PX }}
@@ -303,9 +339,10 @@ function OverlayScrollbar({
           ref={thumbRef}
           onPointerDown={onThumbPointerDown}
           className={cn(
-            "absolute right-0 rounded-[3px] bg-[var(--app-scrollbar-thumb)] transition-colors duration-150 ease-out",
+            "absolute right-0 rounded-[3px] bg-[var(--app-scrollbar-thumb)] transition-[opacity,background-color] duration-150 ease-out",
             "group-hover:bg-[var(--app-scrollbar-thumb-hover)]",
             dragging && "bg-[var(--app-scrollbar-thumb-hover)]",
+            contentsVisible ? "opacity-100" : "opacity-0",
             THUMB_CLASS,
           )}
           style={{
@@ -326,7 +363,8 @@ function OverlayScrollbar({
             startHold(1);
           }}
           className={cn(
-            "mt-auto flex shrink-0 items-center justify-center text-[var(--app-scrollbar-thumb)] transition-colors duration-150",
+            "mt-auto flex shrink-0 items-center justify-center text-[var(--app-scrollbar-thumb)] transition-[opacity,color] duration-150",
+            contentsVisible ? "opacity-100" : "opacity-0",
             "group-hover:text-[var(--app-scrollbar-thumb-hover)]",
           )}
           style={{ height: TRIANGLE_SIZE_PX }}
