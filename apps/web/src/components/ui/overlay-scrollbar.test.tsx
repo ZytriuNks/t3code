@@ -161,6 +161,56 @@ describe("OverlayScrollbar", () => {
     expect(thumb?.className).toContain("opacity-0");
   });
 
+  it("stops dragging the list once the pointer is released", () => {
+    const scrollable = createScrollable(10_000);
+    act(() => {
+      root.render(<OverlayScrollbar scrollable={scrollable} />);
+    });
+    const thumb = container.querySelector<HTMLElement>(".rounded-\\[3px\\]");
+    // jsdom has no pointer capture, so stand it in with a version that throws
+    // the way a browser does once the pointer id is no longer active. If the
+    // teardown let that exception escape, the pointermove handler would survive
+    // and every later hover would drag the list to the cursor.
+    const release = vi
+      .fn(() => {
+        throw new DOMException("no active pointer", "NotFoundError");
+      })
+      .mockName("releasePointerCapture");
+    // jsdom implements neither capture method, so they are defined directly
+    // rather than spied on.
+    Object.defineProperty(thumb!, "setPointerCapture", { value: () => {}, configurable: true });
+    Object.defineProperty(thumb!, "releasePointerCapture", {
+      value: release,
+      configurable: true,
+    });
+
+    act(() => {
+      scrollable.scrollTop = 240;
+      thumb?.dispatchEvent(
+        new PointerEvent("pointerdown", {
+          bubbles: true,
+          button: 0,
+          pointerId: 1,
+          clientY: 40,
+        }),
+      );
+    });
+    act(() => {
+      thumb?.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerId: 1 }));
+    });
+
+    const before = scrollable.scrollTop;
+    act(() => {
+      thumb?.dispatchEvent(
+        new PointerEvent("pointermove", { bubbles: true, pointerId: 1, clientY: 200 }),
+      );
+    });
+    // A leaked handler maps clientY 200 onto a very different offset. Starting
+    // from a non-zero scrollTop keeps a coincidental match from hiding a leak.
+    expect(scrollable.scrollTop).toBe(before);
+    delete (thumb as unknown as Record<string, unknown>).releasePointerCapture;
+  });
+
   it("coasts at a steady rate while a triangle is held", () => {
     vi.useFakeTimers();
     const scrollable = createScrollable(10_000);

@@ -236,6 +236,13 @@ function OverlayScrollbar({
       const pointerOffset = event.clientY - thumb.getBoundingClientRect().top;
       setDragging(true);
       event.currentTarget.setPointerCapture(event.pointerId);
+      // React nulls `event.currentTarget` once the handler returns, and the
+      // window-level safety net below can fire after that. Capture the element
+      // now so teardown never dereferences a dead event.
+      const captureTarget = event.currentTarget;
+      // Both the thumb and the window can deliver the terminating event, so
+      // the teardown must be idempotent.
+      let settled = false;
 
       const onMove = (moveEvent: PointerEvent) => {
         const laneRect = lane.getBoundingClientRect();
@@ -260,15 +267,31 @@ function OverlayScrollbar({
         scrollable.scrollTop = next;
       };
       const onUp = () => {
+        if (settled) return;
+        settled = true;
+        // Remove the listeners *before* releasing capture. releasePointerCapture
+        // throws NotFoundError once the pointer id is no longer active, and that
+        // exception would skip every removal below — leaving a live pointermove
+        // handler that drags the list to the cursor on each later hover.
+        captureTarget.removeEventListener("pointermove", onMove);
+        captureTarget.removeEventListener("pointerup", onUp);
+        captureTarget.removeEventListener("pointercancel", onUp);
+        window.removeEventListener("pointerup", onUp);
+        window.removeEventListener("pointercancel", onUp);
         setDragging(false);
-        event.currentTarget.releasePointerCapture(event.pointerId);
-        event.currentTarget.removeEventListener("pointermove", onMove);
-        event.currentTarget.removeEventListener("pointerup", onUp);
-        event.currentTarget.removeEventListener("pointercancel", onUp);
+        try {
+          captureTarget.releasePointerCapture(event.pointerId);
+        } catch {
+          // Already released; the removals above are what mattered.
+        }
       };
       event.currentTarget.addEventListener("pointermove", onMove);
       event.currentTarget.addEventListener("pointerup", onUp);
       event.currentTarget.addEventListener("pointercancel", onUp);
+      // Safety net: if the thumb is re-rendered or loses capture mid-drag, the
+      // element listener may never fire and the drag would otherwise stick.
+      window.addEventListener("pointerup", onUp);
+      window.addEventListener("pointercancel", onUp);
     },
     [geometry, scrollable, triangles],
   );
