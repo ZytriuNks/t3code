@@ -731,10 +731,15 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     const maxScrollOffset = Math.max(0, scrollElement.scrollHeight - scrollElement.clientHeight);
     setShowTopScrollFade(scrollElement.scrollTop > 1);
     setShowBottomScrollFade(maxScrollOffset - scrollElement.scrollTop > 1);
-    if (scrollElement.scrollTop > 0) {
-      showModelListScrollbar();
-    }
-  }, [showModelListScrollbar]);
+  }, []);
+  // Only real scroll events may (re)arm the scrollbar timer. This is separate
+  // from the fade update on purpose: that callback also runs on layout, which
+  // the virtualized list fires while items recycle, and arming the timer there
+  // restarted it indefinitely and the thumb never faded back out.
+  const handleModelListScroll = useCallback(() => {
+    updateModelListScrollFades();
+    showModelListScrollbar();
+  }, [showModelListScrollbar, updateModelListScrollFades]);
   const modelJumpShortcutContext = useMemo(
     () =>
       ({
@@ -971,7 +976,10 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
             />
 
             {/* Model list */}
-            <div className="relative min-h-0 flex-1 overflow-hidden pr-px">
+            {/* No right padding here: it pushed the scroll lane in from the panel edge.
+                The gap between the list and the thumb comes from the thumb's
+                asymmetric inset in app-scrollbar-hover instead. */}
+            <div className="relative min-h-0 flex-1 overflow-hidden">
               <ComboboxListVirtualized>
                 <LegendList<string>
                   ref={modelListRef}
@@ -1046,7 +1054,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
                   contentContainerClassName="pl-2 pr-px"
                   ItemSeparatorComponent={ModelListSeparator}
                   onLayout={updateModelListScrollFades}
-                  onScroll={updateModelListScrollFades}
+                  onScroll={handleModelListScroll}
                   className={cn(
                     "scrollbar-gutter-stable h-full overflow-x-hidden overscroll-y-contain py-1.5 app-scrollbar-hover [&::-webkit-scrollbar-track]:my-2",
                     modelListScrollbarVisible && "app-scrollbar-hover-active",

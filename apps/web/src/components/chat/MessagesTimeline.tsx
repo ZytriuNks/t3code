@@ -1162,20 +1162,26 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   // those pseudo-elements scrolls one line (~17px), far too small for the
   // intended video-player rhythm, so intercept the press in the capture
   // phase — scrollbar pointer events do not reliably bubble from the
-  // element. A click steps ~30% of the viewport; holding keeps scrolling at a
-  // steady rate for as long as the pointer stays down. Both drive scrollTop
-  // per frame rather than issuing chained smooth scrollBy calls, which would
-  // queue up and stutter. Presses anywhere else, including the thumb, fall
-  // through to native behaviour.
+  // element. A click eases ~30% of the viewport with smooth behaviour; if the
+  // press is held, a rAF loop takes over and scrolls at a steady rate until
+  // release. Driving the hold through scrollTop per frame is what makes it
+  // read as continuous motion rather than a series of discrete jumps.
+  // Presses anywhere else, including the thumb, fall through to native
+  // behaviour.
   useEffect(() => {
     const SCROLLBAR_LANE_PX = 6; // matches --app-scrollbar-width
     const BUTTON_HEIGHT_PX = 12; // matches ::-webkit-scrollbar-button height
     const CLICK_STEP_RATIO = 0.3; // of viewport height, per click
     const HOLD_SPEED_PX_PER_SECOND = 900;
     let holdFrame: number | null = null;
+    let holdDelayTimer: number | null = null;
     let lastFrameAt = 0;
 
     const clearHold = () => {
+      if (holdDelayTimer !== null) {
+        window.clearTimeout(holdDelayTimer);
+        holdDelayTimer = null;
+      }
       if (holdFrame !== null) {
         window.cancelAnimationFrame(holdFrame);
         holdFrame = null;
@@ -1205,23 +1211,30 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       event.preventDefault();
       event.stopPropagation();
 
-      // Click step first, so a plain click always moves a visible amount.
-      element.scrollTop += direction * element.clientHeight * CLICK_STEP_RATIO;
+      // Click step: smooth, so a tap eases into place instead of jumping.
+      element.scrollBy({
+        top: direction * element.clientHeight * CLICK_STEP_RATIO,
+        behavior: "smooth",
+      });
 
-      // Then coast. The pointer travelling outside the button keeps the hold
-      // alive, matching how a native scrollbar button behaves.
-      lastFrameAt = performance.now();
-      const coast = (now: number) => {
-        const elapsedSeconds = Math.min((now - lastFrameAt) / 1000, 0.1);
-        lastFrameAt = now;
-        const before = element.scrollTop;
-        element.scrollTop += direction * HOLD_SPEED_PX_PER_SECOND * elapsedSeconds;
-        if (element.scrollTop === before) {
-          return; // Reached the end; stop requesting frames.
-        }
+      // Holding keeps going at a constant rate. The pointer may travel outside
+      // the button and the hold stays alive, matching a native scrollbar
+      // button. Wait out the click's smooth animation before taking over, or
+      // the two would fight over scrollTop.
+      holdDelayTimer = window.setTimeout(() => {
+        lastFrameAt = performance.now();
+        const coast = (now: number) => {
+          const elapsedSeconds = Math.min((now - lastFrameAt) / 1000, 0.1);
+          lastFrameAt = now;
+          const before = element.scrollTop;
+          element.scrollTop += direction * HOLD_SPEED_PX_PER_SECOND * elapsedSeconds;
+          if (element.scrollTop === before) {
+            return; // Reached the end; stop requesting frames.
+          }
+          holdFrame = window.requestAnimationFrame(coast);
+        };
         holdFrame = window.requestAnimationFrame(coast);
-      };
-      holdFrame = window.requestAnimationFrame(coast);
+      }, 420);
 
       window.addEventListener("pointerup", clearHold, true);
       window.addEventListener("pointercancel", clearHold, true);
