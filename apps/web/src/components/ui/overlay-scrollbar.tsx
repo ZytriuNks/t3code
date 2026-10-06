@@ -65,6 +65,9 @@ type OverlayScrollbarProps = {
   thumbInset?: ThumbInset;
   /** Clearance kept below the bar and above the bottom edge. */
   bottomGap?: BottomGap;
+  /** Compensates for the scroll container's own horizontal padding, so the bar
+   * can sit at the viewport edge rather than inside that gutter. */
+  edgeOffset?: string;
   className?: string;
 };
 
@@ -119,6 +122,7 @@ function OverlayScrollbar({
   width,
   thumbInset = "edge",
   bottomGap = "hairline",
+  edgeOffset = "0px",
   className,
 }: OverlayScrollbarProps) {
   const laneRef = useRef<HTMLDivElement | null>(null);
@@ -341,24 +345,31 @@ function OverlayScrollbar({
         // much clearance is kept below the bar. A surface whose content runs to
         // the panel floor needs the roomier value or the thumb reads as
         // touching it when scrolled to the end.
+        // Positioned against the host's padding box, not the viewport. When the bar is
+        // a child of a scroll container that itself has horizontal padding
+        // (LegendList uses px-3 sm:px-5), `right-0` lands inside that gutter and
+        // leaves the bar visibly short of the window edge. The inset token
+        // subtracts the host padding so the thumb still reaches the edge.
         "group absolute right-0 top-0 z-30 flex touch-none flex-col items-end outline-none",
         bottomGap === "roomy" ? "bottom-2" : "bottom-px",
         LANE_CLASS,
-        // Visibility is expressed through a CSS variable rather than a conditional
-        // class, so the lane and its contents can respond to hover purely in
-        // CSS (`group-hover`) without a React re-render. Routing hover through
-        // state instead made every pointer crossing restart the opacity
-        // transition, which read as the bar jumping.
-        ready && shown ? "opacity-100" : "opacity-0",
+        // The lane is always fully transparent-but-present: it must stay
+        // hit-testable so a hover can reach a bar that is currently faded out.
+        // Fading the *lane* instead of its contents also multiplied the
+        // children's opacity down, which is why a host-controlled bar could
+        // never be revealed by hovering it.
         className,
       )}
       style={
         {
+          // Applied as an inline offset rather than a class: the value is
+          // host-supplied, so Tailwind cannot see it at build time.
+          right: edgeOffset === "0px" ? undefined : `-${edgeOffset}`,
           "--app-scrollbar-thumb-width":
             width ?? "var(--app-scrollbar-width)",
           // One knob for both the thumb and the triangles, so they can never
           // drift out of alignment with each other.
-          "--overlay-scrollbar-edge": thumbInset === "gutter" ? "0.625rem" : "0px",
+          "--overlay-scrollbar-edge": thumbInset === "gutter" ? "0.25rem" : "0px",
         } as React.CSSProperties
       }
     >

@@ -1,0 +1,48 @@
+@import "tailwindcss";
+
+/* The preview page lives outside src, so its classes need an explicit source.
+   `src` is still scanned because OverlayScrollbar is imported from there. */
+@source "./";
+@source "../src";
+
+/* Reuse the app's scrollbar tokens so the harness shows the real values. */
+@theme {
+  --app-scrollbar-width: 6px;
+  --app-scrollbar-thumb: rgb(217 217 217);
+  --app-scrollbar-thumb-hover: rgb(191 191 191);
+}
+
+@custom-variant dark (&:is(.dark, .dark *));
+
+:root {
+  --app-scrollbar-width: 6px;
+  --app-scrollbar-thumb: rgb(217 217 217);
+  --app-scrollbar-thumb-hover: rgb(191 191 191);
+  --background: rgb(250 250 250);
+  --foreground: rgb(9 9 11);
+  --muted-foreground: rgb(113 113 122);
+  --border: rgb(228 228 231);
+  --background: var(--background);
+  color-scheme: light;
+}
+
+.dark {
+  --app-scrollbar-thumb: rgb(255 255 255 / 8%);
+  --app-scrollbar-thumb-hover: rgb(255 255 255 / 12%);
+  --background: rgb(10 10 11);
+  --foreground: rgb(250 250 250);
+  --muted-foreground: rgb(161 161 170);
+  --border: rgb(39 39 42);
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  background: var(--background);
+  color: var(--foreground);
+  font-family:
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    sans-serif;
+}

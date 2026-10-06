@@ -98,9 +98,10 @@ describe("OverlayScrollbar", () => {
       root.render(<OverlayScrollbar scrollable={scrollable} visible={false} />);
     });
     const lane = container.querySelector("[role='scrollbar']");
-    expect(lane?.className).toContain("opacity-0");
-    // The regression: `pointer-events-none` here meant the first hover could
-    // never arrive, so the bar could never be revealed.
+    // The lane must stay fully opaque and hit-testable. Fading the lane
+    // multiplied its children's opacity down, so a host-controlled bar could
+    // never be revealed by hovering it.
+    expect(lane?.className).not.toContain("opacity-0");
     expect(lane?.className).not.toContain("pointer-events-none");
   });
 
@@ -144,7 +145,31 @@ describe("OverlayScrollbar", () => {
       root.render(<OverlayScrollbar scrollable={scrollable} thumbInset="gutter" />);
     });
     const lane = container.querySelector<HTMLElement>("[role='scrollbar']");
-    expect(lane?.style.getPropertyValue("--overlay-scrollbar-edge")).toBe("0.625rem");
+    expect(lane?.style.getPropertyValue("--overlay-scrollbar-edge")).toBe("0.25rem");
+  });
+
+  it("never fades the lane itself, only its contents", () => {
+    const scrollable = createScrollable(1000);
+    act(() => {
+      root.render(<OverlayScrollbar scrollable={scrollable} visible={false} />);
+    });
+    const lane = container.querySelector<HTMLElement>("[role='scrollbar']");
+    const thumb = container.querySelector<HTMLElement>(".rounded-\\[3px\\]");
+    // The regression: an opacity-0 lane multiplies its children's opacity
+    // down, so a host-controlled bar could never be revealed by hovering it.
+    expect(lane?.className).not.toContain("opacity-0");
+    expect(thumb?.className).toContain("opacity-0");
+  });
+
+  it("offsets the lane for the host's horizontal padding", () => {
+    const scrollable = createScrollable(1000);
+    act(() => {
+      root.render(<OverlayScrollbar scrollable={scrollable} edgeOffset="1.3125rem" />);
+    });
+    const lane = container.querySelector<HTMLElement>("[role='scrollbar']");
+    // A `right-0` bar inside a padded scroll container resolves against the
+    // padding box, so it needs a negative offset to reach the viewport edge.
+    expect(lane?.style.right).toBe("-1.3125rem");
   });
 
   it("coasts at a steady rate while a triangle is held", () => {
