@@ -38,6 +38,7 @@ import {
 import { useClientSettings, useUpdateClientSettings } from "~/hooks/useSettings";
 import { cn } from "~/lib/utils";
 import { getVirtualizedScrollFadeClassName } from "../ui/scroll-area";
+import { OverlayScrollbar } from "../ui/overlay-scrollbar";
 import { TooltipProvider } from "../ui/tooltip";
 import { InlineButton } from "../ui/button";
 import {
@@ -198,6 +199,10 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   const [modelListScrollbarVisible, setModelListScrollbarVisible] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const modelListRef = useRef<LegendListRef | null>(null);
+  // Native scroll element behind LegendList, for the overlay scrollbar.
+  const [modelListScrollableNode, setModelListScrollableNode] = useState<HTMLElement | null>(
+    null,
+  );
   const highlightedModelKeyRef = useRef<string | null>(null);
   const favorites = useClientSettings((s) => s.favorites ?? []);
   const activeEntry = props.instanceEntries.find(
@@ -700,6 +705,14 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       ),
     [visibleModels],
   );
+  useEffect(() => {
+    // Duck-type instead of `instanceof HTMLElement` so this stays safe in
+    // non-DOM render environments.
+    const node = modelListRef.current?.getScrollableNode();
+    setModelListScrollableNode(
+      node && typeof node === "object" && "scrollTop" in node ? (node as HTMLElement) : null,
+    );
+  }, [filteredItemKeys]);
   // The scrollbar stays hidden at rest and while merely hovered, and fades in
   // while the list is actually being scrolled. Each scroll event restarts the
   // hide timer so the thumb lingers briefly after the list settles.
@@ -1056,13 +1069,16 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
                   onLayout={updateModelListScrollFades}
                   onScroll={handleModelListScroll}
                   className={cn(
-                    "scrollbar-gutter-stable h-full overflow-x-hidden overscroll-y-contain py-1.5 app-scrollbar-hover [&::-webkit-scrollbar-track]:my-2",
-                    modelListScrollbarVisible && "app-scrollbar-hover-active",
+                    "h-full overflow-x-hidden overscroll-y-contain py-1.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
                     getVirtualizedScrollFadeClassName({
                       top: showTopScrollFade,
                       bottom: showBottomScrollFade,
                     }),
                   )}
+                />
+                <OverlayScrollbar
+                  scrollable={modelListScrollableNode}
+                  visible={modelListScrollbarVisible}
                 />
               </ComboboxListVirtualized>
             </div>

@@ -1,4 +1,9 @@
 import { isMacPlatform } from "../../lib/utils";
+import {
+  scrollbarGeometry,
+  scrollbarOffsetAtPointer,
+  type ScrollbarGeometry,
+} from "../../lib/scrollbar-geometry";
 import { SELECTION_MULTI_CLICK_INTERVAL_MS } from "../../lib/selectionActions";
 import { collectWrappedTerminalLinkLine, extractTerminalLinks } from "../../terminal-links";
 import {
@@ -34,7 +39,6 @@ const TERMINAL_GLYPH_FALLBACKS =
 export const DEFAULT_TERMINAL_FONT_FAMILY =
   '"SF Mono", "SFMono-Regular", Menlo, Consolas, "Liberation Mono", ' + TERMINAL_GLYPH_FALLBACKS;
 const CONTENT_PADDING = 4;
-const MIN_SCROLLBAR_THUMB_HEIGHT = 18;
 /** Half a blink cycle: the visible and hidden phases are equally long. */
 const CURSOR_BLINK_INTERVAL_MS = 500;
 const TERMINAL_FONT_LOAD_TEXT = "iMW0@# .";
@@ -168,46 +172,12 @@ export function terminalContentOriginY(
   return padding + Math.max(0, slack);
 }
 
-export interface TerminalScrollbarGeometry {
-  readonly thumbHeight: number;
-  readonly thumbTop: number;
-  readonly maxOffset: number;
-}
+export interface TerminalScrollbarGeometry extends ScrollbarGeometry {}
 
-export function terminalScrollbarGeometry(
-  state: GhosttyScrollbar,
-  trackHeight: number,
-): TerminalScrollbarGeometry | null {
-  const total = Math.max(0, state.total);
-  const len = Math.max(0, Math.min(state.len, total));
-  const maxOffset = Math.max(0, total - len);
-  if (trackHeight <= 0 || len <= 0 || maxOffset === 0) return null;
-  const thumbHeight = Math.min(
-    trackHeight,
-    Math.max(MIN_SCROLLBAR_THUMB_HEIGHT, (trackHeight * len) / total),
-  );
-  const travel = Math.max(0, trackHeight - thumbHeight);
-  const offset = Math.max(0, Math.min(state.offset, maxOffset));
-  return {
-    thumbHeight,
-    thumbTop: travel * (offset / maxOffset),
-    maxOffset,
-  };
-}
+/** Terminal-flavoured aliases over the shared overlay scrollbar geometry. */
+export const terminalScrollbarGeometry = scrollbarGeometry;
 
-export function terminalScrollbarOffsetAtPointer(
-  state: GhosttyScrollbar,
-  trackHeight: number,
-  pointerY: number,
-  pointerOffset: number,
-): number {
-  const geometry = terminalScrollbarGeometry(state, trackHeight);
-  if (geometry === null) return 0;
-  const travel = Math.max(0, trackHeight - geometry.thumbHeight);
-  if (travel === 0) return 0;
-  const thumbTop = Math.max(0, Math.min(pointerY - pointerOffset, travel));
-  return Math.round((thumbTop / travel) * geometry.maxOffset);
-}
+export const terminalScrollbarOffsetAtPointer = scrollbarOffsetAtPointer;
 
 export function terminalGridCellAt(options: {
   bounds: { left: number; top: number };

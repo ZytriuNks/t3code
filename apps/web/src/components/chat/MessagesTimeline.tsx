@@ -248,6 +248,7 @@ import { useClientSettings } from "~/hooks/useSettings";
 import type { ChatMarkdownContextReference } from "../ChatMarkdown";
 import { useMediaQuery } from "~/hooks/useMediaQuery";
 import { cn } from "~/lib/utils";
+import { OverlayScrollbar } from "~/components/ui/overlay-scrollbar";
 import { useUiStateStore } from "~/uiStateStore";
 import { type TimestampFormat } from "@t3tools/contracts/settings";
 import {
@@ -400,6 +401,8 @@ function TimelineListFooter({ composerInset }: { readonly composerInset: number 
   );
 }
 const EMPTY_TIMELINE_SKILLS: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">> = [];
+/** Fraction of the viewport a scrollbar step triangle moves per step. */
+const TIMELINE_SCROLLBAR_STEP_RATIO = 0.3;
 const TIMELINE_MAINTAIN_SCROLL_AT_END = {
   animated: false,
   on: {
@@ -967,6 +970,18 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   const [timelineViewportElement, setTimelineViewportElement] = useState<HTMLDivElement | null>(
     null,
   );
+  // Native scroll element behind LegendList, for the overlay scrollbar.
+  const [timelineScrollableNode, setTimelineScrollableNode] = useState<HTMLElement | null>(
+    null,
+  );
+  useEffect(() => {
+    // Duck-type instead of `instanceof HTMLElement`: this component is also
+    // rendered by react-test-renderer, where no DOM globals exist.
+    const node = listRef.current?.getScrollableNode();
+    setTimelineScrollableNode(
+      node && typeof node === "object" && "scrollTop" in node ? (node as HTMLElement) : null,
+    );
+  }, [listRef, rows.length]);
   // Re-measure the minimap gutter when the chat column changes width without a viewport resize.
   const chatWidth = useClientSettings((settings) => settings.chatWidth);
   const {
@@ -1157,95 +1172,22 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     return () => cancelAnimationFrame(frame);
   }, [handleScroll, rows.length]);
 
-  // The main timeline draws up/down step triangles at the ends of its
-  // scrollbar via ::-webkit-scrollbar-button. Chromium's default click on
-  // those pseudo-elements scrolls one line (~17px), far too small for the
-  // intended video-player rhythm, so intercept the press in the capture
-  // phase — scrollbar pointer events do not reliably bubble from the
-  // element. A click eases ~30% of the viewport with smooth behaviour; if the
-  // press is held, a rAF loop takes over and scrolls at a steady rate until
-  // release. Driving the hold through scrollTop per frame is what makes it
-  // read as continuous motion rather than a series of discrete jumps.
-  // Presses anywhere else, including the thumb, fall through to native
-  // behaviour.
-  useEffect(() => {
-    const SCROLLBAR_LANE_PX = 6; // matches --app-scrollbar-width
-    const BUTTON_HEIGHT_PX = 12; // matches ::-webkit-scrollbar-button height
-    const CLICK_STEP_RATIO = 0.3; // of viewport height, per click
-    const HOLD_SPEED_PX_PER_SECOND = 900;
-    let holdFrame: number | null = null;
-    let holdDelayTimer: number | null = null;
-    let lastFrameAt = 0;
-
-    const clearHold = () => {
-      if (holdDelayTimer !== null) {
-        window.clearTimeout(holdDelayTimer);
-        holdDelayTimer = null;
-      }
-      if (holdFrame !== null) {
-        window.cancelAnimationFrame(holdFrame);
-        holdFrame = null;
-      }
-      window.removeEventListener("pointerup", clearHold, true);
-      window.removeEventListener("pointercancel", clearHold, true);
-    };
-
-    const onPointerDown = (event: PointerEvent) => {
-      if (event.button !== 0) {
-        return;
-      }
+  // Step triangles at the ends of the overlay scrollbar. A click eases ~30% of
+  // the viewport; holding repeats the same step, so the motion stays smooth
+  // rather than jumping in fixed increments.
+  const handleScrollbarStep = useCallback(
+    (direction: -1 | 1) => {
       const element = listRef.current?.getScrollableNode();
-      if (!(element instanceof HTMLElement)) {
+      if (!element || typeof element.scrollBy !== "function") {
         return;
       }
-      const rect = element.getBoundingClientRect();
-      if (rect.right - event.clientX > SCROLLBAR_LANE_PX) {
-        return;
-      }
-      const fromTop = event.clientY - rect.top;
-      const fromBottom = rect.bottom - event.clientY;
-      const direction = fromTop < BUTTON_HEIGHT_PX ? -1 : fromBottom < BUTTON_HEIGHT_PX ? 1 : 0;
-      if (direction === 0) {
-        return; // Thumb lane — leave the drag to the browser.
-      }
-      event.preventDefault();
-      event.stopPropagation();
-
-      // Click step: smooth, so a tap eases into place instead of jumping.
       element.scrollBy({
-        top: direction * element.clientHeight * CLICK_STEP_RATIO,
-        behavior: "smooth",
+        top: direction * element.clientHeight * TIMELINE_SCROLLBAR_STEP_RATIO,
+        behavior: prefersReducedMotion ? "auto" : "smooth",
       });
-
-      // Holding keeps going at a constant rate. The pointer may travel outside
-      // the button and the hold stays alive, matching a native scrollbar
-      // button. Wait out the click's smooth animation before taking over, or
-      // the two would fight over scrollTop.
-      holdDelayTimer = window.setTimeout(() => {
-        lastFrameAt = performance.now();
-        const coast = (now: number) => {
-          const elapsedSeconds = Math.min((now - lastFrameAt) / 1000, 0.1);
-          lastFrameAt = now;
-          const before = element.scrollTop;
-          element.scrollTop += direction * HOLD_SPEED_PX_PER_SECOND * elapsedSeconds;
-          if (element.scrollTop === before) {
-            return; // Reached the end; stop requesting frames.
-          }
-          holdFrame = window.requestAnimationFrame(coast);
-        };
-        holdFrame = window.requestAnimationFrame(coast);
-      }, 420);
-
-      window.addEventListener("pointerup", clearHold, true);
-      window.addEventListener("pointercancel", clearHold, true);
-    };
-
-    window.addEventListener("pointerdown", onPointerDown, true);
-    return () => {
-      window.removeEventListener("pointerdown", onPointerDown, true);
-      clearHold();
-    };
-  }, [listRef]);
+    },
+    [listRef, prefersReducedMotion],
+  );
 
   useEffect(() => {
     if (!timelineViewportElement) {
@@ -1508,11 +1450,16 @@ export const MessagesTimeline = memo(function MessagesTimeline({
             onScroll={handleScroll}
             onItemSizeChanged={reportContentOverflow}
             className={cn(
-              "scrollbar-gutter-stable h-full min-h-0 overflow-x-hidden overscroll-y-contain px-3 [overflow-anchor:none] sm:px-5 app-scrollbar-with-buttons",
+              "h-full min-h-0 overflow-x-hidden overscroll-y-contain px-3 [overflow-anchor:none] sm:px-5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
               topFadeEnabled && "topbar-scroll-fade",
             )}
             ListHeaderComponent={listHeader}
             ListFooterComponent={timelineListFooter}
+          />
+          <OverlayScrollbar
+            scrollable={timelineScrollableNode}
+            triangles
+            onStep={handleScrollbarStep}
           />
           <TimelineMinimap
             items={minimapItems}
