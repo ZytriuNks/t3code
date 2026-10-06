@@ -22,11 +22,25 @@ const THUMB_CLASS = "w-[var(--app-scrollbar-thumb-width)]";
  */
 const LANE_CLASS = "w-3";
 
+/** Inset of the thumb and triangles from the lane's right edge.
+ *
+ * The lane sits flush with the viewport, so this inset *is* the visible gap
+ * between the bar and the window's right edge. "edge" keeps it 1px, matching
+ * the 1px the lane already leaves at the bottom so the two read as the same
+ * gap; "gutter" pushes it further in, to sit centred inside a reserved content
+ * gutter like the model picker's.
+ */
+type ThumbInset = "edge" | "gutter";
+
 /** Height reserved at each end for a step triangle. */
 const TRIANGLE_SIZE_PX = 12;
 
-const HOLD_REPEAT_DELAY_MS = 420;
-const HOLD_REPEAT_INTERVAL_MS = 90;
+/** How long a press must be sustained before the bar starts coasting, so a
+ * plain click produces exactly one step.
+ */
+const HOLD_START_DELAY_MS = 180;
+/** Coasting speed in pixels per second. */
+const HOLD_SPEED_PX_PER_SECOND = 1100;
 
 type StepDirection = -1 | 1;
 
@@ -45,6 +59,8 @@ type OverlayScrollbarProps = {
    * 6px thumb reads as heavier than it needs to be.
    */
   width?: string;
+  /** Inset of the thumb and triangles from the lane's right edge. */
+  thumbInset?: ThumbInset;
   className?: string;
 };
 
@@ -97,6 +113,7 @@ function OverlayScrollbar({
   triangles,
   onStep,
   width,
+  thumbInset = "edge",
   className,
 }: OverlayScrollbarProps) {
   const laneRef = useRef<HTMLDivElement | null>(null);
@@ -161,29 +178,48 @@ function OverlayScrollbar({
     [onStep],
   );
 
-  // Holding a triangle keeps stepping. The pointer may leave the button while
-  // held, so listen on the window and stop on the next pointerup.
+  // Holding a triangle scrolls at a steady rate. A timer that re-issued the
+  // same step produced a stutter — a long dead pause, then a series of discrete
+  // jumps — so this advances scrollTop once per frame instead, which reads as
+  // continuous motion. The click step is handled by the host's onStep; this
+  // only takes over once the press is sustained. The pointer may leave the
+  // button while held, so stop on the next pointerup anywhere.
   const startHold = useCallback(
     (direction: StepDirection) => {
-      if (!onStep) return;
-      let interval: number | null = null;
-      let delay: number | null = null;
+      const element = scrollable;
+      if (!element) return;
+      let frame: number | null = null;
+      let lastFrameAt = 0;
       const stop = () => {
-        if (delay !== null) window.clearTimeout(delay);
-        if (interval !== null) window.clearInterval(interval);
+        if (frame !== null) window.cancelAnimationFrame(frame);
+        frame = null;
         window.removeEventListener("pointerup", stop, true);
         window.removeEventListener("pointercancel", stop, true);
       };
-      delay = window.setTimeout(() => {
-        interval = window.setInterval(
-          () => scrollByPage(direction),
-          HOLD_REPEAT_INTERVAL_MS,
-        );
-      }, HOLD_REPEAT_DELAY_MS);
-      window.addEventListener("pointerup", stop, true);
-      window.addEventListener("pointercancel", stop, true);
+      const coast = (now: number) => {
+        // Clamp the step so a dropped frame cannot jump a long way.
+        const elapsedSeconds = Math.min((now - lastFrameAt) / 1000, 0.05);
+        lastFrameAt = now;
+        const before = element.scrollTop;
+        element.scrollTop += direction * HOLD_SPEED_PX_PER_SECOND * elapsedSeconds;
+        if (element.scrollTop === before) {
+          return; // Reached the end; stop requesting frames.
+        }
+        frame = window.requestAnimationFrame(coast);
+      };
+      // Short grace period so an ordinary click does not also start coasting.
+      const startTimer = window.setTimeout(() => {
+        lastFrameAt = performance.now();
+        frame = window.requestAnimationFrame(coast);
+      }, HOLD_START_DELAY_MS);
+      const stopAll = () => {
+        window.clearTimeout(startTimer);
+        stop();
+      };
+      window.addEventListener("pointerup", stopAll, true);
+      window.addEventListener("pointercancel", stopAll, true);
     },
-    [onStep, scrollByPage],
+    [scrollable],
   );
 
   const onThumbPointerDown = useCallback(
@@ -293,10 +329,11 @@ function OverlayScrollbar({
       onPointerLeave={() => setHovered(false)}
       onKeyDown={onLaneKeyDown}
       className={cn(
-        // 1px short of the right and bottom edges: the thumb should meet the
-        // viewport with an even hairline gap, not touch it. `inset-y-0` plus
-        // `right-0` made both run flush into the window corner.
-        "group absolute right-px bottom-px top-0 z-30 flex touch-none flex-col items-end outline-none",
+        // The lane sits flush with the viewport's right edge and 1px above the
+        // bottom, so the gap the user sees under the thumb matches the gap on
+        // its right. The 1px bottom inset also keeps the bar off the window
+        // edge when scrolled to the end.
+        "group absolute right-0 bottom-px top-0 z-30 flex touch-none flex-col items-end outline-none",
         LANE_CLASS,
         // The lane is a transparent hit target at all times — never
         // `pointer-events-none`, which made the bar impossible to hover into
@@ -310,6 +347,9 @@ function OverlayScrollbar({
         {
           "--app-scrollbar-thumb-width":
             width ?? "var(--app-scrollbar-width)",
+          // One knob for both the thumb and the triangles, so they can never
+          // drift out of alignment with each other.
+          "--overlay-scrollbar-edge": thumbInset === "gutter" ? "0.5rem" : "1px",
         } as React.CSSProperties
       }
     >
@@ -324,7 +364,7 @@ function OverlayScrollbar({
             startHold(-1);
           }}
           className={cn(
-            "flex shrink-0 items-center justify-center text-[var(--app-scrollbar-thumb)] transition-[opacity,color] duration-150",
+            "flex shrink-0 items-center justify-center text-[var(--app-scrollbar-thumb)] transition-[opacity,color] duration-150 mr-[var(--overlay-scrollbar-edge)]",
             contentsVisible ? "opacity-100" : "opacity-0",
             "group-hover:text-[var(--app-scrollbar-thumb-hover)]",
           )}
@@ -339,7 +379,7 @@ function OverlayScrollbar({
           ref={thumbRef}
           onPointerDown={onThumbPointerDown}
           className={cn(
-            "absolute right-0 rounded-[3px] bg-[var(--app-scrollbar-thumb)] transition-[opacity,background-color] duration-150 ease-out",
+            "absolute right-[var(--overlay-scrollbar-edge)] rounded-[3px] bg-[var(--app-scrollbar-thumb)] transition-[opacity,background-color] duration-150 ease-out",
             "group-hover:bg-[var(--app-scrollbar-thumb-hover)]",
             dragging && "bg-[var(--app-scrollbar-thumb-hover)]",
             contentsVisible ? "opacity-100" : "opacity-0",
@@ -363,7 +403,7 @@ function OverlayScrollbar({
             startHold(1);
           }}
           className={cn(
-            "mt-auto flex shrink-0 items-center justify-center text-[var(--app-scrollbar-thumb)] transition-[opacity,color] duration-150",
+            "mt-auto flex shrink-0 items-center justify-center text-[var(--app-scrollbar-thumb)] transition-[opacity,color] duration-150 mr-[var(--overlay-scrollbar-edge)]",
             contentsVisible ? "opacity-100" : "opacity-0",
             "group-hover:text-[var(--app-scrollbar-thumb-hover)]",
           )}

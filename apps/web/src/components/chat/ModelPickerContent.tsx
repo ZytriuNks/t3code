@@ -1064,7 +1064,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
                   estimatedItemSize={52}
                   drawDistance={480}
                   recycleItems
-                  contentContainerClassName="pl-2 pr-px"
+                  contentContainerClassName="pl-2 pr-2"
                   ItemSeparatorComponent={ModelListSeparator}
                   onLayout={updateModelListScrollFades}
                   onScroll={handleModelListScroll}
@@ -1076,12 +1076,16 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
                     }),
                   )}
                 />
-                <OverlayScrollbar
-                  scrollable={modelListScrollableNode}
-                  visible={modelListScrollbarVisible}
-                  width="4px"
-                />
               </ComboboxListVirtualized>
+              {/* Outside the list on purpose: inside it, the lane is positioned
+                  against the scroll container and sits under its content, so it
+                  could neither be hovered nor dragged. */}
+              <OverlayScrollbar
+                scrollable={modelListScrollableNode}
+                visible={modelListScrollbarVisible}
+                width="4px"
+                thumbInset="gutter"
+              />
             </div>
             {providerSetupEntries.length > 0 ? (
               <div className="max-h-44 shrink-0 overflow-y-auto border-t border-border/70 p-2">

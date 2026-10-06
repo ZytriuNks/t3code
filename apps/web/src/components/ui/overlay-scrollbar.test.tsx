@@ -128,15 +128,50 @@ describe("OverlayScrollbar", () => {
     expect(thumb?.className).toContain("opacity-100");
   });
 
-  it("holds the lane one pixel off the right and bottom edges", () => {
+  it("leaves a matching gap on the right and below the thumb", () => {
     const scrollable = createScrollable(1000);
     act(() => {
       root.render(<OverlayScrollbar scrollable={scrollable} />);
     });
-    const lane = container.querySelector("[role='scrollbar']");
-    expect(lane?.className).toContain("right-px");
+    const lane = container.querySelector<HTMLElement>("[role='scrollbar']");
+    // The lane is flush with the viewport's right edge; the visible gap comes
+    // from the thumb's own inset, which must match the lane's bottom inset.
+    expect(lane?.className).toContain("right-0");
     expect(lane?.className).toContain("bottom-px");
-    expect(lane?.className).not.toContain("inset-y-0");
+    expect(lane?.style.getPropertyValue("--overlay-scrollbar-edge")).toBe("1px");
+  });
+
+  it("pushes the bar into a content gutter when asked", () => {
+    const scrollable = createScrollable(1000);
+    act(() => {
+      root.render(<OverlayScrollbar scrollable={scrollable} thumbInset="gutter" />);
+    });
+    const lane = container.querySelector<HTMLElement>("[role='scrollbar']");
+    expect(lane?.style.getPropertyValue("--overlay-scrollbar-edge")).toBe("0.5rem");
+  });
+
+  it("coasts at a steady rate while a triangle is held", () => {
+    vi.useFakeTimers();
+    const scrollable = createScrollable(10_000);
+    act(() => {
+      root.render(<OverlayScrollbar scrollable={scrollable} triangles onStep={() => {}} />);
+    });
+    const down = [...container.querySelectorAll("button")].find(
+      (button) => button.getAttribute("aria-label") === "Scroll down",
+    );
+    act(() => {
+      down?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0 }));
+    });
+    // Still within the grace period: a plain click has not started coasting.
+    expect(scrollable.scrollTop).toBe(0);
+    act(() => {
+      vi.advanceTimersByTime(200);
+    });
+    act(() => {
+      vi.advanceTimersByTime(100);
+    });
+    expect(scrollable.scrollTop).toBeGreaterThan(0);
+    vi.useRealTimers();
   });
 
   it("narrows the thumb when a width is given", () => {
