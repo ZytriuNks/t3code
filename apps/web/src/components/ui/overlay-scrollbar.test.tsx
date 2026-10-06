@@ -161,17 +161,6 @@ describe("OverlayScrollbar", () => {
     expect(thumb?.className).toContain("opacity-0");
   });
 
-  it("offsets the lane for the host's horizontal padding", () => {
-    const scrollable = createScrollable(1000);
-    act(() => {
-      root.render(<OverlayScrollbar scrollable={scrollable} edgeOffset="1.3125rem" />);
-    });
-    const lane = container.querySelector<HTMLElement>("[role='scrollbar']");
-    // A `right-0` bar inside a padded scroll container resolves against the
-    // padding box, so it needs a negative offset to reach the viewport edge.
-    expect(lane?.style.right).toBe("-1.3125rem");
-  });
-
   it("coasts at a steady rate while a triangle is held", () => {
     vi.useFakeTimers();
     const scrollable = createScrollable(10_000);

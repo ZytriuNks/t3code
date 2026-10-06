@@ -65,9 +65,6 @@ type OverlayScrollbarProps = {
   thumbInset?: ThumbInset;
   /** Clearance kept below the bar and above the bottom edge. */
   bottomGap?: BottomGap;
-  /** Compensates for the scroll container's own horizontal padding, so the bar
-   * can sit at the viewport edge rather than inside that gutter. */
-  edgeOffset?: string;
   className?: string;
 };
 
@@ -122,7 +119,6 @@ function OverlayScrollbar({
   width,
   thumbInset = "edge",
   bottomGap = "hairline",
-  edgeOffset = "0px",
   className,
 }: OverlayScrollbarProps) {
   const laneRef = useRef<HTMLDivElement | null>(null);
@@ -131,14 +127,6 @@ function OverlayScrollbar({
   const [laneElement, setLaneElement] = useState<HTMLDivElement | null>(null);
   const [geometry, setGeometry] = useState<ScrollbarGeometry | null>(null);
   const [dragging, setDragging] = useState(false);
-  // Mirror of `dragging` readable from the measuring effect. That effect closes
-  // over its dependencies once, so a plain state read there would stay pinned
-  // to the initial `false` and could never suppress anything.
-  const draggingRef = useRef(false);
-  const setDraggingState = useCallback((next: boolean) => {
-    draggingRef.current = next;
-    setDragging(next);
-  }, []);
 
   // The lane is measured in the effect below, so the element has to exist
   // before that runs. A ref alone cannot express this: on the first layout
@@ -155,10 +143,6 @@ function OverlayScrollbar({
   useLayoutEffect(() => {
     if (!scrollable || !laneElement) return;
     const measure = () => {
-      // While dragging, the pointer handler owns the thumb position. Feeding
-      // scroll-driven geometry back into state during the drag made both fight
-      // over the same transform, which surfaced as a jump on the next hover.
-      if (draggingRef.current) return;
       const trackHeight =
         laneElement.clientHeight - (triangles ? TRIANGLE_SIZE_PX * 2 : 0);
       trackHeightRef.current = trackHeight;
@@ -250,7 +234,7 @@ function OverlayScrollbar({
       const thumb = thumbRef.current;
       if (!lane || !thumb) return;
       const pointerOffset = event.clientY - thumb.getBoundingClientRect().top;
-      setDraggingState(true);
+      setDragging(true);
       event.currentTarget.setPointerCapture(event.pointerId);
 
       const onMove = (moveEvent: PointerEvent) => {
@@ -276,21 +260,17 @@ function OverlayScrollbar({
         scrollable.scrollTop = next;
       };
       const onUp = () => {
-        setDraggingState(false);
+        setDragging(false);
         event.currentTarget.releasePointerCapture(event.pointerId);
         event.currentTarget.removeEventListener("pointermove", onMove);
         event.currentTarget.removeEventListener("pointerup", onUp);
         event.currentTarget.removeEventListener("pointercancel", onUp);
-        // Measuring was suppressed for the duration of the drag, so settle the
-        // thumb onto its final position now rather than leaving it where the
-        // last pointermove happened to leave it.
-        scrollable.dispatchEvent(new Event("scroll"));
       };
       event.currentTarget.addEventListener("pointermove", onMove);
       event.currentTarget.addEventListener("pointerup", onUp);
       event.currentTarget.addEventListener("pointercancel", onUp);
     },
-    [geometry, scrollable, setDraggingState, triangles],
+    [geometry, scrollable, triangles],
   );
 
   const onLaneKeyDown = useCallback(
@@ -378,9 +358,6 @@ function OverlayScrollbar({
       )}
       style={
         {
-          // Applied as an inline offset rather than a class: the value is
-          // host-supplied, so Tailwind cannot see it at build time.
-          right: edgeOffset === "0px" ? undefined : `-${edgeOffset}`,
           "--app-scrollbar-thumb-width":
             width ?? "var(--app-scrollbar-width)",
           // One knob for both the thumb and the triangles, so they can never

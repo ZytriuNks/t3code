@@ -1460,9 +1460,6 @@ export const MessagesTimeline = memo(function MessagesTimeline({
             scrollable={timelineScrollableNode}
             triangles
             onStep={handleScrollbarStep}
-            // LegendList carries px-3 sm:px-5; without this the bar resolves
-            // against that padding and stops short of the window edge.
-            edgeOffset="1.3125rem"
           />
           <TimelineMinimap
             items={minimapItems}
