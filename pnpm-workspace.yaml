@@ -258,6 +258,7 @@ patchedDependencies:
   react-native-nitro-modules@0.35.9: patches/react-native-nitro-modules@0.35.9.patch
   react-native-screens@4.28.0: patches/react-native-screens@4.28.0.patch
   uniwind@1.11.0: patches/uniwind@1.11.0.patch
+  "@formkit/auto-animate@0.9.0": patches/@formkit__auto-animate@0.9.0.patch
 
 peerDependencyRules:
   allowAny:
