@@ -81,19 +81,28 @@ function OverlayScrollbar({
   const laneRef = useRef<HTMLDivElement | null>(null);
   const thumbRef = useRef<HTMLDivElement | null>(null);
   const trackHeightRef = useRef(0);
+  const [laneElement, setLaneElement] = useState<HTMLDivElement | null>(null);
   const [geometry, setGeometry] = useState<ScrollbarGeometry | null>(null);
   const [hovered, setHovered] = useState(false);
   const [dragging, setDragging] = useState(false);
 
+  // The lane is measured in the effect below, so the element has to exist
+  // before that runs. A ref alone cannot express this: on the first layout
+  // effect the ref is still null, so measuring there would always bail out
+  // and the bar would never appear. Holding the node in state breaks the
+  // cycle — the effect re-runs once it mounts.
+  const laneCallbackRef = useCallback((node: HTMLDivElement | null) => {
+    laneRef.current = node;
+    setLaneElement(node);
+  }, []);
+
   // Re-measure whenever the content resizes. Virtualized lists change content
   // height without the viewport changing, so observe the content element too.
   useLayoutEffect(() => {
-    if (!scrollable) return;
+    if (!scrollable || !laneElement) return;
     const measure = () => {
-      const lane = laneRef.current;
-      if (!lane) return;
       const trackHeight =
-        lane.clientHeight - (triangles ? TRIANGLE_SIZE_PX * 2 : 0);
+        laneElement.clientHeight - (triangles ? TRIANGLE_SIZE_PX * 2 : 0);
       trackHeightRef.current = trackHeight;
       setGeometry(
         scrollbarGeometry(
@@ -122,7 +131,7 @@ function OverlayScrollbar({
       scrollable.removeEventListener("scroll", measure);
       observer?.disconnect();
     };
-  }, [scrollable, triangles]);
+  }, [scrollable, triangles, laneElement]);
 
   const scrollByPage = useCallback(
     (direction: StepDirection) => {
@@ -237,18 +246,25 @@ function OverlayScrollbar({
   // the bar hidden until it decides otherwise; hover reveals it regardless so
   // the whole lane stays an easy grab target.
   const shown = visible ?? true;
-
-  if (geometry === null) return null;
+  // The lane itself must always mount: it is what the measuring effect reads
+  // its height from, so returning early on a null geometry would leave the
+  // thumb permanently unmeasured. Only the thumb and triangles wait for it.
+  const ready = geometry !== null;
+  const travel = Math.max(1, trackHeightRef.current - (geometry?.thumbHeight ?? 0));
 
   return (
     <div
-      ref={laneRef}
+      ref={laneCallbackRef}
       role="scrollbar"
       aria-orientation="vertical"
       aria-valuemin={0}
-      aria-valuemax={geometry.maxOffset}
-      aria-valuenow={Math.round(geometry.maxOffset * (geometry.thumbTop / Math.max(1, trackHeightRef.current - geometry.thumbHeight)))}
-      tabIndex={0}
+      aria-valuemax={geometry?.maxOffset ?? 0}
+      aria-valuenow={
+        geometry === null
+          ? 0
+          : Math.round(geometry.maxOffset * (geometry.thumbTop / travel))
+      }
+      tabIndex={ready ? 0 : -1}
       onPointerEnter={() => setHovered(true)}
       onPointerLeave={() => setHovered(false)}
       onKeyDown={onLaneKeyDown}
@@ -256,11 +272,13 @@ function OverlayScrollbar({
         "group absolute inset-y-0 right-0 z-30 flex touch-none flex-col items-end outline-none",
         LANE_CLASS,
         "transition-opacity duration-150 ease-out",
-        shown || hovered || dragging ? "opacity-100" : "pointer-events-none opacity-0",
+        ready && (shown || hovered || dragging)
+          ? "opacity-100"
+          : "pointer-events-none opacity-0",
         className,
       )}
     >
-      {triangles ? (
+      {triangles && ready ? (
         <button
           type="button"
           tabIndex={-1}
@@ -280,25 +298,28 @@ function OverlayScrollbar({
         </button>
       ) : null}
 
-      <div
-        ref={thumbRef}
-        onPointerDown={onThumbPointerDown}
-        className={cn(
-          "absolute right-0 rounded-[3px] bg-[var(--app-scrollbar-thumb)] transition-colors duration-150 ease-out",
-          "group-hover:bg-[var(--app-scrollbar-thumb-hover)]",
-          dragging && "bg-[var(--app-scrollbar-thumb-hover)]",
-          THUMB_CLASS,
-        )}
-        style={{
-          height: `${geometry.thumbHeight}px`,
-          transform: `translateY(${triangles ? TRIANGLE_SIZE_PX + geometry.thumbTop : geometry.thumbTop}px)`,
-        }}
-      />
+      {ready ? (
+        <div
+          ref={thumbRef}
+          onPointerDown={onThumbPointerDown}
+          className={cn(
+            "absolute right-0 rounded-[3px] bg-[var(--app-scrollbar-thumb)] transition-colors duration-150 ease-out",
+            "group-hover:bg-[var(--app-scrollbar-thumb-hover)]",
+            dragging && "bg-[var(--app-scrollbar-thumb-hover)]",
+            THUMB_CLASS,
+          )}
+          style={{
+            height: `${geometry.thumbHeight}px`,
+            transform: `translateY(${triangles ? TRIANGLE_SIZE_PX + geometry.thumbTop : geometry.thumbTop}px)`,
+          }}
+        />
+      ) : null}
 
-      {triangles ? (
+      {triangles && ready ? (
         <button
           type="button"
           tabIndex={-1}
+          aria-label="Scroll down"
           onClick={() => scrollByPage(1)}
           onPointerDown={(event) => {
             if (event.button !== 0) return;
