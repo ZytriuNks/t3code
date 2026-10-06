@@ -195,6 +195,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   const [searchQuery, setSearchQuery] = useState("");
   const [showTopScrollFade, setShowTopScrollFade] = useState(false);
   const [showBottomScrollFade, setShowBottomScrollFade] = useState(false);
+  const [modelListScrollbarVisible, setModelListScrollbarVisible] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const modelListRef = useRef<LegendListRef | null>(null);
   const highlightedModelKeyRef = useRef<string | null>(null);
@@ -699,6 +700,29 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       ),
     [visibleModels],
   );
+  // The scrollbar stays hidden at rest and while merely hovered, and fades in
+  // while the list is actually being scrolled. Each scroll event restarts the
+  // hide timer so the thumb lingers briefly after the list settles.
+  const scrollbarHideTimerRef = useRef<number | null>(null);
+  const showModelListScrollbar = useCallback(() => {
+    setModelListScrollbarVisible(true);
+    if (scrollbarHideTimerRef.current !== null) {
+      window.clearTimeout(scrollbarHideTimerRef.current);
+    }
+    scrollbarHideTimerRef.current = window.setTimeout(() => {
+      scrollbarHideTimerRef.current = null;
+      setModelListScrollbarVisible(false);
+    }, 700);
+  }, []);
+  useEffect(
+    () => () => {
+      if (scrollbarHideTimerRef.current !== null) {
+        window.clearTimeout(scrollbarHideTimerRef.current);
+      }
+    },
+    [],
+  );
+
   const updateModelListScrollFades = useCallback(() => {
     const scrollElement = modelListRef.current?.getScrollableNode();
     if (!(scrollElement instanceof HTMLElement)) {
@@ -707,7 +731,10 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     const maxScrollOffset = Math.max(0, scrollElement.scrollHeight - scrollElement.clientHeight);
     setShowTopScrollFade(scrollElement.scrollTop > 1);
     setShowBottomScrollFade(maxScrollOffset - scrollElement.scrollTop > 1);
-  }, []);
+    if (scrollElement.scrollTop > 0) {
+      showModelListScrollbar();
+    }
+  }, [showModelListScrollbar]);
   const modelJumpShortcutContext = useMemo(
     () =>
       ({
@@ -1021,7 +1048,8 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
                   onLayout={updateModelListScrollFades}
                   onScroll={updateModelListScrollFades}
                   className={cn(
-                    "scrollbar-gutter-stable h-full overflow-x-hidden overscroll-y-contain py-1.5 app-scrollbar-hover app-scrollbar-track-inset [&::-webkit-scrollbar-track]:my-2",
+                    "scrollbar-gutter-stable h-full overflow-x-hidden overscroll-y-contain py-1.5 app-scrollbar-hover [&::-webkit-scrollbar-track]:my-2",
+                    modelListScrollbarVisible && "app-scrollbar-hover-active",
                     getVirtualizedScrollFadeClassName({
                       top: showTopScrollFade,
                       bottom: showBottomScrollFade,

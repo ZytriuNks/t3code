@@ -79,7 +79,7 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
 
 :root {
   --app-scrollbar-width: 6px;
-  --app-scrollbar-thumb-inset: 2px;
+  --app-scrollbar-thumb-inset: 1px;
   --appearance-contrast-base: 100%;
   --appearance-contrast-boost: 0%;
   --appearance-contrast-border-boost: 0%;
@@ -133,7 +133,7 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
     --appearance-contrast-target: white;
     --app-scrollbar-thumb: rgb(255 255 255 / 8%);
     --app-scrollbar-thumb-hover: rgb(255 255 255 / 12%);
-    --app-scrollbar-thumb-inset: 2px;
+    --app-scrollbar-thumb-inset: 1px;
     --glass-blur: 16px;
     --glass-saturation: 1.08;
   }
@@ -1846,114 +1846,103 @@ code {
   background: var(--app-scrollbar-thumb-hover);
 }
 
-/* Hover-only scrollbar: the thumb stays transparent at rest and only fades
-   in while the scroll lane is hovered, pressed, focused, or actively
-   scrolling. Pair with `scrollbar-gutter: stable` so layout does not jump
-   when the thumb appears. */
-@utility app-scrollbar-hover {
-  &::-webkit-scrollbar-thumb {
-    background: transparent;
-    border-radius: 3px;
-    transition: background-color 120ms ease-out;
-  }
-  &:hover::-webkit-scrollbar-thumb,
-  &:active::-webkit-scrollbar-thumb,
-  &:focus::-webkit-scrollbar-thumb,
-  &:focus-visible::-webkit-scrollbar-thumb {
-    background: var(--app-scrollbar-thumb);
-  }
-  &:hover::-webkit-scrollbar-thumb:hover,
-  &:active::-webkit-scrollbar-thumb:hover {
-    background: var(--app-scrollbar-thumb-hover);
-  }
+/* Scrollbar surface variants.
+
+   These are deliberately plain class rules, not @utility blocks. Tailwind v4
+   drops nested selectors declared inside @utility, so every rule below has to
+   spell out its own selector; anything written as `&::-webkit-scrollbar-*`
+   inside @utility is silently absent from the built stylesheet. */
+
+/* Hover-only scrollbar (model picker list): the thumb is transparent at rest
+   and fades in while the lane is hovered, pressed, or focused, or while the
+   list scrolls (the scroll handler toggles `app-scrollbar-hover-active`).
+   Pair with `scrollbar-gutter: stable` so layout does not jump when the
+   thumb appears. The transparent border plus `padding-box` clip is what
+   pushes the visible thumb away from the list's right edge — Chromium
+   ignores `margin` on ::-webkit-scrollbar-track. */
+.app-scrollbar-hover::-webkit-scrollbar-thumb,
+.app-scrollbar-hover-active::-webkit-scrollbar-thumb {
+  background-color: transparent;
+  border: var(--app-scrollbar-thumb-inset) solid transparent;
+  background-clip: padding-box;
+  border-radius: 3px;
+  transition: background-color 140ms ease-out;
+}
+.app-scrollbar-hover:hover::-webkit-scrollbar-thumb,
+.app-scrollbar-hover:active::-webkit-scrollbar-thumb,
+.app-scrollbar-hover:focus::-webkit-scrollbar-thumb,
+.app-scrollbar-hover:focus-within::-webkit-scrollbar-thumb,
+.app-scrollbar-hover-active::-webkit-scrollbar-thumb {
+  background-color: var(--app-scrollbar-thumb);
+}
+.app-scrollbar-hover:hover::-webkit-scrollbar-thumb:hover,
+.app-scrollbar-hover:active::-webkit-scrollbar-thumb:hover,
+.app-scrollbar-hover-active::-webkit-scrollbar-thumb:hover {
+  background-color: var(--app-scrollbar-thumb-hover);
 }
 
-/* Push the scroll lane away from the content's right edge. Chromium ignores
-   margin on ::-webkit-scrollbar-track, so the inset comes from a transparent
-   border on the thumb with background-clip: padding-box — that narrows the
-   visible thumb and opens equal space on both sides of the lane. */
-@utility app-scrollbar-track-inset {
-  &::-webkit-scrollbar-thumb {
-    border: var(--app-scrollbar-thumb-inset) solid transparent;
-    background-clip: padding-box;
-  }
-}
+/* Main timeline scroll lane: one rounded up triangle at the top of the track
+   and one rounded down triangle at the bottom. Chromium draws four buttons
+   per vertical scrollbar (decrement:start, decrement:end, increment:start,
+   increment:end), so the two off-axis buttons are hidden and only the
+   start-side decrement and end-side increment stay.
 
-/* Main timeline scroll lane: the same inset as the model picker, plus one
-   up triangle at the top of the track and one down triangle at the bottom.
-   Chromium draws four buttons per vertical scrollbar (decrement:start,
-   decrement:end, increment:start, increment:end), so the two off-axis
-   buttons are hidden and only the start-side decrement and end-side
-   increment stay. Colour comes from the same thumb tokens so the triangles
-   track the thumb through rest, hover, and active.
-   The click handler lives in MessagesTimeline.tsx — Chromium's default
-   one-line step is far too small. */
-@utility app-scrollbar-with-buttons {
-  &::-webkit-scrollbar-thumb {
-    background: var(--app-scrollbar-thumb);
-    border: var(--app-scrollbar-thumb-inset) solid transparent;
-    background-clip: padding-box;
-    border-radius: 3px;
-    transition: background-color 120ms ease-out;
-  }
-  &:hover::-webkit-scrollbar-thumb {
-    background: var(--app-scrollbar-thumb-hover);
-  }
-  &::-webkit-scrollbar-button {
-    display: block;
-    width: var(--app-scrollbar-width);
-    background-color: transparent;
-    background-repeat: no-repeat;
-    background-position: center;
-    -webkit-appearance: none;
-    appearance: none;
-  }
-  /* Off-axis buttons: hidden so each end shows a single triangle. */
-  &::-webkit-scrollbar-button:vertical:decrement:end,
-  &::-webkit-scrollbar-button:vertical:increment:start {
-    display: none;
-  }
-  /* Top: up triangle. Bottom: down triangle. Both 14px tall, so the track
-     never reaches the window edges. */
-  &::-webkit-scrollbar-button:vertical:decrement:start,
-  &::-webkit-scrollbar-button:vertical:increment:end {
-    display: block;
-    height: 14px;
-    background-size: 8px 6px;
-  }
-  &::-webkit-scrollbar-button:vertical:decrement:start {
-    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 6'><polygon points='4,0 8,6 0,6' fill='rgb(217,217,217)'/></svg>");
-  }
-  &::-webkit-scrollbar-button:vertical:increment:end {
-    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 6'><polygon points='0,0 8,0 4,6' fill='rgb(217,217,217)'/></svg>");
-  }
-  &:hover::-webkit-scrollbar-button:vertical:decrement:start {
-    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 6'><polygon points='4,0 8,6 0,6' fill='rgb(191,191,191)'/></svg>");
-  }
-  &:hover::-webkit-scrollbar-button:vertical:increment:end {
-    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 6'><polygon points='0,0 8,0 4,6' fill='rgb(191,191,191)'/></svg>");
-  }
-  &:active::-webkit-scrollbar-button:vertical:decrement:start,
-  &:active::-webkit-scrollbar-button:vertical:increment:end {
-    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 6'><polygon fill='rgb(160,160,160)'/></svg>");
-  }
+   The triangles are painted with `mask-image` over a solid
+   `background-color` rather than a filled SVG, so their colour comes from the
+   same tokens as the thumb and tracks it through rest, hover and dark mode
+   with no parallel palette to keep in sync. Mask size matches
+   --app-scrollbar-width so each triangle is exactly as wide as the thumb. */
+.app-scrollbar-with-buttons::-webkit-scrollbar-thumb {
+  background-color: var(--app-scrollbar-thumb);
+  border: var(--app-scrollbar-thumb-inset) solid transparent;
+  background-clip: padding-box;
+  border-radius: 3px;
+  transition: background-color 140ms ease-out;
 }
-
-/* Dark mode: the thumb tokens already lift to white, so the triangles use
-   the same values rather than a parallel hardcoded palette. */
-@variant dark {
-  .app-scrollbar-with-buttons::-webkit-scrollbar-button:vertical:decrement:start {
-    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 6'><polygon points='4,0 8,6 0,6' fill='rgb(255,255,255)' fill-opacity='0.08'/></svg>");
-  }
-  .app-scrollbar-with-buttons::-webkit-scrollbar-button:vertical:increment:end {
-    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 6'><polygon points='0,0 8,0 4,6' fill='rgb(255,255,255)' fill-opacity='0.08'/></svg>");
-  }
-  .app-scrollbar-with-buttons:hover::-webkit-scrollbar-button:vertical:decrement:start {
-    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 6'><polygon points='4,0 8,6 0,6' fill='rgb(255,255,255)' fill-opacity='0.12'/></svg>");
-  }
-  .app-scrollbar-with-buttons:hover::-webkit-scrollbar-button:vertical:increment:end {
-    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 6'><polygon points='0,0 8,0 4,6' fill='rgb(255,255,255)' fill-opacity='0.12'/></svg>");
-  }
+.app-scrollbar-with-buttons:hover::-webkit-scrollbar-thumb {
+  background-color: var(--app-scrollbar-thumb-hover);
+}
+.app-scrollbar-with-buttons::-webkit-scrollbar-button {
+  display: block;
+  width: var(--app-scrollbar-width);
+  background-color: transparent;
+  background-repeat: no-repeat;
+  -webkit-appearance: none;
+  appearance: none;
+}
+/* Off-axis buttons: hidden so each end shows a single triangle. */
+.app-scrollbar-with-buttons::-webkit-scrollbar-button:vertical:decrement:end,
+.app-scrollbar-with-buttons::-webkit-scrollbar-button:vertical:increment:start {
+  display: none;
+}
+/* Top: up triangle. Bottom: down triangle. Both keep the track clear of the
+   window edges. */
+.app-scrollbar-with-buttons::-webkit-scrollbar-button:vertical:decrement:start,
+.app-scrollbar-with-buttons::-webkit-scrollbar-button:vertical:increment:end {
+  display: block;
+  height: 12px;
+  background-color: var(--app-scrollbar-thumb);
+  transition: background-color 140ms ease-out;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-size: var(--app-scrollbar-width) 5px;
+  mask-size: var(--app-scrollbar-width) 5px;
+}
+.app-scrollbar-with-buttons:hover::-webkit-scrollbar-button:vertical:decrement:start,
+.app-scrollbar-with-buttons:hover::-webkit-scrollbar-button:vertical:increment:end {
+  background-color: var(--app-scrollbar-thumb-hover);
+}
+/* Rounded triangles: the path is stroked with a round line join and a fill,
+   which rounds the three corners without needing a filter. */
+.app-scrollbar-with-buttons::-webkit-scrollbar-button:vertical:decrement:start {
+  -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 6 5'><path d='M3 .7 L5.7 4.5 L.3 4.5 Z' fill='black' stroke='black' stroke-width='1.1' stroke-linejoin='round'/></svg>");
+  mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 6 5'><path d='M3 .7 L5.7 4.5 L.3 4.5 Z' fill='black' stroke='black' stroke-width='1.1' stroke-linejoin='round'/></svg>");
+}
+.app-scrollbar-with-buttons::-webkit-scrollbar-button:vertical:increment:end {
+  -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 6 5'><path d='M3 4.3 L5.7 .5 L.3 .5 Z' fill='black' stroke='black' stroke-width='1.1' stroke-linejoin='round'/></svg>");
+  mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 6 5'><path d='M3 4.3 L5.7 .5 L.3 .5 Z' fill='black' stroke='black' stroke-width='1.1' stroke-linejoin='round'/></svg>");
 }
 
 /* Chat markdown rendering */
