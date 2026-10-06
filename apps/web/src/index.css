@@ -79,7 +79,7 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
 
 :root {
   --app-scrollbar-width: 6px;
-  --app-scrollbar-track-inset: 6px;
+  --app-scrollbar-thumb-inset: 2px;
   --appearance-contrast-base: 100%;
   --appearance-contrast-boost: 0%;
   --appearance-contrast-border-boost: 0%;
@@ -133,7 +133,7 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
     --appearance-contrast-target: white;
     --app-scrollbar-thumb: rgb(255 255 255 / 8%);
     --app-scrollbar-thumb-hover: rgb(255 255 255 / 12%);
-    --app-scrollbar-track-inset: 6px;
+    --app-scrollbar-thumb-inset: 2px;
     --glass-blur: 16px;
     --glass-saturation: 1.08;
   }
@@ -1868,34 +1868,32 @@ code {
   }
 }
 
-/* Push the scroll lane away from the right edge by the same amount as the
-   timeline's triangle-button inset, so the three scroll surfaces line up
-   visually. */
+/* Push the scroll lane away from the content's right edge. Chromium ignores
+   margin on ::-webkit-scrollbar-track, so the inset comes from a transparent
+   border on the thumb with background-clip: padding-box — that narrows the
+   visible thumb and opens equal space on both sides of the lane. */
 @utility app-scrollbar-track-inset {
-  &::-webkit-scrollbar-track {
-    background: transparent;
-    margin-inline-end: var(--app-scrollbar-track-inset);
-  }
   &::-webkit-scrollbar-thumb {
-    margin-inline-end: var(--app-scrollbar-track-inset);
+    border: var(--app-scrollbar-thumb-inset) solid transparent;
+    background-clip: padding-box;
   }
 }
 
-/* Main timeline scroll lane: same right/bottom inset as the model picker,
-   plus up/down step triangles at the top and bottom of the track. The
-   triangles use inline SVG data URIs as backgrounds; Chromium still draws
-   ::-webkit-scrollbar-button in 132, and the click handler lives in
-   MessagesTimeline.tsx (default one-line click is too small). */
+/* Main timeline scroll lane: the same inset as the model picker, plus one
+   up triangle at the top of the track and one down triangle at the bottom.
+   Chromium draws four buttons per vertical scrollbar (decrement:start,
+   decrement:end, increment:start, increment:end), so the two off-axis
+   buttons are hidden and only the start-side decrement and end-side
+   increment stay. Colour comes from the same thumb tokens so the triangles
+   track the thumb through rest, hover, and active.
+   The click handler lives in MessagesTimeline.tsx — Chromium's default
+   one-line step is far too small. */
 @utility app-scrollbar-with-buttons {
-  &::-webkit-scrollbar-track {
-    background: transparent;
-    margin-inline-end: var(--app-scrollbar-track-inset);
-    margin-block-end: var(--app-scrollbar-track-inset);
-  }
   &::-webkit-scrollbar-thumb {
     background: var(--app-scrollbar-thumb);
+    border: var(--app-scrollbar-thumb-inset) solid transparent;
+    background-clip: padding-box;
     border-radius: 3px;
-    margin-inline-end: var(--app-scrollbar-track-inset);
     transition: background-color 120ms ease-out;
   }
   &:hover::-webkit-scrollbar-thumb {
@@ -1903,49 +1901,58 @@ code {
   }
   &::-webkit-scrollbar-button {
     display: block;
-    height: 14px;
     width: var(--app-scrollbar-width);
     background-color: transparent;
     background-repeat: no-repeat;
     background-position: center;
-    background-size: 8px 6px;
     -webkit-appearance: none;
     appearance: none;
   }
-  &::-webkit-scrollbar-button:vertical:decrement {
-    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 6'><polygon points='4,0 8,6 0,6' fill='%23999'/></svg>");
+  /* Off-axis buttons: hidden so each end shows a single triangle. */
+  &::-webkit-scrollbar-button:vertical:decrement:end,
+  &::-webkit-scrollbar-button:vertical:increment:start {
+    display: none;
   }
-  &::-webkit-scrollbar-button:vertical:increment {
-    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 6'><polygon points='0,0 8,0 4,6' fill='%23999'/></svg>");
+  /* Top: up triangle. Bottom: down triangle. Both 14px tall, so the track
+     never reaches the window edges. */
+  &::-webkit-scrollbar-button:vertical:decrement:start,
+  &::-webkit-scrollbar-button:vertical:increment:end {
+    display: block;
+    height: 14px;
+    background-size: 8px 6px;
   }
-  &:hover::-webkit-scrollbar-button:vertical:decrement {
-    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 6'><polygon points='4,0 8,6 0,6' fill='%23bcbcbc'/></svg>");
+  &::-webkit-scrollbar-button:vertical:decrement:start {
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 6'><polygon points='4,0 8,6 0,6' fill='rgb(217,217,217)'/></svg>");
   }
-  &:hover::-webkit-scrollbar-button:vertical:increment {
-    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 6'><polygon points='0,0 8,0 4,6' fill='%23bcbcbc'/></svg>");
+  &::-webkit-scrollbar-button:vertical:increment:end {
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 6'><polygon points='0,0 8,0 4,6' fill='rgb(217,217,217)'/></svg>");
   }
-  &:active::-webkit-scrollbar-button:vertical:decrement {
-    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 6'><polygon points='4,0 8,6 0,6' fill='%23ffffff'/></svg>");
+  &:hover::-webkit-scrollbar-button:vertical:decrement:start {
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 6'><polygon points='4,0 8,6 0,6' fill='rgb(191,191,191)'/></svg>");
   }
-  &:active::-webkit-scrollbar-button:vertical:increment {
-    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 6'><polygon points='0,0 8,0 4,6' fill='%23ffffff'/></svg>");
+  &:hover::-webkit-scrollbar-button:vertical:increment:end {
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 6'><polygon points='0,0 8,0 4,6' fill='rgb(191,191,191)'/></svg>");
+  }
+  &:active::-webkit-scrollbar-button:vertical:decrement:start,
+  &:active::-webkit-scrollbar-button:vertical:increment:end {
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 6'><polygon fill='rgb(160,160,160)'/></svg>");
   }
 }
 
-/* Dark-mode triangle fills: lift to a brighter neutral so the triangles
-   read against the dark canvas. */
+/* Dark mode: the thumb tokens already lift to white, so the triangles use
+   the same values rather than a parallel hardcoded palette. */
 @variant dark {
-  .app-scrollbar-with-buttons::-webkit-scrollbar-button:vertical:decrement {
-    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 6'><polygon points='4,0 8,6 0,6' fill='%23aaaaaa'/></svg>");
+  .app-scrollbar-with-buttons::-webkit-scrollbar-button:vertical:decrement:start {
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 6'><polygon points='4,0 8,6 0,6' fill='rgb(255,255,255)' fill-opacity='0.08'/></svg>");
   }
-  .app-scrollbar-with-buttons::-webkit-scrollbar-button:vertical:increment {
-    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 6'><polygon points='0,0 8,0 4,6' fill='%23aaaaaa'/></svg>");
+  .app-scrollbar-with-buttons::-webkit-scrollbar-button:vertical:increment:end {
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 6'><polygon points='0,0 8,0 4,6' fill='rgb(255,255,255)' fill-opacity='0.08'/></svg>");
   }
-  .app-scrollbar-with-buttons:hover::-webkit-scrollbar-button:vertical:decrement {
-    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 6'><polygon points='4,0 8,6 0,6' fill='%23ffffff'/></svg>");
+  .app-scrollbar-with-buttons:hover::-webkit-scrollbar-button:vertical:decrement:start {
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 6'><polygon points='4,0 8,6 0,6' fill='rgb(255,255,255)' fill-opacity='0.12'/></svg>");
   }
-  .app-scrollbar-with-buttons:hover::-webkit-scrollbar-button:vertical:increment {
-    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 6'><polygon points='0,0 8,0 4,6' fill='%23ffffff'/></svg>");
+  .app-scrollbar-with-buttons:hover::-webkit-scrollbar-button:vertical:increment:end {
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 6'><polygon points='0,0 8,0 4,6' fill='rgb(255,255,255)' fill-opacity='0.12'/></svg>");
   }
 }
 

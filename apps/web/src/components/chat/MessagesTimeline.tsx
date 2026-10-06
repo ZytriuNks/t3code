@@ -1157,20 +1157,16 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     return () => cancelAnimationFrame(frame);
   }, [handleScroll, rows.length]);
 
-  // The main timeline uses `::-webkit-scrollbar-button` for the up/down
-  // step triangles at the ends of the scrollbar. Chromium's default click
-  // on those pseudo-elements scrolls by one line (~17px), which is far too
-  // small for the intended "video-player" rhythm. Intercept pointerdown
-  // inside the scroll-lane hit region at the top/bottom 14px of the track
-  // and call scrollBy with ~30% viewport instead. Falls outside the lane:
-  // native scroll drag continues to work.
+  // The main timeline draws up/down step triangles at the ends of its
+  // scrollbar via ::-webkit-scrollbar-button. Chromium's default click on
+  // those pseudo-elements scrolls one line (~17px), far too small for the
+  // intended video-player rhythm, so intercept the press in the capture
+  // phase — scrollbar pointer events do not reliably bubble from the
+  // element — and scroll by ~30% of the viewport instead. Presses anywhere
+  // else, including the thumb, fall through to native behaviour.
   useEffect(() => {
-    const element = listRef.current?.getScrollableNode();
-    if (!(element instanceof HTMLElement)) {
-      return;
-    }
-    const SCROLL_LANE_INSET = 12; // scrollbar width (6) + track inset (6)
-    const BUTTON_HEIGHT = 14;
+    const SCROLLBAR_LANE_PX = 6; // matches --app-scrollbar-width
+    const BUTTON_HEIGHT_PX = 14; // matches ::-webkit-scrollbar-button height
     let holdTimer: number | null = null;
 
     const clearHold = () => {
@@ -1178,32 +1174,32 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         window.clearTimeout(holdTimer);
         holdTimer = null;
       }
-      window.removeEventListener("pointerup", clearHold);
-      window.removeEventListener("pointercancel", clearHold);
+      window.removeEventListener("pointerup", clearHold, true);
+      window.removeEventListener("pointercancel", clearHold, true);
     };
 
     const onPointerDown = (event: PointerEvent) => {
-      const rect = element.getBoundingClientRect();
-      const xFromRight = rect.right - event.clientX;
-      if (xFromRight > SCROLL_LANE_INSET) {
+      if (event.button !== 0) {
         return;
       }
-      const yFromTop = event.clientY - rect.top;
-      const yFromBottom = rect.bottom - event.clientY;
-      let dir = 0;
-      if (yFromTop < BUTTON_HEIGHT) {
-        dir = -1;
-      } else if (yFromBottom < BUTTON_HEIGHT) {
-        dir = 1;
-      } else {
-        return; // Hit the thumb lane — let the browser handle the drag.
+      const element = listRef.current?.getScrollableNode();
+      if (!(element instanceof HTMLElement)) {
+        return;
+      }
+      const rect = element.getBoundingClientRect();
+      if (rect.right - event.clientX > SCROLLBAR_LANE_PX) {
+        return;
+      }
+      const fromTop = event.clientY - rect.top;
+      const fromBottom = rect.bottom - event.clientY;
+      const direction = fromTop < BUTTON_HEIGHT_PX ? -1 : fromBottom < BUTTON_HEIGHT_PX ? 1 : 0;
+      if (direction === 0) {
+        return; // Thumb lane — leave the drag to the browser.
       }
       event.preventDefault();
+      event.stopPropagation();
       const step = () => {
-        element.scrollBy({
-          top: dir * element.clientHeight * 0.3,
-          behavior: "smooth",
-        });
+        element.scrollBy({ top: direction * element.clientHeight * 0.3, behavior: "smooth" });
       };
       step();
       const tick = () => {
@@ -1211,13 +1207,13 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         holdTimer = window.setTimeout(tick, 180);
       };
       holdTimer = window.setTimeout(tick, 350);
-      window.addEventListener("pointerup", clearHold);
-      window.addEventListener("pointercancel", clearHold);
+      window.addEventListener("pointerup", clearHold, true);
+      window.addEventListener("pointercancel", clearHold, true);
     };
 
-    element.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("pointerdown", onPointerDown, true);
     return () => {
-      element.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("pointerdown", onPointerDown, true);
       clearHold();
     };
   }, [listRef]);
