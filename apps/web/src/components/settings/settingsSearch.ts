@@ -595,10 +595,12 @@ const SETTINGS_SEARCH_ITEM_DEFINITIONS = [
   },
   {
     id: "legacy-sidebar-project-guides",
-    title: "Show project guides",
+    title: "Indentation guides",
     to: "/settings/appearance",
     requiresLegacySidebar: true,
-    searchTerms: ["project guides vertical lines thread tree indent left align legacy sidebar"],
+    searchTerms: [
+      "project guides vertical lines thread tree indentation indent indentation guides left align legacy sidebar pinned no project drafts",
+    ],
   },
   {
     id: "legacy-sidebar-thread-status-dots",

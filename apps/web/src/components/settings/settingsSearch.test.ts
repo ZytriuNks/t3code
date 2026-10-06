@@ -124,14 +124,18 @@ describe("searchSettings", () => {
     },
   );
 
-  it.each(["project guides", "项目 竖线"])(
-    "finds the legacy project guide setting for %s",
-    (query) => {
-      expect(searchSettings(query, SETTINGS_SEARCH_ITEMS, zh).map((item) => item.id)).toContain(
-        "legacy-sidebar-project-guides",
-      );
-    },
-  );
+  it.each([
+    "project guides",
+    "项目 竖线",
+    "缩进竖线",
+    "置顶 竖线",
+    "无项目 竖线",
+    "indentation guides",
+  ])("finds the shared legacy sidebar indentation setting for %s", (query) => {
+    expect(searchSettings(query, SETTINGS_SEARCH_ITEMS, zh).map((item) => item.id)).toContain(
+      "legacy-sidebar-project-guides",
+    );
+  });
 
   it.each([
     ["sidebar style", "legacy-sidebar"],
