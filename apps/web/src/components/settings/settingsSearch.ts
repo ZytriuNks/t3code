@@ -518,6 +518,13 @@ const SETTINGS_SEARCH_ITEM_DEFINITIONS = [
     searchTerms: ["base directory folder browser path home"],
   },
   {
+    id: "scratch-base-directory",
+    title: "No-project chats base directory",
+    to: "/settings/general",
+    scope: "environment-defaults",
+    searchTerms: ["scratch no project chat thread working directory folder path home"],
+  },
+  {
     id: "unpin-confirmation",
     title: "Unpin confirmation",
     to: "/settings/general",

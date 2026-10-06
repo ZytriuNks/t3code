@@ -301,6 +301,9 @@ export const EN_MESSAGES = {
     'Leave empty to use "~/" when the Add Project browser opens.',
   "settings.general.addProjectBaseDirectory.ariaLabel": "Add project base directory",
   "settings.general.addProjectBaseDirectory.resetLabel": "add project base directory",
+  "settings.general.scratchBaseDirectory.description":
+    "Create a separate folder for each new chat without a project under this directory on the selected environment. Use an absolute path or ~/ outside a Git repository. Leave blank for the default scratch directory. Existing chats keep their folders.",
+  "settings.general.scratchBaseDirectory.placeholder": "Default scratch directory",
   "settings.general.confirmUnpin.description":
     "Ask before unpinning a thread from the pinned section.",
   "settings.general.confirmUnpin.ariaLabel": "Confirm thread unpinning",
@@ -942,6 +945,9 @@ export const EN_MESSAGES = {
     "new worktrees latest matching remote branch local",
   "settings.search.item.add-project-starts-in.title": "Add project starts in",
   "settings.search.item.add-project-starts-in.keywords": "base directory folder browser path home",
+  "settings.search.item.scratch-base-directory.title": "No-project chats base directory",
+  "settings.search.item.scratch-base-directory.keywords":
+    "scratch no project chat thread working directory folder path home",
   "settings.search.item.unpin-confirmation.title": "Unpin confirmation",
   "settings.search.item.unpin-confirmation.keywords": "ask before thread pinned section",
   "settings.search.item.archive-confirmation.title": "Archive confirmation",
@@ -2875,6 +2881,9 @@ export const ZH_CN_MESSAGES = {
     "留空时，打开“添加项目”浏览器会使用 “~/”。",
   "settings.general.addProjectBaseDirectory.ariaLabel": "添加项目的基础目录",
   "settings.general.addProjectBaseDirectory.resetLabel": "添加项目的基础目录",
+  "settings.general.scratchBaseDirectory.description":
+    "在所选运行环境的此目录下，为每个新建的无项目对话创建独立文件夹。请使用 Git 仓库之外的绝对路径或 ~/ 路径。留空则使用默认 scratch 目录。已有对话保留原目录。",
+  "settings.general.scratchBaseDirectory.placeholder": "默认 scratch 目录",
   "settings.general.confirmUnpin.description": "从置顶区域取消置顶线程前先询问。",
   "settings.general.confirmUnpin.ariaLabel": "确认取消置顶线程",
   "settings.general.confirmUnpin.resetLabel": "取消置顶确认",
@@ -3451,6 +3460,9 @@ export const ZH_CN_MESSAGES = {
   "settings.search.item.start-from-origin.keywords": "新工作树 最新 匹配 远程 分支 本地 origin",
   "settings.search.item.add-project-starts-in.title": "添加项目的起始位置",
   "settings.search.item.add-project-starts-in.keywords": "基础目录 文件夹 浏览器 路径 主目录",
+  "settings.search.item.scratch-base-directory.title": "无项目对话主目录",
+  "settings.search.item.scratch-base-directory.keywords":
+    "无项目 对话 聊天 工作目录 主目录 基础目录 文件夹 路径 scratch",
   "settings.search.item.unpin-confirmation.title": "取消置顶确认",
   "settings.search.item.unpin-confirmation.keywords": "询问 线程 置顶 区域",
   "settings.search.item.archive-confirmation.title": "归档确认",

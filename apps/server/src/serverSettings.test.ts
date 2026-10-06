@@ -95,6 +95,23 @@ const recordProviderUsage = (provider: string, instanceId: string | null = provi
   });
 
 it.layer(NodeServices.layer)("server settings", (it) => {
+  it.effect("persists and resets the no-project chats base directory", () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const fs = yield* FileSystem.FileSystem;
+      const service = yield* ServerSettingsModule.ServerSettingsService;
+      const updated = yield* service.updateSettings({ scratchBaseDirectory: "  ~/Chats  " });
+      assert.equal(updated.scratchBaseDirectory, "~/Chats");
+      const persisted = yield* decodeServerSettingsJson(
+        yield* fs.readFileString(config.settingsPath),
+      );
+      assert.equal(persisted.scratchBaseDirectory, "~/Chats");
+      yield* service.updateSettings({ scratchBaseDirectory: "" });
+      const reset = yield* decodeServerSettingsJson(yield* fs.readFileString(config.settingsPath));
+      assert.equal(reset.scratchBaseDirectory, "");
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
   it.effect("migrates saved token delivery to paragraph buffering without resetting settings", () =>
     Effect.gen(function* () {
       const config = yield* ServerConfig.ServerConfig;
