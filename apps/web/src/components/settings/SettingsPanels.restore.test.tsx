@@ -98,4 +98,13 @@ describe("restoring V2 settings", () => {
     expect(state.confirm).toHaveBeenCalledOnce();
     expect(state.update).not.toHaveBeenCalled();
   });
+
+  it("restores the no-project chats base directory", async () => {
+    state.settings = { ...DEFAULT_UNIFIED_SETTINGS, scratchBaseDirectory: "~/Chats" };
+    hooks.beginRender();
+    const restore = useSettingsRestore();
+    expect(restore.changedSettingLabels).toEqual(["No-project chats base directory"]);
+    await restore.restoreDefaults();
+    expect(state.update.mock.calls[0]?.[0].scratchBaseDirectory).toBe("");
+  });
 });

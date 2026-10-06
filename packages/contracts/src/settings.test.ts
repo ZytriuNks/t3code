@@ -1062,9 +1062,17 @@ describe("ServerSettingsPatch.providerInstances", () => {
 });
 
 describe("ServerSettingsPatch string normalization", () => {
+  it("defaults no-project chats to the built-in directory and allows resetting it", () => {
+    expect(decodeServerSettings({}).scratchBaseDirectory).toBe("");
+    expect(decodeServerSettingsPatch({ scratchBaseDirectory: "   " }).scratchBaseDirectory).toBe(
+      "",
+    );
+  });
+
   it("trims string settings while decoding patches", () => {
     const patch = decodeServerSettingsPatch({
       addProjectBaseDirectory: "  ~/Development  ",
+      scratchBaseDirectory: "  ~/Chats  ",
       textGenerationModelSelection: { model: "  gpt-5.4-mini  " },
       observability: {
         otlpTracesUrl: "  http://localhost:4318/v1/traces  ",
@@ -1086,6 +1094,7 @@ describe("ServerSettingsPatch string normalization", () => {
     });
 
     expect(patch.addProjectBaseDirectory).toBe("~/Development");
+    expect(patch.scratchBaseDirectory).toBe("~/Chats");
     expect(patch.textGenerationModelSelection?.model).toBe("gpt-5.4-mini");
     expect(patch.observability?.otlpTracesUrl).toBe("http://localhost:4318/v1/traces");
     expect(patch.providers?.codex?.binaryPath).toBe("/opt/homebrew/bin/codex");
@@ -1107,6 +1116,7 @@ describe("ServerSettingsPatch string normalization", () => {
     const encoded = encodeServerSettings({
       ...defaultSettings,
       addProjectBaseDirectory: "  ~/Development  ",
+      scratchBaseDirectory: "  ~/Chats  ",
       providers: {
         ...defaultSettings.providers,
         codex: {
@@ -1118,6 +1128,7 @@ describe("ServerSettingsPatch string normalization", () => {
     });
 
     expect(encoded.addProjectBaseDirectory).toBe("~/Development");
+    expect(encoded.scratchBaseDirectory).toBe("~/Chats");
     expect(encoded.providers?.codex?.binaryPath).toBe("/opt/homebrew/bin/codex");
     expect(encoded.providers?.codex?.launchArgs).toBe("--strict-config");
   });

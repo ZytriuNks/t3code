@@ -800,6 +800,9 @@ export function useSettingsRestore(onRestored?: () => void) {
       ...(settings.addProjectBaseDirectory !== DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory
         ? [t("settings.restore.label.addProjectBaseDirectory")]
         : []),
+      ...(settings.scratchBaseDirectory !== DEFAULT_UNIFIED_SETTINGS.scratchBaseDirectory
+        ? [t("settings.search.item.scratch-base-directory.title")]
+        : []),
       ...(settings.confirmThreadUnpin !== DEFAULT_UNIFIED_SETTINGS.confirmThreadUnpin
         ? [t("settings.restore.label.unpinConfirmation")]
         : []),
@@ -843,6 +846,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.sendShortcut,
       settings.followUpBehavior,
       settings.addProjectBaseDirectory,
+      settings.scratchBaseDirectory,
       settings.defaultThreadEnvMode,
       settings.newWorktreesStartFromOrigin,
       settings.diffFilesCollapsed,
@@ -988,6 +992,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       defaultThreadEnvMode: DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode,
       newWorktreesStartFromOrigin: DEFAULT_UNIFIED_SETTINGS.newWorktreesStartFromOrigin,
       addProjectBaseDirectory: DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory,
+      scratchBaseDirectory: DEFAULT_UNIFIED_SETTINGS.scratchBaseDirectory,
       confirmThreadArchive: DEFAULT_UNIFIED_SETTINGS.confirmThreadArchive,
       confirmThreadDelete: DEFAULT_UNIFIED_SETTINGS.confirmThreadDelete,
       confirmThreadUnpin: DEFAULT_UNIFIED_SETTINGS.confirmThreadUnpin,
@@ -2669,6 +2674,7 @@ function GeneralSettingsRows() {
   const backgroundActivityProfileOption = resolveBackgroundActivityProfileOption(settings);
   const mixedBackgroundActivity = useScopedSettingsMixed(["backgroundActivity"]);
   const mixedAddProjectBaseDirectory = useScopedSettingsMixed(["addProjectBaseDirectory"]);
+  const mixedScratchBaseDirectory = useScopedSettingsMixed(["scratchBaseDirectory"]);
   const mixedTextGenerationModel = useScopedSettingsMixed(["textGenerationModelSelection"]);
   const backgroundActivityDescription =
     backgroundActivityProfileOption === "advanced"
@@ -3593,6 +3599,39 @@ function GeneralSettingsRows() {
               placeholder={mixedAddProjectBaseDirectory ? t("settings.general.mixed") : "~/"}
               spellCheck={false}
               aria-label={t("settings.general.addProjectBaseDirectory.ariaLabel")}
+            />
+          }
+        />
+        <SettingsRow
+          serverScoped
+          settingKeys={["scratchBaseDirectory"]}
+          {...searchableSetting("scratch-base-directory", t)}
+          description={t("settings.general.scratchBaseDirectory.description")}
+          resetAction={
+            settings.scratchBaseDirectory !== DEFAULT_UNIFIED_SETTINGS.scratchBaseDirectory ? (
+              <SettingResetButton
+                label={t("settings.search.item.scratch-base-directory.title")}
+                onClick={() =>
+                  updateSettings({
+                    scratchBaseDirectory: DEFAULT_UNIFIED_SETTINGS.scratchBaseDirectory,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <DraftInput
+              size="sm"
+              className="w-full sm:w-72"
+              value={mixedScratchBaseDirectory ? "" : settings.scratchBaseDirectory}
+              onCommit={(next) => updateSettings({ scratchBaseDirectory: next })}
+              placeholder={
+                mixedScratchBaseDirectory
+                  ? t("settings.general.mixed")
+                  : t("settings.general.scratchBaseDirectory.placeholder")
+              }
+              spellCheck={false}
+              aria-label={t("settings.search.item.scratch-base-directory.title")}
             />
           }
         />

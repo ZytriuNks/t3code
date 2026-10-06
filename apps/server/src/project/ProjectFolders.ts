@@ -16,6 +16,8 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import { ServerConfig } from "../config.ts";
+import { expandHomePathWith } from "../pathExpansion.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as GitWorkflow from "../git/GitWorkflowService.ts";
 import { randomUuidV4 } from "../orchestration-v2/RandomUuid.ts";
 import * as NewProject from "./NewProject.ts";
@@ -58,6 +60,7 @@ const make = Effect.gen(function* () {
   const files = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const vcs = yield* GitVcsDriver.GitVcsDriver;
+  const settings = yield* ServerSettings.ServerSettingsService;
   const newProjectsRoot = path.resolve(config.baseDir, "projects");
   // Scratch must not inherit a surrounding checkout's status or checkpoints.
   const [cachedRoot, invalidateRoot] = yield* Effect.cachedInvalidateWithTTL(
@@ -157,13 +160,28 @@ const make = Effect.gen(function* () {
     "ProjectFolders.prepareThreadFolder",
   )(function* (input) {
     if (input.worktreePath !== null) return input.worktreePath;
-    const root = yield* scratchWorkspaceRoot;
+    const scratchRoot = yield* scratchWorkspaceRoot;
     if (
-      root === undefined ||
+      scratchRoot === undefined ||
       normalizeProjectPathForComparison(input.workspaceRoot) !==
-        normalizeProjectPathForComparison(root)
+        normalizeProjectPathForComparison(scratchRoot)
     )
       return null;
+    // Keep the scratch project's identity stable; only new thread folders follow the setting.
+    const { scratchBaseDirectory } = yield* settings.getSettings.pipe(
+      Effect.mapError(failure("Failed to read the base directory for threads without a project.")),
+    );
+    let root = scratchRoot;
+    if (scratchBaseDirectory !== "") {
+      const expanded = expandHomePathWith(scratchBaseDirectory, path);
+      if (!path.isAbsolute(expanded)) {
+        return yield* new ProjectFolderError({
+          message:
+            "The base directory for threads without a project must be an absolute path or start with ~/.",
+        });
+      }
+      root = path.resolve(expanded);
+    }
     const words = input.text
       .toLowerCase()
       .split(/[^a-z0-9]+/)
@@ -178,6 +196,21 @@ const make = Effect.gen(function* () {
     yield* files
       .makeDirectory(root, { recursive: true })
       .pipe(Effect.mapError(failure("Failed to create the scratch root.")));
+    if (
+      scratchBaseDirectory !== "" &&
+      (yield* git
+        .isRepository(root)
+        .pipe(
+          Effect.mapError(
+            failure("Failed to check the base directory for threads without a project."),
+          ),
+        ))
+    ) {
+      return yield* new ProjectFolderError({
+        message:
+          "The base directory for threads without a project must be outside a Git repository.",
+      });
+    }
     const claim = (folder: string) =>
       files.makeDirectory(folder).pipe(
         Effect.as(true),

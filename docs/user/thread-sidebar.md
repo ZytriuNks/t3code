@@ -29,6 +29,13 @@ folder, so the files the agent wrote stay until you delete them. Branch, worktre
 these folders are not Git repositories. This is unavailable when the data
 directory itself sits inside a Git checkout.
 
+To choose where new no-project chat folders are created, set **Settings → General →
+No-project chats base directory** on web or desktop, or **Settings → Thread behavior →
+No-project chats** on mobile. Enter an absolute path or a
+`~/` path on the selected environment, outside a Git repository. Each new chat
+still gets its own subfolder. Leave the setting blank to use the default scratch
+directory again. Changing it does not move existing chats or their files.
+
 ### Start in the background
 
 In a desktop browser or the desktop app, press `Cmd+Enter` on macOS or `Ctrl+Enter`

@@ -99,6 +99,7 @@ describe("searchSettings", () => {
     ["主题", "theme"],
     ["远程 配对", "network-access"],
     ["提供商", "providers"],
+    ["无项目 主目录", "scratch-base-directory"],
   ])("finds %s in Simplified Chinese", (query, id) => {
     expect(searchSettings(query, SETTINGS_SEARCH_ITEMS, zh).some((item) => item.id === id)).toBe(
       true,
