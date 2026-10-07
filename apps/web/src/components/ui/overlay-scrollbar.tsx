@@ -127,6 +127,7 @@ function OverlayScrollbar({
   const [dragging, setDragging] = useState(false);
   const [scrolling, setScrolling] = useState(false);
   const [horizontalOverflow, setHorizontalOverflow] = useState(false);
+  const [atWindowRightEdge, setAtWindowRightEdge] = useState(false);
   const stopHoldRef = useRef<(() => void) | null>(null);
   const stopDragRef = useRef<(() => void) | null>(null);
   const heldRef = useRef(false);
@@ -170,6 +171,21 @@ function OverlayScrollbar({
   // height without the viewport changing, so observe the content element too.
   useLayoutEffect(() => {
     if (!scrollable || !laneElement) return;
+    const measureWindowEdge = () => {
+      if (horizontal || embedded || thumbInset !== "edge") return;
+      const resizeInset =
+        Number.parseFloat(
+          getComputedStyle(laneElement).getPropertyValue("--desktop-window-right-resize-inset"),
+        ) || 0;
+      // Only the outermost pane shares the root's desktop resize clearance.
+      setAtWindowRightEdge(
+        resizeInset > 0 &&
+          Math.abs(
+            laneElement.getBoundingClientRect().right -
+              (document.documentElement.clientWidth - resizeInset),
+          ) < 1,
+      );
+    };
     const measure = () => {
       if (scrollFade && !horizontal) {
         const remaining = scrollable.scrollHeight - scrollable.clientHeight - scrollable.scrollTop;
@@ -203,16 +219,26 @@ function OverlayScrollbar({
             ),
       );
     };
-    const frame = requestAnimationFrame(measure);
+    const frame = requestAnimationFrame(() => {
+      measureWindowEdge();
+      measure();
+    });
     scrollable.addEventListener("scroll", measure, { passive: true });
     // Guard for render environments without ResizeObserver; the scroll
     // listener above still keeps the thumb in sync there.
-    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+    const observer =
+      typeof ResizeObserver === "undefined"
+        ? null
+        : new ResizeObserver(() => {
+            measureWindowEdge();
+            measure();
+          });
     const observeContent = () => {
       observer?.disconnect();
       observer?.observe(scrollable);
       observer?.observe(laneElement);
       for (const child of scrollable.children) observer?.observe(child);
+      measureWindowEdge();
       measure();
     };
     observeContent();
@@ -221,19 +247,21 @@ function OverlayScrollbar({
       typeof MutationObserver === "undefined" ? null : new MutationObserver(observeContent);
     mutations?.observe(scrollable, { childList: true });
     scrollable.addEventListener("input", measure);
+    window.addEventListener("resize", measureWindowEdge);
     return () => {
       cancelAnimationFrame(frame);
       scrollable.removeEventListener("scroll", measure);
       observer?.disconnect();
       mutations?.disconnect();
       scrollable.removeEventListener("input", measure);
+      window.removeEventListener("resize", measureWindowEdge);
       if (scrollFade && !horizontal) {
         scrollable.removeAttribute("data-overlay-scroll-fade");
         scrollable.style.removeProperty("--overlay-scroll-fade-top");
         scrollable.style.removeProperty("--overlay-scroll-fade-bottom");
       }
     };
-  }, [scrollable, horizontal, showTriangles, laneElement, scrollFade]);
+  }, [scrollable, horizontal, showTriangles, laneElement, scrollFade, embedded, thumbInset]);
 
   const scrollByPage = useCallback(
     (direction: StepDirection) => {
@@ -643,9 +671,9 @@ function OverlayScrollbar({
           "--overlay-scrollbar-edge":
             thumbInset === "gutter"
               ? "3px"
-              : embedded
-                ? "2px"
-                : "max(0px, calc(2px - var(--desktop-window-right-resize-inset)))",
+              : !embedded && atWindowRightEdge
+                ? "max(0px, calc(2px - var(--desktop-window-right-resize-inset)))"
+                : "2px",
           "--overlay-scrollbar-bottom": `${Math.max(thumbInset === "gutter" ? 6 : 2, horizontalOverflow ? 8 : 0)}px`,
           "--overlay-scrollbar-top": `${thumbInset === "gutter" ? Math.max(6, horizontalOverflow ? 8 : 0) : 0}px`,
           backgroundColor: horizontal

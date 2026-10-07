@@ -41,6 +41,47 @@ afterEach(() => {
 });
 
 describe("OverlayScrollbar", () => {
+  it("only deducts desktop resize clearance when a pane reaches the window edge", () => {
+    const scrollable = createScrollable(1000);
+    let paneRight = 1000;
+    let notifyResize = () => {};
+    const desktopStyle = document.createElement("style");
+    desktopStyle.textContent =
+      "[data-slot='overlay-scrollbar'] { --desktop-window-right-resize-inset: 2px; }";
+    document.head.append(desktopStyle);
+    vi.spyOn(document.documentElement, "clientWidth", "get").mockReturnValue(1280);
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(
+      () => new DOMRect(0, 0, paneRight, 400),
+    );
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(callback: () => void) {
+          notifyResize = callback;
+        }
+        observe() {}
+        disconnect() {}
+      },
+    );
+    try {
+      act(() => root.render(<OverlayScrollbar scrollable={scrollable} triangles />));
+      const lane = container.querySelector<HTMLElement>("[role='scrollbar']")!;
+      expect(lane.style.getPropertyValue("--overlay-scrollbar-edge")).toBe("2px");
+      // Closing the adjacent pane puts this bar beside the root's 2px padding.
+      paneRight = 1278;
+      act(() => notifyResize());
+      expect(lane.style.getPropertyValue("--overlay-scrollbar-edge")).toBe(
+        "max(0px, calc(2px - var(--desktop-window-right-resize-inset)))",
+      );
+      // Reopening the pane restores the gap at the internal divider.
+      paneRight = 1000;
+      act(() => notifyResize());
+      expect(lane.style.getPropertyValue("--overlay-scrollbar-edge")).toBe("2px");
+    } finally {
+      desktopStyle.remove();
+    }
+  });
+
   it("continues a compact fade from its painted progress and takes longer to fade out", () => {
     const scrollable = createScrollable(1000);
     const cancel = vi.fn();
