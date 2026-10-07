@@ -1,3 +1,4 @@
+import { ScrollFrame } from "~/components/ui/scroll-frame";
 import { useState } from "react";
 import * as Option from "effect/Option";
 import type { SshDeviceHostConfig } from "@t3tools/contracts";
@@ -208,9 +209,11 @@ export function DeviceHostEditor({
                           <summary className="cursor-pointer">
                             {t("settings.devices.hosts.showError")}
                           </summary>
-                          <p className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap break-words">
-                            {result.error}
-                          </p>
+                          <ScrollFrame variant="page">
+                            <p className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap break-words">
+                              {result.error}
+                            </p>
+                          </ScrollFrame>
                         </details>
                       ) : null}
                     </li>

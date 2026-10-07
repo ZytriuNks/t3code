@@ -406,10 +406,9 @@ export function showContextMenuFallback<T extends string>(
       menu.dataset.level = String(level);
 
       const inner = document.createElement("div");
-      inner.className =
-        "max-h-[min(24rem,70vh)] w-full min-w-0 max-w-sm overflow-y-auto overflow-x-hidden p-1";
+      inner.className = "w-full min-w-0 max-w-sm overflow-x-hidden p-1";
       inner.style.cssText =
-        "width:100%;max-height:min(24rem,70vh);min-width:0;max-width:24rem;overflow-x:hidden;overflow-y:auto;padding:0.25rem;";
+        "width:100%;min-width:0;max-width:24rem;overflow-x:hidden;padding:0.25rem;";
 
       const enabledButtons = () =>
         [...inner.querySelectorAll<HTMLButtonElement>("button")].filter(

@@ -1,3 +1,4 @@
+import { ScrollFrame } from "~/components/ui/scroll-frame";
 import { RefreshIcon } from "~/components/ui/refresh-icon";
 import { useAtomValue } from "@effect/atom-react";
 import type { FileDiffContentsLoader, FileDiffMetadata } from "@pierre/diffs";
@@ -1176,23 +1177,25 @@ export default function DiffPanel({
                 ) : null}
               </div>
             ) : (
-              <div className="min-h-0 flex-1 overflow-auto p-2">
-                <div className="space-y-2">
-                  <p className="text-2xs text-muted-foreground/75">
-                    {renderablePatch?.kind === "raw" ? renderablePatch.reason : null}
-                  </p>
-                  <pre
-                    className={cn(
-                      "max-h-[72vh] rounded-md border border-border/70 bg-background/70 p-3 font-mono text-2xs leading-relaxed text-muted-foreground/90",
-                      wordWrap
-                        ? "overflow-auto whitespace-pre-wrap wrap-break-word"
-                        : "overflow-auto",
-                    )}
-                  >
-                    {renderablePatch?.kind === "raw" ? renderablePatch.text : null}
-                  </pre>
+              <ScrollFrame variant="page" className="flex-1">
+                <div className="min-h-0 flex-1 overflow-auto p-2">
+                  <div className="space-y-2">
+                    <p className="text-2xs text-muted-foreground/75">
+                      {renderablePatch?.kind === "raw" ? renderablePatch.reason : null}
+                    </p>
+                    <pre
+                      className={cn(
+                        "rounded-md border border-border/70 bg-background/70 p-3 font-mono text-2xs leading-relaxed text-muted-foreground/90",
+                        wordWrap
+                          ? "overflow-auto whitespace-pre-wrap wrap-break-word"
+                          : "overflow-auto",
+                      )}
+                    >
+                      {renderablePatch?.kind === "raw" ? renderablePatch.text : null}
+                    </pre>
+                  </div>
                 </div>
-              </div>
+              </ScrollFrame>
             )}
           </div>
         </>

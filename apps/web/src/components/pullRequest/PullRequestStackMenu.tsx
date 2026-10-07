@@ -1,3 +1,4 @@
+import { ScrollFrame } from "~/components/ui/scroll-frame";
 import { Tooltip, TooltipTrigger, TooltipPopup } from "../ui/tooltip";
 import type {
   EnvironmentId,
@@ -233,16 +234,18 @@ export function PullRequestStackMenu({
             </DialogDescription>
           </DialogHeader>
           <DialogPanel>
-            <ul className="max-h-48 space-y-1 overflow-y-auto text-sm">
-              {confirmationLayers.map((layer) => (
-                <li
-                  key={layer.number}
-                  className="flex items-center gap-2 rounded-md bg-muted/50 px-3 py-2"
-                >
-                  <PullRequestStackLayerContent layer={layer} compact />
-                </li>
-              ))}
-            </ul>
+            <ScrollFrame variant="compact">
+              <ul className="max-h-48 space-y-1 overflow-y-auto text-sm">
+                {confirmationLayers.map((layer) => (
+                  <li
+                    key={layer.number}
+                    className="flex items-center gap-2 rounded-md bg-muted/50 px-3 py-2"
+                  >
+                    <PullRequestStackLayerContent layer={layer} compact />
+                  </li>
+                ))}
+              </ul>
+            </ScrollFrame>
           </DialogPanel>
           <DialogFooter>
             <Button variant="outline" disabled={pending} onClick={() => setConfirmation(null)}>

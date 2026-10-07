@@ -1,3 +1,4 @@
+import { ScrollFrame } from "~/components/ui/scroll-frame";
 import type { VcsRef } from "@t3tools/contracts";
 import { LegendList, type LegendListRef } from "@legendapp/list/react";
 import {
@@ -197,31 +198,33 @@ export function BranchPicker({
           <ComboboxEmpty>No refs found.</ComboboxEmpty>
           <div className="relative min-h-0 w-full max-h-56 flex-1 overflow-hidden">
             <ComboboxListVirtualized className="size-full min-w-0">
-              <LegendList<string>
-                ref={branchListRef}
-                data={filteredItems}
-                keyExtractor={(item) => item}
-                {...(getItemType ? { getItemType } : {})}
-                renderItem={({ item, index }) => renderItem(item, index)}
-                estimatedItemSize={28}
-                drawDistance={336}
-                onLayout={() => {
-                  updateBranchListScrollFades();
-                  previousBranchListScrollTopRef.current =
-                    branchListScrollElementRef.current?.scrollTop ?? null;
-                }}
-                onScroll={() => {
-                  updateBranchListScrollFades();
-                  maybeFetchNextBranchPage();
-                }}
-                className={cn(
-                  "max-h-56 scrollbar-gutter-stable overflow-x-hidden overscroll-y-contain ps-1 pe-0 pt-2 pb-1",
-                  getVirtualizedScrollFadeClassName({
-                    top: showTopBranchScrollFade,
-                    bottom: showBottomBranchScrollFade,
-                  }),
-                )}
-              />
+              <ScrollFrame variant="compact" className="h-full">
+                <LegendList<string>
+                  ref={branchListRef}
+                  data={filteredItems}
+                  keyExtractor={(item) => item}
+                  {...(getItemType ? { getItemType } : {})}
+                  renderItem={({ item, index }) => renderItem(item, index)}
+                  estimatedItemSize={28}
+                  drawDistance={336}
+                  onLayout={() => {
+                    updateBranchListScrollFades();
+                    previousBranchListScrollTopRef.current =
+                      branchListScrollElementRef.current?.scrollTop ?? null;
+                  }}
+                  onScroll={() => {
+                    updateBranchListScrollFades();
+                    maybeFetchNextBranchPage();
+                  }}
+                  className={cn(
+                    "max-h-56 scrollbar-gutter-stable overflow-x-hidden overscroll-y-contain px-1 pt-2 pb-1",
+                    getVirtualizedScrollFadeClassName({
+                      top: showTopBranchScrollFade,
+                      bottom: showBottomBranchScrollFade,
+                    }),
+                  )}
+                />
+              </ScrollFrame>
             </ComboboxListVirtualized>
           </div>
           {originControl ? (

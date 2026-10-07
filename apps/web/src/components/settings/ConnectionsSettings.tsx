@@ -3575,6 +3575,7 @@ export function ConnectionsSettings() {
               }
             >
               <ScrollArea
+                scrollbarVariant="page"
                 scrollFade
                 chainVerticalScroll
                 className="max-h-[22.5rem]"

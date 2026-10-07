@@ -1,5 +1,7 @@
 "use client";
 
+import { ScrollFrame } from "~/components/ui/scroll-frame";
+
 import { Menu as MenuPrimitive } from "@base-ui/react/menu";
 import { CheckIcon, ChevronRightIcon } from "lucide-react";
 import type * as React from "react";
@@ -60,7 +62,9 @@ function MenuPopup({
           data-slot="menu-popup"
           {...props}
         >
-          <div className="max-h-(--available-height) w-full overflow-y-auto p-1">{children}</div>
+          <ScrollFrame variant="compact" className="w-full max-h-[inherit]">
+            <div className="max-h-(--available-height) w-full overflow-y-auto p-1">{children}</div>
+          </ScrollFrame>
         </MenuPrimitive.Popup>
       </MenuPrimitive.Positioner>
     </MenuPrimitive.Portal>

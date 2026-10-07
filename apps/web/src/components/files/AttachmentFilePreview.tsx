@@ -1,3 +1,4 @@
+import { ScrollFrame } from "~/components/ui/scroll-frame";
 import { filePreviewDelimiter } from "@t3tools/shared/delimitedPreview";
 import type { EnvironmentId } from "@t3tools/contracts";
 import { formatAttachmentSize } from "@t3tools/client-runtime/state/attachments";
@@ -244,7 +245,7 @@ export function AttachmentFilePreview(props: {
     delimiter && rendered ? (
       <DelimitedTablePreview name={props.name} text={content.text} delimiter={delimiter} />
     ) : kind === "markdown" && rendered ? (
-      <ScrollArea className="min-h-0 flex-1">
+      <ScrollArea scrollbarVariant="page" className="min-h-0 flex-1">
         <ChatMarkdown text={content.text} cwd={undefined} className="mx-auto max-w-4xl px-6 py-5" />
       </ScrollArea>
     ) : (
@@ -266,14 +267,16 @@ export function AttachmentFilePreview(props: {
       />
     </div>
   ) : kind === "image" ? (
-    <div className="flex min-h-0 flex-1 items-center justify-center overflow-auto p-4">
-      <img
-        src={url}
-        alt={props.name}
-        className="max-h-full max-w-full object-contain"
-        onError={() => setError("Unable to load image.")}
-      />
-    </div>
+    <ScrollFrame variant="page" className="flex-1">
+      <div className="flex min-h-0 flex-1 items-center justify-center overflow-auto p-4">
+        <img
+          src={url}
+          alt={props.name}
+          className="max-h-full max-w-full object-contain"
+          onError={() => setError("Unable to load image.")}
+        />
+      </div>
+    </ScrollFrame>
   ) : (
     <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-1 px-6 text-center">
       <p className="text-sm font-medium">No preview for this file</p>

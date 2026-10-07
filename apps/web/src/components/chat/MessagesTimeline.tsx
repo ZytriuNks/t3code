@@ -1,3 +1,4 @@
+import { ScrollFrame } from "~/components/ui/scroll-frame";
 import { WorkLogBlock, WorkLogButton, WorkLogDetails, WorkLogList, WorkLogRow } from "./WorkLog";
 import type { WorktreeSetupSnapshot } from "@t3tools/contracts";
 import { ReadOnlySourcePreview } from "../files/AttachmentFilePreview";
@@ -248,6 +249,7 @@ import { useClientSettings } from "~/hooks/useSettings";
 import type { ChatMarkdownContextReference } from "../ChatMarkdown";
 import { useMediaQuery } from "~/hooks/useMediaQuery";
 import { cn } from "~/lib/utils";
+import { OverlayScrollbar } from "~/components/ui/overlay-scrollbar";
 import { useUiStateStore } from "~/uiStateStore";
 import { type TimestampFormat } from "@t3tools/contracts/settings";
 import {
@@ -400,6 +402,8 @@ function TimelineListFooter({ composerInset }: { readonly composerInset: number 
   );
 }
 const EMPTY_TIMELINE_SKILLS: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">> = [];
+/** Fraction of the viewport a scrollbar step triangle moves per step. */
+const TIMELINE_SCROLLBAR_STEP_RATIO = 0.3;
 const TIMELINE_MAINTAIN_SCROLL_AT_END = {
   animated: false,
   on: {
@@ -967,6 +971,16 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   const [timelineViewportElement, setTimelineViewportElement] = useState<HTMLDivElement | null>(
     null,
   );
+  // Native scroll element behind LegendList, for the overlay scrollbar.
+  const [timelineScrollableNode, setTimelineScrollableNode] = useState<HTMLElement | null>(null);
+  useEffect(() => {
+    // Duck-type instead of `instanceof HTMLElement`: this component is also
+    // rendered by react-test-renderer, where no DOM globals exist.
+    const node = listRef.current?.getScrollableNode();
+    setTimelineScrollableNode(
+      node && typeof node === "object" && "scrollTop" in node ? (node as HTMLElement) : null,
+    );
+  }, [listRef, rows.length]);
   // Re-measure the minimap gutter when the chat column changes width without a viewport resize.
   const chatWidth = useClientSettings((settings) => settings.chatWidth);
   const {
@@ -1156,6 +1170,22 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     const frame = requestAnimationFrame(handleScroll);
     return () => cancelAnimationFrame(frame);
   }, [handleScroll, rows.length]);
+
+  // Step triangles at the ends of the overlay scrollbar. A click eases ~30% of
+  // the viewport; the overlay advances scrollTop continuously for a hold.
+  const handleScrollbarStep = useCallback(
+    (direction: -1 | 1) => {
+      const element = listRef.current?.getScrollableNode();
+      if (!element || typeof element.scrollBy !== "function") {
+        return;
+      }
+      element.scrollBy({
+        top: direction * element.clientHeight * TIMELINE_SCROLLBAR_STEP_RATIO,
+        behavior: prefersReducedMotion ? "auto" : "smooth",
+      });
+    },
+    [listRef, prefersReducedMotion],
+  );
 
   useEffect(() => {
     if (!timelineViewportElement) {
@@ -1418,11 +1448,17 @@ export const MessagesTimeline = memo(function MessagesTimeline({
             onScroll={handleScroll}
             onItemSizeChanged={reportContentOverflow}
             className={cn(
-              "scrollbar-gutter-both h-full min-h-0 overflow-x-hidden overscroll-y-contain px-3 [overflow-anchor:none] sm:px-5",
+              "h-full min-h-0 overflow-x-hidden overscroll-y-contain px-3 [overflow-anchor:none] sm:px-5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
               topFadeEnabled && "topbar-scroll-fade",
             )}
             ListHeaderComponent={listHeader}
             ListFooterComponent={timelineListFooter}
+          />
+          <OverlayScrollbar
+            scrollable={timelineScrollableNode}
+            triangles
+            onStep={handleScrollbarStep}
+            onScrollStart={onManualNavigation}
           />
           <TimelineMinimap
             items={minimapItems}
@@ -3480,38 +3516,41 @@ function ExpandedWorkGroupEntries({
   return (
     <WorkGroupViewCtx value={groupView}>
       <WorkLogList>
-        <LegendList
-          ref={listRef}
-          data={entries}
-          extraData={workspaceRoot}
-          keyExtractor={workEntryKey}
-          renderItem={renderEntry}
-          estimatedItemSize={24}
-          drawDistance={240}
-          recycleItems
-          {...(initialScrollIndex ? { initialScrollIndex } : {})}
-          maintainScrollAtEnd={
-            appendState.follow ? { animated: false, on: { dataChange: true } } : false
-          }
-          maintainScrollAtEndThreshold={1 / Math.max(1, fades.viewportHeight)}
-          // Measure the restored row even when an intra-row offset puts its
-          // estimated bounds outside the list's small bootstrap render window.
-          {...(restoringPosition && initialScrollIndex
-            ? { alwaysRender: { indices: [initialScrollIndex.index] } }
-            : {})}
-          maintainVisibleContentPosition
-          onLoad={handleLoad}
-          onScroll={handleScroll}
-          onLayout={updateScrollFades}
-          tabIndex={0}
-          role="region"
-          aria-label="Tool calls"
-          data-tool-group-scroll
-          className={cn(
-            "scrollbar-gutter-stable max-h-[min(18rem,50dvh)] scroll-py-6 overflow-x-hidden rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70",
-            getVirtualizedScrollFadeClassName(fades),
-          )}
-        />
+        <ScrollFrame variant="compact">
+          <LegendList
+            ref={listRef}
+            data={entries}
+            extraData={workspaceRoot}
+            keyExtractor={workEntryKey}
+            renderItem={renderEntry}
+            estimatedItemSize={24}
+            drawDistance={240}
+            recycleItems
+            contentContainerClassName="pr-3"
+            {...(initialScrollIndex ? { initialScrollIndex } : {})}
+            maintainScrollAtEnd={
+              appendState.follow ? { animated: false, on: { dataChange: true } } : false
+            }
+            maintainScrollAtEndThreshold={1 / Math.max(1, fades.viewportHeight)}
+            // Measure the restored row even when an intra-row offset puts its
+            // estimated bounds outside the list's small bootstrap render window.
+            {...(restoringPosition && initialScrollIndex
+              ? { alwaysRender: { indices: [initialScrollIndex.index] } }
+              : {})}
+            maintainVisibleContentPosition
+            onLoad={handleLoad}
+            onScroll={handleScroll}
+            onLayout={updateScrollFades}
+            tabIndex={0}
+            role="region"
+            aria-label="Tool calls"
+            data-tool-group-scroll
+            className={cn(
+              "scrollbar-gutter-stable max-h-[min(18rem,50dvh)] scroll-py-6 overflow-x-hidden rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70",
+              getVirtualizedScrollFadeClassName(fades),
+            )}
+          />
+        </ScrollFrame>
       </WorkLogList>
     </WorkGroupViewCtx>
   );
@@ -4120,9 +4159,11 @@ function UserMessagePreviewAnnotationDetails(props: {
                     ) : null}
                   </div>
                   {element.htmlPreview?.trim() ? (
-                    <pre className="mt-1 max-h-24 overflow-auto whitespace-pre-wrap rounded bg-muted/60 px-2 py-1.5 text-3xs leading-relaxed">
-                      {element.htmlPreview.trim()}
-                    </pre>
+                    <ScrollFrame variant="compact">
+                      <pre className="mt-1 max-h-24 overflow-auto whitespace-pre-wrap rounded bg-muted/60 px-2 py-1.5 text-3xs leading-relaxed">
+                        {element.htmlPreview.trim()}
+                      </pre>
+                    </ScrollFrame>
                   ) : null}
                 </div>
               );
@@ -5377,7 +5418,9 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
               onRollbackCheckpoint={ctx.onRollbackCheckpoint}
             />
           ) : expandedBody ? (
-            <pre className={toolCallExpandedBodyClassName}>{expandedBody}</pre>
+            <ScrollFrame variant="compact">
+              <pre className={toolCallExpandedBodyClassName}>{expandedBody}</pre>
+            </ScrollFrame>
           ) : null}
         </WorkLogDetails>
       ) : null}

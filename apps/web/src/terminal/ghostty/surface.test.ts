@@ -103,6 +103,7 @@ describe("GhosttyTerminalSurface visibility", () => {
 
     const canvas = new TerminalTestElement();
     const mount = new TerminalTestElement();
+    const stepButtons: TerminalTestElement[] = [];
     const context = {
       canvas,
       beginPath() {},
@@ -122,7 +123,12 @@ describe("GhosttyTerminalSurface visibility", () => {
       }),
     };
     vi.stubGlobal("document", {
-      createElement: (tag: string) => (tag === "canvas" ? canvas : new TerminalTestElement()),
+      createElement: (tag: string) => {
+        const element = tag === "canvas" ? canvas : new TerminalTestElement();
+        if (tag === "button") stepButtons.push(element);
+        return element;
+      },
+      createElementNS: () => new TerminalTestElement(),
       fonts: Object.assign(new EventTarget(), { load: async () => [], add() {} }),
     });
     vi.stubGlobal(
@@ -160,6 +166,17 @@ describe("GhosttyTerminalSurface visibility", () => {
       requestFrame,
       snapshot,
       onData,
+      step(direction: -1 | 1, type: "click" | "pointerdown") {
+        const button = stepButtons.find(
+          (element) =>
+            element.getAttribute("aria-label") ===
+            (direction < 0 ? "Scroll up one line" : "Scroll down one line"),
+        );
+        if (!button) throw new Error("Missing terminal step button");
+        button.dispatchEvent(
+          Object.assign(new Event(type, { cancelable: true }), { button: 0, pointerId: 1 }),
+        );
+      },
       get renderedSnapshot() {
         const result = snapshot.mock.results.at(-1);
         if (result?.type !== "return") throw new Error("No terminal snapshot was rendered");
@@ -475,6 +492,74 @@ describe("GhosttyTerminalSurface visibility", () => {
 
       expect(surface.input.getAttribute("aria-label")).toBe("终端输入");
       expect(surface.scrollbar.getAttribute("aria-label")).toBe("终端回滚区");
+    });
+  });
+
+  describe("scrollbar line steps", () => {
+    it("moves exactly one row per click in either direction", async () => {
+      const harness = createHarness();
+      const surface = await harness.create();
+      surface.write(Array.from({ length: 40 }, (_, i) => `line ${i}\r\n`).join(""));
+      harness.flushFrame();
+      const scroll = vi.spyOn(GhosttyTerminalCore.prototype, "scroll");
+      harness.step(-1, "click");
+      harness.step(1, "click");
+      expect(scroll.mock.calls).toEqual([[-1], [1]]);
+    });
+
+    it("repeats one row at a time after a delay and stops on release without an extra click", async () => {
+      const harness = createHarness();
+      const surface = await harness.create();
+      surface.write("line\r\n".repeat(40));
+      harness.flushFrame();
+      const scroll = vi.spyOn(GhosttyTerminalCore.prototype, "scroll");
+      harness.step(-1, "pointerdown");
+      vi.advanceTimersByTime(179);
+      expect(scroll).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(81);
+      expect(scroll.mock.calls).toEqual([[-1], [-1], [-1]]);
+      window.dispatchEvent(new Event("pointerup"));
+      harness.step(-1, "click");
+      vi.advanceTimersByTime(400);
+      expect(scroll).toHaveBeenCalledTimes(3);
+    });
+
+    it.each(["blur", "pointercancel", "hidden", "dispose"])(
+      "stops repeating when %s",
+      async (reason) => {
+        const harness = createHarness();
+        const surface = await harness.create();
+        surface.write("line\r\n".repeat(40));
+        harness.flushFrame();
+        const scroll = vi.spyOn(GhosttyTerminalCore.prototype, "scroll");
+        harness.step(-1, "pointerdown");
+        vi.advanceTimersByTime(180);
+        expect(scroll).toHaveBeenCalledTimes(1);
+        if (reason === "hidden") surface.setVisible(false);
+        else if (reason === "dispose") surface.dispose();
+        else window.dispatchEvent(new Event(reason));
+        vi.advanceTimersByTime(500);
+        expect(scroll).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it("can hold downward from the top and upward from the bottom", async () => {
+      const harness = createHarness();
+      const surface = await harness.create();
+      surface.write("line\r\n".repeat(40));
+      harness.flushFrame();
+      surface.scrollbar.dispatchEvent(Object.assign(new Event("keydown"), { key: "Home" }));
+      const scroll = vi.spyOn(GhosttyTerminalCore.prototype, "scroll");
+      harness.step(1, "pointerdown");
+      vi.advanceTimersByTime(220);
+      window.dispatchEvent(new Event("pointerup"));
+      expect(scroll.mock.calls).toEqual([[1], [1]]);
+      surface.scrollToBottom();
+      scroll.mockClear();
+      harness.step(-1, "pointerdown");
+      vi.advanceTimersByTime(220);
+      window.dispatchEvent(new Event("pointerup"));
+      expect(scroll.mock.calls).toEqual([[-1], [-1]]);
     });
   });
 });

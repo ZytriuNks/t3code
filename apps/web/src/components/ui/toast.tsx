@@ -1,5 +1,7 @@
 "use client";
 
+import { ScrollFrame } from "~/components/ui/scroll-frame";
+
 import { Spinner } from "~/components/ui/spinner";
 
 import { Toast } from "@base-ui/react/toast";
@@ -172,7 +174,11 @@ function ToastExpandableSection({
         )}
         {open ? collapseLabel : expandLabel}
       </button>
-      {open ? <div className={toastExpandablePanelClassName}>{children}</div> : null}
+      {open ? (
+        <ScrollFrame variant="compact">
+          <div className={toastExpandablePanelClassName}>{children}</div>
+        </ScrollFrame>
+      ) : null}
     </div>
   );
 }
@@ -265,7 +271,11 @@ function ToastDescriptionAndExpandable({
         </TooltipTrigger>
         <TooltipPopup side="top">{open ? collapseLabel : expandLabel}</TooltipPopup>
       </Tooltip>
-      {open ? <div className={toastExpandablePanelClassName}>{expandableContent}</div> : null}
+      {open ? (
+        <ScrollFrame variant="compact">
+          <div className={toastExpandablePanelClassName}>{expandableContent}</div>
+        </ScrollFrame>
+      ) : null}
     </>
   );
 }

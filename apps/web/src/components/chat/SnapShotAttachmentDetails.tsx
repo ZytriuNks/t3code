@@ -1,3 +1,4 @@
+import { ScrollFrame } from "~/components/ui/scroll-frame";
 import type { SnapShotSource } from "@t3tools/contracts";
 import { ImageIcon, TextIcon } from "lucide-react";
 import { Suspense, use, useMemo, type CSSProperties } from "react";
@@ -92,15 +93,17 @@ export function SnapShotAccessibilityData({
     );
 
   return (
-    <pre
-      className={cn(
-        "overflow-auto whitespace-pre-wrap break-words font-mono focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70",
-        className,
-      )}
-      tabIndex={0}
-    >
-      {content}
-    </pre>
+    <ScrollFrame variant="compact">
+      <pre
+        className={cn(
+          "overflow-auto whitespace-pre-wrap break-words font-mono focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70",
+          className,
+        )}
+        tabIndex={0}
+      >
+        {content}
+      </pre>
+    </ScrollFrame>
   );
 }
 
@@ -164,24 +167,26 @@ export function SnapShotContentsButton({
         <TooltipPopup side={side}>{tooltip}</TooltipPopup>
       </Tooltip>
       <PopoverPopup side={side} align="center" width="md">
-        <div className="max-h-[min(28rem,70vh)] space-y-2 overflow-y-auto">
-          <PopoverTitle>Accessibility data</PopoverTitle>
-          {accessibilityDetails ? (
-            <SnapShotAccessibilityData
-              details={accessibilityDetails}
-              className="max-h-64 rounded-md border border-border/70 bg-muted/45 p-2.5 text-2xs leading-4"
-            />
-          ) : includesAccessibility ? (
-            <div className="rounded-md border border-border/70 bg-muted/45 p-2.5 text-muted-foreground text-xs leading-4">
-              Structured accessibility elements were included, but they have no readable names or
-              values.
-            </div>
-          ) : (
-            <div className="rounded-md border border-border/70 bg-muted/45 p-2.5 text-muted-foreground text-xs leading-4">
-              The app or capture backend did not provide verified accessibility data.
-            </div>
-          )}
-        </div>
+        <ScrollFrame variant="compact">
+          <div className="max-h-[min(28rem,70vh)] space-y-2 overflow-y-auto">
+            <PopoverTitle>Accessibility data</PopoverTitle>
+            {accessibilityDetails ? (
+              <SnapShotAccessibilityData
+                details={accessibilityDetails}
+                className="max-h-64 rounded-md border border-border/70 bg-muted/45 p-2.5 text-2xs leading-4"
+              />
+            ) : includesAccessibility ? (
+              <div className="rounded-md border border-border/70 bg-muted/45 p-2.5 text-muted-foreground text-xs leading-4">
+                Structured accessibility elements were included, but they have no readable names or
+                values.
+              </div>
+            ) : (
+              <div className="rounded-md border border-border/70 bg-muted/45 p-2.5 text-muted-foreground text-xs leading-4">
+                The app or capture backend did not provide verified accessibility data.
+              </div>
+            )}
+          </div>
+        </ScrollFrame>
       </PopoverPopup>
     </Popover>
   );

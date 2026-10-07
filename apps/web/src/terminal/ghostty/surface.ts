@@ -1,4 +1,15 @@
 import { isMacPlatform } from "../../lib/utils";
+import {
+  SCROLLBAR_TRIANGLE_SIZE,
+  SCROLLBAR_TRIANGLE_PATH,
+  SCROLLBAR_TRIANGLE_VIEWBOX,
+  SCROLLBAR_TRIANGLE_DOWN_TRANSFORM,
+} from "../../lib/scrollbar-style";
+import {
+  scrollbarGeometry,
+  scrollbarOffsetAtPointer,
+  type ScrollbarGeometry,
+} from "../../lib/scrollbar-geometry";
 import { SELECTION_MULTI_CLICK_INTERVAL_MS } from "../../lib/selectionActions";
 import { collectWrappedTerminalLinkLine, extractTerminalLinks } from "../../terminal-links";
 import {
@@ -34,7 +45,6 @@ const TERMINAL_GLYPH_FALLBACKS =
 export const DEFAULT_TERMINAL_FONT_FAMILY =
   '"SF Mono", "SFMono-Regular", Menlo, Consolas, "Liberation Mono", ' + TERMINAL_GLYPH_FALLBACKS;
 const CONTENT_PADDING = 4;
-const MIN_SCROLLBAR_THUMB_HEIGHT = 18;
 /** Half a blink cycle: the visible and hidden phases are equally long. */
 const CURSOR_BLINK_INTERVAL_MS = 500;
 const TERMINAL_FONT_LOAD_TEXT = "iMW0@# .";
@@ -168,46 +178,12 @@ export function terminalContentOriginY(
   return padding + Math.max(0, slack);
 }
 
-export interface TerminalScrollbarGeometry {
-  readonly thumbHeight: number;
-  readonly thumbTop: number;
-  readonly maxOffset: number;
-}
+export interface TerminalScrollbarGeometry extends ScrollbarGeometry {}
 
-export function terminalScrollbarGeometry(
-  state: GhosttyScrollbar,
-  trackHeight: number,
-): TerminalScrollbarGeometry | null {
-  const total = Math.max(0, state.total);
-  const len = Math.max(0, Math.min(state.len, total));
-  const maxOffset = Math.max(0, total - len);
-  if (trackHeight <= 0 || len <= 0 || maxOffset === 0) return null;
-  const thumbHeight = Math.min(
-    trackHeight,
-    Math.max(MIN_SCROLLBAR_THUMB_HEIGHT, (trackHeight * len) / total),
-  );
-  const travel = Math.max(0, trackHeight - thumbHeight);
-  const offset = Math.max(0, Math.min(state.offset, maxOffset));
-  return {
-    thumbHeight,
-    thumbTop: travel * (offset / maxOffset),
-    maxOffset,
-  };
-}
+/** Terminal-flavoured aliases over the shared overlay scrollbar geometry. */
+export const terminalScrollbarGeometry = scrollbarGeometry;
 
-export function terminalScrollbarOffsetAtPointer(
-  state: GhosttyScrollbar,
-  trackHeight: number,
-  pointerY: number,
-  pointerOffset: number,
-): number {
-  const geometry = terminalScrollbarGeometry(state, trackHeight);
-  if (geometry === null) return 0;
-  const travel = Math.max(0, trackHeight - geometry.thumbHeight);
-  if (travel === 0) return 0;
-  const thumbTop = Math.max(0, Math.min(pointerY - pointerOffset, travel));
-  return Math.round((thumbTop / travel) * geometry.maxOffset);
-}
+export const terminalScrollbarOffsetAtPointer = scrollbarOffsetAtPointer;
 
 export function terminalGridCellAt(options: {
   bounds: { left: number; top: number };
@@ -580,6 +556,10 @@ export class GhosttyTerminalSurface {
   private pendingFontEpoch: number | null = null;
   private readonly resizeObserver: ResizeObserver;
   private readonly scrollbarThumb: HTMLDivElement;
+  private readonly scrollbarUp: HTMLButtonElement;
+  private readonly scrollbarDown: HTMLButtonElement;
+  private scrollbarHoldTimer: number | null = null;
+  private scrollbarHeld = false;
   private snapshot: GhosttySnapshot | null = null;
   private frame = 0;
   private cursorTimer: number | null = null;
@@ -659,6 +639,9 @@ export class GhosttyTerminalSurface {
     this.input = input;
     this.scrollbar = scrollbar;
     this.scrollbarThumb = scrollbarThumb;
+    this.scrollbarUp = this.createScrollbarStepButton(-1);
+    this.scrollbarDown = this.createScrollbarStepButton(1);
+    scrollbar.replaceChildren(this.scrollbarUp, scrollbarThumb, this.scrollbarDown);
     this.context = context;
     this.core = core;
     this.mouseAnyEventTracking = core.isMouseAnyEventTracking();
@@ -696,7 +679,7 @@ export class GhosttyTerminalSurface {
 
     const scrollbar = document.createElement("div");
     scrollbar.className =
-      "group absolute top-1 right-px bottom-1 z-1 w-[var(--app-scrollbar-width)] cursor-default touch-none";
+      "group absolute top-0 right-0 bottom-0.5 z-1 flex w-3 flex-col items-end cursor-default touch-none";
     scrollbar.setAttribute("role", "scrollbar");
     scrollbar.setAttribute("aria-label", options.scrollbackAriaLabel ?? "Terminal scrollback");
     scrollbar.setAttribute("aria-orientation", "vertical");
@@ -704,7 +687,7 @@ export class GhosttyTerminalSurface {
     scrollbar.hidden = true;
     const scrollbarThumb = document.createElement("div");
     scrollbarThumb.className =
-      "absolute inset-x-px top-0 rounded-[3px] bg-[var(--app-scrollbar-thumb)] transition-[background-color] duration-[120ms] ease-[ease-out] group-hover:bg-[var(--app-scrollbar-thumb-hover)] group-focus-visible:bg-[var(--app-scrollbar-thumb-hover)]";
+      "absolute right-0.5 top-0 w-[var(--app-scrollbar-width)] rounded-[3px] bg-[var(--app-scrollbar-thumb)] transition-[background-color] duration-150 ease-out group-hover:bg-[var(--app-scrollbar-thumb-hover)] group-focus-visible:bg-[var(--app-scrollbar-thumb-hover)]";
     scrollbar.append(scrollbarThumb);
     mount.replaceChildren(canvas, input, scrollbar);
 
@@ -758,6 +741,7 @@ export class GhosttyTerminalSurface {
     this.forceFullRender = true;
     this.scrollbarDirty = true;
     if (!visible) {
+      this.stopScrollbarHold();
       this.cancelRender();
       this.setSelectionAutoscroll(0);
       return;
@@ -1026,6 +1010,7 @@ export class GhosttyTerminalSurface {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.stopScrollbarHold();
     this.resizeObserver.disconnect();
     document.fonts.removeEventListener("loadingdone", this.onFontsLoaded);
     this.dprMedia?.removeEventListener("change", this.onDevicePixelRatioChange);
@@ -1618,14 +1603,14 @@ export class GhosttyTerminalSurface {
     const state = this.readScrollbarState();
     if (state === null) return;
     const bounds = this.scrollbar.getBoundingClientRect();
-    const geometry = terminalScrollbarGeometry(state, bounds.height);
+    const geometry = terminalScrollbarGeometry(state, bounds.height - SCROLLBAR_TRIANGLE_SIZE * 2);
     if (geometry === null) return;
     event.preventDefault();
     event.stopPropagation();
     this.scrollbarPointerId = event.pointerId;
     this.scrollbarPointerOffset =
       event.target === this.scrollbarThumb
-        ? event.clientY - bounds.top - geometry.thumbTop
+        ? event.clientY - bounds.top - SCROLLBAR_TRIANGLE_SIZE - geometry.thumbTop
         : geometry.thumbHeight / 2;
     this.scrollbar.setPointerCapture(event.pointerId);
     this.scrollbarToPointer(event.clientY, bounds);
@@ -1647,6 +1632,7 @@ export class GhosttyTerminalSurface {
   };
 
   private readonly onScrollbarKeyDown = (event: KeyboardEvent) => {
+    if (event.target !== this.scrollbar) return;
     const state = this.readScrollbarState();
     if (state === null) return;
     let delta = 0;
@@ -1675,6 +1661,67 @@ export class GhosttyTerminalSurface {
     event.preventDefault();
     event.stopPropagation();
     this.scrollViewport(delta);
+  };
+
+  private createScrollbarStepButton(direction: -1 | 1): HTMLButtonElement {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.tabIndex = -1;
+    button.setAttribute(
+      "aria-label",
+      direction < 0 ? "Scroll up one line" : "Scroll down one line",
+    );
+    button.className = `flex w-3 shrink-0 justify-end mr-0.5 text-[var(--app-scrollbar-thumb)] transition-colors duration-150 group-hover:text-[var(--app-scrollbar-thumb-hover)] ${direction < 0 ? "items-start" : "mt-auto items-end"}`;
+    button.style.height = `${SCROLLBAR_TRIANGLE_SIZE}px`;
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", SCROLLBAR_TRIANGLE_VIEWBOX);
+    svg.setAttribute("aria-hidden", "true");
+    svg.setAttribute(
+      "class",
+      "h-[calc(var(--app-scrollbar-width)*0.911)] w-[var(--app-scrollbar-width)]",
+    );
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", SCROLLBAR_TRIANGLE_PATH);
+    path.setAttribute("fill", "currentColor");
+    if (direction > 0) path.setAttribute("transform", SCROLLBAR_TRIANGLE_DOWN_TRANSFORM);
+    svg.append(path);
+    button.append(svg);
+    button.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      event.stopPropagation();
+      this.stopScrollbarHold();
+      this.scrollbarHeld = false;
+      const advance = () => {
+        this.scrollbarHoldTimer = null;
+        this.scrollbarHeld = true;
+        const before = this.readScrollbarState()?.offset;
+        this.scrollViewport(direction);
+        if (before === this.scrollbarState?.offset) {
+          this.stopScrollbarHold();
+          return;
+        }
+        this.scrollbarHoldTimer = window.setTimeout(advance, 40);
+      };
+      this.scrollbarHoldTimer = window.setTimeout(advance, 180);
+      window.addEventListener("pointerup", this.stopScrollbarHold, true);
+      window.addEventListener("pointercancel", this.stopScrollbarHold, true);
+      window.addEventListener("blur", this.stopScrollbarHold);
+    });
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      if (!this.scrollbarHeld) this.scrollViewport(direction);
+      this.scrollbarHeld = false;
+    });
+    return button;
+  }
+
+  private readonly stopScrollbarHold = () => {
+    if (this.scrollbarHoldTimer !== null) window.clearTimeout(this.scrollbarHoldTimer);
+    this.scrollbarHoldTimer = null;
+    window.removeEventListener("pointerup", this.stopScrollbarHold, true);
+    window.removeEventListener("pointercancel", this.stopScrollbarHold, true);
+    window.removeEventListener("blur", this.stopScrollbarHold);
   };
 
   private installEvents(): void {
@@ -1750,8 +1797,8 @@ export class GhosttyTerminalSurface {
     if (state === null) return;
     const offset = terminalScrollbarOffsetAtPointer(
       state,
-      bounds.height,
-      clientY - bounds.top,
+      bounds.height - SCROLLBAR_TRIANGLE_SIZE * 2,
+      clientY - bounds.top - SCROLLBAR_TRIANGLE_SIZE,
       this.scrollbarPointerOffset,
     );
     this.scrollViewport(offset - state.offset);
@@ -1764,7 +1811,7 @@ export class GhosttyTerminalSurface {
         ? null
         : terminalScrollbarGeometry(
             state,
-            Math.max(0, this.mount.clientHeight - CONTENT_PADDING * 2),
+            Math.max(0, this.mount.clientHeight - 2 - SCROLLBAR_TRIANGLE_SIZE * 2),
           );
     this.scrollbar.hidden = geometry === null;
     if (state === null || geometry === null) return;
@@ -1775,7 +1822,7 @@ export class GhosttyTerminalSurface {
       String(Math.max(0, Math.min(state.offset, geometry.maxOffset))),
     );
     this.scrollbarThumb.style.height = `${geometry.thumbHeight}px`;
-    this.scrollbarThumb.style.transform = `translateY(${geometry.thumbTop}px)`;
+    this.scrollbarThumb.style.transform = `translateY(${SCROLLBAR_TRIANGLE_SIZE + geometry.thumbTop}px)`;
   }
 
   private readScrollbarState(): GhosttyScrollbar | null {

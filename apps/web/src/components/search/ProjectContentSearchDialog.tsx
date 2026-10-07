@@ -246,7 +246,7 @@ function OpenContentSearchDialog(props: {
             : "Type to search across your project."}
         </div>
       ) : (
-        <ScrollArea className="min-h-0 flex-1" scrollFade>
+        <ScrollArea scrollbarVariant="compact" className="min-h-0 flex-1" scrollFade>
           <div className="py-2">
             {groups.map((group) => {
               const path = splitPath(group.path);

@@ -166,7 +166,7 @@ function DialogPanel({
   ...props
 }: React.ComponentProps<"div"> & { scrollFade?: boolean }) {
   return (
-    <ScrollArea scrollFade={scrollFade}>
+    <ScrollArea scrollbarVariant="compact" scrollFade={scrollFade}>
       <div
         className={cn(
           "space-y-4 p-6 in-[[data-slot=dialog-popup]:has([data-slot=dialog-header])]:pt-1 in-[[data-slot=dialog-popup]:has([data-slot=dialog-footer]:not(.border-t))]:pb-1",

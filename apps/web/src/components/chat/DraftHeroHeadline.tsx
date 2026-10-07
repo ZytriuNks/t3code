@@ -253,7 +253,7 @@ export function DraftHeroHeadline({
           <TooltipPopup side="top">{activeProjectDisplayName}</TooltipPopup>
         ) : null}
       </Tooltip>
-      <MenuPopup align="center" className="max-h-80 overflow-y-auto">
+      <MenuPopup align="center" className="max-h-80">
         <MenuRadioGroup
           value={isScratchDraft ? NO_PROJECT_VALUE : activeProjectKey}
           onValueChange={(value) => {

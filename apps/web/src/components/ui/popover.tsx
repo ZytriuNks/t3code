@@ -1,6 +1,8 @@
 "use client";
 
 import { Popover as PopoverPrimitive } from "@base-ui/react/popover";
+import { useState } from "react";
+import { OverlayScrollbar } from "./overlay-scrollbar";
 
 import { cn } from "~/lib/utils";
 
@@ -65,6 +67,7 @@ function PopoverPopup({
   // Viewport rekeys its children when the active trigger clears on close. Persistent
   // single-trigger forms need a stable container to retain drafts and submit guards.
   const Viewport = keepMounted ? "div" : PopoverPrimitive.Viewport;
+  const [scrollable, setScrollable] = useState<HTMLDivElement | null>(null);
   return (
     <PopoverPrimitive.Portal keepMounted={keepMounted}>
       <PopoverPrimitive.Positioner
@@ -98,12 +101,13 @@ function PopoverPopup({
           {...props}
         >
           <Viewport
+            ref={setScrollable}
             className={cn(
               "relative size-full max-h-(--available-height) overflow-clip px-(--viewport-inline-padding) has-data-[slot=calendar]:p-2 data-instant:transition-none **:data-current:data-ending-style:opacity-0 **:data-current:data-starting-style:opacity-0 **:data-previous:data-ending-style:opacity-0 **:data-previous:data-starting-style:opacity-0 **:data-current:w-[calc(var(--popup-width)-2*var(--viewport-inline-padding)-2px)] **:data-previous:w-[calc(var(--popup-width)-2*var(--viewport-inline-padding)-2px)] **:data-current:opacity-100 **:data-previous:opacity-100 **:data-current:transition-opacity **:data-previous:transition-opacity",
               tooltipStyle && padding === "default"
                 ? "py-1 [--viewport-inline-padding:--spacing(2)]"
                 : popoverViewportPaddingClassName[padding],
-              !tooltipStyle && "not-data-transitioning:overflow-y-auto",
+              !tooltipStyle && "overlay-scroll-viewport not-data-transitioning:overflow-y-auto",
               variant === "panel" &&
                 "overflow-visible py-2 [--viewport-inline-padding:--spacing(2)]",
             )}
@@ -111,6 +115,9 @@ function PopoverPopup({
           >
             {children}
           </Viewport>
+          {!tooltipStyle && variant !== "panel" && (
+            <OverlayScrollbar scrollable={scrollable} autoHide thumbInset="gutter" embedded />
+          )}
         </PopoverPrimitive.Popup>
       </PopoverPrimitive.Positioner>
     </PopoverPrimitive.Portal>

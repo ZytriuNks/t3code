@@ -1749,7 +1749,7 @@ body {
 }
 
 .electron-windows {
-  --desktop-window-right-resize-inset: 6px;
+  --desktop-window-right-resize-inset: 2px;
 }
 
 /* App-chrome grain. Baked into each surface's own background (behind
@@ -1842,6 +1842,90 @@ code {
 
 ::-webkit-scrollbar-thumb:hover {
   background: var(--app-scrollbar-thumb-hover);
+}
+
+/* ScrollFrame paints both axes in sibling overlays. The standard property also
+   hides native bars in browsers that do not implement WebKit pseudo-elements. */
+.scroll-frame > :first-child,
+.overlay-scroll-viewport {
+  scrollbar-width: none;
+}
+
+.scroll-frame > :first-child::-webkit-scrollbar,
+.overlay-scroll-viewport::-webkit-scrollbar {
+  display: none;
+}
+
+/* Code gutters stay opaque to both ends, independently of the thumb clearance. */
+.file-preview-scroll-frame::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 0 auto;
+  z-index: 30;
+  width: 12px;
+  background: var(--code-background);
+  pointer-events: none;
+}
+
+/* Page lists reveal on column hover; compact lists reveal only over the lane. */
+[data-slot="overlay-scrollbar"][data-variant="page"][data-auto-hide]
+  > :is([data-slot="overlay-scrollbar-thumb"], [data-slot="overlay-scrollbar-step"]) {
+  transition-duration: 300ms;
+  transition-timing-function: ease-out;
+}
+
+:has(> [data-slot="overlay-scrollbar"][data-variant="page"][data-auto-hide][data-overflow]):hover
+  > [data-slot="overlay-scrollbar"]
+  > :is([data-slot="overlay-scrollbar-thumb"], [data-slot="overlay-scrollbar-step"]) {
+  opacity: 1;
+  transition-duration: 150ms;
+}
+
+[data-slot="overlay-scrollbar"][data-variant="page"][data-auto-hide][data-visible]
+  > :is([data-slot="overlay-scrollbar-thumb"], [data-slot="overlay-scrollbar-step"]) {
+  transition-duration: 150ms;
+}
+
+/* One finite animation drives the bar and masks, including recycled rows. */
+@property --compact-scrollbar-reveal {
+  syntax: "<number>";
+  inherits: true;
+  initial-value: 0;
+}
+
+[data-slot="overlay-scrollbar"][data-variant="compact"]
+  > :is([data-slot="overlay-scrollbar-thumb"], [data-slot="overlay-scrollbar-step"]) {
+  opacity: var(--compact-scrollbar-reveal);
+  transition-property: background-color, color;
+}
+
+/* The end stays fixed at the thumb's left edge as its alpha changes. */
+[data-scrollbar-row-fade] {
+  mask-image: linear-gradient(
+    to right,
+    black calc(var(--overlay-scrollbar-row-fade-end) - 8px),
+    rgb(0 0 0 / calc(1 - var(--compact-scrollbar-reveal))) var(--overlay-scrollbar-row-fade-end)
+  );
+}
+
+/* The scrollbar is a sibling, so the content can fade without dimming it.
+   Zero remaining distance removes the fade at that edge. */
+[data-overlay-scroll-fade] {
+  mask-image: linear-gradient(
+    to bottom,
+    transparent,
+    black var(--overlay-scroll-fade-top),
+    black calc(100% - var(--overlay-scroll-fade-bottom)),
+    transparent
+  );
+  mask-size: 100% 100%;
+  mask-repeat: no-repeat;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :is([data-slot="overlay-scrollbar-thumb"], [data-slot="overlay-scrollbar-step"]) {
+    transition: none;
+  }
 }
 
 /* Chat markdown rendering */

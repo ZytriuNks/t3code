@@ -1,3 +1,4 @@
+import { ScrollFrame } from "~/components/ui/scroll-frame";
 import { DownloadIcon, PlusIcon } from "lucide-react";
 import type { ChangeEvent, DragEvent, UIEvent } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -132,21 +133,23 @@ function ThemeJsonEditor({
           <code dangerouslySetInnerHTML={{ __html: highlightedJson }} />
         </pre>
       )}
-      <textarea
-        aria-label={translate(language, "settings.appearance.theme.jsonLabel")}
-        className={cn(
-          "relative z-10 block min-h-44 w-full resize-y overflow-auto bg-transparent p-3 font-mono text-xs leading-5 caret-foreground outline-none placeholder:text-muted-foreground selection:bg-primary selection:text-primary-foreground",
-          isPlainText ? "text-foreground" : "text-transparent",
-        )}
-        id={id}
-        onChange={(event) => onChange(event.currentTarget.value)}
-        onScroll={syncScroll}
-        placeholder={
-          '{\n  "version": 1,\n  "name": "Aurora",\n  "appearance": "light",\n  "colors": { ... }\n}'
-        }
-        spellCheck={false}
-        value={value}
-      />
+      <ScrollFrame variant="compact">
+        <textarea
+          aria-label={translate(language, "settings.appearance.theme.jsonLabel")}
+          className={cn(
+            "relative z-10 block min-h-44 w-full resize-y overflow-auto bg-transparent p-3 font-mono text-xs leading-5 caret-foreground outline-none placeholder:text-muted-foreground selection:bg-primary selection:text-primary-foreground",
+            isPlainText ? "text-foreground" : "text-transparent",
+          )}
+          id={id}
+          onChange={(event) => onChange(event.currentTarget.value)}
+          onScroll={syncScroll}
+          placeholder={
+            '{\n  "version": 1,\n  "name": "Aurora",\n  "appearance": "light",\n  "colors": { ... }\n}'
+          }
+          spellCheck={false}
+          value={value}
+        />
+      </ScrollFrame>
     </div>
   );
 }

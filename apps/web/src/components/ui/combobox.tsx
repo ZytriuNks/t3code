@@ -6,7 +6,7 @@ import * as React from "react";
 
 import { cn } from "~/lib/utils";
 import { Input } from "~/components/ui/input";
-import { ScrollArea } from "~/components/ui/scroll-area";
+import { ScrollFrame } from "~/components/ui/scroll-frame";
 
 const ComboboxContext = React.createContext<{
   chipsRef: React.RefObject<Element | null> | null;
@@ -226,18 +226,21 @@ function ComboboxEmpty({ className, ...props }: ComboboxPrimitive.Empty.Props) {
 
 function ComboboxList({ className, ...props }: ComboboxPrimitive.List.Props) {
   return (
-    <ScrollArea scrollbarGutter scrollFade>
+    <ScrollFrame variant="compact" className="size-full max-h-[inherit]">
       <ComboboxPrimitive.List
-        className={cn("not-empty:scroll-py-1 not-empty:px-1 not-empty:py-1", className)}
+        className={cn(
+          "min-h-0 max-h-[inherit] overflow-y-auto not-empty:scroll-py-1 not-empty:px-1 not-empty:py-1",
+          className,
+        )}
         data-slot="combobox-list"
         {...props}
       />
-    </ScrollArea>
+    </ScrollFrame>
   );
 }
 
 /**
- * A variant of `ComboboxList` without `ScrollArea`, for use when
+ * A variant of `ComboboxList` without a scroll frame, for use when
  * an external virtualizer (e.g. LegendList) owns the scroll container.
  */
 function ComboboxListVirtualized({ className, ...props }: ComboboxPrimitive.List.Props) {

@@ -1,3 +1,4 @@
+import { ScrollFrame } from "~/components/ui/scroll-frame";
 import {
   CheckIcon,
   CopyIcon,
@@ -1065,54 +1066,56 @@ export function ThemeLibrary({
             </AlertDialogDescription>
           </AlertDialogHeader>
           {canRemoveCollection ? (
-            <div className="grid max-h-72 grid-cols-1 gap-2 overflow-y-auto px-6 pb-6 sm:grid-cols-2">
-              {removeDialogCollectionThemes.map((customTheme) => {
-                const checked = themeIdsToRemoveSet.has(customTheme.id);
-                const card = getThemeCardDefinition(customTheme);
-                const checkboxId = `remove-theme-${customTheme.id}`;
-                return (
-                  <label
-                    className="group relative flex min-h-28 cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-border/70 bg-muted/25 p-3 has-checked:border-ring has-checked:bg-accent/20 hover:bg-muted/40"
-                    htmlFor={checkboxId}
-                    key={customTheme.id}
-                  >
-                    <span className="absolute right-2 top-2 inline-grid size-5 grid-cols-1 sm:size-4">
-                      <input
-                        checked={checked}
-                        className="col-start-1 row-start-1 size-full appearance-none rounded-sm border border-input bg-background outline-none checked:border-primary checked:bg-primary focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring dark:not-checked:bg-input/32 forced-colors:appearance-auto"
-                        id={checkboxId}
-                        name="themes-to-remove"
-                        type="checkbox"
-                        onChange={(event) => {
-                          const shouldRemove = event.currentTarget.checked;
-                          setThemeIdsToRemove((current) =>
-                            shouldRemove
-                              ? [...current, customTheme.id]
-                              : current.filter((themeId) => themeId !== customTheme.id),
-                          );
-                        }}
-                      />
-                      <CheckIcon className="pointer-events-none col-start-1 row-start-1 size-3.5 shrink-0 self-center justify-self-center stroke-primary-foreground opacity-0 group-has-checked:opacity-100 sm:size-3" />
-                    </span>
-                    <span className="flex min-h-12 items-center justify-center gap-1">
-                      {card.previews.map((preview) => (
-                        <span
-                          className="flex size-11 shrink-0 items-center justify-center"
-                          key={preview.mode}
-                        >
-                          <span className="flex scale-75">
-                            <ThemePreviewCircle colors={preview.colors} mode={preview.mode} />
+            <ScrollFrame variant="compact">
+              <div className="grid max-h-72 grid-cols-1 gap-2 overflow-y-auto px-6 pb-6 sm:grid-cols-2">
+                {removeDialogCollectionThemes.map((customTheme) => {
+                  const checked = themeIdsToRemoveSet.has(customTheme.id);
+                  const card = getThemeCardDefinition(customTheme);
+                  const checkboxId = `remove-theme-${customTheme.id}`;
+                  return (
+                    <label
+                      className="group relative flex min-h-28 cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-border/70 bg-muted/25 p-3 has-checked:border-ring has-checked:bg-accent/20 hover:bg-muted/40"
+                      htmlFor={checkboxId}
+                      key={customTheme.id}
+                    >
+                      <span className="absolute right-2 top-2 inline-grid size-5 grid-cols-1 sm:size-4">
+                        <input
+                          checked={checked}
+                          className="col-start-1 row-start-1 size-full appearance-none rounded-sm border border-input bg-background outline-none checked:border-primary checked:bg-primary focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring dark:not-checked:bg-input/32 forced-colors:appearance-auto"
+                          id={checkboxId}
+                          name="themes-to-remove"
+                          type="checkbox"
+                          onChange={(event) => {
+                            const shouldRemove = event.currentTarget.checked;
+                            setThemeIdsToRemove((current) =>
+                              shouldRemove
+                                ? [...current, customTheme.id]
+                                : current.filter((themeId) => themeId !== customTheme.id),
+                            );
+                          }}
+                        />
+                        <CheckIcon className="pointer-events-none col-start-1 row-start-1 size-3.5 shrink-0 self-center justify-self-center stroke-primary-foreground opacity-0 group-has-checked:opacity-100 sm:size-3" />
+                      </span>
+                      <span className="flex min-h-12 items-center justify-center gap-1">
+                        {card.previews.map((preview) => (
+                          <span
+                            className="flex size-11 shrink-0 items-center justify-center"
+                            key={preview.mode}
+                          >
+                            <span className="flex scale-75">
+                              <ThemePreviewCircle colors={preview.colors} mode={preview.mode} />
+                            </span>
                           </span>
-                        </span>
-                      ))}
-                    </span>
-                    <p className="max-w-full truncate text-center text-base font-medium text-foreground sm:text-sm">
-                      {customTheme.label}
-                    </p>
-                  </label>
-                );
-              })}
-            </div>
+                        ))}
+                      </span>
+                      <p className="max-w-full truncate text-center text-base font-medium text-foreground sm:text-sm">
+                        {customTheme.label}
+                      </p>
+                    </label>
+                  );
+                })}
+              </div>
+            </ScrollFrame>
           ) : null}
           <AlertDialogFooter>
             <AlertDialogClose render={<Button variant="outline" />}>
