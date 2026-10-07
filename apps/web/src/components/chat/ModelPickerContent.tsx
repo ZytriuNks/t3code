@@ -197,7 +197,6 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   const [searchQuery, setSearchQuery] = useState("");
   const [showTopScrollFade, setShowTopScrollFade] = useState(false);
   const [showBottomScrollFade, setShowBottomScrollFade] = useState(false);
-  const [modelListScrollbarVisible, setModelListScrollbarVisible] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const modelListRef = useRef<LegendListRef | null>(null);
   // Native scroll element behind LegendList, for the overlay scrollbar.
@@ -712,29 +711,6 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       node && typeof node === "object" && "scrollTop" in node ? (node as HTMLElement) : null,
     );
   }, [filteredItemKeys]);
-  // The scrollbar stays hidden at rest and while merely hovered, and fades in
-  // while the list is actually being scrolled. Each scroll event restarts the
-  // hide timer so the thumb lingers briefly after the list settles.
-  const scrollbarHideTimerRef = useRef<number | null>(null);
-  const showModelListScrollbar = useCallback(() => {
-    setModelListScrollbarVisible(true);
-    if (scrollbarHideTimerRef.current !== null) {
-      window.clearTimeout(scrollbarHideTimerRef.current);
-    }
-    scrollbarHideTimerRef.current = window.setTimeout(() => {
-      scrollbarHideTimerRef.current = null;
-      setModelListScrollbarVisible(false);
-    }, 700);
-  }, []);
-  useEffect(
-    () => () => {
-      if (scrollbarHideTimerRef.current !== null) {
-        window.clearTimeout(scrollbarHideTimerRef.current);
-      }
-    },
-    [],
-  );
-
   const updateModelListScrollFades = useCallback(() => {
     const scrollElement = modelListRef.current?.getScrollableNode();
     if (!(scrollElement instanceof HTMLElement)) {
@@ -744,14 +720,6 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     setShowTopScrollFade(scrollElement.scrollTop > 1);
     setShowBottomScrollFade(maxScrollOffset - scrollElement.scrollTop > 1);
   }, []);
-  // Only real scroll events may (re)arm the scrollbar timer. This is separate
-  // from the fade update on purpose: that callback also runs on layout, which
-  // the virtualized list fires while items recycle, and arming the timer there
-  // restarted it indefinitely and the thumb never faded back out.
-  const handleModelListScroll = useCallback(() => {
-    updateModelListScrollFades();
-    showModelListScrollbar();
-  }, [showModelListScrollbar, updateModelListScrollFades]);
   const modelJumpShortcutContext = useMemo(
     () =>
       ({
@@ -1063,7 +1031,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
                   contentContainerClassName="pl-2 pr-2"
                   ItemSeparatorComponent={ModelListSeparator}
                   onLayout={updateModelListScrollFades}
-                  onScroll={handleModelListScroll}
+                  onScroll={updateModelListScrollFades}
                   className={cn(
                     "h-full overflow-x-hidden overscroll-y-contain py-1.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
                     getVirtualizedScrollFadeClassName({
@@ -1078,7 +1046,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
                   could neither be hovered nor dragged. */}
               <OverlayScrollbar
                 scrollable={modelListScrollableNode}
-                visible={modelListScrollbarVisible}
+                autoHide
                 width="6px"
                 thumbInset="gutter"
               />

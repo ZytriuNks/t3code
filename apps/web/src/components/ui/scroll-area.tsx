@@ -34,7 +34,7 @@ function ScrollArea({
   radius = "inherit",
   viewportTabIndex,
   scrollbarVariant,
-  windowEdge = false,
+  windowEdge = scrollbarVariant === "page",
   ...props
 }: ScrollAreaPrimitive.Root.Props & {
   scrollFade?: boolean;
@@ -71,7 +71,6 @@ function ScrollArea({
             "mask-t-from-[calc(100%-min(var(--fade-size),var(--scroll-area-overflow-y-start)))] mask-b-from-[calc(100%-min(var(--fade-size),var(--scroll-area-overflow-y-end)))] mask-l-from-[calc(100%-min(var(--fade-size),var(--scroll-area-overflow-x-start)))] mask-r-from-[calc(100%-min(var(--fade-size),var(--scroll-area-overflow-x-end)))] [--fade-size:1.5rem]",
           scrollFade && scrollFadePadding && "scroll-p-[var(--fade-size)]",
           scrollbarGutter && "scrollbar-gutter-stable",
-          scrollbarVariant === "compact" && "pr-3",
           hideScrollbars &&
             "[-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
         )}

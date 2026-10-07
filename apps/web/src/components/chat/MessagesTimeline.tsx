@@ -3526,6 +3526,7 @@ function ExpandedWorkGroupEntries({
             estimatedItemSize={24}
             drawDistance={240}
             recycleItems
+            contentContainerClassName="pr-3"
             {...(initialScrollIndex ? { initialScrollIndex } : {})}
             maintainScrollAtEnd={
               appendState.follow ? { animated: false, on: { dataChange: true } } : false

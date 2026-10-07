@@ -10,7 +10,7 @@ export function ScrollFrame({
   children,
   className,
   variant = "compact",
-  windowEdge = false,
+  windowEdge = variant === "page",
 }: {
   children: ReactNode;
   className?: string;
@@ -37,7 +37,6 @@ export function ScrollFrame({
       ref={setFrame}
       className={cn(
         "scroll-frame relative flex min-h-0 min-w-0 flex-col [&>:first-child]:min-h-0",
-        variant === "compact" && "[&>:first-child]:pr-3",
         className,
       )}
     >

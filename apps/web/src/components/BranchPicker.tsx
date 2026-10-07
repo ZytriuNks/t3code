@@ -217,7 +217,7 @@ export function BranchPicker({
                     maybeFetchNextBranchPage();
                   }}
                   className={cn(
-                    "max-h-56 scrollbar-gutter-stable overflow-x-hidden overscroll-y-contain ps-1 pe-0 pt-2 pb-1",
+                    "max-h-56 scrollbar-gutter-stable overflow-x-hidden overscroll-y-contain px-1 pt-2 pb-1",
                     getVirtualizedScrollFadeClassName({
                       top: showTopBranchScrollFade,
                       bottom: showBottomBranchScrollFade,

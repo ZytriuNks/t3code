@@ -41,6 +41,57 @@ afterEach(() => {
 });
 
 describe("OverlayScrollbar", () => {
+  it("continues a compact fade from its painted progress and takes longer to fade out", () => {
+    const scrollable = createScrollable(1000);
+    const cancel = vi.fn();
+    const animate = vi.fn(() => ({ cancel }));
+    Object.defineProperty(container, "animate", { configurable: true, value: animate });
+    act(() =>
+      root.render(<OverlayScrollbar scrollable={scrollable} autoHide thumbInset="gutter" />),
+    );
+    const lane = container.querySelector<HTMLElement>("[role='scrollbar']")!;
+    lane.dispatchEvent(new Event("pointerenter"));
+    expect(animate).toHaveBeenLastCalledWith(
+      [{ "--compact-scrollbar-reveal": 0 }, { "--compact-scrollbar-reveal": 1 }],
+      { duration: 150, easing: "ease-out" },
+    );
+    // A partially painted frame must be retained when direction reverses.
+    container.style.setProperty("--compact-scrollbar-reveal", "0.4");
+    lane.dispatchEvent(new Event("pointerleave"));
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(animate).toHaveBeenLastCalledWith(
+      [{ "--compact-scrollbar-reveal": 0.4 }, { "--compact-scrollbar-reveal": 0 }],
+      { duration: 300, easing: "ease-out" },
+    );
+    act(() => root.unmount());
+    expect(cancel).toHaveBeenCalledTimes(2);
+    expect(container.style.getPropertyValue("--compact-scrollbar-reveal")).toBe("");
+    root = createRoot(container);
+  });
+
+  it("shares compact scroll visibility without restarting its animation on each scroll", () => {
+    vi.useFakeTimers();
+    const scrollable = createScrollable(1000);
+    const cancel = vi.fn();
+    const animate = vi.fn(() => ({ cancel }));
+    Object.defineProperty(container, "animate", { configurable: true, value: animate });
+    act(() =>
+      root.render(<OverlayScrollbar scrollable={scrollable} autoHide thumbInset="gutter" />),
+    );
+    act(() => scrollable.dispatchEvent(new Event("scroll")));
+    expect(animate).toHaveBeenCalledOnce();
+    act(() => vi.advanceTimersByTime(600));
+    act(() => scrollable.dispatchEvent(new Event("scroll")));
+    act(() => vi.advanceTimersByTime(600));
+    expect(animate).toHaveBeenCalledOnce();
+    act(() => vi.advanceTimersByTime(100));
+    expect(animate).toHaveBeenCalledTimes(2);
+    expect(animate).toHaveBeenLastCalledWith(
+      [{ "--compact-scrollbar-reveal": 1 }, { "--compact-scrollbar-reveal": 0 }],
+      { duration: 300, easing: "ease-out" },
+    );
+  });
+
   it("drags a horizontal overflow without changing the vertical offset", () => {
     vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(400);
     const scrollable = createScrollable(1000);
@@ -217,7 +268,7 @@ describe("OverlayScrollbar", () => {
     // Hover is a `group-hover` rule rather than a state flip. Routing it
     // through state re-rendered on every pointer crossing and restarted the
     // opacity transition, which read as the bar jumping.
-    expect(thumb?.className).toContain("group-hover:opacity-100");
+    expect(thumb?.className).toContain("group-hover/overlay-scrollbar:opacity-100");
   });
 
   it("never fades the lane itself, only its contents", () => {

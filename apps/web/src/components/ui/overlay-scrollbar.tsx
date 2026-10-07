@@ -28,7 +28,7 @@ const THUMB_CLASS = "w-[var(--app-scrollbar-thumb-width)]";
  */
 const LANE_CLASS = "w-3";
 
-/** Model rows reserve a 12px gutter; centre the thumb in that space. */
+/** Compact bars overlay content with 3px clearance at the right edge. */
 type ThumbInset = "edge" | "gutter";
 
 /** Height reserved at each end for a step triangle. */
@@ -40,6 +40,10 @@ const TRIANGLE_SIZE_PX = SCROLLBAR_TRIANGLE_SIZE;
 const HOLD_START_DELAY_MS = 180;
 /** Coasting speed in pixels per second. */
 const HOLD_SPEED_PX_PER_SECOND = 1100;
+
+const COMPACT_REVEAL_PROPERTY = "--compact-scrollbar-reveal";
+const COMPACT_FADE_IN_MS = 150;
+const COMPACT_FADE_OUT_MS = 300;
 
 type StepDirection = -1 | 1;
 
@@ -67,6 +71,8 @@ type OverlayScrollbarProps = {
   thumbInset?: ThumbInset;
   /** Embedded panes use their own edge rather than the desktop resize inset. */
   embedded?: boolean;
+  /** Show remaining content at the vertical edges. Compact lists enable this by default. */
+  scrollFade?: boolean;
   className?: string;
 };
 
@@ -108,6 +114,7 @@ function OverlayScrollbar({
   width,
   thumbInset = "edge",
   embedded = false,
+  scrollFade = thumbInset === "gutter",
   className,
 }: OverlayScrollbarProps) {
   const horizontal = orientation === "horizontal";
@@ -123,6 +130,7 @@ function OverlayScrollbar({
   const stopHoldRef = useRef<(() => void) | null>(null);
   const stopDragRef = useRef<(() => void) | null>(null);
   const heldRef = useRef(false);
+  const updateCompactRevealRef = useRef<((visible: boolean) => void) | null>(null);
 
   useLayoutEffect(() => {
     if (!autoHide || !scrollable) return;
@@ -163,6 +171,17 @@ function OverlayScrollbar({
   useLayoutEffect(() => {
     if (!scrollable || !laneElement) return;
     const measure = () => {
+      if (scrollFade && !horizontal) {
+        const remaining = scrollable.scrollHeight - scrollable.clientHeight - scrollable.scrollTop;
+        scrollable.style.setProperty(
+          "--overlay-scroll-fade-top",
+          `${Math.max(0, Math.min(24, scrollable.scrollTop))}px`,
+        );
+        scrollable.style.setProperty(
+          "--overlay-scroll-fade-bottom",
+          `${Math.max(0, Math.min(24, remaining))}px`,
+        );
+      }
       setHorizontalOverflow(
         scrollable.scrollWidth > scrollable.clientWidth &&
           ["auto", "scroll"].includes(getComputedStyle(scrollable).overflowX),
@@ -197,6 +216,7 @@ function OverlayScrollbar({
       measure();
     };
     observeContent();
+    if (scrollFade && !horizontal) scrollable.setAttribute("data-overlay-scroll-fade", "");
     const mutations =
       typeof MutationObserver === "undefined" ? null : new MutationObserver(observeContent);
     mutations?.observe(scrollable, { childList: true });
@@ -207,8 +227,13 @@ function OverlayScrollbar({
       observer?.disconnect();
       mutations?.disconnect();
       scrollable.removeEventListener("input", measure);
+      if (scrollFade && !horizontal) {
+        scrollable.removeAttribute("data-overlay-scroll-fade");
+        scrollable.style.removeProperty("--overlay-scroll-fade-top");
+        scrollable.style.removeProperty("--overlay-scroll-fade-bottom");
+      }
     };
-  }, [scrollable, horizontal, showTriangles, laneElement]);
+  }, [scrollable, horizontal, showTriangles, laneElement, scrollFade]);
 
   const scrollByPage = useCallback(
     (direction: StepDirection) => {
@@ -441,8 +466,8 @@ function OverlayScrollbar({
   // rather than to the lane, so the lane's own className never changes and
   // hovering cannot make the track itself jump.
   const shown = visible ?? (autoHide ? scrolling : true);
-  // Hover is handled entirely in CSS (`group-hover`), so no React state is
-  // involved and crossing the lane cannot restart a transition.
+  // Hover never flips React state. Compact bars animate one inherited value
+  // for both the thumb and row masks; page bars retain their CSS transition.
   const contentsVisible = shown || dragging;
   // The lane itself must always mount: it is what the measuring effect reads
   // its height from, so returning early on a null geometry would leave the
@@ -450,9 +475,139 @@ function OverlayScrollbar({
   const ready = geometry !== null;
   const travel = Math.max(1, trackHeightRef.current - (geometry?.thumbHeight ?? 0));
 
+  useLayoutEffect(() => {
+    const parent = laneElement?.parentElement;
+    if (!parent || !laneElement || horizontal || thumbInset !== "gutter") return;
+    const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)");
+    let animation: Animation | undefined;
+    let hovering = laneElement.matches(":hover");
+    let contentsShown = laneElement.hasAttribute("data-visible");
+    let target = 0;
+    parent.style.setProperty(COMPACT_REVEAL_PROPERTY, "0");
+    const update = () => {
+      const next = laneElement.hasAttribute("data-overflow") && (contentsShown || hovering) ? 1 : 0;
+      if (next === target && !reducedMotion?.matches) return;
+      // Read before cancellation so interrupted fades continue from the
+      // painted value. WAAPI leaves the popup's own transitions untouched.
+      const current =
+        Number.parseFloat(getComputedStyle(parent).getPropertyValue(COMPACT_REVEAL_PROPERTY)) || 0;
+      animation?.cancel();
+      target = next;
+      parent.style.setProperty(COMPACT_REVEAL_PROPERTY, String(next));
+      if (current !== next && !reducedMotion?.matches && parent.animate) {
+        animation = parent.animate(
+          [{ [COMPACT_REVEAL_PROPERTY]: current }, { [COMPACT_REVEAL_PROPERTY]: next }],
+          {
+            duration: next ? COMPACT_FADE_IN_MS : COMPACT_FADE_OUT_MS,
+            easing: "ease-out",
+          },
+        );
+      }
+    };
+    const enter = () => {
+      hovering = true;
+      update();
+    };
+    const leave = () => {
+      hovering = false;
+      update();
+    };
+    updateCompactRevealRef.current = (visible) => {
+      contentsShown = visible;
+      update();
+    };
+    laneElement.addEventListener("pointerenter", enter);
+    laneElement.addEventListener("pointerleave", leave);
+    reducedMotion?.addEventListener("change", update);
+    update();
+    return () => {
+      animation?.cancel();
+      updateCompactRevealRef.current = null;
+      parent.style.removeProperty(COMPACT_REVEAL_PROPERTY);
+      laneElement.removeEventListener("pointerenter", enter);
+      laneElement.removeEventListener("pointerleave", leave);
+      reducedMotion?.removeEventListener("change", update);
+    };
+  }, [laneElement, horizontal, thumbInset]);
+
+  useLayoutEffect(() => {
+    updateCompactRevealRef.current?.(ready && contentsVisible);
+  }, [contentsVisible, ready]);
+
+  // Row padding varies between menus, virtualizers and model lists. Anchor
+  // every fade to the thumb, including selected rows, and spare rows that
+  // already leave 3px between their background and the thumb.
+  useLayoutEffect(() => {
+    if (!scrollable || !laneElement || horizontal || thumbInset !== "gutter" || !ready) return;
+    let frame: number | undefined;
+    let rows = new Set<HTMLElement>();
+    const clearRow = (row: HTMLElement) => {
+      row.removeAttribute("data-scrollbar-row-fade");
+      row.style.removeProperty("--overlay-scrollbar-row-fade-end");
+    };
+    const measureRows = () => {
+      frame = undefined;
+      const thumb = thumbRef.current;
+      if (!thumb) return;
+      const thumbLeft = thumb.getBoundingClientRect().left;
+      // Popup opening animations scale the whole lane and its rows. Store
+      // unscaled CSS pixels so the fade stays aligned after that animation.
+      const scale = laneElement.getBoundingClientRect().width / laneElement.offsetWidth || 1;
+      const measurements = [
+        ...scrollable.querySelectorAll<HTMLElement>(
+          '[role="option"], [role^="menuitem"], [class~="group/timeline-row"]',
+        ),
+      ]
+        .filter((row) => row.closest("[data-overlay-scroll-fade]") === scrollable)
+        .map((row) => ({ row, rect: row.getBoundingClientRect() }));
+      const nextRows = new Set(measurements.map(({ row }) => row));
+      for (const row of rows) {
+        if (!nextRows.has(row)) {
+          observer?.unobserve(row);
+          clearRow(row);
+        }
+      }
+      for (const { row, rect } of measurements) {
+        if (!rows.has(row)) observer?.observe(row);
+        if ((thumbLeft - rect.right) / scale >= 2.99) {
+          clearRow(row);
+        } else {
+          row.setAttribute("data-scrollbar-row-fade", "");
+          row.style.setProperty(
+            "--overlay-scrollbar-row-fade-end",
+            `${(thumbLeft - rect.left) / scale}px`,
+          );
+        }
+      }
+      rows = nextRows;
+    };
+    const schedule = () => {
+      if (frame === undefined) frame = requestAnimationFrame(measureRows);
+    };
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(schedule);
+    observer?.observe(scrollable);
+    observer?.observe(laneElement);
+    const mutations = new MutationObserver(schedule);
+    mutations.observe(scrollable, { childList: true, subtree: true });
+    scrollable.addEventListener("scroll", schedule, { passive: true });
+    measureRows();
+    return () => {
+      if (frame !== undefined) cancelAnimationFrame(frame);
+      observer?.disconnect();
+      mutations.disconnect();
+      scrollable.removeEventListener("scroll", schedule);
+      rows.forEach(clearRow);
+    };
+  }, [scrollable, laneElement, horizontal, thumbInset, ready]);
+
   return (
     <div
       ref={laneCallbackRef}
+      data-slot="overlay-scrollbar"
+      data-variant={thumbInset === "gutter" ? "compact" : "page"}
+      data-auto-hide={autoHide || undefined}
+      data-overflow={ready || undefined}
+      data-visible={(contentsVisible && ready) || undefined}
       role="scrollbar"
       aria-orientation={orientation}
       aria-valuemin={0}
@@ -467,7 +622,7 @@ function OverlayScrollbar({
       className={cn(
         // This is a sibling of the scroll container, so list padding does not
         // affect its position. The model list keeps extra bottom clearance.
-        "group absolute z-30 flex touch-none items-end outline-none",
+        "group/overlay-scrollbar absolute z-30 flex touch-none items-end outline-none",
         horizontal
           ? "bottom-0 left-0.5 right-3 h-3"
           : "right-0 top-[var(--overlay-scrollbar-top)] flex-col bottom-[var(--overlay-scrollbar-bottom)]",
@@ -487,7 +642,7 @@ function OverlayScrollbar({
           // drift out of alignment with each other.
           "--overlay-scrollbar-edge":
             thumbInset === "gutter"
-              ? "calc((0.75rem - var(--app-scrollbar-thumb-width)) / 2)"
+              ? "3px"
               : embedded
                 ? "2px"
                 : "max(0px, calc(2px - var(--desktop-window-right-resize-inset)))",
@@ -502,6 +657,7 @@ function OverlayScrollbar({
       {showTriangles && ready ? (
         <button
           type="button"
+          data-slot="overlay-scrollbar-step"
           tabIndex={-1}
           aria-label="Scroll up"
           onClick={() => scrollByPage(-1)}
@@ -514,8 +670,8 @@ function OverlayScrollbar({
             contentsVisible ? "opacity-100" : "opacity-0",
             // Pure-CSS hover reveal: no state, no re-render, no transition
             // restart when the pointer crosses the lane.
-            "group-hover:opacity-100",
-            "group-hover:text-[var(--app-scrollbar-thumb-hover)]",
+            "group-hover/overlay-scrollbar:opacity-100",
+            "group-hover/overlay-scrollbar:text-[var(--app-scrollbar-thumb-hover)]",
           )}
           style={{ height: TRIANGLE_SIZE_PX }}
         >
@@ -526,18 +682,19 @@ function OverlayScrollbar({
       {ready ? (
         <div
           ref={thumbRef}
+          data-slot="overlay-scrollbar-thumb"
           onPointerDown={onThumbPointerDown}
           className={cn(
             "absolute rounded-[3px] bg-[var(--app-scrollbar-thumb)] transition-[opacity,background-color] duration-150 ease-out",
             horizontal
               ? "bottom-0.5 left-0 h-[var(--app-scrollbar-thumb-width)]"
               : "right-[var(--overlay-scrollbar-edge)]",
-            "group-hover:bg-[var(--app-scrollbar-thumb-hover)]",
+            "group-hover/overlay-scrollbar:bg-[var(--app-scrollbar-thumb-hover)]",
             dragging && "bg-[var(--app-scrollbar-thumb-hover)]",
             contentsVisible ? "opacity-100" : "opacity-0",
             // Pure-CSS hover reveal: no state, no re-render, no transition
             // restart when the pointer crosses the lane.
-            "group-hover:opacity-100",
+            "group-hover/overlay-scrollbar:opacity-100",
             !horizontal && THUMB_CLASS,
           )}
           style={
@@ -557,6 +714,7 @@ function OverlayScrollbar({
       {showTriangles && ready ? (
         <button
           type="button"
+          data-slot="overlay-scrollbar-step"
           tabIndex={-1}
           aria-label="Scroll down"
           onClick={() => scrollByPage(1)}
@@ -569,8 +727,8 @@ function OverlayScrollbar({
             contentsVisible ? "opacity-100" : "opacity-0",
             // Pure-CSS hover reveal: no state, no re-render, no transition
             // restart when the pointer crosses the lane.
-            "group-hover:opacity-100",
-            "group-hover:text-[var(--app-scrollbar-thumb-hover)]",
+            "group-hover/overlay-scrollbar:opacity-100",
+            "group-hover/overlay-scrollbar:text-[var(--app-scrollbar-thumb-hover)]",
           )}
           style={{ height: TRIANGLE_SIZE_PX }}
         >
