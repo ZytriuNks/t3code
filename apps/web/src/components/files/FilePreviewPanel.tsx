@@ -780,7 +780,7 @@ function EditableFileSurface({
 
   return (
     <EditProvider editor={editor}>
-      <div ref={surfaceRef} className="flex min-h-0 flex-1">
+      <div ref={surfaceRef} className="file-preview-scroll-frame relative flex min-h-0 flex-1">
         <ScrollFrame
           variant="page"
           className="flex-1 [--overlay-scrollbar-track:var(--code-background)]"

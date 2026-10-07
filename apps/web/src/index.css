@@ -1856,11 +1856,34 @@ code {
   display: none;
 }
 
+/* Code gutters stay opaque to both ends, independently of the thumb clearance. */
+.file-preview-scroll-frame::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 0 auto;
+  z-index: 30;
+  width: 12px;
+  background: var(--code-background);
+  pointer-events: none;
+}
+
 /* Page lists reveal on column hover; compact lists reveal only over the lane. */
+[data-slot="overlay-scrollbar"][data-variant="page"][data-auto-hide]
+  > :is([data-slot="overlay-scrollbar-thumb"], [data-slot="overlay-scrollbar-step"]) {
+  transition-duration: 300ms;
+  transition-timing-function: ease-out;
+}
+
 :has(> [data-slot="overlay-scrollbar"][data-variant="page"][data-auto-hide][data-overflow]):hover
   > [data-slot="overlay-scrollbar"]
   > :is([data-slot="overlay-scrollbar-thumb"], [data-slot="overlay-scrollbar-step"]) {
   opacity: 1;
+  transition-duration: 150ms;
+}
+
+[data-slot="overlay-scrollbar"][data-variant="page"][data-auto-hide][data-visible]
+  > :is([data-slot="overlay-scrollbar-thumb"], [data-slot="overlay-scrollbar-step"]) {
+  transition-duration: 150ms;
 }
 
 /* One finite animation drives the bar and masks, including recycled rows. */
