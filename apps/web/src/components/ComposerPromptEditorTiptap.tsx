@@ -1,4 +1,5 @@
 import { Extension, Node, wrappingInputRule, type JSONContent } from "@tiptap/core";
+import { OverlayScrollbar } from "./ui/overlay-scrollbar";
 import { TaskList } from "@tiptap/extension-task-list";
 import { ReactNodeViewRenderer, NodeViewWrapper, type NodeViewProps } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
@@ -796,7 +797,7 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
   const editorAttributes = useMemo(
     () => ({
       class: cn(
-        "composer-tiptap -m-1 block max-h-52 min-h-19.5 overflow-y-auto p-1 whitespace-pre-wrap wrap-break-word bg-transparent leading-relaxed text-foreground focus:outline-none",
+        "composer-tiptap -m-1 block max-h-52 min-h-19.5 overflow-y-auto p-1 pr-3 whitespace-pre-wrap wrap-break-word bg-transparent leading-relaxed text-foreground focus:outline-none [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
         className,
       ),
       "data-testid": "composer-editor",
@@ -1427,6 +1428,12 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
                 {placeholder}
               </div>
             ) : null}
+            <OverlayScrollbar
+              scrollable={editor?.isInitialized && !editor.isDestroyed ? editor.view.dom : null}
+              autoHide
+              thumbInset="gutter"
+              embedded
+            />
           </div>
         </ComposerCitationCommentContext>
       </ComposerContextRecordsContext>

@@ -448,7 +448,7 @@ export function UsagePage() {
           {topbarContent}
         </WorkspacePageHeader>
 
-        <ScrollArea className="min-h-0 flex-1">
+        <ScrollArea scrollbarVariant="page" windowEdge className="min-h-0 flex-1">
           <WorkspacePageContainer width="wide">
             {selectedEnvironments.length === 0 ? (
               <p className="text-sm text-muted-foreground">

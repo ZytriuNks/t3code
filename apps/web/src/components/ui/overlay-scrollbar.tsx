@@ -4,6 +4,12 @@ import { useCallback, useLayoutEffect, useRef, useState } from "react";
 
 import { cn } from "~/lib/utils";
 import {
+  SCROLLBAR_TRIANGLE_SIZE,
+  SCROLLBAR_TRIANGLE_PATH,
+  SCROLLBAR_TRIANGLE_VIEWBOX,
+  SCROLLBAR_TRIANGLE_DOWN_TRANSFORM,
+} from "~/lib/scrollbar-style";
+import {
   scrollbarGeometry,
   scrollbarOffsetAtPointer,
   type ScrollbarGeometry,
@@ -22,20 +28,11 @@ const THUMB_CLASS = "w-[var(--app-scrollbar-thumb-width)]";
  */
 const LANE_CLASS = "w-3";
 
-/** Inset of the thumb and triangles from the lane's right edge. The lane sits
- * flush with the viewport, so this inset *is* the visible gap between the bar
- * and the edge. "edge" keeps a 1px hairline; "gutter" pushes the bar further
- * in so it sits centred inside a content gutter reserved by the host.
- */
+/** Model rows reserve a 12px gutter; centre the thumb in that space. */
 type ThumbInset = "edge" | "gutter";
 
-/** Gap left below the bar. A surface whose content ends flush with the panel
- * floor needs more clearance here, or the thumb reads as touching it.
- */
-type BottomGap = "hairline" | "roomy";
-
 /** Height reserved at each end for a step triangle. */
-const TRIANGLE_SIZE_PX = 12;
+const TRIANGLE_SIZE_PX = SCROLLBAR_TRIANGLE_SIZE;
 
 /** How long a press must be sustained before the bar starts coasting, so a
  * plain click produces exactly one step.
@@ -49,12 +46,17 @@ type StepDirection = -1 | 1;
 type OverlayScrollbarProps = {
   /** Native scroll element being represented. */
   scrollable: HTMLElement | null;
+  orientation?: "vertical" | "horizontal";
   /** Controlled visibility. Hover is layered on top of this. */
   visible?: boolean;
+  /** Reveal on scroll, hover or drag, then fade after 700ms at rest. */
+  autoHide?: boolean;
   /** Render up/down step triangles at the ends of the lane. */
   triangles?: boolean;
-  /** Fired on triangle click and repeatedly while it is held. */
+  /** Fired for a short triangle click; holding advances the native offset. */
   onStep?: (direction: StepDirection) => void;
+  /** Release any host-owned scroll animation or live-follow before navigation. */
+  onScrollStart?: () => void;
   /**
    * Thumb width. Defaults to the shared --app-scrollbar-width. The model
    * picker passes a thinner bar: it sits over dense two-line rows, where a
@@ -63,46 +65,30 @@ type OverlayScrollbarProps = {
   width?: string;
   /** Inset of the thumb and triangles from the lane's right edge. */
   thumbInset?: ThumbInset;
-  /** Clearance kept below the bar and above the bottom edge. */
-  bottomGap?: BottomGap;
+  /** Embedded panes use their own edge rather than the desktop resize inset. */
+  embedded?: boolean;
   className?: string;
 };
 
-/** Up/down triangle in a box as wide as the thumb.
- *
- * Drawn as an equilateral triangle (apex centred, base corners pulled in by
- * half the height so the three sides are equal) rather than the squat arrow
- * used before. The corners are rounded by stroking the path in the same
- * colour with a round line join, which rounds all three vertices at once
- * without needing a filter or a per-corner arc.
- */
+/** Equilateral outline with 1px circular corners at the default 6px width. */
 function StepTriangle({ direction }: { direction: StepDirection }) {
-  // 6 wide x 5.196 tall: the exact height of an equilateral triangle with a
-  // 6px side, so the shape reads as a triangle and not a chevron.
-  const height = 5.196;
   return (
     <svg
       aria-hidden="true"
-      className="h-[calc(var(--app-scrollbar-thumb-width)*0.866)] w-[var(--app-scrollbar-thumb-width)]"
-      viewBox="0 0 6 5.196"
+      className="h-[calc(var(--app-scrollbar-thumb-width)*0.911)] w-[var(--app-scrollbar-thumb-width)]"
+      viewBox={SCROLLBAR_TRIANGLE_VIEWBOX}
       preserveAspectRatio="none"
     >
       <path
-        d={
-          direction === -1
-            ? `M3 .4 L5.55 ${height - 0.4} L.45 ${height - 0.4} Z`
-            : `M3 ${height - 0.4} L5.55 .4 L.45 .4 Z`
-        }
+        d={SCROLLBAR_TRIANGLE_PATH}
+        transform={direction === 1 ? SCROLLBAR_TRIANGLE_DOWN_TRANSFORM : undefined}
         fill="currentColor"
-        stroke="currentColor"
-        strokeWidth=".8"
-        strokeLinejoin="round"
       />
     </svg>
   );
 }
 
-/** Custom vertical scrollbar drawn over a scroll container.
+/** Custom scrollbar drawn over a scroll container.
  *
  * The native scrollbar is hidden by the host (see the three-part
  * `[-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden`
@@ -113,20 +99,54 @@ function StepTriangle({ direction }: { direction: StepDirection }) {
  */
 function OverlayScrollbar({
   scrollable,
+  orientation = "vertical",
   visible,
+  autoHide = false,
   triangles,
   onStep,
+  onScrollStart,
   width,
   thumbInset = "edge",
-  bottomGap = "hairline",
+  embedded = false,
   className,
 }: OverlayScrollbarProps) {
+  const horizontal = orientation === "horizontal";
+  const showTriangles = triangles && !horizontal;
   const laneRef = useRef<HTMLDivElement | null>(null);
   const thumbRef = useRef<HTMLDivElement | null>(null);
   const trackHeightRef = useRef(0);
   const [laneElement, setLaneElement] = useState<HTMLDivElement | null>(null);
   const [geometry, setGeometry] = useState<ScrollbarGeometry | null>(null);
   const [dragging, setDragging] = useState(false);
+  const [scrolling, setScrolling] = useState(false);
+  const [horizontalOverflow, setHorizontalOverflow] = useState(false);
+  const stopHoldRef = useRef<(() => void) | null>(null);
+  const stopDragRef = useRef<(() => void) | null>(null);
+  const heldRef = useRef(false);
+
+  useLayoutEffect(() => {
+    if (!autoHide || !scrollable) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const reveal = () => {
+      setScrolling(true);
+      clearTimeout(timer);
+      timer = setTimeout(() => setScrolling(false), 700);
+    };
+    scrollable.addEventListener("scroll", reveal, { passive: true });
+    return () => {
+      clearTimeout(timer);
+      scrollable.removeEventListener("scroll", reveal);
+      setScrolling(false);
+    };
+  }, [autoHide, scrollable]);
+
+  useLayoutEffect(() => {
+    if (!scrollable) return;
+    return () => {
+      stopHoldRef.current?.();
+      stopDragRef.current?.();
+    };
+  }, [scrollable]);
 
   // The lane is measured in the effect below, so the element has to exist
   // before that runs. A ref alone cannot express this: on the first layout
@@ -143,43 +163,79 @@ function OverlayScrollbar({
   useLayoutEffect(() => {
     if (!scrollable || !laneElement) return;
     const measure = () => {
-      const trackHeight =
-        laneElement.clientHeight - (triangles ? TRIANGLE_SIZE_PX * 2 : 0);
+      setHorizontalOverflow(
+        scrollable.scrollWidth > scrollable.clientWidth &&
+          ["auto", "scroll"].includes(getComputedStyle(scrollable).overflowX),
+      );
+      const trackHeight = horizontal
+        ? laneElement.clientWidth
+        : laneElement.clientHeight - (showTriangles ? TRIANGLE_SIZE_PX * 2 : 0);
       trackHeightRef.current = trackHeight;
       setGeometry(
-        scrollbarGeometry(
-          {
-            total: scrollable.scrollHeight,
-            offset: scrollable.scrollTop,
-            len: scrollable.clientHeight,
-          },
-          trackHeight,
-        ),
+        horizontal && !["auto", "scroll"].includes(getComputedStyle(scrollable).overflowX)
+          ? null
+          : scrollbarGeometry(
+              {
+                total: horizontal ? scrollable.scrollWidth : scrollable.scrollHeight,
+                offset: horizontal ? scrollable.scrollLeft : scrollable.scrollTop,
+                len: horizontal ? scrollable.clientWidth : scrollable.clientHeight,
+              },
+              trackHeight,
+            ),
       );
     };
-    measure();
     const frame = requestAnimationFrame(measure);
     scrollable.addEventListener("scroll", measure, { passive: true });
     // Guard for render environments without ResizeObserver; the scroll
     // listener above still keeps the thumb in sync there.
-    const observer =
-      typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
-    observer?.observe(scrollable);
-    if (scrollable.firstElementChild) {
-      observer?.observe(scrollable.firstElementChild);
-    }
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+    const observeContent = () => {
+      observer?.disconnect();
+      observer?.observe(scrollable);
+      observer?.observe(laneElement);
+      for (const child of scrollable.children) observer?.observe(child);
+      measure();
+    };
+    observeContent();
+    const mutations =
+      typeof MutationObserver === "undefined" ? null : new MutationObserver(observeContent);
+    mutations?.observe(scrollable, { childList: true });
+    scrollable.addEventListener("input", measure);
     return () => {
       cancelAnimationFrame(frame);
       scrollable.removeEventListener("scroll", measure);
       observer?.disconnect();
+      mutations?.disconnect();
+      scrollable.removeEventListener("input", measure);
     };
-  }, [scrollable, triangles, laneElement]);
+  }, [scrollable, horizontal, showTriangles, laneElement]);
 
   const scrollByPage = useCallback(
     (direction: StepDirection) => {
-      onStep?.(direction);
+      if (heldRef.current) {
+        heldRef.current = false;
+        return;
+      }
+      if (
+        scrollable &&
+        (direction < 0
+          ? scrollable.scrollTop > 0
+          : scrollable.scrollTop < scrollable.scrollHeight - scrollable.clientHeight)
+      ) {
+        onScrollStart?.();
+      }
+      if (onStep) {
+        onStep(direction);
+      } else {
+        scrollable?.scrollBy({
+          top: direction * scrollable.clientHeight * 0.3,
+          behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches
+            ? "auto"
+            : "smooth",
+        });
+      }
     },
-    [onStep],
+    [onScrollStart, onStep, scrollable],
   );
 
   // Holding a triangle scrolls at a steady rate. A timer that re-issued the
@@ -190,50 +246,74 @@ function OverlayScrollbar({
   // button while held, so stop on the next pointerup anywhere.
   const startHold = useCallback(
     (direction: StepDirection) => {
+      stopHoldRef.current?.();
+      heldRef.current = false;
       const element = scrollable;
       if (!element) return;
       let frame: number | null = null;
-      let lastFrameAt = 0;
+      let lastFrameAt: number | null = null;
+      let startTimer: number | undefined;
       const stop = () => {
+        window.clearTimeout(startTimer);
         if (frame !== null) window.cancelAnimationFrame(frame);
         frame = null;
         window.removeEventListener("pointerup", stop, true);
         window.removeEventListener("pointercancel", stop, true);
+        window.removeEventListener("blur", stop);
+        stopHoldRef.current = null;
       };
       const coast = (now: number) => {
-        // Clamp the step so a dropped frame cannot jump a long way.
-        const elapsedSeconds = Math.min((now - lastFrameAt) / 1000, 0.05);
+        frame = null;
+        // Use only RAF timestamps. A frame can start before the timer fires;
+        // subtracting performance.now() can reverse the first step at an edge.
+        const elapsedSeconds =
+          lastFrameAt === null ? 0 : Math.max(0, Math.min((now - lastFrameAt) / 1000, 0.05));
         lastFrameAt = now;
-        const before = element.scrollTop;
-        element.scrollTop += direction * HOLD_SPEED_PX_PER_SECOND * elapsedSeconds;
-        if (element.scrollTop === before) {
-          return; // Reached the end; stop requesting frames.
+        const maxOffset = Math.max(0, element.scrollHeight - element.clientHeight);
+        if (direction < 0 ? element.scrollTop <= 0 : element.scrollTop >= maxOffset) {
+          return;
         }
+        element.scrollTop = Math.max(
+          0,
+          Math.min(
+            maxOffset,
+            element.scrollTop + direction * HOLD_SPEED_PX_PER_SECOND * elapsedSeconds,
+          ),
+        );
         frame = window.requestAnimationFrame(coast);
       };
       // Short grace period so an ordinary click does not also start coasting.
-      const startTimer = window.setTimeout(() => {
-        lastFrameAt = performance.now();
+      startTimer = window.setTimeout(() => {
+        heldRef.current = true;
+        if (
+          direction < 0
+            ? element.scrollTop > 0
+            : element.scrollTop < element.scrollHeight - element.clientHeight
+        ) {
+          onScrollStart?.();
+        }
         frame = window.requestAnimationFrame(coast);
       }, HOLD_START_DELAY_MS);
-      const stopAll = () => {
-        window.clearTimeout(startTimer);
-        stop();
-      };
-      window.addEventListener("pointerup", stopAll, true);
-      window.addEventListener("pointercancel", stopAll, true);
+      stopHoldRef.current = stop;
+      window.addEventListener("pointerup", stop, true);
+      window.addEventListener("pointercancel", stop, true);
+      window.addEventListener("blur", stop);
     },
-    [scrollable],
+    [onScrollStart, scrollable],
   );
 
   const onThumbPointerDown = useCallback(
     (event: React.PointerEvent<HTMLDivElement>) => {
-      if (!scrollable || !geometry) return;
+      if (event.button !== 0 || !scrollable || !geometry) return;
+      stopDragRef.current?.();
       event.preventDefault();
       const lane = laneRef.current;
       const thumb = thumbRef.current;
       if (!lane || !thumb) return;
-      const pointerOffset = event.clientY - thumb.getBoundingClientRect().top;
+      const thumbRect = thumb.getBoundingClientRect();
+      const pointerOffset = horizontal
+        ? event.clientX - thumbRect.left
+        : event.clientY - thumbRect.top;
       setDragging(true);
       event.currentTarget.setPointerCapture(event.pointerId);
       // React nulls `event.currentTarget` once the handler returns, and the
@@ -243,20 +323,24 @@ function OverlayScrollbar({
       // Both the thumb and the window can deliver the terminating event, so
       // the teardown must be idempotent.
       let settled = false;
+      let started = false;
 
       const onMove = (moveEvent: PointerEvent) => {
         const laneRect = lane.getBoundingClientRect();
-        const trackHeight =
-          laneRect.height - (triangles ? TRIANGLE_SIZE_PX * 2 : 0);
-        const trackTop = laneRect.top + (triangles ? TRIANGLE_SIZE_PX : 0);
+        const trackHeight = horizontal
+          ? laneRect.width
+          : laneRect.height - (showTriangles ? TRIANGLE_SIZE_PX * 2 : 0);
+        const trackTop = horizontal
+          ? laneRect.left
+          : laneRect.top + (showTriangles ? TRIANGLE_SIZE_PX : 0);
         const next = scrollbarOffsetAtPointer(
           {
-            total: scrollable.scrollHeight,
-            offset: scrollable.scrollTop,
-            len: scrollable.clientHeight,
+            total: horizontal ? scrollable.scrollWidth : scrollable.scrollHeight,
+            offset: horizontal ? scrollable.scrollLeft : scrollable.scrollTop,
+            len: horizontal ? scrollable.clientWidth : scrollable.clientHeight,
           },
           trackHeight,
-          moveEvent.clientY - trackTop,
+          (horizontal ? moveEvent.clientX : moveEvent.clientY) - trackTop,
           // Where inside the thumb the pointer grabbed it. This must be the
           // offset from the thumb's top, unchanged since pointerdown —
           // subtracting it from the pointer position beforehand as well made
@@ -264,7 +348,15 @@ function OverlayScrollbar({
           // wrong offset, which then read as a jump on the next hover.
           pointerOffset,
         );
-        scrollable.scrollTop = next;
+        if (!started && next !== (horizontal ? scrollable.scrollLeft : scrollable.scrollTop)) {
+          started = true;
+          onScrollStart?.();
+        }
+        if (horizontal) {
+          scrollable.scrollLeft = next;
+        } else {
+          scrollable.scrollTop = next;
+        }
       };
       const onUp = () => {
         if (settled) return;
@@ -276,8 +368,11 @@ function OverlayScrollbar({
         captureTarget.removeEventListener("pointermove", onMove);
         captureTarget.removeEventListener("pointerup", onUp);
         captureTarget.removeEventListener("pointercancel", onUp);
+        captureTarget.removeEventListener("lostpointercapture", onUp);
         window.removeEventListener("pointerup", onUp);
         window.removeEventListener("pointercancel", onUp);
+        window.removeEventListener("blur", onUp);
+        stopDragRef.current = null;
         setDragging(false);
         try {
           captureTarget.releasePointerCapture(event.pointerId);
@@ -288,46 +383,56 @@ function OverlayScrollbar({
       event.currentTarget.addEventListener("pointermove", onMove);
       event.currentTarget.addEventListener("pointerup", onUp);
       event.currentTarget.addEventListener("pointercancel", onUp);
+      event.currentTarget.addEventListener("lostpointercapture", onUp);
+      stopDragRef.current = onUp;
       // Safety net: if the thumb is re-rendered or loses capture mid-drag, the
       // element listener may never fire and the drag would otherwise stick.
       window.addEventListener("pointerup", onUp);
       window.addEventListener("pointercancel", onUp);
+      window.addEventListener("blur", onUp);
     },
-    [geometry, scrollable, triangles],
+    [geometry, horizontal, onScrollStart, scrollable, showTriangles],
   );
 
   const onLaneKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>) => {
       if (!scrollable || !geometry) return;
-      const page = scrollable.clientHeight;
+      const page = horizontal ? scrollable.clientWidth : scrollable.clientHeight;
+      const offset = horizontal ? scrollable.scrollLeft : scrollable.scrollTop;
       const step = 40;
       const max = geometry.maxOffset;
       const clamp = (value: number) => Math.max(0, Math.min(value, max));
+      let next: number;
       switch (event.key) {
-        case "ArrowUp":
-          scrollable.scrollTop = clamp(scrollable.scrollTop - step);
+        case horizontal ? "ArrowLeft" : "ArrowUp":
+          next = clamp(offset - step);
           break;
-        case "ArrowDown":
-          scrollable.scrollTop = clamp(scrollable.scrollTop + step);
+        case horizontal ? "ArrowRight" : "ArrowDown":
+          next = clamp(offset + step);
           break;
         case "PageUp":
-          scrollable.scrollTop = clamp(scrollable.scrollTop - page);
+          next = clamp(offset - page);
           break;
         case "PageDown":
-          scrollable.scrollTop = clamp(scrollable.scrollTop + page);
+          next = clamp(offset + page);
           break;
         case "Home":
-          scrollable.scrollTop = 0;
+          next = 0;
           break;
         case "End":
-          scrollable.scrollTop = max;
+          next = max;
           break;
         default:
           return;
       }
+      if (next !== offset) onScrollStart?.();
+      scrollable.scrollTo({
+        ...(horizontal ? { left: next } : { top: next }),
+        behavior: "instant",
+      });
       event.preventDefault();
     },
-    [geometry, scrollable],
+    [geometry, horizontal, onScrollStart, scrollable],
   );
 
   // The lane itself is always hit-testable so a hover can reach a bar that is
@@ -335,7 +440,7 @@ function OverlayScrollbar({
   // load-bearing again, but it is applied to the thumb and triangles below
   // rather than to the lane, so the lane's own className never changes and
   // hovering cannot make the track itself jump.
-  const shown = visible ?? true;
+  const shown = visible ?? (autoHide ? scrolling : true);
   // Hover is handled entirely in CSS (`group-hover`), so no React state is
   // involved and crossing the lane cannot restart a transition.
   const contentsVisible = shown || dragging;
@@ -349,31 +454,27 @@ function OverlayScrollbar({
     <div
       ref={laneCallbackRef}
       role="scrollbar"
-      aria-orientation="vertical"
+      aria-orientation={orientation}
       aria-valuemin={0}
       aria-valuemax={geometry?.maxOffset ?? 0}
       aria-valuenow={
-        geometry === null
-          ? 0
-          : Math.round(geometry.maxOffset * (geometry.thumbTop / travel))
+        geometry === null ? 0 : Math.round(geometry.maxOffset * (geometry.thumbTop / travel))
       }
       tabIndex={ready ? 0 : -1}
       onKeyDown={onLaneKeyDown}
+      onPointerDown={(event) => event.stopPropagation()}
+      onClick={(event) => event.stopPropagation()}
       className={cn(
-        // The lane sits flush with the viewport's right edge; `bottomGap` sets how
-        // much clearance is kept below the bar. A surface whose content runs to
-        // the panel floor needs the roomier value or the thumb reads as
-        // touching it when scrolled to the end.
-        // Positioned against the host's padding box, not the viewport. When the bar is
-        // a child of a scroll container that itself has horizontal padding
-        // (LegendList uses px-3 sm:px-5), `right-0` lands inside that gutter and
-        // leaves the bar visibly short of the window edge. The inset token
-        // subtracts the host padding so the thumb still reaches the edge.
-        "group absolute right-0 top-0 z-30 flex touch-none flex-col items-end outline-none",
-        bottomGap === "roomy" ? "bottom-2" : "bottom-px",
-        LANE_CLASS,
-        // The lane is always fully transparent-but-present: it must stay
-        // hit-testable so a hover can reach a bar that is currently faded out.
+        // This is a sibling of the scroll container, so list padding does not
+        // affect its position. The model list keeps extra bottom clearance.
+        "group absolute z-30 flex touch-none items-end outline-none",
+        horizontal
+          ? "bottom-0 left-0.5 right-3 h-3"
+          : "right-0 top-[var(--overlay-scrollbar-top)] flex-col bottom-[var(--overlay-scrollbar-bottom)]",
+        !ready && "pointer-events-none",
+        !horizontal && LANE_CLASS,
+        // The lane stays hit-testable so a hover can reach a bar that is
+        // currently faded out. Code surfaces can supply an opaque background.
         // Fading the *lane* instead of its contents also multiplied the
         // children's opacity down, which is why a host-controlled bar could
         // never be revealed by hovering it.
@@ -381,15 +482,24 @@ function OverlayScrollbar({
       )}
       style={
         {
-          "--app-scrollbar-thumb-width":
-            width ?? "var(--app-scrollbar-width)",
+          "--app-scrollbar-thumb-width": width ?? "var(--app-scrollbar-width)",
           // One knob for both the thumb and the triangles, so they can never
           // drift out of alignment with each other.
-          "--overlay-scrollbar-edge": thumbInset === "gutter" ? "0.25rem" : "0px",
+          "--overlay-scrollbar-edge":
+            thumbInset === "gutter"
+              ? "calc((0.75rem - var(--app-scrollbar-thumb-width)) / 2)"
+              : embedded
+                ? "2px"
+                : "max(0px, calc(2px - var(--desktop-window-right-resize-inset)))",
+          "--overlay-scrollbar-bottom": `${Math.max(thumbInset === "gutter" ? 6 : 2, horizontalOverflow ? 8 : 0)}px`,
+          "--overlay-scrollbar-top": `${thumbInset === "gutter" ? Math.max(6, horizontalOverflow ? 8 : 0) : 0}px`,
+          backgroundColor: horizontal
+            ? "transparent"
+            : "var(--overlay-scrollbar-track, transparent)",
         } as React.CSSProperties
       }
     >
-      {triangles && ready ? (
+      {showTriangles && ready ? (
         <button
           type="button"
           tabIndex={-1}
@@ -400,7 +510,7 @@ function OverlayScrollbar({
             startHold(-1);
           }}
           className={cn(
-            "flex shrink-0 items-center justify-center text-[var(--app-scrollbar-thumb)] transition-[opacity,color] duration-150 mr-[var(--overlay-scrollbar-edge)]",
+            "flex w-3 shrink-0 items-start justify-end text-[var(--app-scrollbar-thumb)] transition-[opacity,color] duration-150 mr-[var(--overlay-scrollbar-edge)]",
             contentsVisible ? "opacity-100" : "opacity-0",
             // Pure-CSS hover reveal: no state, no re-render, no transition
             // restart when the pointer crosses the lane.
@@ -418,23 +528,33 @@ function OverlayScrollbar({
           ref={thumbRef}
           onPointerDown={onThumbPointerDown}
           className={cn(
-            "absolute right-[var(--overlay-scrollbar-edge)] rounded-[3px] bg-[var(--app-scrollbar-thumb)] transition-[opacity,background-color] duration-150 ease-out",
+            "absolute rounded-[3px] bg-[var(--app-scrollbar-thumb)] transition-[opacity,background-color] duration-150 ease-out",
+            horizontal
+              ? "bottom-0.5 left-0 h-[var(--app-scrollbar-thumb-width)]"
+              : "right-[var(--overlay-scrollbar-edge)]",
             "group-hover:bg-[var(--app-scrollbar-thumb-hover)]",
             dragging && "bg-[var(--app-scrollbar-thumb-hover)]",
             contentsVisible ? "opacity-100" : "opacity-0",
             // Pure-CSS hover reveal: no state, no re-render, no transition
             // restart when the pointer crosses the lane.
             "group-hover:opacity-100",
-            THUMB_CLASS,
+            !horizontal && THUMB_CLASS,
           )}
-          style={{
-            height: `${geometry.thumbHeight}px`,
-            transform: `translateY(${triangles ? TRIANGLE_SIZE_PX + geometry.thumbTop : geometry.thumbTop}px)`,
-          }}
+          style={
+            horizontal
+              ? {
+                  width: `${geometry.thumbHeight}px`,
+                  transform: `translateX(${geometry.thumbTop}px)`,
+                }
+              : {
+                  height: `${geometry.thumbHeight}px`,
+                  transform: `translateY(${showTriangles ? TRIANGLE_SIZE_PX + geometry.thumbTop : geometry.thumbTop}px)`,
+                }
+          }
         />
       ) : null}
 
-      {triangles && ready ? (
+      {showTriangles && ready ? (
         <button
           type="button"
           tabIndex={-1}
@@ -445,7 +565,7 @@ function OverlayScrollbar({
             startHold(1);
           }}
           className={cn(
-            "mt-auto flex shrink-0 items-center justify-center text-[var(--app-scrollbar-thumb)] transition-[opacity,color] duration-150 mr-[var(--overlay-scrollbar-edge)]",
+            "mt-auto flex w-3 shrink-0 items-end justify-end text-[var(--app-scrollbar-thumb)] transition-[opacity,color] duration-150 mr-[var(--overlay-scrollbar-edge)]",
             contentsVisible ? "opacity-100" : "opacity-0",
             // Pure-CSS hover reveal: no state, no re-render, no transition
             // restart when the pointer crosses the lane.

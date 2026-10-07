@@ -18,9 +18,11 @@ import {
   PRIMARY_SETTINGS_UNAVAILABLE_MESSAGE,
   usePrimarySettingsAvailable,
 } from "../../hooks/useSettings";
+import { useMediaQuery } from "../../hooks/useMediaQuery";
 import { cn } from "../../lib/utils";
 import { WorkspacePageContainer, type WorkspacePageWidth } from "../WorkspacePageContainer";
 import { Button } from "../ui/button";
+import { OverlayScrollbar } from "../ui/overlay-scrollbar";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { useOptionalSettingsScope } from "./SettingsScopeContext";
 import { SettingsScopeSentence } from "./SettingsScopeSentence";
@@ -589,6 +591,17 @@ export function SettingsPageContainer({
   width?: WorkspacePageWidth;
 }) {
   const navigate = useNavigate();
+  const [scrollable, setScrollable] = useState<HTMLDivElement | null>(null);
+  const prefersReducedMotion = useMediaQuery("(prefers-reduced-motion: reduce)");
+  const handleScrollbarStep = useCallback(
+    (direction: -1 | 1) => {
+      scrollable?.scrollBy({
+        top: direction * scrollable.clientHeight * 0.3,
+        behavior: prefersReducedMotion ? "auto" : "smooth",
+      });
+    },
+    [prefersReducedMotion, scrollable],
+  );
   const hash = useLocation({ select: (location) => location.hash });
   const highlightTarget = useLocation({
     select: (location) => location.state.settingsTargetHighlight !== false,
@@ -610,14 +623,18 @@ export function SettingsPageContainer({
       highlightTarget={highlightTarget}
       onTargetHandled={clearTargetHash}
     >
-      <div
-        className="topbar-scroll-fade scrollbar-gutter-both flex-1 overflow-y-auto"
-        data-settings-page-scroll
-      >
-        <WorkspacePageContainer width={width} className={cn("gap-8", className)}>
-          <SettingsScopeSentence />
-          {children}
-        </WorkspacePageContainer>
+      <div className="relative min-h-0 flex-1">
+        <div
+          ref={setScrollable}
+          className="topbar-scroll-fade h-full overflow-y-auto [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+          data-settings-page-scroll
+        >
+          <WorkspacePageContainer width={width} className={cn("gap-8", className)}>
+            <SettingsScopeSentence />
+            {children}
+          </WorkspacePageContainer>
+        </div>
+        <OverlayScrollbar scrollable={scrollable} triangles onStep={handleScrollbarStep} />
       </div>
     </SettingsSearchTargetProvider>
   );

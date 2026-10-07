@@ -1,3 +1,4 @@
+import { ScrollFrame } from "~/components/ui/scroll-frame";
 import {
   ANTIGRAVITY_DEFAULT_MODEL,
   type ProviderInstanceId,
@@ -200,9 +201,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   const searchInputRef = useRef<HTMLInputElement>(null);
   const modelListRef = useRef<LegendListRef | null>(null);
   // Native scroll element behind LegendList, for the overlay scrollbar.
-  const [modelListScrollableNode, setModelListScrollableNode] = useState<HTMLElement | null>(
-    null,
-  );
+  const [modelListScrollableNode, setModelListScrollableNode] = useState<HTMLElement | null>(null);
   const highlightedModelKeyRef = useRef<string | null>(null);
   const favorites = useClientSettings((s) => s.favorites ?? []);
   const activeEntry = props.instanceEntries.find(
@@ -989,9 +988,6 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
             />
 
             {/* Model list */}
-            {/* No right padding here: it pushed the scroll lane in from the panel edge.
-                The gap between the list and the thumb comes from the thumb's
-                asymmetric inset in app-scrollbar-hover instead. */}
             <div className="relative min-h-0 flex-1 overflow-hidden">
               <ComboboxListVirtualized>
                 <LegendList<string>
@@ -1085,30 +1081,31 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
                 visible={modelListScrollbarVisible}
                 width="6px"
                 thumbInset="gutter"
-                bottomGap="roomy"
               />
             </div>
             {providerSetupEntries.length > 0 ? (
-              <div className="max-h-44 shrink-0 overflow-y-auto border-t border-border/70 p-2">
-                {providerSetupEntries.map((entry) => (
-                  <div key={entry.instanceId} className="px-1 py-1.5 text-xs leading-snug">
-                    <p className="line-clamp-3 text-muted-foreground">
-                      {getProviderStatusMessage(entry.snapshot)}
-                    </p>
-                    <InlineButton
-                      className="mt-1"
-                      onClick={() => {
-                        props.onRequestClose?.();
-                        props.onOpenProviderSetup?.(entry.instanceId);
-                      }}
-                    >
-                      {providerSetupEntries.length > 1
-                        ? `Set up ${entry.displayName}`
-                        : "Open provider setup"}
-                    </InlineButton>
-                  </div>
-                ))}
-              </div>
+              <ScrollFrame variant="compact" className="shrink-0">
+                <div className="max-h-44 shrink-0 overflow-y-auto border-t border-border/70 p-2">
+                  {providerSetupEntries.map((entry) => (
+                    <div key={entry.instanceId} className="px-1 py-1.5 text-xs leading-snug">
+                      <p className="line-clamp-3 text-muted-foreground">
+                        {getProviderStatusMessage(entry.snapshot)}
+                      </p>
+                      <InlineButton
+                        className="mt-1"
+                        onClick={() => {
+                          props.onRequestClose?.();
+                          props.onOpenProviderSetup?.(entry.instanceId);
+                        }}
+                      >
+                        {providerSetupEntries.length > 1
+                          ? `Set up ${entry.displayName}`
+                          : "Open provider setup"}
+                      </InlineButton>
+                    </div>
+                  ))}
+                </div>
+              </ScrollFrame>
             ) : (
               <ComboboxEmpty className="empty:h-0">No models found</ComboboxEmpty>
             )}

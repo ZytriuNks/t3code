@@ -29,6 +29,7 @@ beforeEach(() => {
   // ResizeObserver is stubbed out for the same reason.
   vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(400);
   vi.stubGlobal("ResizeObserver", undefined);
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
 });
 
 afterEach(() => {
@@ -36,9 +37,110 @@ afterEach(() => {
   container.remove();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 
 describe("OverlayScrollbar", () => {
+  it("drags a horizontal overflow without changing the vertical offset", () => {
+    vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(400);
+    const scrollable = createScrollable(1000);
+    Object.defineProperty(scrollable, "scrollWidth", { value: 1000 });
+    scrollable.style.overflowX = "auto";
+    scrollable.scrollLeft = 100;
+    scrollable.scrollTop = 80;
+    act(() => root.render(<OverlayScrollbar scrollable={scrollable} orientation="horizontal" />));
+    const lane = container.querySelector<HTMLElement>("[role='scrollbar']")!;
+    const thumb = lane.querySelector<HTMLElement>("div")!;
+    vi.spyOn(lane, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 400, 12));
+    vi.spyOn(thumb, "getBoundingClientRect").mockReturnValue(new DOMRect(40, 0, 160, 6));
+    thumb.setPointerCapture = () => {};
+    thumb.releasePointerCapture = () => {};
+    act(() =>
+      thumb.dispatchEvent(
+        new PointerEvent("pointerdown", { bubbles: true, button: 0, pointerId: 1, clientX: 50 }),
+      ),
+    );
+    act(() => thumb.dispatchEvent(new PointerEvent("pointermove", { pointerId: 1, clientX: 130 })));
+    expect(scrollable.scrollLeft).toBe(300);
+    expect(scrollable.scrollTop).toBe(80);
+    act(() => thumb.dispatchEvent(new PointerEvent("pointerup", { pointerId: 1 })));
+    act(() => thumb.dispatchEvent(new PointerEvent("pointermove", { pointerId: 1, clientX: 200 })));
+    expect(scrollable.scrollLeft).toBe(300);
+  });
+
+  it("navigates horizontal overflow by keyboard and clamps to its edges", () => {
+    vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(400);
+    const scrollable = createScrollable(1000);
+    Object.defineProperty(scrollable, "scrollWidth", { value: 1000 });
+    scrollable.style.overflowX = "auto";
+    scrollable.scrollLeft = 590;
+    scrollable.scrollTo = vi.fn();
+    act(() => root.render(<OverlayScrollbar scrollable={scrollable} orientation="horizontal" />));
+    const lane = container.querySelector<HTMLElement>("[role='scrollbar']")!;
+    act(() =>
+      lane.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "ArrowRight" })),
+    );
+    expect(scrollable.scrollTo).toHaveBeenLastCalledWith({ left: 600, behavior: "instant" });
+    act(() => lane.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Home" })));
+    expect(scrollable.scrollTo).toHaveBeenLastCalledWith({ left: 0, behavior: "instant" });
+    act(() =>
+      lane.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "ArrowDown" })),
+    );
+    expect(scrollable.scrollTo).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["auto", "hidden"])(
+    "has no horizontal thumb when overflow is %s and cannot be scrolled",
+    (overflow) => {
+      vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(400);
+      const scrollable = createScrollable(1000);
+      Object.defineProperty(scrollable, "scrollWidth", { value: overflow === "auto" ? 400 : 1000 });
+      scrollable.style.overflowX = overflow;
+      act(() => root.render(<OverlayScrollbar scrollable={scrollable} orientation="horizontal" />));
+      expect(container.querySelector("[role='scrollbar'] > div")).toBeNull();
+    },
+  );
+
+  it("reveals while scrolling and restarts the idle delay on subsequent scrolls", () => {
+    vi.useFakeTimers();
+    const scrollable = createScrollable(1000);
+    act(() => root.render(<OverlayScrollbar scrollable={scrollable} autoHide />));
+    const thumb = () => container.querySelector<HTMLElement>("[role='scrollbar'] > div")!;
+    expect(thumb().classList.contains("opacity-0")).toBe(true);
+    act(() => scrollable.dispatchEvent(new Event("scroll")));
+    expect(thumb().classList.contains("opacity-100")).toBe(true);
+    act(() => vi.advanceTimersByTime(600));
+    act(() => scrollable.dispatchEvent(new Event("scroll")));
+    act(() => vi.advanceTimersByTime(600));
+    expect(thumb().classList.contains("opacity-100")).toBe(true);
+    act(() => vi.advanceTimersByTime(100));
+    expect(thumb().classList.contains("opacity-0")).toBe(true);
+  });
+
+  it("steps the supplied viewport without requiring a host callback", () => {
+    const scrollable = createScrollable(1000);
+    scrollable.scrollBy = vi.fn();
+    act(() => root.render(<OverlayScrollbar scrollable={scrollable} triangles />));
+    act(() => container.querySelector<HTMLButtonElement>('[aria-label="Scroll down"]')!.click());
+    expect(scrollable.scrollBy).toHaveBeenCalledWith({ top: 120, behavior: "smooth" });
+  });
+
+  it("releases idle timers when the scroll container is replaced", () => {
+    vi.useFakeTimers();
+    const first = createScrollable(1000);
+    const second = createScrollable(2000);
+    act(() => root.render(<OverlayScrollbar scrollable={first} autoHide />));
+    act(() => first.dispatchEvent(new Event("scroll")));
+    act(() => root.render(<OverlayScrollbar scrollable={second} autoHide />));
+    act(() => first.dispatchEvent(new Event("scroll")));
+    expect(
+      container.querySelector("[role='scrollbar'] > div")!.classList.contains("opacity-0"),
+    ).toBe(true);
+    act(() => second.dispatchEvent(new Event("scroll")));
+    expect(
+      container.querySelector("[role='scrollbar'] > div")!.classList.contains("opacity-100"),
+    ).toBe(true);
+  });
   it("renders a thumb once the lane has been measured", () => {
     const scrollable = createScrollable(1000);
     act(() => {
@@ -118,36 +220,6 @@ describe("OverlayScrollbar", () => {
     expect(thumb?.className).toContain("group-hover:opacity-100");
   });
 
-  it("flushes the bar against the right edge by default", () => {
-    const scrollable = createScrollable(1000);
-    act(() => {
-      root.render(<OverlayScrollbar scrollable={scrollable} />);
-    });
-    const lane = container.querySelector<HTMLElement>("[role='scrollbar']");
-    expect(lane?.className).toContain("right-0");
-    expect(lane?.className).toContain("bottom-px");
-    expect(lane?.style.getPropertyValue("--overlay-scrollbar-edge")).toBe("0px");
-  });
-
-  it("opens the bottom clearance for surfaces that need it", () => {
-    const scrollable = createScrollable(1000);
-    act(() => {
-      root.render(<OverlayScrollbar scrollable={scrollable} bottomGap="roomy" />);
-    });
-    const lane = container.querySelector<HTMLElement>("[role='scrollbar']");
-    expect(lane?.className).toContain("bottom-2");
-    expect(lane?.className).not.toContain("bottom-px");
-  });
-
-  it("pushes the bar into a content gutter when asked", () => {
-    const scrollable = createScrollable(1000);
-    act(() => {
-      root.render(<OverlayScrollbar scrollable={scrollable} thumbInset="gutter" />);
-    });
-    const lane = container.querySelector<HTMLElement>("[role='scrollbar']");
-    expect(lane?.style.getPropertyValue("--overlay-scrollbar-edge")).toBe("0.25rem");
-  });
-
   it("never fades the lane itself, only its contents", () => {
     const scrollable = createScrollable(1000);
     act(() => {
@@ -211,6 +283,38 @@ describe("OverlayScrollbar", () => {
     delete (thumb as unknown as Record<string, unknown>).releasePointerCapture;
   });
 
+  it.each(["blur", "lostpointercapture", "replace"])(
+    "keeps a grabbed compact thumb visible and stops dragging on %s",
+    (reason) => {
+      vi.useFakeTimers();
+      const scrollable = createScrollable(1000);
+      act(() => root.render(<OverlayScrollbar scrollable={scrollable} autoHide />));
+      const thumb = container.querySelector<HTMLElement>("[role='scrollbar'] > div")!;
+      thumb.setPointerCapture = () => {};
+      thumb.releasePointerCapture = () => {};
+      act(() =>
+        thumb.dispatchEvent(
+          new PointerEvent("pointerdown", { bubbles: true, button: 0, pointerId: 1 }),
+        ),
+      );
+      act(() => vi.advanceTimersByTime(900));
+      expect(thumb.classList.contains("opacity-100")).toBe(true);
+      if (reason === "replace") {
+        act(() => root.render(<OverlayScrollbar scrollable={createScrollable(2000)} autoHide />));
+      } else {
+        act(() => (reason === "blur" ? window : thumb).dispatchEvent(new Event(reason)));
+      }
+      scrollable.scrollTop = 123;
+      act(() =>
+        thumb.dispatchEvent(new PointerEvent("pointermove", { pointerId: 1, clientY: 300 })),
+      );
+      expect(scrollable.scrollTop).toBe(123);
+      expect(
+        container.querySelector("[role='scrollbar'] > div")!.classList.contains("opacity-0"),
+      ).toBe(true);
+    },
+  );
+
   it("coasts at a steady rate while a triangle is held", () => {
     vi.useFakeTimers();
     const scrollable = createScrollable(10_000);
@@ -233,6 +337,114 @@ describe("OverlayScrollbar", () => {
     });
     expect(scrollable.scrollTop).toBeGreaterThan(0);
     vi.useRealTimers();
+  });
+
+  it.each([
+    { label: "Scroll up", initialOffset: 600, direction: -1 },
+    { label: "Scroll down", initialOffset: 0, direction: 1 },
+  ])(
+    "starts holding $label at the boundary even with an earlier first frame",
+    ({ label, initialOffset, direction }) => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      vi.spyOn(performance, "now").mockReturnValue(200);
+      const frames = new Map<number, FrameRequestCallback>();
+      let nextFrame = 0;
+      vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+        frames.set(++nextFrame, callback);
+        return nextFrame;
+      });
+      vi.stubGlobal("cancelAnimationFrame", (id: number) => frames.delete(id));
+      const advanceFrame = (time: number) => {
+        const callbacks = [...frames.values()];
+        frames.clear();
+        act(() => callbacks.forEach((callback) => callback(time)));
+      };
+      const scrollable = createScrollable(1000);
+      let offset = initialOffset;
+      Object.defineProperty(scrollable, "scrollTop", {
+        get: () => offset,
+        set: (value: number) => {
+          offset = Math.max(0, Math.min(value, 600));
+        },
+      });
+      const onStep = vi.fn();
+      act(() =>
+        root.render(<OverlayScrollbar scrollable={scrollable} triangles onStep={onStep} />),
+      );
+      advanceFrame(100);
+      const button = container.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)!;
+      act(() => {
+        button.dispatchEvent(
+          new PointerEvent("pointerdown", { bubbles: true, button: 0, pointerId: 1 }),
+        );
+        vi.advanceTimersByTime(180);
+      });
+      // RAF timestamps describe the frame start, which can precede the timer callback.
+      advanceFrame(199);
+      advanceFrame(215);
+      expect((offset - initialOffset) * direction).toBeGreaterThan(0);
+      const beforeRelease = offset;
+      act(() => {
+        button.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerId: 1 }));
+        button.click();
+      });
+      advanceFrame(231);
+      expect(offset).toBe(beforeRelease);
+      expect(onStep).not.toHaveBeenCalled();
+      vi.useRealTimers();
+    },
+  );
+
+  it("cancels a pending hold when the scroll container changes", () => {
+    vi.useFakeTimers();
+    const previous = createScrollable(1000);
+    const current = createScrollable(1000);
+    act(() => root.render(<OverlayScrollbar scrollable={previous} triangles />));
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Scroll down"]')!
+        .dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0, pointerId: 1 }));
+    });
+    act(() => root.render(<OverlayScrollbar scrollable={current} triangles />));
+    act(() => vi.advanceTimersByTime(400));
+    expect(previous.scrollTop).toBe(0);
+    expect(current.scrollTop).toBe(0);
+    vi.useRealTimers();
+  });
+
+  it("releases the host's pinned scroll before a hold moves away from the end", () => {
+    vi.useFakeTimers();
+    const scrollable = createScrollable(1000);
+    let pinned = true;
+    let offset = 600;
+    Object.defineProperty(scrollable, "scrollTop", {
+      get: () => offset,
+      set: (value: number) => {
+        if (!pinned) offset = Math.max(0, Math.min(value, 600));
+      },
+    });
+    act(() =>
+      root.render(
+        <OverlayScrollbar
+          scrollable={scrollable}
+          triangles
+          onScrollStart={() => {
+            pinned = false;
+          }}
+        />,
+      ),
+    );
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Scroll up"]')!
+        .dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0, pointerId: 1 }));
+      vi.advanceTimersByTime(300);
+    });
+    expect(offset).toBeLessThan(600);
+    const beforeBlur = offset;
+    act(() => window.dispatchEvent(new Event("blur")));
+    act(() => vi.advanceTimersByTime(300));
+    expect(offset).toBe(beforeBlur);
   });
 
   it("narrows the thumb when a width is given", () => {

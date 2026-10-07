@@ -1,3 +1,4 @@
+import { ScrollFrame } from "~/components/ui/scroll-frame";
 import { SettingsGroup } from "./SettingsGroup";
 import { RefreshIcon } from "~/components/ui/refresh-icon";
 import { useAtomValue } from "@effect/atom-react";
@@ -216,19 +217,21 @@ function ProviderSettingsPlaceholder({
       {deviceTabs ? (
         <div className="flex min-h-11 min-w-0 items-center px-3 sm:px-4">{deviceTabs}</div>
       ) : null}
-      <SettingsGroup
-        divided={false}
-        className={cn(providerCardHeightClassName, "flex overflow-x-hidden overflow-y-auto")}
-      >
-        <Empty>
-          <EmptyMedia variant="icon">{icon}</EmptyMedia>
-          <EmptyHeader>
-            <EmptyTitle>{title}</EmptyTitle>
-            <EmptyDescription>{description}</EmptyDescription>
-          </EmptyHeader>
-          {children ? <EmptyContent className="max-w-xl">{children}</EmptyContent> : null}
-        </Empty>
-      </SettingsGroup>
+      <ScrollFrame variant="page">
+        <SettingsGroup
+          divided={false}
+          className={cn(providerCardHeightClassName, "flex overflow-x-hidden overflow-y-auto")}
+        >
+          <Empty>
+            <EmptyMedia variant="icon">{icon}</EmptyMedia>
+            <EmptyHeader>
+              <EmptyTitle>{title}</EmptyTitle>
+              <EmptyDescription>{description}</EmptyDescription>
+            </EmptyHeader>
+            {children ? <EmptyContent className="max-w-xl">{children}</EmptyContent> : null}
+          </Empty>
+        </SettingsGroup>
+      </ScrollFrame>
     </SettingsSection>
   );
 }
@@ -1289,6 +1292,7 @@ export function EnvironmentProviderSettings({
         >
           <div className="border-b border-border/60 bg-muted/10 @min-[48rem]/providers:flex @min-[48rem]/providers:min-h-0 @min-[48rem]/providers:flex-col @min-[48rem]/providers:border-r @min-[48rem]/providers:border-b-0">
             <ScrollArea
+              scrollbarVariant="page"
               scrollFade
               chainVerticalScroll
               className="@min-[48rem]/providers:min-h-0 @min-[48rem]/providers:flex-1"
@@ -1301,7 +1305,12 @@ export function EnvironmentProviderSettings({
 
           <div className="min-w-0 @min-[48rem]/providers:min-h-0">
             {selectedRow ? (
-              <ScrollArea scrollFade chainVerticalScroll className="@min-[48rem]/providers:h-full">
+              <ScrollArea
+                scrollbarVariant="page"
+                scrollFade
+                chainVerticalScroll
+                className="@min-[48rem]/providers:h-full"
+              >
                 <div className="space-y-6 p-4">{renderProviderInstance(selectedRow, "editor")}</div>
               </ScrollArea>
             ) : (

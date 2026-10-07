@@ -2008,7 +2008,7 @@ export default function GitActionsControl({
                 ) : (
                   <div className="space-y-2">
                     <div className="h-44 rounded-lg bg-card ring-1 ring-black/5 dark:bg-white/[0.025] dark:ring-white/5">
-                      <ScrollArea>
+                      <ScrollArea scrollbarVariant="compact">
                         <div className="space-y-1 p-1">
                           {allFiles.map((file) => {
                             const isExcluded = excludedFiles.has(file.path);

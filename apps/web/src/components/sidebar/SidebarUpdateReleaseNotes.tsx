@@ -1,3 +1,4 @@
+import { ScrollFrame } from "~/components/ui/scroll-frame";
 import type { DesktopBridge, DesktopUpdateState } from "@t3tools/contracts";
 import { ExternalLinkIcon } from "lucide-react";
 
@@ -74,47 +75,49 @@ export function SidebarUpdateReleaseNotes({
           <div className="text-sm leading-5 font-medium">{tooltip}</div>
         )}
       </div>
-      <div className="min-h-0 max-h-[min(28rem,calc(100vh-6rem))] overflow-y-auto px-1 pt-4 pb-1">
-        {state.releaseNotes.map((releaseNote, index) => {
-          const releaseUrl = getDesktopUpdateReleaseUrl(releaseNote.version);
-          const omittedItemCount = Math.max(0, releaseNote.totalItems - releaseNote.items.length);
-          const linkLabel =
-            omittedItemCount === 0
-              ? "View release on GitHub"
-              : `${omittedItemCount} more ${omittedItemCount === 1 ? "change" : "changes"} on GitHub`;
+      <ScrollFrame variant="compact">
+        <div className="min-h-0 max-h-[min(28rem,calc(100vh-6rem))] overflow-y-auto px-1 pt-4 pb-1">
+          {state.releaseNotes.map((releaseNote, index) => {
+            const releaseUrl = getDesktopUpdateReleaseUrl(releaseNote.version);
+            const omittedItemCount = Math.max(0, releaseNote.totalItems - releaseNote.items.length);
+            const linkLabel =
+              omittedItemCount === 0
+                ? "View release on GitHub"
+                : `${omittedItemCount} more ${omittedItemCount === 1 ? "change" : "changes"} on GitHub`;
 
-          return (
-            <div key={releaseNote.version}>
-              {index > 0 && <Separator className="my-3" />}
-              <section>
-                <h3 className="text-foreground text-xs leading-4 font-semibold">
-                  {index === 0 ? "What's changed" : `Changes in ${releaseNote.version}`}
-                </h3>
-                <ul className="mt-2 space-y-1.5 pl-4 text-xs leading-5 text-popover-foreground/90">
-                  {keyReleaseNoteItems(releaseNote.items).map(({ item, key }) => (
-                    <li className="list-disc break-words" key={key}>
-                      {item}
-                    </li>
-                  ))}
-                </ul>
-                {releaseUrl ? (
-                  <ReleaseLink releaseUrl={releaseUrl} shell={shell}>
-                    {linkLabel}
-                  </ReleaseLink>
-                ) : null}
-              </section>
+            return (
+              <div key={releaseNote.version}>
+                {index > 0 && <Separator className="my-3" />}
+                <section>
+                  <h3 className="text-foreground text-xs leading-4 font-semibold">
+                    {index === 0 ? "What's changed" : `Changes in ${releaseNote.version}`}
+                  </h3>
+                  <ul className="mt-2 space-y-1.5 pl-4 text-xs leading-5 text-popover-foreground/90">
+                    {keyReleaseNoteItems(releaseNote.items).map(({ item, key }) => (
+                      <li className="list-disc break-words" key={key}>
+                        {item}
+                      </li>
+                    ))}
+                  </ul>
+                  {releaseUrl ? (
+                    <ReleaseLink releaseUrl={releaseUrl} shell={shell}>
+                      {linkLabel}
+                    </ReleaseLink>
+                  ) : null}
+                </section>
+              </div>
+            );
+          })}
+          {state.omittedReleaseCount > 0 ? (
+            <div>
+              <Separator className="my-3" />
+              <ReleaseLink releaseUrl={getDesktopUpdateReleaseHistoryUrl()} shell={shell}>
+                {`${state.omittedReleaseCount} older ${state.omittedReleaseCount === 1 ? "release" : "releases"} on GitHub`}
+              </ReleaseLink>
             </div>
-          );
-        })}
-        {state.omittedReleaseCount > 0 ? (
-          <div>
-            <Separator className="my-3" />
-            <ReleaseLink releaseUrl={getDesktopUpdateReleaseHistoryUrl()} shell={shell}>
-              {`${state.omittedReleaseCount} older ${state.omittedReleaseCount === 1 ? "release" : "releases"} on GitHub`}
-            </ReleaseLink>
-          </div>
-        ) : null}
-      </div>
+          ) : null}
+        </div>
+      </ScrollFrame>
     </div>
   );
 }

@@ -1,3 +1,4 @@
+import { ScrollFrame } from "~/components/ui/scroll-frame";
 import type {
   EnvironmentId,
   PullRequestActor,
@@ -577,52 +578,54 @@ export function PullRequestTimelineTab({
   };
 
   return (
-    <div className="h-full overflow-y-auto px-4 py-5">
-      <div className="mx-auto max-w-3xl">
-        <div className="relative">
-          <span aria-hidden className="absolute bottom-5 left-[15px] top-1 w-px bg-border/45" />
-          {rows.map((row) => {
-            if (row.kind === "comments") {
-              return (
-                <ConversationGroup
-                  key={`comments:${row.events[0]?.id ?? "empty"}`}
-                  events={row.events}
-                  editable={editable}
-                  cwd={detail.workspaceRoot}
-                  onOpen={openOnHost}
-                  reactions={reactions}
-                />
-              );
-            }
-            const event = row.event;
-            if (event.kind === "commit") {
-              return <CommitEvent key={event.id} event={event} onOpen={onOpenCommit} />;
-            }
-            const outcome = pullRequestReviewOutcome(event.reviewState);
-            if (outcome !== null) {
-              return (
-                <ReviewVerdictEvent
-                  key={event.id}
-                  event={event}
-                  outcome={outcome}
-                  stale={isPullRequestVerdictStale(event.at, newestCommitAt)}
-                  cwd={detail.workspaceRoot}
-                  onOpen={openOnHost}
-                  reactions={reactions}
-                />
-              );
-            }
-            return <LifecycleEvent key={event.id} event={event} />;
-          })}
-        </div>
-
-        {events.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-16 text-center text-muted-foreground">
-            <PullRequestGlyph.pullRequest className="mb-2 size-5" />
-            <p className="text-xs">No activity yet.</p>
+    <ScrollFrame variant="page" className="h-full">
+      <div className="h-full overflow-y-auto px-4 py-5">
+        <div className="mx-auto max-w-3xl">
+          <div className="relative">
+            <span aria-hidden className="absolute bottom-5 left-[15px] top-1 w-px bg-border/45" />
+            {rows.map((row) => {
+              if (row.kind === "comments") {
+                return (
+                  <ConversationGroup
+                    key={`comments:${row.events[0]?.id ?? "empty"}`}
+                    events={row.events}
+                    editable={editable}
+                    cwd={detail.workspaceRoot}
+                    onOpen={openOnHost}
+                    reactions={reactions}
+                  />
+                );
+              }
+              const event = row.event;
+              if (event.kind === "commit") {
+                return <CommitEvent key={event.id} event={event} onOpen={onOpenCommit} />;
+              }
+              const outcome = pullRequestReviewOutcome(event.reviewState);
+              if (outcome !== null) {
+                return (
+                  <ReviewVerdictEvent
+                    key={event.id}
+                    event={event}
+                    outcome={outcome}
+                    stale={isPullRequestVerdictStale(event.at, newestCommitAt)}
+                    cwd={detail.workspaceRoot}
+                    onOpen={openOnHost}
+                    reactions={reactions}
+                  />
+                );
+              }
+              return <LifecycleEvent key={event.id} event={event} />;
+            })}
           </div>
-        ) : null}
+
+          {events.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-16 text-center text-muted-foreground">
+              <PullRequestGlyph.pullRequest className="mb-2 size-5" />
+              <p className="text-xs">No activity yet.</p>
+            </div>
+          ) : null}
+        </div>
       </div>
-    </div>
+    </ScrollFrame>
   );
 }

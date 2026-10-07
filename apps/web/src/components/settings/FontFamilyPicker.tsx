@@ -1,3 +1,4 @@
+import { ScrollFrame } from "~/components/ui/scroll-frame";
 import { LegendList, type LegendListRef } from "@legendapp/list/react";
 import { CheckIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
@@ -217,15 +218,17 @@ export function FontFamilyPicker({
           <ComboboxEmpty>{t("settings.appearance.fontPicker.empty")}</ComboboxEmpty>
           <div className="relative min-h-0 max-h-72 w-full flex-1 overflow-hidden">
             <ComboboxListVirtualized>
-              <LegendList<string>
-                ref={listRef}
-                data={items}
-                keyExtractor={(item) => item}
-                renderItem={({ item, index }) => renderItem(item, index)}
-                estimatedItemSize={30}
-                drawDistance={360}
-                style={{ height: Math.min(items.length * 30, 288) }}
-              />
+              <ScrollFrame variant="compact">
+                <LegendList<string>
+                  ref={listRef}
+                  data={items}
+                  keyExtractor={(item) => item}
+                  renderItem={({ item, index }) => renderItem(item, index)}
+                  estimatedItemSize={30}
+                  drawDistance={360}
+                  style={{ height: Math.min(items.length * 30, 288) }}
+                />
+              </ScrollFrame>
             </ComboboxListVirtualized>
           </div>
         </div>

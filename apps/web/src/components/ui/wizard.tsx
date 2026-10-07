@@ -3,6 +3,7 @@ import type { ComponentProps, ReactNode } from "react";
 
 import { cn } from "../../lib/utils";
 import { AnimatedHeight } from "../AnimatedHeight";
+import { ScrollFrame } from "./scroll-frame";
 import { DialogPopup, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "./dialog";
 
 /** Compose a wizard from its header, panel, and footer; flow logic stays with the caller. */
@@ -16,12 +17,11 @@ export function WizardPopup({
   return (
     <DialogPopup
       {...props}
-      className={cn(
-        "overflow-x-hidden overflow-y-auto",
-        size === "wide" ? "max-w-3xl" : "max-w-xl",
-      )}
+      className={cn("overflow-hidden", size === "wide" ? "max-w-3xl" : "max-w-xl")}
     >
-      <div className="flex min-h-0 flex-col">{children}</div>
+      <ScrollFrame variant="compact" className="flex-1">
+        <div className="flex min-h-0 flex-col overflow-x-hidden overflow-y-auto">{children}</div>
+      </ScrollFrame>
     </DialogPopup>
   );
 }

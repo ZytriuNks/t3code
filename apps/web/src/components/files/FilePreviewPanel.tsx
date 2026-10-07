@@ -1,3 +1,4 @@
+import { ScrollFrame } from "~/components/ui/scroll-frame";
 import { Spinner } from "~/components/ui/spinner";
 import type {
   ChatFileAttachment,
@@ -158,16 +159,18 @@ function WorkspaceImagePreview(props: {
   }
 
   return assetUrl._tag === "Success" && imageUrl !== null ? (
-    <div className="flex min-h-0 flex-1 items-center justify-center overflow-auto p-4">
-      <MediaActions source={actionsSource}>
-        <img
-          className="max-h-full max-w-full object-contain"
-          src={imageUrl}
-          alt={props.alt}
-          onError={() => setFailedUrl(imageUrl)}
-        />
-      </MediaActions>
-    </div>
+    <ScrollFrame variant="page" className="flex-1">
+      <div className="flex min-h-0 flex-1 items-center justify-center overflow-auto p-4">
+        <MediaActions source={actionsSource}>
+          <img
+            className="max-h-full max-w-full object-contain"
+            src={imageUrl}
+            alt={props.alt}
+            onError={() => setFailedUrl(imageUrl)}
+          />
+        </MediaActions>
+      </div>
+    </ScrollFrame>
   ) : (
     <div className="flex min-h-0 flex-1 items-center justify-center text-muted-foreground">
       <Spinner size="lg" />
@@ -778,60 +781,68 @@ function EditableFileSurface({
   return (
     <EditProvider editor={editor}>
       <div ref={surfaceRef} className="flex min-h-0 flex-1">
-        <Virtualizer
-          className="file-preview-virtualizer min-h-0 flex-1 overflow-auto"
-          config={{
-            overscrollSize: 600,
-            intersectionObserverMargin: 1200,
-          }}
+        <ScrollFrame
+          variant="page"
+          className="flex-1 [--overlay-scrollbar-track:var(--code-background)]"
         >
-          <File<FileCommentAnnotationGroup>
-            file={{
-              name: relativePath,
-              contents,
-              cacheKey: projectFileEditorCacheKey(
-                environmentId,
-                cwd,
-                relativePath,
-                contents,
-                editor.getFile(),
-              ),
-            }}
-            options={{
-              disableFileHeader: true,
-              enableGutterUtility: !hasOpenCommentForm,
-              enableLineSelection: !hasOpenCommentForm,
-              onGutterUtilityClick: setSelectedRange,
-              onLineSelectionChange: setSelectedRange,
-              onLineSelectionEnd: handleLineSelectionEnd,
-              overflow: wordWrap ? "wrap" : "scroll",
-              theme: resolveDiffThemeName(resolvedTheme),
-              preferredHighlighter: PREFERRED_HIGHLIGHTER,
-              themeType: resolvedTheme,
-              unsafeCSS: FILE_LINK_REVEAL_UNSAFE_CSS,
-              onPostRender: handlePostRender,
-            }}
-            selectedLines={selectedRange}
-            lineAnnotations={lineAnnotations}
-            renderAnnotation={(annotation) => (
-              <div className="py-1">
-                {annotation.metadata.entries.map((entry) => (
-                  <DiffCommentAnnotation
-                    key={entry.id}
-                    kind={entry.kind}
-                    rangeLabel={formatFileCommentRange(entry.startLine, entry.endLine)}
-                    text={entry.text}
-                    onCancel={() => removeAnnotationEntry(entry.id)}
-                    onComment={(text) => submitAnnotationEntry(entry.id, text)}
-                    onDelete={() => removeAnnotationEntry(entry.id)}
-                  />
-                ))}
-              </div>
+          <Virtualizer
+            className={cn(
+              "file-preview-virtualizer min-h-0 flex-1 overflow-auto",
+              wordWrap && "pe-3",
             )}
-            className="min-h-full"
-            contentEditable
-          />
-        </Virtualizer>
+            config={{
+              overscrollSize: 600,
+              intersectionObserverMargin: 1200,
+            }}
+          >
+            <File<FileCommentAnnotationGroup>
+              file={{
+                name: relativePath,
+                contents,
+                cacheKey: projectFileEditorCacheKey(
+                  environmentId,
+                  cwd,
+                  relativePath,
+                  contents,
+                  editor.getFile(),
+                ),
+              }}
+              options={{
+                disableFileHeader: true,
+                enableGutterUtility: !hasOpenCommentForm,
+                enableLineSelection: !hasOpenCommentForm,
+                onGutterUtilityClick: setSelectedRange,
+                onLineSelectionChange: setSelectedRange,
+                onLineSelectionEnd: handleLineSelectionEnd,
+                overflow: wordWrap ? "wrap" : "scroll",
+                theme: resolveDiffThemeName(resolvedTheme),
+                preferredHighlighter: PREFERRED_HIGHLIGHTER,
+                themeType: resolvedTheme,
+                unsafeCSS: FILE_LINK_REVEAL_UNSAFE_CSS,
+                onPostRender: handlePostRender,
+              }}
+              selectedLines={selectedRange}
+              lineAnnotations={lineAnnotations}
+              renderAnnotation={(annotation) => (
+                <div className="py-1">
+                  {annotation.metadata.entries.map((entry) => (
+                    <DiffCommentAnnotation
+                      key={entry.id}
+                      kind={entry.kind}
+                      rangeLabel={formatFileCommentRange(entry.startLine, entry.endLine)}
+                      text={entry.text}
+                      onCancel={() => removeAnnotationEntry(entry.id)}
+                      onComment={(text) => submitAnnotationEntry(entry.id, text)}
+                      onDelete={() => removeAnnotationEntry(entry.id)}
+                    />
+                  ))}
+                </div>
+              )}
+              className="min-h-full"
+              contentEditable
+            />
+          </Virtualizer>
+        </ScrollFrame>
       </div>
     </EditProvider>
   );
@@ -865,7 +876,7 @@ function RenderedMarkdownSurface({
   });
 
   return (
-    <ScrollArea className="min-h-0 flex-1">
+    <ScrollArea scrollbarVariant="page" className="min-h-0 flex-1">
       <FileMarkdownPreview
         text={contents}
         cwd={cwd}

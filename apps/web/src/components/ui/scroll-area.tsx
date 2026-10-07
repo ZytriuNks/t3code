@@ -1,8 +1,10 @@
 "use client";
 
 import { ScrollArea as ScrollAreaPrimitive } from "@base-ui/react/scroll-area";
+import { useState } from "react";
 
 import { cn } from "~/lib/utils";
+import { OverlayScrollbar } from "./overlay-scrollbar";
 
 function getVirtualizedScrollFadeClassName({ top, bottom }: { top: boolean; bottom: boolean }) {
   if (!top && !bottom) return undefined;
@@ -31,6 +33,8 @@ function ScrollArea({
   chainVerticalScroll = false,
   radius = "inherit",
   viewportTabIndex,
+  scrollbarVariant,
+  windowEdge = false,
   ...props
 }: ScrollAreaPrimitive.Root.Props & {
   scrollFade?: boolean;
@@ -44,7 +48,10 @@ function ScrollArea({
   radius?: "inherit" | "none";
   /** Override Base UI's focusable viewport when focusable descendants provide scroll access. */
   viewportTabIndex?: number;
+  scrollbarVariant?: "page" | "compact";
+  windowEdge?: boolean;
 }) {
+  const [scrollable, setScrollable] = useState<HTMLDivElement | null>(null);
   return (
     <ScrollAreaPrimitive.Root
       className={cn(
@@ -55,6 +62,7 @@ function ScrollArea({
       {...props}
     >
       <ScrollAreaPrimitive.Viewport
+        ref={setScrollable}
         {...(viewportTabIndex === undefined ? {} : { tabIndex: viewportTabIndex })}
         className={cn(
           "h-full max-h-[inherit] overflow-auto overscroll-contain rounded-[inherit] outline-none transition-shadow focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background data-has-overflow-x:overscroll-x-contain",
@@ -63,6 +71,7 @@ function ScrollArea({
             "mask-t-from-[calc(100%-min(var(--fade-size),var(--scroll-area-overflow-y-start)))] mask-b-from-[calc(100%-min(var(--fade-size),var(--scroll-area-overflow-y-end)))] mask-l-from-[calc(100%-min(var(--fade-size),var(--scroll-area-overflow-x-start)))] mask-r-from-[calc(100%-min(var(--fade-size),var(--scroll-area-overflow-x-end)))] [--fade-size:1.5rem]",
           scrollFade && scrollFadePadding && "scroll-p-[var(--fade-size)]",
           scrollbarGutter && "scrollbar-gutter-stable",
+          scrollbarVariant === "compact" && "pr-3",
           hideScrollbars &&
             "[-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
         )}
@@ -72,7 +81,17 @@ function ScrollArea({
       </ScrollAreaPrimitive.Viewport>
       {!hideScrollbars && (
         <>
-          <ScrollBar orientation="vertical" />
+          {scrollbarVariant ? (
+            <OverlayScrollbar
+              scrollable={scrollable}
+              triangles={scrollbarVariant === "page"}
+              autoHide={scrollbarVariant === "compact"}
+              thumbInset={scrollbarVariant === "compact" ? "gutter" : "edge"}
+              embedded={!windowEdge}
+            />
+          ) : (
+            <ScrollBar orientation="vertical" />
+          )}
           <ScrollBar orientation="horizontal" />
           <ScrollAreaPrimitive.Corner data-slot="scroll-area-corner" />
         </>
