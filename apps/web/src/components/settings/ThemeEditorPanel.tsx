@@ -1,3 +1,4 @@
+import { ScrollFrame } from "~/components/ui/scroll-frame";
 import {
   ChevronDownIcon,
   ChevronUpIcon,
@@ -1314,21 +1315,23 @@ export function ThemeEditorPanel({
 
       {isMinimized ? null : (
         <>
-          <div className="min-h-0 flex-1 space-y-3 overflow-y-auto py-3 pl-3 pr-1.5">
-            {renderNameField()}
-            {/* Inline and above the color list: the panel scrolls, and an
+          <ScrollFrame variant="compact" className="flex-1">
+            <div className="min-h-0 flex-1 space-y-3 overflow-y-auto py-3 pl-3 pr-1.5">
+              {renderNameField()}
+              {/* Inline and above the color list: the panel scrolls, and an
                 error parked below every role would go unseen. */}
-            {error ? (
-              <p aria-live="polite" className="text-sm text-destructive">
-                {error}
-              </p>
-            ) : null}
-            {renderAppearanceButtons()}
-            <div className="space-y-3">
-              {renderColorsHeader()}
-              {renderColorFields()}
+              {error ? (
+                <p aria-live="polite" className="text-sm text-destructive">
+                  {error}
+                </p>
+              ) : null}
+              {renderAppearanceButtons()}
+              <div className="space-y-3">
+                {renderColorsHeader()}
+                {renderColorFields()}
+              </div>
             </div>
-          </div>
+          </ScrollFrame>
           <div className="flex items-center justify-end gap-2 border-t border-border/70 px-3 py-2">
             <Button size="sm" variant="ghost" onClick={() => onOpenChange(false)}>
               {t("settings.general.cancel")}

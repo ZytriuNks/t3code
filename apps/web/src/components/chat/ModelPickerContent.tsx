@@ -1,3 +1,4 @@
+import { ScrollFrame } from "~/components/ui/scroll-frame";
 import {
   ANTIGRAVITY_DEFAULT_MODEL,
   type ProviderInstanceId,
@@ -38,6 +39,7 @@ import {
 import { useClientSettings, useUpdateClientSettings } from "~/hooks/useSettings";
 import { cn } from "~/lib/utils";
 import { getVirtualizedScrollFadeClassName } from "../ui/scroll-area";
+import { OverlayScrollbar } from "../ui/overlay-scrollbar";
 import { TooltipProvider } from "../ui/tooltip";
 import { InlineButton } from "../ui/button";
 import {
@@ -197,6 +199,8 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   const [showBottomScrollFade, setShowBottomScrollFade] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const modelListRef = useRef<LegendListRef | null>(null);
+  // Native scroll element behind LegendList, for the overlay scrollbar.
+  const [modelListScrollableNode, setModelListScrollableNode] = useState<HTMLElement | null>(null);
   const highlightedModelKeyRef = useRef<string | null>(null);
   const favorites = useClientSettings((s) => s.favorites ?? []);
   const activeEntry = props.instanceEntries.find(
@@ -699,6 +703,14 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       ),
     [visibleModels],
   );
+  useEffect(() => {
+    // Duck-type instead of `instanceof HTMLElement` so this stays safe in
+    // non-DOM render environments.
+    const node = modelListRef.current?.getScrollableNode();
+    setModelListScrollableNode(
+      node && typeof node === "object" && "scrollTop" in node ? (node as HTMLElement) : null,
+    );
+  }, [filteredItemKeys]);
   const updateModelListScrollFades = useCallback(() => {
     const scrollElement = modelListRef.current?.getScrollableNode();
     if (!(scrollElement instanceof HTMLElement)) {
@@ -944,7 +956,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
             />
 
             {/* Model list */}
-            <div className="relative min-h-0 flex-1 overflow-hidden pr-px">
+            <div className="relative min-h-0 flex-1 overflow-hidden">
               <ComboboxListVirtualized>
                 <LegendList<string>
                   ref={modelListRef}
@@ -1016,12 +1028,12 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
                   estimatedItemSize={52}
                   drawDistance={480}
                   recycleItems
-                  contentContainerClassName="pl-2 pr-px"
+                  contentContainerClassName="pl-2 pr-2"
                   ItemSeparatorComponent={ModelListSeparator}
                   onLayout={updateModelListScrollFades}
                   onScroll={updateModelListScrollFades}
                   className={cn(
-                    "scrollbar-gutter-stable h-full overflow-x-hidden overscroll-y-contain py-1.5 [&::-webkit-scrollbar-track]:my-2",
+                    "h-full overflow-x-hidden overscroll-y-contain py-1.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
                     getVirtualizedScrollFadeClassName({
                       top: showTopScrollFade,
                       bottom: showBottomScrollFade,
@@ -1029,28 +1041,39 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
                   )}
                 />
               </ComboboxListVirtualized>
+              {/* Outside the list on purpose: inside it, the lane is positioned
+                  against the scroll container and sits under its content, so it
+                  could neither be hovered nor dragged. */}
+              <OverlayScrollbar
+                scrollable={modelListScrollableNode}
+                autoHide
+                width="6px"
+                thumbInset="gutter"
+              />
             </div>
             {providerSetupEntries.length > 0 ? (
-              <div className="max-h-44 shrink-0 overflow-y-auto border-t border-border/70 p-2">
-                {providerSetupEntries.map((entry) => (
-                  <div key={entry.instanceId} className="px-1 py-1.5 text-xs leading-snug">
-                    <p className="line-clamp-3 text-muted-foreground">
-                      {getProviderStatusMessage(entry.snapshot)}
-                    </p>
-                    <InlineButton
-                      className="mt-1"
-                      onClick={() => {
-                        props.onRequestClose?.();
-                        props.onOpenProviderSetup?.(entry.instanceId);
-                      }}
-                    >
-                      {providerSetupEntries.length > 1
-                        ? `Set up ${entry.displayName}`
-                        : "Open provider setup"}
-                    </InlineButton>
-                  </div>
-                ))}
-              </div>
+              <ScrollFrame variant="compact" className="shrink-0">
+                <div className="max-h-44 shrink-0 overflow-y-auto border-t border-border/70 p-2">
+                  {providerSetupEntries.map((entry) => (
+                    <div key={entry.instanceId} className="px-1 py-1.5 text-xs leading-snug">
+                      <p className="line-clamp-3 text-muted-foreground">
+                        {getProviderStatusMessage(entry.snapshot)}
+                      </p>
+                      <InlineButton
+                        className="mt-1"
+                        onClick={() => {
+                          props.onRequestClose?.();
+                          props.onOpenProviderSetup?.(entry.instanceId);
+                        }}
+                      >
+                        {providerSetupEntries.length > 1
+                          ? `Set up ${entry.displayName}`
+                          : "Open provider setup"}
+                      </InlineButton>
+                    </div>
+                  ))}
+                </div>
+              </ScrollFrame>
             ) : (
               <ComboboxEmpty className="empty:h-0">No models found</ComboboxEmpty>
             )}

@@ -1,3 +1,4 @@
+import { ScrollFrame } from "~/components/ui/scroll-frame";
 import {
   isModifierPairShortcut,
   type DesktopCaptureConfigApplied,
@@ -171,19 +172,21 @@ export function CaptureShortcutConfig({
                 : "This shortcut is already set up."}
           </p>
           {diff ? (
-            <div
-              className="max-h-80 overflow-auto rounded-lg border text-xs"
-              aria-label="Shortcut changes"
-            >
-              <FileDiff
-                fileDiff={diff}
-                options={{
-                  diffStyle: "unified",
-                  theme: resolveDiffThemeName(resolvedTheme),
-                  overflow: "wrap",
-                }}
-              />
-            </div>
+            <ScrollFrame variant="page">
+              <div
+                className="max-h-80 overflow-auto rounded-lg border text-xs"
+                aria-label="Shortcut changes"
+              >
+                <FileDiff
+                  fileDiff={diff}
+                  options={{
+                    diffStyle: "unified",
+                    theme: resolveDiffThemeName(resolvedTheme),
+                    overflow: "wrap",
+                  }}
+                />
+              </div>
+            </ScrollFrame>
           ) : null}
           {changed ? (
             <p className="text-xs text-muted-foreground">
@@ -309,9 +312,11 @@ export function CaptureShortcutConfig({
               : "Add this binding to your Hyprland config, then save."}{" "}
             Change the keys if needed.
           </p>
-          <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-xl bg-muted/50 p-3">
-            {state.shortcutBinding}
-          </pre>
+          <ScrollFrame variant="page">
+            <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-xl bg-muted/50 p-3">
+              {state.shortcutBinding}
+            </pre>
+          </ScrollFrame>
           <Button
             size="sm"
             variant="outline"

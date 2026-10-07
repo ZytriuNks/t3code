@@ -1,3 +1,4 @@
+import { ScrollFrame } from "~/components/ui/scroll-frame";
 /**
  * Agents right-panel surface: the fleet view over the native subagent fold.
  * The chat carries one expandable row per spawn batch and links here.
@@ -294,18 +295,20 @@ function WorkflowScriptView({
           <X aria-hidden className="size-3" />
         </Button>
       </div>
-      <div className="max-h-72 overflow-auto p-2">
-        {result._tag === "Success" ? (
-          <pre className="whitespace-pre-wrap break-words font-mono text-2xs leading-relaxed text-foreground/90">
-            {result.value.contents}
-            {result.value.truncated ? "\n… (truncated)" : ""}
-          </pre>
-        ) : result._tag === "Failure" ? (
-          <p className="text-xs text-destructive-foreground">Could not load the script.</p>
-        ) : (
-          <p className="text-xs text-muted-foreground">Loading…</p>
-        )}
-      </div>
+      <ScrollFrame variant="compact">
+        <div className="max-h-72 overflow-auto p-2">
+          {result._tag === "Success" ? (
+            <pre className="whitespace-pre-wrap break-words font-mono text-2xs leading-relaxed text-foreground/90">
+              {result.value.contents}
+              {result.value.truncated ? "\n… (truncated)" : ""}
+            </pre>
+          ) : result._tag === "Failure" ? (
+            <p className="text-xs text-destructive-foreground">Could not load the script.</p>
+          ) : (
+            <p className="text-xs text-muted-foreground">Loading…</p>
+          )}
+        </div>
+      </ScrollFrame>
     </div>
   );
 }

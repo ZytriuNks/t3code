@@ -1,3 +1,4 @@
+import { ScrollFrame } from "~/components/ui/scroll-frame";
 import type {
   EnvironmentId,
   OrchestrationV2ProjectedTurnItem,
@@ -30,9 +31,11 @@ function StructuredValue({ value }: { readonly value: unknown }) {
   const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
   if (!text) return null;
   return (
-    <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-md border border-border/50 bg-background/60 p-2 font-mono text-[11px] leading-relaxed text-muted-foreground select-text">
-      {text}
-    </pre>
+    <ScrollFrame variant="compact">
+      <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-md border border-border/50 bg-background/60 p-2 font-mono text-[11px] leading-relaxed text-muted-foreground select-text">
+        {text}
+      </pre>
+    </ScrollFrame>
   );
 }
 

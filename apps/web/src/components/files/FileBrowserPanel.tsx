@@ -7,10 +7,11 @@ import type { EnvironmentId, ProjectEntry } from "@t3tools/contracts";
 import { FileTree, useFileTree, useFileTreeSearch, useFileTreeSelector } from "@pierre/trees/react";
 import { serializeComposerFileLink } from "@t3tools/shared/composerTrigger";
 import { ChevronsDownUpIcon, ChevronsUpDownIcon } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "~/components/ui/button";
 import { InputGroup, InputGroupInput } from "~/components/ui/input-group";
+import { OverlayScrollbar } from "~/components/ui/overlay-scrollbar";
 import { toastManager } from "~/components/ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 import { useComposerHandleContext } from "~/composerHandleContext";
@@ -40,6 +41,24 @@ interface FileBrowserPanelProps {
   onRefreshSelectedFile?: () => void;
   workspaceMutationId: string | null;
 }
+
+const FILE_BROWSER_TREE_UNSAFE_CSS = `${PIERRE_TREE_UNSAFE_CSS}
+  [data-file-tree-virtualized-scroll='true'] {
+    scrollbar-width: none;
+    padding-inline-end: 12px;
+  }
+  [data-file-tree-virtualized-scroll='true']::-webkit-scrollbar {
+    display: none;
+  }
+  /* The tree lives in a shadow root; the shared edge distances still inherit. */
+  [data-file-tree-virtualized-scroll='true'][data-overlay-scroll-fade] {
+    mask-image: linear-gradient(to bottom, transparent,
+      black var(--overlay-scroll-fade-top),
+      black calc(100% - var(--overlay-scroll-fade-bottom)), transparent);
+    mask-size: 100% 100%;
+    mask-repeat: no-repeat;
+  }
+`;
 
 function treePath(entry: ProjectEntry): string {
   return entry.kind === "directory" ? `${entry.path}/` : entry.path;
@@ -284,7 +303,7 @@ export default function FileBrowserPanel({
     paths: [],
     search: false,
     onSearchChange: (value) => setQuery(value ?? ""),
-    unsafeCSS: PIERRE_TREE_UNSAFE_CSS,
+    unsafeCSS: FILE_BROWSER_TREE_UNSAFE_CSS,
   });
   const search = useFileTreeSearch(model);
   const allDirectoriesExpanded = useFileTreeSelector(model, (currentModel) =>
@@ -463,6 +482,23 @@ export default function FileBrowserPanel({
   // The capture phase runs before the tree's own dragstart handler selects
   // the dragged row, so the drag flag is up before that selection emits.
   const panelRef = useRef<HTMLDivElement | null>(null);
+  const [fileTreeHost, setFileTreeHost] = useState<HTMLDivElement | null>(null);
+  const [fileTreeScrollable, setFileTreeScrollable] = useState<HTMLElement | null>(null);
+  // Pierre owns the virtualized scroll node inside its shadow root. Bind the
+  // overlay after its host mounts, without introducing a second scroll owner.
+  useLayoutEffect(() => {
+    if (!fileTreeHost) return;
+    const findScrollable = () => {
+      const next = fileTreeHost
+        .querySelector("file-tree-container")
+        ?.shadowRoot?.querySelector<HTMLElement>("[data-file-tree-virtualized-scroll='true']");
+      setFileTreeScrollable(next ?? null);
+    };
+    findScrollable();
+    const observer = new MutationObserver(findScrollable);
+    observer.observe(fileTreeHost, { childList: true, subtree: true });
+    return () => observer.disconnect();
+  }, [fileTreeHost]);
   useEffect(() => {
     treeModelRef.current = model;
   }, [model]);
@@ -547,12 +583,21 @@ export default function FileBrowserPanel({
           Loading files…
         </div>
       )}
-      <FileTree
-        model={model}
-        aria-label={`${projectName} files`}
-        className="min-h-0 flex-1 overflow-hidden"
-        style={pierreTreeStyle(resolvedTheme)}
-      />
+      <div ref={setFileTreeHost} className="relative min-h-0 flex-1">
+        <FileTree
+          model={model}
+          aria-label={`${projectName} files`}
+          className="size-full min-h-0 overflow-hidden"
+          style={pierreTreeStyle(resolvedTheme)}
+        />
+        <OverlayScrollbar
+          scrollable={fileTreeScrollable}
+          autoHide
+          triangles
+          scrollFade
+          className="[--overlay-scrollbar-track:var(--background)]"
+        />
+      </div>
     </div>
   );
 }

@@ -1,3 +1,4 @@
+import { ScrollFrame } from "~/components/ui/scroll-frame";
 import { createContext, use, type ComponentProps, type ReactNode } from "react";
 import { cn } from "../../lib/utils";
 
@@ -117,19 +118,21 @@ export function WorkLogDetails({
   kind?: "text" | "panel" | "media";
 }) {
   return (
-    <div
-      className={cn(
-        "ms-7 cursor-auto",
-        kind === "text"
-          ? "flex max-h-96 flex-col gap-3 overflow-auto px-0.5 py-1 select-text"
-          : kind === "panel"
-            ? "mt-1 rounded-md bg-muted/40 px-3 py-2"
-            : "mt-1",
-      )}
-      onClick={(event) => event.stopPropagation()}
-      onPointerDown={(event) => event.stopPropagation()}
-    >
-      {children}
-    </div>
+    <ScrollFrame variant="compact">
+      <div
+        className={cn(
+          "ms-7 cursor-auto",
+          kind === "text"
+            ? "flex max-h-96 flex-col gap-3 overflow-auto px-0.5 py-1 select-text"
+            : kind === "panel"
+              ? "mt-1 rounded-md bg-muted/40 px-3 py-2"
+              : "mt-1",
+        )}
+        onClick={(event) => event.stopPropagation()}
+        onPointerDown={(event) => event.stopPropagation()}
+      >
+        {children}
+      </div>
+    </ScrollFrame>
   );
 }

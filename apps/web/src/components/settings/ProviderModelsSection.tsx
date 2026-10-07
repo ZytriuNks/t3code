@@ -1,5 +1,7 @@
 "use client";
 
+import { ScrollFrame } from "~/components/ui/scroll-frame";
+
 import { ArrowDownIcon, ArrowUpIcon, PencilIcon, PlusIcon, StarIcon, XIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -577,52 +579,53 @@ export function ProviderModelsSection({
           </Button>
         ) : null}
       </div>
-      <div
-        ref={listRef}
-        className="mt-2 -mx-2 max-h-64 overflow-y-auto lg:max-h-none lg:min-h-0 lg:flex-1"
-      >
-        {visibleModels.length === 0 ? (
-          <p className="px-2 py-2 text-xs text-muted-foreground">
-            {t(
-              isFiltering ? "settings.providers.models.noMatch" : "settings.providers.models.none",
-            )}
-          </p>
-        ) : null}
-        {visibleModels.map((model, index) => {
-          const group = groupOf(model);
-          const previous = visibleModels[index - 1];
-          const startsGroup = previous === undefined || groupOf(previous) !== group;
-          const editingEntry =
-            model.isCustom && editingSlug === model.slug
-              ? customModels.find((entry) => entry.slug === model.slug)
-              : undefined;
-          return (
-            <div key={`${instanceId}:${model.slug}:group`}>
-              {startsGroup && favoriteCount > 0 && group === "favorite"
-                ? groupLabel(t("settings.providers.models.group.favorites"), index === 0)
-                : null}
-              {startsGroup && favoriteCount > 0 && group === "visible"
-                ? groupLabel(t("settings.providers.models.group.all"), index === 0)
-                : null}
-              {startsGroup && group === "hidden"
-                ? groupLabel(t("settings.providers.models.group.hidden"), index === 0)
-                : null}
-              {renderRow(model)}
-              {editingEntry ? (
-                <CustomModelEditor
-                  key={`${instanceId}:${model.slug}:editor`}
-                  instanceId={instanceId}
-                  driverKind={driverKind}
-                  entry={editingEntry}
-                  builtInModels={builtInModels}
-                  onSave={handleSaveEdit}
-                  onCancel={() => setEditingSlug(null)}
-                />
-              ) : null}
-            </div>
-          );
-        })}
-      </div>
+      <ScrollFrame variant="page" className="mt-2 -mx-2 lg:flex-1">
+        <div ref={listRef} className="max-h-64 overflow-y-auto lg:max-h-none lg:min-h-0 lg:flex-1">
+          {visibleModels.length === 0 ? (
+            <p className="px-2 py-2 text-xs text-muted-foreground">
+              {t(
+                isFiltering
+                  ? "settings.providers.models.noMatch"
+                  : "settings.providers.models.none",
+              )}
+            </p>
+          ) : null}
+          {visibleModels.map((model, index) => {
+            const group = groupOf(model);
+            const previous = visibleModels[index - 1];
+            const startsGroup = previous === undefined || groupOf(previous) !== group;
+            const editingEntry =
+              model.isCustom && editingSlug === model.slug
+                ? customModels.find((entry) => entry.slug === model.slug)
+                : undefined;
+            return (
+              <div key={`${instanceId}:${model.slug}:group`}>
+                {startsGroup && favoriteCount > 0 && group === "favorite"
+                  ? groupLabel(t("settings.providers.models.group.favorites"), index === 0)
+                  : null}
+                {startsGroup && favoriteCount > 0 && group === "visible"
+                  ? groupLabel(t("settings.providers.models.group.all"), index === 0)
+                  : null}
+                {startsGroup && group === "hidden"
+                  ? groupLabel(t("settings.providers.models.group.hidden"), index === 0)
+                  : null}
+                {renderRow(model)}
+                {editingEntry ? (
+                  <CustomModelEditor
+                    key={`${instanceId}:${model.slug}:editor`}
+                    instanceId={instanceId}
+                    driverKind={driverKind}
+                    entry={editingEntry}
+                    builtInModels={builtInModels}
+                    onSave={handleSaveEdit}
+                    onCancel={() => setEditingSlug(null)}
+                  />
+                ) : null}
+              </div>
+            );
+          })}
+        </div>
+      </ScrollFrame>
 
       {driverKind === "antigravity" ? null : isAdding ? (
         <div className="mt-3 flex flex-col gap-2 sm:flex-row">

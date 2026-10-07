@@ -282,6 +282,7 @@ function Children({ className, render, ...props }: useRender.ComponentProps<"div
 function Scroll({ className, children, ...props }: ComponentProps<typeof ScrollArea>) {
   return (
     <ScrollArea
+      scrollbarVariant="compact"
       radius="none"
       scrollFade
       className={cn("h-auto max-h-[min(24rem,40dvh)]", className)}

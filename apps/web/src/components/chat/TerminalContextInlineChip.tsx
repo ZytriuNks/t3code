@@ -1,3 +1,4 @@
+import { ScrollFrame } from "~/components/ui/scroll-frame";
 import { TerminalIcon } from "lucide-react";
 
 import type { ContextPresentationCapability } from "../contextPresentationRegistry";
@@ -34,13 +35,15 @@ export function TerminalContextInlineChip(props: TerminalContextInlineChipProps)
               {lineStart === lineEnd ? `Line ${lineStart}` : `Lines ${lineStart}–${lineEnd}`}
             </span>
           </div>
-          <pre
-            className="max-h-80 overflow-auto whitespace-pre bg-muted p-3 font-mono text-foreground text-xs leading-relaxed outline-none [tab-size:4] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
-            aria-label="Captured terminal output"
-            tabIndex={0}
-          >
-            {text}
-          </pre>
+          <ScrollFrame variant="compact">
+            <pre
+              className="max-h-80 overflow-auto whitespace-pre bg-muted p-3 font-mono text-foreground text-xs leading-relaxed outline-none [tab-size:4] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+              aria-label="Captured terminal output"
+              tabIndex={0}
+            >
+              {text}
+            </pre>
+          </ScrollFrame>
         </div>
       </ContextChipPopover>
     );

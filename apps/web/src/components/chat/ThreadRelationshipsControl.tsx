@@ -1,3 +1,4 @@
+import { ScrollFrame } from "~/components/ui/scroll-frame";
 import { ThreadDetailsControl } from "./ThreadDetailsControl";
 import { ThreadHoverCardPopup } from "../ThreadHoverCard";
 import { ThreadDetailsSection } from "./ThreadDetailsSection";
@@ -86,12 +87,14 @@ export function ThreadLineageRowList(props: {
         button, so keyboard users reach and scroll the region through the rows
         themselves and the container needs no extra tab stop of its own.
       */}
-      <ul
-        aria-label="Related threads"
-        className="m-0 max-h-[13.5rem] list-none overflow-y-auto overscroll-contain p-0"
-      >
-        {props.children}
-      </ul>
+      <ScrollFrame variant="compact">
+        <ul
+          aria-label="Related threads"
+          className="m-0 max-h-[13.5rem] list-none overflow-y-auto overscroll-contain p-0"
+        >
+          {props.children}
+        </ul>
+      </ScrollFrame>
       {props.hiddenCount > 0 ? (
         <button
           type="button"

@@ -654,7 +654,11 @@ function AgentsStep({
       title="Connect your agents"
       description="Choose an agent to start coding. You can add more later."
     >
-      <ScrollArea scrollFade className="mt-5 h-auto max-h-[min(32rem,55dvh)]">
+      <ScrollArea
+        scrollbarVariant="compact"
+        scrollFade
+        className="mt-5 h-auto max-h-[min(32rem,55dvh)]"
+      >
         <div className="space-y-5 pr-3">
           {environmentIds.map((environmentId) => (
             <ConnectedAgentsStep
@@ -1397,7 +1401,7 @@ function ImportStep({
           </div>
         </div>
       ) : null}
-      <ScrollArea scrollFade className="mt-2 h-auto max-h-80">
+      <ScrollArea scrollbarVariant="compact" scrollFade className="mt-2 h-auto max-h-80">
         <div className="space-y-5 pr-3">
           {scans.map((scan) => {
             const scanCandidates = candidates.filter(

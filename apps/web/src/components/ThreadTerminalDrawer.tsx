@@ -1,3 +1,4 @@
+import { ScrollFrame } from "~/components/ui/scroll-frame";
 import { useAtomValue } from "@effect/atom-react";
 import {
   isAtomCommandInterrupted,
@@ -1628,85 +1629,87 @@ export default function ThreadTerminalDrawer({
                 </div>
               </div>
 
-              <div className="min-h-0 flex-1 overflow-y-auto px-1 py-1">
-                {resolvedTerminalGroups.map((terminalGroup) => {
-                  const isGroupActive =
-                    terminalGroup.terminalIds.includes(resolvedActiveTerminalId);
-                  const groupActiveTerminalId = isGroupActive
-                    ? resolvedActiveTerminalId
-                    : (terminalGroup.terminalIds[0] ?? resolvedActiveTerminalId);
-                  const terminalCount = terminalGroup.terminalIds.length;
-                  const isSplitGroup = terminalCount > 1;
-                  const groupLabel = !isSplitGroup
-                    ? "Single"
-                    : terminalGroup.splitDirection === "vertical"
-                      ? "Stacked"
-                      : "Side by side";
-                  const GroupIcon = !isSplitGroup
-                    ? Square
-                    : terminalGroup.splitDirection === "vertical"
-                      ? SquareSplitVertical
-                      : SquareSplitHorizontal;
+              <ScrollFrame variant="compact" className="flex-1">
+                <div className="min-h-0 flex-1 overflow-y-auto px-1 py-1">
+                  {resolvedTerminalGroups.map((terminalGroup) => {
+                    const isGroupActive =
+                      terminalGroup.terminalIds.includes(resolvedActiveTerminalId);
+                    const groupActiveTerminalId = isGroupActive
+                      ? resolvedActiveTerminalId
+                      : (terminalGroup.terminalIds[0] ?? resolvedActiveTerminalId);
+                    const terminalCount = terminalGroup.terminalIds.length;
+                    const isSplitGroup = terminalCount > 1;
+                    const groupLabel = !isSplitGroup
+                      ? "Single"
+                      : terminalGroup.splitDirection === "vertical"
+                        ? "Stacked"
+                        : "Side by side";
+                    const GroupIcon = !isSplitGroup
+                      ? Square
+                      : terminalGroup.splitDirection === "vertical"
+                        ? SquareSplitVertical
+                        : SquareSplitHorizontal;
 
-                  return (
-                    <div key={terminalGroup.id} className="pb-0.5">
-                      {showGroupHeaders && (
-                        <button
-                          type="button"
-                          className={`flex h-[22px] w-full cursor-pointer items-center gap-1 rounded px-1.5 text-2xs ${
-                            isGroupActive
-                              ? "bg-accent/50 text-foreground"
-                              : "text-muted-foreground hover:bg-accent/40 hover:text-foreground"
-                          }`}
-                          onClick={() => onActiveTerminalChange(groupActiveTerminalId)}
-                        >
-                          <GroupIcon className="size-3 shrink-0" />
-                          <span className="min-w-0 flex-1 truncate text-left">{groupLabel}</span>
-                          <span className="text-muted-foreground/70 text-3xs tabular-nums">
-                            {terminalCount}
-                          </span>
-                        </button>
-                      )}
+                    return (
+                      <div key={terminalGroup.id} className="pb-0.5">
+                        {showGroupHeaders && (
+                          <button
+                            type="button"
+                            className={`flex h-[22px] w-full cursor-pointer items-center gap-1 rounded px-1.5 text-2xs ${
+                              isGroupActive
+                                ? "bg-accent/50 text-foreground"
+                                : "text-muted-foreground hover:bg-accent/40 hover:text-foreground"
+                            }`}
+                            onClick={() => onActiveTerminalChange(groupActiveTerminalId)}
+                          >
+                            <GroupIcon className="size-3 shrink-0" />
+                            <span className="min-w-0 flex-1 truncate text-left">{groupLabel}</span>
+                            <span className="text-muted-foreground/70 text-3xs tabular-nums">
+                              {terminalCount}
+                            </span>
+                          </button>
+                        )}
 
-                      <div className="flex flex-col gap-0.5">
-                        {terminalGroup.terminalIds.map((terminalId) => {
-                          const isActive = terminalId === resolvedActiveTerminalId;
-                          const terminalLabel = terminalLabelById.get(terminalId) ?? "Terminal";
-                          const closeTerminalLabel = `Close ${terminalLabel}${
-                            isActive && closeShortcutLabel ? ` (${closeShortcutLabel})` : ""
-                          }`;
-                          return (
-                            <div
-                              key={terminalId}
-                              className={cn(
-                                "group/tab flex h-6 w-full items-center gap-0.5 rounded-md pr-2 pl-1.5 text-xs",
-                                isActive
-                                  ? "bg-accent text-foreground"
-                                  : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
-                              )}
-                            >
-                              <PanelTabCloseButton
-                                label={closeTerminalLabel}
-                                onClick={() => confirmCloseTerminal(terminalId)}
-                                tooltip={closeTerminalLabel}
+                        <div className="flex flex-col gap-0.5">
+                          {terminalGroup.terminalIds.map((terminalId) => {
+                            const isActive = terminalId === resolvedActiveTerminalId;
+                            const terminalLabel = terminalLabelById.get(terminalId) ?? "Terminal";
+                            const closeTerminalLabel = `Close ${terminalLabel}${
+                              isActive && closeShortcutLabel ? ` (${closeShortcutLabel})` : ""
+                            }`;
+                            return (
+                              <div
+                                key={terminalId}
+                                className={cn(
+                                  "group/tab flex h-6 w-full items-center gap-0.5 rounded-md pr-2 pl-1.5 text-xs",
+                                  isActive
+                                    ? "bg-accent text-foreground"
+                                    : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
+                                )}
                               >
-                                <TerminalSquare className="size-3 shrink-0" />
-                              </PanelTabCloseButton>
-                              <button
-                                type="button"
-                                className="flex min-w-0 flex-1 cursor-pointer items-center gap-1 text-left"
-                                onClick={() => onActiveTerminalChange(terminalId)}
-                              >
-                                <span className="truncate">{terminalLabel}</span>
-                              </button>
-                            </div>
-                          );
-                        })}
+                                <PanelTabCloseButton
+                                  label={closeTerminalLabel}
+                                  onClick={() => confirmCloseTerminal(terminalId)}
+                                  tooltip={closeTerminalLabel}
+                                >
+                                  <TerminalSquare className="size-3 shrink-0" />
+                                </PanelTabCloseButton>
+                                <button
+                                  type="button"
+                                  className="flex min-w-0 flex-1 cursor-pointer items-center gap-1 text-left"
+                                  onClick={() => onActiveTerminalChange(terminalId)}
+                                >
+                                  <span className="truncate">{terminalLabel}</span>
+                                </button>
+                              </div>
+                            );
+                          })}
+                        </div>
                       </div>
-                    </div>
-                  );
-                })}
-              </div>
+                    );
+                  })}
+                </div>
+              </ScrollFrame>
             </aside>
           )}
         </div>

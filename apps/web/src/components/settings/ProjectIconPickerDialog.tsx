@@ -160,7 +160,7 @@ export function ProjectIconPickerDialog({
                 placeholder={t("settings.project.searchAllLucideIcons")}
                 onChange={(event) => setQuery(event.currentTarget.value)}
               />
-              <ScrollArea scrollFade className="max-h-64">
+              <ScrollArea scrollbarVariant="compact" scrollFade className="max-h-64">
                 <div className="grid grid-cols-8 gap-1 p-0.5 sm:grid-cols-10">
                   {icons.map((name) => (
                     <button
@@ -212,7 +212,7 @@ export function ProjectIconPickerDialog({
             </div>
           ) : (
             <>
-              <ScrollArea scrollFade className="max-h-64">
+              <ScrollArea scrollbarVariant="compact" scrollFade className="max-h-64">
                 <div className="grid grid-cols-8 gap-1 p-0.5 sm:grid-cols-10">
                   {PROJECT_EMOJIS.map((option) => (
                     <button

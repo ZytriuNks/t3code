@@ -74,7 +74,7 @@ function ChecksBody({
   }
   return (
     <>
-      <ScrollArea className="max-h-64">
+      <ScrollArea scrollbarVariant="compact" className="max-h-64">
         <ul className="flex flex-col gap-1">
           {/* Keyed by position as well as by name: the host is the one that decides how many runs
           share a name, and a repeated key is a rendering fault rather than a wrong list. */}

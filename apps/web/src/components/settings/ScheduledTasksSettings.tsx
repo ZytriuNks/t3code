@@ -1,3 +1,4 @@
+import { ScrollFrame } from "~/components/ui/scroll-frame";
 import { useAtomValue } from "@effect/atom-react";
 import {
   Clock3Icon,
@@ -845,15 +846,17 @@ function ScheduledTaskEditorDialog({
               label={t("settings.scheduledTasks.field.prompt")}
               htmlFor="scheduled-task-prompt"
             >
-              <Textarea
-                id="scheduled-task-prompt"
-                className="max-h-64 overflow-y-auto"
-                placeholder={t("settings.scheduledTasks.field.promptPlaceholder")}
-                value={draft.prompt}
-                onChange={(event) =>
-                  setDraft((current) => ({ ...current, prompt: event.target.value }))
-                }
-              />
+              <ScrollFrame variant="page">
+                <Textarea
+                  id="scheduled-task-prompt"
+                  className="max-h-64 overflow-y-auto"
+                  placeholder={t("settings.scheduledTasks.field.promptPlaceholder")}
+                  value={draft.prompt}
+                  onChange={(event) =>
+                    setDraft((current) => ({ ...current, prompt: event.target.value }))
+                  }
+                />
+              </ScrollFrame>
             </Field>
 
             <Field label={t("settings.scheduledTasks.field.model")}>

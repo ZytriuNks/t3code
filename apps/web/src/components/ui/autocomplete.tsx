@@ -5,7 +5,7 @@ import { ChevronsUpDownIcon, XIcon } from "lucide-react";
 
 import { cn } from "~/lib/utils";
 import { Input } from "~/components/ui/input";
-import { ScrollArea } from "~/components/ui/scroll-area";
+import { ScrollFrame } from "~/components/ui/scroll-frame";
 
 const Autocomplete = AutocompletePrimitive.Root;
 
@@ -171,13 +171,16 @@ function AutocompleteEmpty({ className, ...props }: AutocompletePrimitive.Empty.
 
 function AutocompleteList({ className, ...props }: AutocompletePrimitive.List.Props) {
   return (
-    <ScrollArea scrollbarGutter scrollFade>
+    <ScrollFrame variant="compact" className="size-full max-h-[inherit]">
       <AutocompletePrimitive.List
-        className={cn("not-empty:scroll-py-1 not-empty:p-1", className)}
+        className={cn(
+          "min-h-0 max-h-[inherit] overflow-y-auto not-empty:scroll-py-1 not-empty:p-1",
+          className,
+        )}
         data-slot="autocomplete-list"
         {...props}
       />
-    </ScrollArea>
+    </ScrollFrame>
   );
 }
 

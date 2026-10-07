@@ -567,9 +567,10 @@ function ProcessTable({
   return (
     <div className="border-t border-border/60">
       <ScrollArea
+        scrollbarVariant="page"
         chainVerticalScroll
         scrollFade
-        hideScrollbars
+
         className="max-h-[min(68vh,48rem)] w-full max-w-full"
       >
         <table className="w-full min-w-[1320px] table-fixed text-left text-xs">
@@ -672,9 +673,10 @@ function HistoryProcessTable({
   return (
     <div className="border-t border-border/60">
       <ScrollArea
+        scrollbarVariant="page"
         chainVerticalScroll
         scrollFade
-        hideScrollbars
+
         className="max-h-[28rem] w-full max-w-full"
       >
         <table className="w-full min-w-[1020px] table-fixed text-left text-xs">
