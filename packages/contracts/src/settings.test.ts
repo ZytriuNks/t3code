@@ -34,7 +34,7 @@ describe("ServerSettings response streaming", () => {
     expect(decodeServerSettings({}).responseStreamingMode).toBe("paragraph");
   });
 
-  it.each(["turn", "paragraph"])(
+  it.each(["turn", "paragraph", "realtime", "smooth"])(
     "round-trips %s as an environment setting and project override",
     (responseStreamingMode) => {
       const input = {

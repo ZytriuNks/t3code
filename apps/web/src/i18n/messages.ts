@@ -49,6 +49,8 @@ export const EN_MESSAGES = {
   "settings.row.copy.settingValue.runtimeMode.fullAccess": "full-access",
   "settings.row.copy.settingValue.streamingMode.turn": "turn",
   "settings.row.copy.settingValue.streamingMode.paragraph": "paragraph",
+  "settings.row.copy.settingValue.streamingMode.realtime": "real-time output",
+  "settings.row.copy.settingValue.streamingMode.smooth": "smooth output",
   "settings.row.copy.settingValue.streamingMode.token": "token",
   "settings.restore.title": "Restore default settings?",
   "settings.restore.body": "This will reset: {labels}.",
@@ -163,6 +165,12 @@ export const EN_MESSAGES = {
   "settings.general.streaming.paragraph": "Show finished paragraphs",
   "settings.general.streaming.paragraphDescription":
     "Each paragraph or code block appears as soon as it is complete.",
+  "settings.general.streaming.realtime": "Real-time output",
+  "settings.general.streaming.realtimeDescription":
+    "Text appears as it is generated, with more frequent message updates.",
+  "settings.general.streaming.smooth": "Smooth output",
+  "settings.general.streaming.smoothDescription":
+    "New text appears gradually as it arrives for a smoother reading experience.",
   "settings.general.streaming.token": "Token by token (legacy)",
   "settings.general.streaming.tokenDescription":
     "Every token repaints the message as it arrives. Slower and harder to read.",
@@ -906,7 +914,7 @@ export const EN_MESSAGES = {
     "timestamp clock locale system browser os 12 hour 24 hour",
   "settings.search.item.response-streaming.title": "Response streaming",
   "settings.search.item.response-streaming.keywords":
-    "output token paragraph buffered wait turn legacy",
+    "output smooth realtime real-time incremental token paragraph buffered wait turn",
   "settings.search.item.hide-whitespace-changes.title": "Hide whitespace changes",
   "settings.search.item.hide-whitespace-changes.keywords": "diff ignore spaces edits default",
   "settings.search.item.default-diff-file-state.title": "Default diff file state",
@@ -2658,6 +2666,8 @@ export const ZH_CN_MESSAGES = {
   "settings.row.copy.settingValue.runtimeMode.fullAccess": "完全访问",
   "settings.row.copy.settingValue.streamingMode.turn": "等待完整响应",
   "settings.row.copy.settingValue.streamingMode.paragraph": "显示已完成的段落",
+  "settings.row.copy.settingValue.streamingMode.realtime": "实时输出",
+  "settings.row.copy.settingValue.streamingMode.smooth": "平滑输出",
   "settings.row.copy.settingValue.streamingMode.token": "逐 Token 显示（旧版）",
   "settings.restore.title": "恢复默认设置？",
   "settings.restore.body": "将重置：{labels}。",
@@ -2766,6 +2776,10 @@ export const ZH_CN_MESSAGES = {
   "settings.general.streaming.turnDescription": "代理完成该轮次后一次性显示文本。",
   "settings.general.streaming.paragraph": "显示已完成的段落",
   "settings.general.streaming.paragraphDescription": "每个段落或代码块一完成就立即显示。",
+  "settings.general.streaming.realtime": "实时输出",
+  "settings.general.streaming.realtimeDescription": "文字生成时逐步显示，消息会更频繁地更新。",
+  "settings.general.streaming.smooth": "平滑输出",
+  "settings.general.streaming.smoothDescription": "新文字会逐步平滑呈现，阅读起来更连贯。",
   "settings.general.streaming.token": "逐 Token 显示（旧版）",
   "settings.general.streaming.tokenDescription":
     "每个 Token 到达时都会重绘消息。速度更慢，也更难阅读。",
@@ -3433,7 +3447,8 @@ export const ZH_CN_MESSAGES = {
   "settings.search.item.time-format.title": "时间格式",
   "settings.search.item.time-format.keywords": "时间戳 时钟 区域 系统 浏览器 12 小时 24 小时",
   "settings.search.item.response-streaming.title": "响应流式传输",
-  "settings.search.item.response-streaming.keywords": "输出 token 段落 缓冲 等待 轮次 旧版",
+  "settings.search.item.response-streaming.keywords":
+    "平滑输出 实时输出 逐步 增量 token 段落 缓冲 等待 轮次",
   "settings.search.item.hide-whitespace-changes.title": "隐藏空白字符更改",
   "settings.search.item.hide-whitespace-changes.keywords": "差异 忽略 空格 编辑 默认",
   "settings.search.item.default-diff-file-state.title": "默认差异文件状态",

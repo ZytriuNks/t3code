@@ -110,6 +110,16 @@ const STREAMING_CHOICES: ReadonlyArray<{
     label: "Finished paragraphs",
     description: "Show each paragraph or code block as it completes.",
   },
+  {
+    mode: "realtime",
+    label: "Real-time output",
+    description: "Show text as it is generated, with more frequent message updates.",
+  },
+  {
+    mode: "smooth",
+    label: "Smooth output",
+    description: "New text appears smoothly on web and desktop; mobile shows it as it arrives.",
+  },
 ];
 
 export function SettingsEnvironmentNewThreadsRouteScreen() {

@@ -53,10 +53,11 @@ export function splitBufferedAssistantText(text: string): { ready: string; rest:
   return { ready: text.slice(0, boundary), rest: text.slice(boundary) };
 }
 
-/** Buffer assistant messages and reasoning alike, keeping unfinished markdown out of the read model. */
+/** Apply the selected buffering mode to assistant messages and reasoning alike. */
 export function makeAssistantStreamingFilter(mode: ResponseStreamingMode) {
   const delivered = new Map<string, { text: string; at: number }>();
   return (event: ProviderAdapterV2Event, now: number): ProviderAdapterV2Event | null => {
+    if (mode === "realtime" || mode === "smooth") return event;
     if (
       event.type === "node.updated" &&
       event.node.kind === "assistant_message" &&

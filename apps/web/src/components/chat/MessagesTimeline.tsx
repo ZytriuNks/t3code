@@ -187,7 +187,10 @@ import {
   type MessagesTimelineRowsProjection,
   liveWorkEntryLabel,
   resolveAssistantMessageCopyState,
+  resolveTimelineDomIsAtEnd,
   resolveTimelineIsAtEnd,
+  shouldCancelTimelineFollowOnNativeScroll,
+  shouldMaintainVisibleTimelineContent,
   resolveTimelineMinimapHasPersistentGutter,
   resolveTimelineMinimapCurrentIndex,
   resolveTimelineMinimapHeightStyle,
@@ -248,6 +251,7 @@ import { useOpenPrLink } from "~/lib/openPullRequestLink";
 import { useClientSettings } from "~/hooks/useSettings";
 import type { ChatMarkdownContextReference } from "../ChatMarkdown";
 import { useMediaQuery } from "~/hooks/useMediaQuery";
+import { useSmoothScroll, type SmoothScrollHandle } from "~/hooks/useSmoothScroll";
 import { cn } from "~/lib/utils";
 import { OverlayScrollbar } from "~/components/ui/overlay-scrollbar";
 import { useUiStateStore } from "~/uiStateStore";
@@ -290,6 +294,10 @@ import { ComputerUseAppIcon } from "~/components/Icons";
 // ---------------------------------------------------------------------------
 
 interface TimelineRowSharedState {
+  smoothStreaming: boolean;
+  onSmoothPresentationSettled?:
+    | ((input: { messageId: MessageId; runId: RunId | null; textLength: number }) => void)
+    | undefined;
   citationRequest: AssistantCitationTarget | null;
   listRef: React.RefObject<LegendListRef | null>;
   timestampFormat: TimestampFormat;
@@ -437,6 +445,15 @@ export interface MessagesTimelineHistoryControls {
 }
 
 interface MessagesTimelineProps {
+  smoothStreaming?: boolean;
+  smoothScrollRef?: React.RefObject<SmoothScrollHandle | null>;
+  smoothEndRequest?: number;
+  onScrollableNodeChange?: (element: HTMLElement | null) => void;
+  onSmoothPresentationSettled?: (input: {
+    messageId: MessageId;
+    runId: RunId | null;
+    textLength: number;
+  }) => void;
   citationRequest?: AssistantCitationRequest | null;
   citationHistoryLoading?: boolean;
   onCiteAssistantText?: (
@@ -512,7 +529,7 @@ interface MessagesTimelineProps {
    */
   onContentOverflowChange?: (overflows: boolean) => void;
   onToolOutputCollapsedAtEnd?: () => void;
-  onManualNavigation: () => void;
+  onManualNavigation: (direction?: -1 | 1) => void;
   cancelPositionRestoreRef?: React.RefObject<(() => void) | null>;
   hideEmptyPlaceholder?: boolean;
   topFadeEnabled?: boolean;
@@ -526,6 +543,11 @@ interface MessagesTimelineProps {
 // ---------------------------------------------------------------------------
 
 export const MessagesTimeline = memo(function MessagesTimeline({
+  smoothStreaming = false,
+  smoothScrollRef,
+  smoothEndRequest = 0,
+  onScrollableNodeChange,
+  onSmoothPresentationSettled,
   citationRequest = null,
   citationHistoryLoading = false,
   onCiteAssistantText,
@@ -973,14 +995,31 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   );
   // Native scroll element behind LegendList, for the overlay scrollbar.
   const [timelineScrollableNode, setTimelineScrollableNode] = useState<HTMLElement | null>(null);
-  useEffect(() => {
+  const refreshTimelineScrollableNode = useCallback(() => {
     // Duck-type instead of `instanceof HTMLElement`: this component is also
     // rendered by react-test-renderer, where no DOM globals exist.
     const node = listRef.current?.getScrollableNode();
     setTimelineScrollableNode(
       node && typeof node === "object" && "scrollTop" in node ? (node as HTMLElement) : null,
     );
-  }, [listRef, rows.length]);
+  }, [listRef]);
+  useEffect(refreshTimelineScrollableNode, [
+    refreshTimelineScrollableNode,
+    rows.length,
+    listIdentityKey,
+  ]);
+  useEffect(() => {
+    onScrollableNodeChange?.(timelineScrollableNode);
+    return () => onScrollableNodeChange?.(null);
+  }, [onScrollableNodeChange, timelineScrollableNode]);
+  const previousNativeViewportRef = useRef<{
+    scrollTop: number;
+    scrollHeight: number;
+    clientHeight: number;
+  } | null>(null);
+  useLayoutEffect(() => {
+    previousNativeViewportRef.current = null;
+  }, [listIdentityKey, timelineScrollableNode]);
   // Re-measure the minimap gutter when the chat column changes width without a viewport resize.
   const chatWidth = useClientSettings((settings) => settings.chatWidth);
   const {
@@ -1000,10 +1039,17 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     onManualNavigation,
   });
   const onTimelineLoad = useCallback(() => {
+    refreshTimelineScrollableNode();
     onCitationListLoad();
     loadedThreadKeyRef.current = listIdentityKey;
     if (!restoringThreadPosition) signalInitialLayout();
-  }, [listIdentityKey, onCitationListLoad, restoringThreadPosition, signalInitialLayout]);
+  }, [
+    listIdentityKey,
+    onCitationListLoad,
+    refreshTimelineScrollableNode,
+    restoringThreadPosition,
+    signalInitialLayout,
+  ]);
   const [minimapHasPersistentGutter, setMinimapHasPersistentGutter] = useState(false);
   const alwaysRender = citationAlwaysRender ?? restoringAlwaysRender;
   const [minimapHitStripWidth, setMinimapHitStripWidth] = useState(0);
@@ -1048,6 +1094,30 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     [anchoredEndSpace, contentInsetEndAdjustment],
   );
 
+  const localSmoothScrollRef = useRef<SmoothScrollHandle | null>(null);
+  const smoothFollowControl = smoothScrollRef ?? localSmoothScrollRef;
+  const smoothFollowEnabled =
+    smoothStreaming &&
+    timelineScrollableNode !== null &&
+    liveFollowEnabled &&
+    !citationPositioning &&
+    !restoringThreadPosition &&
+    !anchoredEndSpace &&
+    !disclosureToggleSettling &&
+    settlingListIdentity === null;
+  const requestSmoothFollow = useSmoothScroll({
+    element: timelineScrollableNode,
+    enabled: smoothFollowEnabled,
+    identity: listIdentityKey,
+    reducedMotion: prefersReducedMotion,
+    controlRef: smoothFollowControl,
+    endRequest: smoothEndRequest,
+    onDetach: onManualNavigation,
+  });
+  useLayoutEffect(() => {
+    requestSmoothFollow();
+  }, [requestSmoothFollow, rows, contentInsetEndAdjustment, smoothFollowEnabled]);
+
   const measureContentOverflow = useCallback(
     () =>
       timelineContentOverflowsViewport(listRef.current?.getState?.(), {
@@ -1073,6 +1143,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onContentOverflowChange(measureContentOverflow());
     });
   }, [measureContentOverflow, onContentOverflowChange]);
+  const handleItemSizeChanged = useCallback(() => {
+    requestSmoothFollow();
+    reportContentOverflow();
+  }, [reportContentOverflow, requestSmoothFollow]);
   useEffect(() => cancelContentOverflowFrame, [cancelContentOverflowFrame]);
   // The list's own layout effects have already run here, so estimated row
   // positions are in place. Reporting before the first paint lets a thread
@@ -1084,10 +1158,74 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     onContentOverflowChange?.(measureContentOverflow());
   }, [cancelContentOverflowFrame, measureContentOverflow, onContentOverflowChange, rows.length]);
 
+  const detectNativeNavigation = useCallback(() => {
+    const scrollElement = listRef.current?.getScrollableNode();
+    if (!scrollElement) return;
+    const previous = previousNativeViewportRef.current;
+    const viewport = {
+      scrollTop: scrollElement.scrollTop,
+      scrollHeight: scrollElement.scrollHeight,
+      clientHeight: scrollElement.clientHeight,
+    };
+    previousNativeViewportRef.current = viewport;
+    // Programmatic scrollTop writes also produce trusted native scroll events.
+    // Explicit gestures cancel synchronously; this fallback only treats an
+    // upward move through unchanged geometry as navigation, outside positioning.
+    if (
+      shouldCancelTimelineFollowOnNativeScroll({
+        smoothStreaming,
+        liveFollowEnabled,
+        nativeIsAtEnd: resolveTimelineDomIsAtEnd(viewport),
+        previousScrollTop: previous?.scrollTop ?? null,
+        scrollTop: viewport.scrollTop,
+        layoutChanged:
+          previous?.scrollHeight !== viewport.scrollHeight ||
+          previous?.clientHeight !== viewport.clientHeight,
+        blockedByProgrammaticPositioning:
+          citationPositioning ||
+          restoringThreadPosition ||
+          anchoredEndSpace !== undefined ||
+          disclosureToggleSettling ||
+          settlingListIdentity !== null,
+      })
+    ) {
+      onManualNavigation(-1);
+    }
+  }, [
+    listRef,
+    smoothStreaming,
+    liveFollowEnabled,
+    citationPositioning,
+    restoringThreadPosition,
+    anchoredEndSpace,
+    disclosureToggleSettling,
+    settlingListIdentity,
+    onManualNavigation,
+  ]);
+  useLayoutEffect(() => {
+    detectNativeNavigation();
+    // Capture before LegendList handles the event and publishes its end state.
+    timelineScrollableNode?.addEventListener("scroll", detectNativeNavigation, {
+      capture: true,
+      passive: true,
+    });
+    return () =>
+      timelineScrollableNode?.removeEventListener("scroll", detectNativeNavigation, true);
+  }, [detectNativeNavigation, timelineScrollableNode]);
+
   const handleScroll = useCallback(() => {
+    detectNativeNavigation();
     const state = listRef.current?.getState?.();
+    const scrollElement = listRef.current?.getScrollableNode();
+    const nativeIsAtEnd = scrollElement ? resolveTimelineDomIsAtEnd(scrollElement) : undefined;
     if (restoringThreadPosition || state?.data !== rows) return;
-    const isAtEnd = resolveTimelineIsAtEnd(state);
+    // Smooth output follows the real DOM edge. LegendList's near-end band is
+    // still useful for non-streaming history navigation, but it must not
+    // re-arm live-follow after a user has scrolled up.
+    const isAtEnd =
+      smoothStreaming && nativeIsAtEnd !== undefined
+        ? nativeIsAtEnd
+        : resolveTimelineIsAtEnd(state);
     const position = state?.data?.length ? resolveWorkGroupScrollAnchor(state) : undefined;
     if (position && state && isAtEnd !== undefined) {
       const index = state.indexByKey(position.rowId);
@@ -1099,7 +1237,9 @@ export const MessagesTimeline = memo(function MessagesTimeline({
           // DOM geometry includes the header and the virtualizer's layout adjustment.
           offsetWithinRow: element.getBoundingClientRect().top - row.getBoundingClientRect().top,
           scrollOffset: element.scrollTop,
-          atEnd: isAtEnd,
+          // A live-follow animation can lag behind the measured end without
+          // turning this thread into a saved history-reading position.
+          atEnd: smoothFollowControl.current?.isFollowing() || isAtEnd,
           disclosures: {
             runs: paintedExpandedRunIds,
             workGroups: paintedExpandedWorkGroupIds,
@@ -1152,6 +1292,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     );
   }, [
     citationPositioning,
+    detectNativeNavigation,
     paintedExpandedRunIds,
     paintedExpandedWorkGroupIds,
     paintedExpandedAttemptIds,
@@ -1164,6 +1305,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     minimapStripMap,
     onIsAtEndChange,
     reportContentOverflow,
+    smoothFollowControl,
+    smoothStreaming,
   ]);
 
   useEffect(() => {
@@ -1223,6 +1366,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
 
   const sharedState = useMemo<TimelineRowSharedState>(
     () => ({
+      smoothStreaming,
+      onSmoothPresentationSettled,
       citationRequest: readyCitationRequest,
       listRef,
       timestampFormat,
@@ -1261,6 +1406,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     }),
     [
       readyCitationRequest,
+      smoothStreaming,
+      onSmoothPresentationSettled,
       listRef,
       timestampFormat,
       language,
@@ -1428,6 +1575,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
             {...(anchoredEndSpace ? { anchoredEndSpace } : {})}
             contentInsetEndAdjustment={anchoredEndSpace ? contentInsetEndAdjustment : 0}
             maintainScrollAtEnd={
+              smoothStreaming ||
               citationPositioning ||
               (restoringThreadPosition && rememberedPosition?.atEnd === false) ||
               anchoredEndSpace ||
@@ -1439,14 +1587,18 @@ export const MessagesTimeline = memo(function MessagesTimeline({
                   : TIMELINE_MAINTAIN_SCROLL_AT_END
             }
             maintainVisibleContentPosition={
-              citationPositioning ||
-              (restoringThreadPosition && rememberedPosition?.atEnd === false)
-                ? false
-                : maintainVisibleContentPosition
+              shouldMaintainVisibleTimelineContent({
+                smoothStreaming,
+                liveFollowEnabled,
+              }) &&
+              !citationPositioning &&
+              !(restoringThreadPosition && rememberedPosition?.atEnd === false)
+                ? maintainVisibleContentPosition
+                : false
             }
-            maintainScrollAtEndThreshold={1}
+            maintainScrollAtEndThreshold={liveFollowEnabled ? 1 : 0}
             onScroll={handleScroll}
-            onItemSizeChanged={reportContentOverflow}
+            onItemSizeChanged={handleItemSizeChanged}
             className={cn(
               "h-full min-h-0 overflow-x-hidden overscroll-y-contain px-3 [overflow-anchor:none] sm:px-5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
               topFadeEnabled && "topbar-scroll-fade",
@@ -2710,6 +2862,17 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
             cwd={ctx.markdownCwd}
             threadRef={ctx.threadRef ?? undefined}
             isStreaming={Boolean(row.message.streaming)}
+            smoothStreaming={ctx.smoothStreaming}
+            onSmoothSettled={
+              ctx.smoothStreaming
+                ? () =>
+                    ctx.onSmoothPresentationSettled?.({
+                      messageId: row.message.id,
+                      runId: row.message.runId,
+                      textLength: messageText.length,
+                    })
+                : undefined
+            }
             lineBreaks={shouldPreserveAssistantLineBreaks(messageText)}
             skills={ctx.skills}
             headingLevelOffset={MESSAGE_HEADING_LEVEL}
@@ -3698,6 +3861,7 @@ function LiveActivityRow({
   return (
     <div
       ref={animated ? observeVisibleAnimation : undefined}
+      data-timeline-live-label={animated ? "" : undefined}
       className="relative min-h-6 w-fit max-w-full min-w-0 overflow-hidden rounded-md text-sm leading-relaxed"
     >
       <LiveActivityContent
@@ -5109,6 +5273,7 @@ function ReasoningTraceContent({ entries }: { entries: ReadonlyArray<TimelineWor
           isStreaming={
             isWorking && entry.runId === latestRunId && entry.toolLifecycleStatus === "inProgress"
           }
+          smoothStreaming={ctx.smoothStreaming}
           headingLevelOffset={MESSAGE_HEADING_LEVEL}
           onUseArtifactTemplate={ctx.onUseArtifactTemplate}
           onImageExpand={ctx.onImageExpand}

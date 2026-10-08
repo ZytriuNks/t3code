@@ -115,6 +115,21 @@ describe("searchSettings", () => {
     expect(searchSettings(query).map((item) => item.id)).toContain("send-shortcut");
   });
 
+  it.each([
+    "real-time output",
+    "realtime",
+    "incremental output",
+    "smooth output",
+    "平滑输出",
+    "实时输出",
+    "增量 输出",
+  ])("finds response streaming for %s", (query) => {
+    expect(searchSettings(query, SETTINGS_SEARCH_ITEMS, zh)[0]).toMatchObject({
+      id: "response-streaming",
+      to: "/settings/general",
+    });
+  });
+
   it.each(["thread status dots", "对话 状态 圆点"])(
     "finds the legacy thread status dots setting for %s",
     (query) => {

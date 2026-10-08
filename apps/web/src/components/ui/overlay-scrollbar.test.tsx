@@ -160,6 +160,49 @@ describe("OverlayScrollbar", () => {
     expect(scrollable.scrollLeft).toBe(300);
   });
 
+  it("reports each drag reversal before moving, even after the host resumes follow", () => {
+    const scrollable = createScrollable(1000);
+    scrollable.scrollTop = 300;
+    const navigation: { direction: number; before: number }[] = [];
+    act(() =>
+      root.render(
+        <OverlayScrollbar
+          scrollable={scrollable}
+          onScrollStart={(direction) => {
+            navigation.push({ direction, before: scrollable.scrollTop });
+          }}
+        />,
+      ),
+    );
+    const lane = container.querySelector<HTMLElement>("[role='scrollbar']")!;
+    const thumb = lane.querySelector<HTMLElement>("div")!;
+    vi.spyOn(lane, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 12, 400));
+    vi.spyOn(thumb, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 120, 6, 160));
+    thumb.setPointerCapture = () => {};
+    thumb.releasePointerCapture = () => {};
+    act(() =>
+      thumb.dispatchEvent(
+        new PointerEvent("pointerdown", {
+          bubbles: true,
+          button: 0,
+          pointerId: 1,
+          clientY: 130,
+        }),
+      ),
+    );
+    for (const clientY of [90, 250, 170, 250]) {
+      act(() => thumb.dispatchEvent(new PointerEvent("pointermove", { pointerId: 1, clientY })));
+    }
+    expect(navigation).toEqual([
+      { direction: -1, before: 300 },
+      { direction: 1, before: 200 },
+      { direction: -1, before: 600 },
+      { direction: 1, before: 400 },
+    ]);
+    expect(scrollable.scrollTop).toBe(600);
+    act(() => thumb.dispatchEvent(new PointerEvent("pointerup", { pointerId: 1 })));
+  });
+
   it("navigates horizontal overflow by keyboard and clamps to its edges", () => {
     vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(400);
     const scrollable = createScrollable(1000);

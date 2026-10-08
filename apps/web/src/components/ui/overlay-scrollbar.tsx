@@ -59,8 +59,8 @@ type OverlayScrollbarProps = {
   triangles?: boolean;
   /** Fired for a short triangle click; holding advances the native offset. */
   onStep?: (direction: StepDirection) => void;
-  /** Release any host-owned scroll animation or live-follow before navigation. */
-  onScrollStart?: () => void;
+  /** Release host follow before navigation, including direction reversals during a drag. */
+  onScrollStart?: (direction: StepDirection) => void;
   /**
    * Thumb width. Defaults to the shared --app-scrollbar-width. The model
    * picker passes a thinner bar: it sits over dense two-line rows, where a
@@ -275,7 +275,7 @@ function OverlayScrollbar({
           ? scrollable.scrollTop > 0
           : scrollable.scrollTop < scrollable.scrollHeight - scrollable.clientHeight)
       ) {
-        onScrollStart?.();
+        onScrollStart?.(direction);
       }
       if (onStep) {
         onStep(direction);
@@ -343,7 +343,7 @@ function OverlayScrollbar({
             ? element.scrollTop > 0
             : element.scrollTop < element.scrollHeight - element.clientHeight
         ) {
-          onScrollStart?.();
+          onScrollStart?.(direction);
         }
         frame = window.requestAnimationFrame(coast);
       }, HOLD_START_DELAY_MS);
@@ -376,7 +376,7 @@ function OverlayScrollbar({
       // Both the thumb and the window can deliver the terminating event, so
       // the teardown must be idempotent.
       let settled = false;
-      let started = false;
+      let previousDirection: StepDirection | null = null;
 
       const onMove = (moveEvent: PointerEvent) => {
         const laneRect = lane.getBoundingClientRect();
@@ -401,9 +401,13 @@ function OverlayScrollbar({
           // wrong offset, which then read as a jump on the next hover.
           pointerOffset,
         );
-        if (!started && next !== (horizontal ? scrollable.scrollLeft : scrollable.scrollTop)) {
-          started = true;
-          onScrollStart?.();
+        const offset = horizontal ? scrollable.scrollLeft : scrollable.scrollTop;
+        if (next !== offset) {
+          const direction = next < offset ? -1 : 1;
+          if (direction !== previousDirection) {
+            previousDirection = direction;
+            onScrollStart?.(direction);
+          }
         }
         if (horizontal) {
           scrollable.scrollLeft = next;
@@ -478,7 +482,7 @@ function OverlayScrollbar({
         default:
           return;
       }
-      if (next !== offset) onScrollStart?.();
+      if (next !== offset) onScrollStart?.(next < offset ? -1 : 1);
       scrollable.scrollTo({
         ...(horizontal ? { left: next } : { top: next }),
         behavior: "instant",

@@ -259,6 +259,23 @@ export function shouldReleaseTimelineAnchorForToolActivity(input: {
   });
 }
 
+/** Keep Thinking visible until the active provider run has published its final assistant message. */
+export function shouldShowWorkingActivity(input: {
+  isWorking: boolean;
+  activeRunId: RunId | null;
+  latestRunId: RunId | null;
+  latestAssistantMessage: { runId: RunId | null; streaming: boolean } | null;
+}): boolean {
+  if (!input.isWorking) return false;
+
+  const latestAssistantOutputFinished =
+    input.latestRunId !== null &&
+    input.latestAssistantMessage?.runId === input.latestRunId &&
+    !input.latestAssistantMessage.streaming;
+
+  return !(input.activeRunId === null && latestAssistantOutputFinished);
+}
+
 export {
   findRecordedWorktreeSetup,
   resolveVisibleWorktreeSetup,

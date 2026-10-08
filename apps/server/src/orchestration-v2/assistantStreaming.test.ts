@@ -52,6 +52,32 @@ const turnItem = (
 });
 
 describe("V2 assistant streaming", () => {
+  it.each(["realtime", "smooth"] as const)(
+    "delivers unfinished assistant content immediately in %s mode and preserves final text",
+    (mode) => {
+      const filter = makeAssistantStreamingFilter(mode);
+      const events = [
+        { kind: "messages", makeEvent: message },
+        { kind: "assistant turn items", makeEvent: turnItem },
+        {
+          kind: "reasoning",
+          makeEvent: (text: string, streaming = true) => turnItem(text, streaming, "reasoning"),
+        },
+      ];
+      for (const { makeEvent } of events) {
+        const partial = makeEvent("中文");
+        const openFence = makeEvent("中文🙂\n\n```ts\nconst value = ");
+        const rapidUpdate = makeEvent("中文🙂\n\n```ts\nconst value = 1;\n");
+        const final = makeEvent("中文🙂\n\n```ts\nconst value = 1;\n```\nDone.", false);
+
+        expect(filter(partial, 0)).toEqual(partial);
+        expect(filter(openFence, 50)).toEqual(openFence);
+        expect(filter(rapidUpdate, 100)).toEqual(rapidUpdate);
+        expect(filter(final, 150)).toEqual(final);
+      }
+    },
+  );
+
   it("delivers completed paragraphs, coalesces rapid updates, and flushes final text", () => {
     const filter = makeAssistantStreamingFilter("paragraph");
     expect(filter(message("First"), 0)).toBeNull();
@@ -104,9 +130,14 @@ describe("V2 assistant streaming", () => {
     },
   );
 
-  it.each(["turn", "paragraph"] as const)(
-    "suppresses running assistant nodes in %s mode while delivering tool and completed nodes",
-    (mode) => {
+  it.each([
+    { mode: "turn", showRunning: false },
+    { mode: "paragraph", showRunning: false },
+    { mode: "realtime", showRunning: true },
+    { mode: "smooth", showRunning: true },
+  ] as const)(
+    "controls running assistant nodes in $mode mode while delivering tool and completed nodes",
+    ({ mode, showRunning }) => {
       const filter = makeAssistantStreamingFilter(mode);
       const running: Extract<ProviderAdapterV2Event, { type: "node.updated" }> = {
         type: "node.updated",
@@ -129,7 +160,7 @@ describe("V2 assistant streaming", () => {
           completedAt: null,
         },
       };
-      expect(filter(running, 0)).toBeNull();
+      expect(filter(running, 0)).toEqual(showRunning ? running : null);
       const completed = { ...running, node: { ...running.node, status: "completed" as const } };
       expect(filter(completed, 1)).toBe(completed);
       const tool = { ...running, node: { ...running.node, kind: "tool_call" as const } };

@@ -148,6 +148,47 @@ it.layer(NodeServices.layer)("server settings", (it) => {
     }).pipe(Effect.provide(makeServerSettingsLayer())),
   );
 
+  for (const mode of ["realtime", "smooth"] as const) {
+    it.effect(
+      `loads, persists, and switches ${mode} response delivery with project overrides`,
+      () =>
+        Effect.gen(function* () {
+          const config = yield* ServerConfig.ServerConfig;
+          const fs = yield* FileSystem.FileSystem;
+          const service = yield* ServerSettingsModule.ServerSettingsService;
+          const projectId = ProjectId.make(`${mode}-project`);
+          yield* fs.writeFileString(
+            config.settingsPath,
+            `{"responseStreamingMode":"${mode}","projectSettingsOverrides":{"${mode}-project":{"responseStreamingMode":"${mode}"}}}`,
+          );
+
+          const loaded = yield* service.getSettings;
+          assert.equal(loaded.responseStreamingMode, mode);
+          assert.equal(loaded.projectSettingsOverrides[projectId]?.responseStreamingMode, mode);
+
+          yield* service.updateSettings({ responseStreamingMode: "paragraph" });
+          const buffered = yield* decodeServerSettingsJson(
+            yield* fs.readFileString(config.settingsPath),
+          );
+          assert.equal(buffered.responseStreamingMode, "paragraph");
+          assert.equal(buffered.projectSettingsOverrides[projectId]?.responseStreamingMode, mode);
+
+          yield* service.updateSettings({
+            responseStreamingMode: mode,
+            projectSettingsOverrides: { [projectId]: { responseStreamingMode: "turn" } },
+          });
+          const persisted = yield* decodeServerSettingsJson(
+            yield* fs.readFileString(config.settingsPath),
+          );
+          assert.equal(persisted.responseStreamingMode, mode);
+          assert.equal(
+            persisted.projectSettingsOverrides[projectId]?.responseStreamingMode,
+            "turn",
+          );
+        }).pipe(Effect.provide(makeServerSettingsLayer())),
+    );
+  }
+
   it.effect("preserves context when reading a provider environment secret fails", () => {
     const platformCause = PlatformError.systemError({
       _tag: "PermissionDenied",

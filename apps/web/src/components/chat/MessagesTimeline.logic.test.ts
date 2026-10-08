@@ -27,9 +27,14 @@ import {
   liveWorkEntryLabel,
   normalizeCompactToolLabel,
   resolveAssistantMessageCopyState,
+  resolveTimelineDomIsAtEnd,
+  resolveTimelineIsAtEnd,
+  shouldRearmTimelineFollow,
   resolveWorkGroupScrollIndex,
+  shouldCancelTimelineFollowOnNativeScroll,
   shouldFollowWorkGroupAppend,
   shouldPreserveAssistantLineBreaks,
+  shouldMaintainVisibleTimelineContent,
   type MessagesTimelineRow,
   resolveTimelineToolPresentation,
   workEntryDisplayLabel,
@@ -119,6 +124,188 @@ describe("expanded tool group scrolling", () => {
     expect(
       resolveWorkGroupScrollIndex(entries, { entryId: "removed", offset: 120 }),
     ).toBeUndefined();
+  });
+});
+
+describe("smooth streaming scroll edge", () => {
+  it("never lets row-size compensation move the viewport during smooth output", () => {
+    // LegendList's maintainVisibleContentPosition pins whatever the reader is
+    // looking at back to the same screen offset when a row resizes. During
+    // smooth output the thinking block grows every frame while it is inside
+    // the viewport, so compensation keeps writing scrollTop after the reader
+    // has left the edge.
+    expect(
+      shouldMaintainVisibleTimelineContent({
+        smoothStreaming: true,
+        liveFollowEnabled: false,
+      }),
+    ).toBe(false);
+    expect(
+      shouldMaintainVisibleTimelineContent({
+        smoothStreaming: true,
+        liveFollowEnabled: true,
+      }),
+    ).toBe(false);
+    // Outside smooth output the historical reading behaviour is unchanged.
+    expect(
+      shouldMaintainVisibleTimelineContent({
+        smoothStreaming: false,
+        liveFollowEnabled: false,
+      }),
+    ).toBe(true);
+    expect(
+      shouldMaintainVisibleTimelineContent({
+        smoothStreaming: false,
+        liveFollowEnabled: true,
+      }),
+    ).toBe(true);
+  });
+
+  it("uses the native viewport instead of LegendList's near-end band", () => {
+    const state = {
+      isAtEnd: true,
+      contentLength: 2_000,
+      scroll: 1_160,
+      scrollLength: 800,
+    };
+    const viewport = {
+      scrollTop: 500,
+      scrollHeight: 2_000,
+      clientHeight: 800,
+    };
+
+    // The virtualized state is inside its 40px re-arm band, while the native
+    // viewport is hundreds of pixels above the real bottom.
+    expect(resolveTimelineIsAtEnd(state)).toBe(true);
+    expect(resolveTimelineDomIsAtEnd(viewport)).toBe(false);
+  });
+
+  it("recognizes only the actual native bottom as the smooth live edge", () => {
+    expect(
+      resolveTimelineDomIsAtEnd({
+        scrollTop: 1_200,
+        scrollHeight: 2_000,
+        clientHeight: 800,
+      }),
+    ).toBe(true);
+    expect(
+      resolveTimelineDomIsAtEnd({
+        scrollTop: 1_199.75,
+        scrollHeight: 2_000,
+        clientHeight: 800,
+      }),
+    ).toBe(false);
+  });
+
+  it("treats the first one-pixel upward move as leaving the live edge", () => {
+    expect(
+      shouldCancelTimelineFollowOnNativeScroll({
+        smoothStreaming: true,
+        liveFollowEnabled: true,
+        nativeIsAtEnd: false,
+        previousScrollTop: 1_000,
+        scrollTop: 999,
+        layoutChanged: false,
+        blockedByProgrammaticPositioning: false,
+      }),
+    ).toBe(true);
+    expect(
+      shouldCancelTimelineFollowOnNativeScroll({
+        smoothStreaming: true,
+        liveFollowEnabled: true,
+        nativeIsAtEnd: false,
+        previousScrollTop: 1_000,
+        scrollTop: 999.75,
+        layoutChanged: false,
+        blockedByProgrammaticPositioning: false,
+      }),
+    ).toBe(true);
+  });
+
+  it("cancels follow even while the smooth-scroll controller is unavailable", () => {
+    expect(
+      shouldCancelTimelineFollowOnNativeScroll({
+        smoothStreaming: true,
+        liveFollowEnabled: true,
+        nativeIsAtEnd: false,
+        previousScrollTop: 1_000,
+        scrollTop: 700,
+        layoutChanged: false,
+        blockedByProgrammaticPositioning: false,
+      }),
+    ).toBe(true);
+    expect(
+      shouldCancelTimelineFollowOnNativeScroll({
+        smoothStreaming: true,
+        liveFollowEnabled: true,
+        nativeIsAtEnd: false,
+        previousScrollTop: 1_000,
+        scrollTop: 700,
+        layoutChanged: false,
+        blockedByProgrammaticPositioning: true,
+      }),
+    ).toBe(false);
+  });
+
+  it("does not re-arm after a stale end report while reading above the end", () => {
+    expect(
+      shouldRearmTimelineFollow({
+        isAtEnd: true,
+        scrollMode: "free-scrolling",
+        scrollIntent: "away-from-end",
+      }),
+    ).toBe(false);
+    expect(
+      shouldRearmTimelineFollow({
+        isAtEnd: true,
+        scrollMode: "free-scrolling",
+        scrollIntent: null,
+      }),
+    ).toBe(false);
+    expect(
+      shouldRearmTimelineFollow({
+        isAtEnd: true,
+        scrollMode: "free-scrolling",
+        scrollIntent: "toward-end",
+      }),
+    ).toBe(true);
+    expect(
+      shouldRearmTimelineFollow({
+        isAtEnd: true,
+        scrollMode: "anchoring-new-turn",
+        scrollIntent: null,
+      }),
+    ).toBe(false);
+    expect(
+      shouldRearmTimelineFollow({
+        isAtEnd: true,
+        scrollMode: "following-end",
+        scrollIntent: null,
+      }),
+    ).toBe(true);
+  });
+
+  it("does not confuse a layout correction or content growth with upward navigation", () => {
+    const input = {
+      smoothStreaming: true,
+      liveFollowEnabled: true,
+      nativeIsAtEnd: false,
+      previousScrollTop: 1_000,
+      scrollTop: 980,
+      layoutChanged: true,
+      blockedByProgrammaticPositioning: false,
+    };
+    expect(shouldCancelTimelineFollowOnNativeScroll(input)).toBe(false);
+    expect(shouldCancelTimelineFollowOnNativeScroll({ ...input, scrollTop: 1_000 })).toBe(false);
+    // The next upward move through stable geometry must still cancel.
+    expect(
+      shouldCancelTimelineFollowOnNativeScroll({
+        ...input,
+        previousScrollTop: 980,
+        scrollTop: 979,
+        layoutChanged: false,
+      }),
+    ).toBe(true);
   });
 });
 

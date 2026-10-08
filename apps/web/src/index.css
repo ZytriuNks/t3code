@@ -2163,6 +2163,60 @@ code {
   }
 }
 
+/* The live activity label rides above the growing stream. When the timeline
+   follows the bottom edge, compensating the viewport shifts it down and back.
+   This offset cancels that shift so the label holds still; the scroll
+   controller sets it only while following and clears it when the reader
+   leaves, letting the label move down to make room for a new line again. */
+[data-timeline-live-label] {
+  transform: translateY(var(--t3-live-label-offset, 0px));
+  will-change: transform;
+}
+
+/* Keep the original text and layout for copying and citations. Only newly
+   received glyphs are masked; the registry is empty whenever reveal is idle. */
+@media (prefers-reduced-motion: no-preference) and (forced-colors: none) {
+  ::highlight(t3-smooth-hidden) {
+    color: transparent;
+    text-shadow: none;
+    text-decoration-color: transparent;
+  }
+}
+
+/* New graphemes reuse the completed-paragraph fade without adding spans or
+   React work. Each fixed bucket keeps the highlight registry bounded. */
+::highlight(t3-smooth-fade-0) {
+  color: color-mix(in srgb, currentColor 0%, transparent);
+}
+::highlight(t3-smooth-fade-1) {
+  color: color-mix(in srgb, currentColor 33%, transparent);
+}
+::highlight(t3-smooth-fade-2) {
+  color: color-mix(in srgb, currentColor 58%, transparent);
+}
+::highlight(t3-smooth-fade-3) {
+  color: color-mix(in srgb, currentColor 76%, transparent);
+}
+::highlight(t3-smooth-fade-4) {
+  color: color-mix(in srgb, currentColor 88%, transparent);
+}
+::highlight(t3-smooth-fade-5) {
+  color: color-mix(in srgb, currentColor 95%, transparent);
+}
+::highlight(t3-smooth-fade-6) {
+  color: color-mix(in srgb, currentColor 99%, transparent);
+}
+::highlight(t3-smooth-fade-7) {
+  color: currentColor;
+}
+
+/* Smooth text grows inside a clipped frame. At the live edge the real list
+   scrolls to its new maximum, moving every earlier row together; away from the
+   edge the same frame grows downward and leaves the reader's viewport alone. */
+[data-smooth-text-frame] {
+  overflow: clip;
+}
+
 /* Diagnostics-style tables: row separators only, uppercase headers, and a
    scroll-fade container for horizontal overflow. The root chat-markdown
    wrapping rules (overflow-wrap: anywhere) would let columns shrink to single

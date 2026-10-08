@@ -190,6 +190,73 @@ export interface TimelineEndState {
   readonly scrollLength?: number;
 }
 
+/** Reads the actual browser viewport edge without LegendList's near-end band. */
+export function resolveTimelineDomIsAtEnd(input: {
+  readonly scrollTop: number;
+  readonly scrollHeight: number;
+  readonly clientHeight: number;
+}): boolean {
+  // Even a fractional upward step leaves the edge. Animation writes separately
+  // track the browser's last clamped bottom so layout growth is not navigation.
+  return input.scrollTop >= Math.max(0, input.scrollHeight - input.clientHeight);
+}
+
+/**
+ * Row-size compensation pins the reader's current content to the same screen
+ * offset whenever a row resizes. Smooth output resizes the thinking block every
+ * frame while it is still inside the viewport, so compensation would keep
+ * moving the viewport after the reader has left the live edge. Smooth output
+ * owns viewport movement instead, in both follow and free-reading states.
+ */
+export function shouldMaintainVisibleTimelineContent(input: {
+  readonly smoothStreaming: boolean;
+  readonly liveFollowEnabled: boolean;
+}): boolean {
+  return !input.smoothStreaming;
+}
+
+/**
+ * Identifies a user leaving the live edge even when the smooth-scroll hook is
+ * temporarily unavailable during another layout transition.
+ */
+export function shouldCancelTimelineFollowOnNativeScroll(input: {
+  readonly smoothStreaming: boolean;
+  readonly liveFollowEnabled: boolean;
+  readonly nativeIsAtEnd: boolean | undefined;
+  readonly previousScrollTop: number | null;
+  readonly scrollTop: number;
+  readonly layoutChanged: boolean;
+  readonly blockedByProgrammaticPositioning: boolean;
+}): boolean {
+  return (
+    input.smoothStreaming &&
+    input.liveFollowEnabled &&
+    input.nativeIsAtEnd === false &&
+    input.previousScrollTop !== null &&
+    // Any negative native delta is enough to identify an upward gesture. The
+    // event is already filtered by the caller's programmatic-positioning
+    // guards; a sub-pixel first trackpad step must not wait for a second step.
+    input.scrollTop < input.previousScrollTop &&
+    !input.layoutChanged &&
+    !input.blockedByProgrammaticPositioning
+  );
+}
+
+/**
+ * Prevents a stale virtual-list end report from re-arming live follow while
+ * the user is reading above the end. Returning to follow requires a real
+ * downward navigation intent (or an already-following state).
+ */
+export function shouldRearmTimelineFollow(input: {
+  readonly isAtEnd: boolean;
+  readonly scrollMode: "following-end" | "anchoring-new-turn" | "free-scrolling";
+  readonly scrollIntent: "toward-end" | "away-from-end" | null;
+}): boolean {
+  return (
+    input.isAtEnd && (input.scrollMode === "following-end" || input.scrollIntent === "toward-end")
+  );
+}
+
 /**
  * The follow re-arm band (#5566): strict isAtEnd flickers false for a frame
  * while streaming content grows under the viewport, so follow re-arms within

@@ -182,11 +182,15 @@ const ENVIRONMENT_IDENTIFICATION_LABEL_KEYS: Record<EnvironmentIdentificationMod
 const RESPONSE_STREAMING_MODE_LABEL_KEYS: Record<ResponseStreamingMode, MessageKey> = {
   turn: "settings.general.streaming.turn",
   paragraph: "settings.general.streaming.paragraph",
+  realtime: "settings.general.streaming.realtime",
+  smooth: "settings.general.streaming.smooth",
 };
 
 const RESPONSE_STREAMING_MODE_DESCRIPTION_KEYS: Record<ResponseStreamingMode, MessageKey> = {
   turn: "settings.general.streaming.turnDescription",
   paragraph: "settings.general.streaming.paragraphDescription",
+  realtime: "settings.general.streaming.realtimeDescription",
+  smooth: "settings.general.streaming.smoothDescription",
 };
 
 const TIMESTAMP_FORMAT_LABEL_KEYS = {
@@ -255,6 +259,8 @@ const INHERITED_RUNTIME_MODE_LABEL_KEYS: Readonly<Record<string, MessageKey>> = 
 const INHERITED_RESPONSE_STREAMING_MODE_LABEL_KEYS: Readonly<Record<string, MessageKey>> = {
   turn: "settings.row.copy.settingValue.streamingMode.turn",
   paragraph: "settings.row.copy.settingValue.streamingMode.paragraph",
+  realtime: "settings.row.copy.settingValue.streamingMode.realtime",
+  smooth: "settings.row.copy.settingValue.streamingMode.smooth",
   token: "settings.row.copy.settingValue.streamingMode.token",
 };
 
@@ -2995,7 +3001,12 @@ function GeneralSettingsRows() {
             <Select
               value={mixedResponseStreamingMode ? null : settings.responseStreamingMode}
               onValueChange={(value) => {
-                if (value === "turn" || value === "paragraph") {
+                if (
+                  value === "turn" ||
+                  value === "paragraph" ||
+                  value === "realtime" ||
+                  value === "smooth"
+                ) {
                   updateSettings({ responseStreamingMode: value });
                 }
               }}
@@ -3019,6 +3030,12 @@ function GeneralSettingsRows() {
                 </SelectItem>
                 <SelectItem hideIndicator value="paragraph">
                   {t(RESPONSE_STREAMING_MODE_LABEL_KEYS.paragraph)}
+                </SelectItem>
+                <SelectItem hideIndicator value="realtime">
+                  {t(RESPONSE_STREAMING_MODE_LABEL_KEYS.realtime)}
+                </SelectItem>
+                <SelectItem hideIndicator value="smooth">
+                  {t(RESPONSE_STREAMING_MODE_LABEL_KEYS.smooth)}
                 </SelectItem>
               </SelectPopup>
             </Select>

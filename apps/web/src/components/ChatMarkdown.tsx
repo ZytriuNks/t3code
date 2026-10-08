@@ -142,6 +142,7 @@ import { createIncrementalHighlightedDocument } from "../lib/incrementalHighligh
 import { HighlightedCodeLines } from "./chat/HighlightedCodeLines";
 import { RenderErrorBoundary } from "./RenderErrorBoundary";
 import { useTheme } from "../hooks/useTheme";
+import { useSmoothText } from "../hooks/useSmoothText";
 import { getClientSettings, useClientSettings } from "../hooks/useSettings";
 import {
   chatMarkdownClipboardPayload,
@@ -213,6 +214,9 @@ interface ChatMarkdownProps {
   environmentId?: EnvironmentId | undefined;
   onTaskListChange?: ((input: { markerOffset: number; checked: boolean }) => void) | undefined;
   isStreaming?: boolean;
+  smoothStreaming?: boolean;
+  /** Called once smooth output has painted its final visible prefix. */
+  onSmoothSettled?: (() => void) | undefined;
   skills?: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
   className?: string;
   /** Treat single newlines as hard breaks — chat-style user input. */
@@ -3413,6 +3417,8 @@ const CHAT_MARKDOWN_COMPONENTS = {
 
 function ChatMarkdown({
   text,
+  smoothStreaming = false,
+  onSmoothSettled,
   className,
   lineBreaks = false,
   parseRawHtml = true,
@@ -3427,6 +3433,11 @@ function ChatMarkdown({
     localMediaPreview,
     setLocalMediaPreview,
   } = useChatMarkdownState({ text, ...props });
+  useSmoothText(markdownRef, {
+    enabled: smoothStreaming,
+    streaming: props.isStreaming === true,
+    onSettled: onSmoothSettled,
+  });
   const incrementalParsing =
     props.isStreaming === true &&
     extraRemarkPlugins.length === 0 &&
@@ -3444,33 +3455,35 @@ function ChatMarkdown({
   // Keep that behavior explicit because literal mode depends on escaping the
   // complete source token instead of dropping it from the rendered message.
   return (
-    <div
-      ref={markdownRef}
-      className={cn(
-        "chat-markdown w-full min-w-0 text-sm leading-relaxed text-foreground/[calc(80%+var(--appearance-contrast-boost)/5)] [overflow-wrap:anywhere] [word-break:break-word]",
-        className,
-      )}
-      // Gates the fade-in for blocks that arrive while the response streams.
-      data-streaming={componentState.isStreaming ? "" : undefined}
-      onCopy={handleCopy}
-    >
-      <ChatMarkdownRendererContext value={componentState}>
-        <ReactMarkdown
-          remarkPlugins={remarkPlugins}
-          rehypePlugins={parseRawHtml ? CHAT_MARKDOWN_REHYPE_PLUGINS : undefined}
-          skipHtml={false}
-          components={CHAT_MARKDOWN_COMPONENTS}
-          urlTransform={markdownUrlTransform}
-        >
-          {text}
-        </ReactMarkdown>
-      </ChatMarkdownRendererContext>
-      {localMediaPreview ? (
-        <ExpandedImageDialog
-          preview={localMediaPreview}
-          onClose={() => setLocalMediaPreview(null)}
-        />
-      ) : null}
+    <div data-smooth-text-frame={smoothStreaming ? "" : undefined}>
+      <div
+        ref={markdownRef}
+        className={cn(
+          "chat-markdown w-full min-w-0 text-sm leading-relaxed text-foreground/[calc(80%+var(--appearance-contrast-boost)/5)] [overflow-wrap:anywhere] [word-break:break-word]",
+          className,
+        )}
+        // Gates the fade-in for blocks that arrive while the response streams.
+        data-streaming={componentState.isStreaming ? "" : undefined}
+        onCopy={handleCopy}
+      >
+        <ChatMarkdownRendererContext value={componentState}>
+          <ReactMarkdown
+            remarkPlugins={remarkPlugins}
+            rehypePlugins={parseRawHtml ? CHAT_MARKDOWN_REHYPE_PLUGINS : undefined}
+            skipHtml={false}
+            components={CHAT_MARKDOWN_COMPONENTS}
+            urlTransform={markdownUrlTransform}
+          >
+            {text}
+          </ReactMarkdown>
+        </ChatMarkdownRendererContext>
+        {localMediaPreview ? (
+          <ExpandedImageDialog
+            preview={localMediaPreview}
+            onClose={() => setLocalMediaPreview(null)}
+          />
+        ) : null}
+      </div>
     </div>
   );
 }

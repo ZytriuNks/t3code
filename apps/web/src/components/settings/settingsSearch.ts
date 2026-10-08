@@ -400,7 +400,9 @@ const SETTINGS_SEARCH_ITEM_DEFINITIONS = [
     title: "Response streaming",
     to: "/settings/general",
     scope: "project-defaults",
-    searchTerms: ["output token paragraph buffered wait turn legacy"],
+    searchTerms: [
+      "output smooth realtime real-time incremental token paragraph buffered wait turn",
+    ],
   },
   {
     id: "hide-whitespace-changes",
