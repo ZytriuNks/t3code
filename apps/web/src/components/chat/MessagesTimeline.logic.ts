@@ -1255,6 +1255,15 @@ export function deriveMessagesTimelineRows(input: {
     workEntryDisplayIndicatesToolFailure(latestVisibleToolEntry.entry);
 
   const activeWorkPlacementEntryId = latestVisibleToolEntry?.id;
+  // Restructured releases each tool the moment it finishes, letting the
+  // existing grouping archive it upward. The live label therefore carries only
+  // what is still running — the same predicate `activeWorkEntryIds` uses below
+  // to skip those entries from the body pass. Keeping a finished tool in
+  // `groupedEntries` renders it a second time under the label, right next to
+  // the body work group that already holds it.
+  const restructuredLiveToolEntries = visibleActiveToolEntries.filter((entry) =>
+    workEntryIsActiveTurnActivity(entry.entry),
+  );
   // Restructured narrows the live label to the running operation only, so once
   // the tail has nothing in flight the label empties out. Keeping a row built
   // from latestVisibleToolEntry here would double-render the just-finished tool:
@@ -1273,7 +1282,10 @@ export function deriveMessagesTimelineRows(input: {
               : `work-live:${activeWorkAnchor.id}`,
             createdAt: activeWorkAnchor.createdAt,
             entry: (latestRunningToolEntry ?? latestVisibleToolEntry).entry,
-            groupedEntries: visibleActiveToolEntries.map((entry) => entry.entry),
+            groupedEntries: (input.conversationStructure === "restructured"
+              ? restructuredLiveToolEntries
+              : visibleActiveToolEntries
+            ).map((entry) => entry.entry),
             groupId,
             expanded: input.expandedWorkGroupIds?.has(groupId) ?? false,
             active: latestToolKeepsActivityLive,

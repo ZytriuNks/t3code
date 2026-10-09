@@ -22,8 +22,6 @@ import { create, type ReactTestRenderer } from "react-test-renderer";
 import { shouldUseRestingComposerLayout } from "../composerFooterLayout";
 import { useComposerFocusState } from "./useComposerFocusState";
 import { rememberTimelinePosition } from "./timelineScrollAnchoring";
-import { deriveTimelineMinimapItems } from "./timelineMinimapItems";
-import { deriveMessagesTimelineRows } from "./MessagesTimeline.logic";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import type { LegendListRef } from "@legendapp/list/react";
 
@@ -3385,30 +3383,139 @@ describe("restructured live activity layer", () => {
     expect(defaultMarkup).toContain('data-timeline-extra-data="environment-local:thread-1:3"');
   });
 
-  it("keeps minimap indices aligned with the rows the list was given", () => {
-    // A minimap item's rowIndex is fed straight to LegendList's
-    // scrollToIndex/positionAtIndex. Deriving it from the unfiltered array
-    // would shift every index once the live label leaves the list.
-    const minimapItems = deriveTimelineMinimapItems(
-      deriveMessagesTimelineRows({
-        timelineEntries: buildRunningToolEntries("inProgress"),
-        latestRun: {
-          runId: RUN_ID,
-          status: "running",
-          startedAt: MESSAGE_CREATED_AT,
-          completedAt: null,
+  /** Three settled turns, then a tool still in flight in the active run. */
+  function buildMinimapFixtureEntries() {
+    const turn = (index: number) => [
+      {
+        id: `entry-user-${index}`,
+        kind: "message" as const,
+        createdAt: MESSAGE_CREATED_AT,
+        message: {
+          id: MessageId.make(`message-user-${index}`),
+          role: "user" as const,
+          text: `Ask ${index}.`,
+          runId: null,
+          createdAt: MESSAGE_CREATED_AT,
+          updatedAt: MESSAGE_CREATED_AT,
+          streaming: false,
         },
-        runningRunId: RUN_ID,
-        isWorking: true,
-        turnDiffSummaries: [],
-        supportsConversationRollback: false,
-        conversationStructure: "restructured",
-      }).filter((row) => row.kind !== "thinking" && row.kind !== "work-live"),
-    );
+      },
+      {
+        id: `entry-assistant-${index}`,
+        kind: "message" as const,
+        createdAt: MESSAGE_CREATED_AT,
+        message: {
+          id: MessageId.make(`message-assistant-${index}`),
+          role: "assistant" as const,
+          text: `Answer ${index}.`,
+          runId: RUN_ID,
+          createdAt: MESSAGE_CREATED_AT,
+          updatedAt: MESSAGE_CREATED_AT,
+          streaming: false,
+        },
+      },
+    ];
+    return [
+      ...turn(1),
+      ...turn(2),
+      ...turn(3),
+      {
+        id: "running-tool-entry",
+        kind: "work" as const,
+        createdAt: MESSAGE_CREATED_AT,
+        entry: {
+          id: "running-tool",
+          runId: RUN_ID,
+          createdAt: MESSAGE_CREATED_AT,
+          label: "Run the build",
+          command: "pnpm build",
+          requestKind: "command" as const,
+          tone: "tool" as const,
+          toolLifecycleStatus: "inProgress" as const,
+        },
+      },
+    ];
+  }
 
-    expect(minimapItems).toHaveLength(1);
-    // Index 0 in the filtered list is the user message the item names.
-    expect(minimapItems[0]?.rowIndex).toBe(0);
-    expect(minimapItems[0]?.userText).toBe("Do the thing.");
+  /** The minimap rail's single jump button; re-found so props stay fresh. */
+  function findMinimapJumpButton(renderer: ReactTestRenderer) {
+    return renderer.root.find(
+      (node) =>
+        node.type === "button" &&
+        typeof node.props["aria-label"] === "string" &&
+        node.props["aria-label"].startsWith("Jump to message:"),
+    );
+  }
+
+  it("scrolls the list to the row a minimap item names once the live label left", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const scrollToIndexRequests: Array<{ index: number; animated: boolean; viewOffset: number }> =
+      [];
+    const props = buildProps();
+    props.listRef.current = {
+      getState: () => null,
+      getScrollableNode: () => null,
+      scrollToIndex: async (request: { index: number; animated: boolean; viewOffset: number }) => {
+        scrollToIndexRequests.push(request);
+      },
+      scrollToOffset: async () => {},
+      scrollToEnd: async () => {},
+    } as unknown as LegendListRef;
+
+    let renderer: ReactTestRenderer | undefined;
+    try {
+      await act(() => {
+        renderer = create(
+          <MessagesTimeline
+            {...props}
+            conversationStructure="restructured"
+            isWorking
+            runningRunId={RUN_ID}
+            latestRun={{
+              runId: RUN_ID,
+              status: "running",
+              startedAt: MESSAGE_CREATED_AT,
+              completedAt: null,
+            }}
+            timelineEntries={buildMinimapFixtureEntries()}
+          />,
+        );
+      });
+
+      // The live label left the list, so the list holds seven of the eight
+      // projected rows. Everything the minimap can name is still in it.
+      const list = renderer!.root.find(
+        (node) => Array.isArray(node.props.data) && typeof node.props.keyExtractor === "function",
+      );
+      expect(list.props.data).toHaveLength(7);
+      // Row 4 of the list LegendList was actually handed is "Ask 3."
+      expect(list.props.data[4]).toMatchObject({
+        kind: "message",
+        message: { text: "Ask 3." },
+      });
+
+      const noop = () => {};
+      await act(() => findMinimapJumpButton(renderer!).props.onFocus());
+      await act(() =>
+        findMinimapJumpButton(renderer!).props.onKeyDown({
+          key: "ArrowDown",
+          preventDefault: noop,
+        }),
+      );
+      await act(() =>
+        findMinimapJumpButton(renderer!).props.onKeyDown({
+          key: "ArrowDown",
+          preventDefault: noop,
+        }),
+      );
+      await act(() =>
+        findMinimapJumpButton(renderer!).props.onKeyDown({ key: "Enter", preventDefault: noop }),
+      );
+
+      // The minimap item for "Ask 3." scrolls the list to that message's own row.
+      expect(scrollToIndexRequests).toEqual([{ index: 4, animated: true, viewOffset: 24 }]);
+    } finally {
+      await act(() => renderer?.unmount());
+    }
   });
 });

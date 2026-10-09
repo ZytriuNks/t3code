@@ -3126,10 +3126,12 @@ describe("deriveMessagesTimelineRows", () => {
       timelineEntries: TimelineEntry[],
       conversationStructure: ConversationStructure | undefined,
       expandedAttemptIds?: ReadonlySet<RunAttemptId>,
+      expandedWorkGroupIds?: ReadonlySet<string>,
     ) {
       return deriveMessagesTimelineRows({
         timelineEntries,
         ...(expandedAttemptIds ? { expandedAttemptIds } : {}),
+        ...(expandedWorkGroupIds ? { expandedWorkGroupIds } : {}),
         latestRun: {
           runId: "turn-1" as never,
           status: "running",
@@ -3180,6 +3182,71 @@ describe("deriveMessagesTimelineRows", () => {
 
       expect(bodyWorkEntryIds(rows)).not.toContain("finished-command");
       expect(rows.filter((row) => row.kind === "work-live")).toHaveLength(1);
+    });
+
+    /** The detail row the live label renders underneath itself when expanded. */
+    function expandedWorkGroupEntryIds(rows: MessagesTimelineRow[]): string[] {
+      return rows.flatMap((row) =>
+        row.kind === "work" && row.isExpandedToolGroup
+          ? row.groupedEntries.map((entry) => entry.id)
+          : [],
+      );
+    }
+
+    /** Archived body groups only, excluding the live label's own details row. */
+    function archivedWorkGroupEntryIds(rows: MessagesTimelineRow[]): string[] {
+      return rows.flatMap((row) =>
+        row.kind === "work" && !row.isExpandedToolGroup
+          ? row.groupedEntries.map((entry) => entry.id)
+          : [],
+      );
+    }
+
+    /** Every row that names this entry anywhere: live label, details, or body. */
+    function allRenderedEntryIds(rows: MessagesTimelineRow[]): string[] {
+      return rows.flatMap((row) => {
+        if (row.kind === "work" || row.kind === "work-live") {
+          return row.groupedEntries.map((entry) => entry.id);
+        }
+        return [];
+      });
+    }
+
+    it("shows only the running tool when the restructured live label is expanded", () => {
+      // Expanding the live label must not resurrect the tool that already
+      // archived into the body work group above it.
+      const rows = deriveWithStructureFor(
+        streamingTools,
+        "restructured",
+        undefined,
+        new Set(["work-group:finished-command-entry"]),
+      );
+
+      expect(rows.find((row) => row.kind === "work-live")).toMatchObject({
+        entry: { id: "running-command" },
+        expanded: true,
+      });
+      expect(expandedWorkGroupEntryIds(rows)).toEqual(["running-command"]);
+      expect(liveEntryIds(rows)).toEqual(["running-command"]);
+      // The finished tool is named exactly once, by its body work group.
+      expect(archivedWorkGroupEntryIds(rows)).toEqual(["finished-command"]);
+      expect(allRenderedEntryIds(rows).filter((id) => id === "finished-command")).toEqual([
+        "finished-command",
+      ]);
+    });
+
+    it("expands the default live label to the whole trailing tool set", () => {
+      // Regression guard: default keeps the trailing tools live until the turn
+      // ends, so its expanded details must still list all of them.
+      const rows = deriveWithStructureFor(
+        streamingTools,
+        "default",
+        undefined,
+        new Set(["work-group:finished-command-entry"]),
+      );
+
+      expect(expandedWorkGroupEntryIds(rows)).toEqual(["finished-command", "running-command"]);
+      expect(liveEntryIds(rows)).toEqual(["finished-command", "running-command"]);
     });
 
     it("keeps the whole turn live when no structure is set", () => {
