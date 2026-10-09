@@ -41,6 +41,26 @@ describe("conversationStructure", () => {
     expect(decoded.conversationStructure).toBe("restructured");
     expect(decoded.conversationStructureIdleLabel).toBe("考虑下一步");
   });
+
+  it("defaults both keys on the environment-wide server settings", () => {
+    const decoded = decodeServerSettings({});
+    expect(decoded.conversationStructure).toBe(DEFAULT_CONVERSATION_STRUCTURE);
+    expect(decoded.conversationStructureIdleLabel).toBe(DEFAULT_CONVERSATION_IDLE_LABEL);
+  });
+
+  it("round-trips both keys through the environment-wide settings write path", () => {
+    const input = {
+      conversationStructure: "restructured",
+      conversationStructureIdleLabel: "考虑下一步",
+    };
+    expect(encodeServerSettings(decodeServerSettings(input))).toMatchObject(input);
+    expect(decodeServerSettingsPatch(input)).toEqual(input);
+  });
+
+  it("rejects an unknown structure value", () => {
+    expect(() => decodeServerSettings({ conversationStructure: "unknown" })).toThrow();
+    expect(() => decodeServerSettingsPatch({ conversationStructure: "unknown" })).toThrow();
+  });
 });
 
 describe("ClientSettings context menu visibility", () => {

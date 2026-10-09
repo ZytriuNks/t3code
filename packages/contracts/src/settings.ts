@@ -1615,6 +1615,8 @@ export const ServerSettingsPatch = Schema.Struct({
   ),
   // Server settings
   responseStreamingMode: Schema.optionalKey(ResponseStreamingMode),
+  conversationStructure: Schema.optionalKey(ConversationStructure),
+  conversationStructureIdleLabel: Schema.optionalKey(Schema.String),
   enableProviderUpdateChecks: Schema.optionalKey(Schema.Boolean),
   continueThreadsAfterServerUpdate: Schema.optionalKey(Schema.Boolean),
   enableAgentBrowserAccess: Schema.optionalKey(Schema.Boolean),
