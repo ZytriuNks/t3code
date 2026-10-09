@@ -256,7 +256,7 @@ import { useSmoothScroll, type SmoothScrollHandle } from "~/hooks/useSmoothScrol
 import { cn } from "~/lib/utils";
 import { OverlayScrollbar } from "~/components/ui/overlay-scrollbar";
 import { useUiStateStore } from "~/uiStateStore";
-import { type TimestampFormat } from "@t3tools/contracts/settings";
+import { DEFAULT_CONVERSATION_IDLE_LABEL, type TimestampFormat } from "@t3tools/contracts/settings";
 import {
   formatChatTimestampTooltip,
   formatDayAwareTimestamp,
@@ -351,6 +351,12 @@ interface TimelineRowActivityState {
   activeTurnInProgress: boolean;
   isPreparingWorktree: boolean;
   latestRunId: RunId | null;
+  /**
+   * Wording for the restructured gap between a finished tool and the response.
+   * It lives here because the row renderer is deliberately closure-free, and
+   * only a label change should repaint the live label, not every timeline row.
+   */
+  conversationStructureIdleLabel: string;
   /**
    * A worktree setup whose script is still running after the agent took
    * over. The working header shows it as a chip with a popover; the stage
@@ -484,6 +490,8 @@ interface MessagesTimelineProps {
    * which leaves the timeline byte-identical to the pre-restructuring shape.
    */
   conversationStructure?: ConversationStructure | undefined;
+  /** Text shown while the turn's tools are done and the response has not started. */
+  conversationStructureIdleLabel?: string | undefined;
   worktreeSetup?: WorktreeSetupSnapshot | null;
   queuedMessages?: ReadonlyArray<QueuedComposerMessage>;
   onSteerQueuedMessage?: (id: string) => void;
@@ -576,6 +584,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   activeTurnInProgress,
   activeTurnStartedAt = null,
   conversationStructure,
+  conversationStructureIdleLabel = DEFAULT_CONVERSATION_IDLE_LABEL,
   worktreeSetup = null,
   queuedMessages = EMPTY_QUEUED_MESSAGES,
   onSteerQueuedMessage = NOOP_QUEUE_MESSAGE_ACTION,
@@ -1593,11 +1602,13 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       activeTurnInProgress,
       isPreparingWorktree,
       latestRunId: latestRun?.runId ?? null,
+      conversationStructureIdleLabel,
     }),
     [
       compactionAwaitingRow,
       backgroundWorktreeSetup,
       activeTurnInProgress,
+      conversationStructureIdleLabel,
       isPreparingWorktree,
       isRevertingCheckpoint,
       isWorking,
@@ -2180,7 +2191,7 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
           ) : null}
           {row.kind === "work-live" ? <LiveWorkEntryTimelineRow row={row} /> : null}
           {row.kind === "work-toggle" ? <WorkGroupToggleTimelineRow row={row} /> : null}
-          {row.kind === "thinking" ? <ThinkingTimelineRow /> : null}
+          {row.kind === "thinking" ? <ThinkingTimelineRow row={row} /> : null}
         </WorkLogBlock>
       ) : null}
       {row.kind === "turn-fold" ? <TurnFoldTimelineRow row={row} /> : null}
@@ -3965,13 +3976,19 @@ function CompactingLabel() {
   );
 }
 
-function ThinkingTimelineRow() {
-  const { isCompacting, isPreparingWorktree } = use(TimelineRowActivityCtx);
+function ThinkingTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "thinking" }> }) {
+  const { isCompacting, isPreparingWorktree, conversationStructureIdleLabel } =
+    use(TimelineRowActivityCtx);
   // Reserve the activity row during setup so the handoff keeps the same height.
   return isPreparingWorktree || isCompacting ? (
     <WorkLogRow label="" />
   ) : (
-    <LiveActivityRow label="Thinking" iconName="brain" active shimmer />
+    <LiveActivityRow
+      label={row.idle === true ? conversationStructureIdleLabel : "Thinking"}
+      iconName="brain"
+      active
+      shimmer
+    />
   );
 }
 
@@ -4156,7 +4173,7 @@ function LiveActivityOverlay({
             {row.kind === "work-live" ? (
               <LiveWorkEntryTimelineRow row={row} />
             ) : (
-              <ThinkingTimelineRow />
+              <ThinkingTimelineRow row={row} />
             )}
           </div>
         ))}

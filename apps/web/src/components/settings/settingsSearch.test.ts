@@ -79,6 +79,15 @@ describe("searchSettings", () => {
     },
   );
 
+  it.each(["conversation structure", "对话 结构", "activity label", "活动 标签"])(
+    "finds the conversation structure setting for %s",
+    (query) => {
+      expect(searchSettings(query, SETTINGS_SEARCH_ITEMS, zh).map((item) => item.id)).toContain(
+        "conversation-structure",
+      );
+    },
+  );
+
   it("gives localized catalog items stable typed message keys", () => {
     for (const item of SETTINGS_SEARCH_ITEMS) {
       if (!item.titleKey) continue;

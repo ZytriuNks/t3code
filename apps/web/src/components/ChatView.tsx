@@ -3448,7 +3448,12 @@ export default function ChatView(props: ChatViewProps) {
     (isSendBusy || phase === "connecting" || phase === "running") &&
     compactRequestIsActive &&
     !compactionSettled;
-  const smoothOutputEnabled = activeProjectSettings.settings.responseStreamingMode === "smooth";
+  // spec: smooth reveal is only offered under the restructured layout. Both
+  // animate the same growing body, so letting them stack produces two
+  // competing timing sources in one frame.
+  const smoothOutputEnabled =
+    activeProjectSettings.settings.responseStreamingMode === "smooth" &&
+    activeProjectSettings.settings.conversationStructure === "restructured";
   const isWorking =
     phase === "running" || isSendBusy || isConnecting || isRevertingCheckpoint || isCompacting;
   const latestAssistantTurnItem = serverVisibleTurnItems.findLast(
@@ -10799,6 +10804,10 @@ export default function ChatView(props: ChatViewProps) {
                 }
                 isCompacting={!paintOnlyDisplayedTimeline && isCompacting}
                 activeTurnStartedAt={paintOnlyDisplayedTimeline ? null : activeWorkStartedAt}
+                conversationStructure={activeProjectSettings.settings.conversationStructure}
+                conversationStructureIdleLabel={
+                  activeProjectSettings.settings.conversationStructureIdleLabel
+                }
                 worktreeSetup={paintOnlyDisplayedTimeline ? null : worktreeSetup}
                 onCancelWorktreeSetup={onCancelWorktreeSetup}
                 {...(draftId ? { onWorktreeSetupWorkLocally } : {})}

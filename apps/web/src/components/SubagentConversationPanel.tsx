@@ -325,6 +325,8 @@ export function SubagentConversationPanel({
               isWorking={isActiveRun(activityRun?.status)}
               activeTurnInProgress={isActiveRun(activityRun?.status)}
               activeTurnStartedAt={activityRun?.startedAt ?? null}
+              conversationStructure={settings.conversationStructure}
+              conversationStructureIdleLabel={settings.conversationStructureIdleLabel}
               listRef={listRef}
               timelineEntries={timelineProjection.entries}
               latestRun={activityRun}

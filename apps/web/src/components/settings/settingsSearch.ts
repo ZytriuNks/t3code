@@ -405,6 +405,15 @@ const SETTINGS_SEARCH_ITEM_DEFINITIONS = [
     ],
   },
   {
+    id: "conversation-structure",
+    title: "Conversation structure",
+    to: "/settings/general",
+    scope: "project-defaults",
+    searchTerms: [
+      "conversation structure chat message timeline live activity label tools archive restructured idle planning",
+    ],
+  },
+  {
     id: "hide-whitespace-changes",
     title: "Hide whitespace changes",
     to: "/settings/general",

@@ -514,6 +514,12 @@ type MessagesTimelineRowContent =
       kind: "thinking";
       id: string;
       createdAt: string | null;
+      /**
+       * The restructured gap between a finished tool and the response. Absent
+       * everywhere else, so the default shape is unchanged; the same row also
+       * covers the model genuinely starting to think, which is never idle.
+       */
+      idle?: true;
     }
   | {
       kind: "work-toggle";
@@ -1719,6 +1725,13 @@ export function deriveMessagesTimelineRows(input: {
       kind: "thinking",
       id: LIVE_ACTIVITY_ROW_ID,
       createdAt: input.activeTurnStartedAt ?? null,
+      // Restructured shows this row in two situations that read differently:
+      // the model starting to think at the top of a turn, and the gap after the
+      // turn's last tool finished. Only a tool having already run makes it the
+      // gap, and the label picks its wording from that.
+      ...(input.conversationStructure === "restructured" && latestVisibleToolEntry !== undefined
+        ? { idle: true as const }
+        : {}),
     });
   }
 
@@ -1944,8 +1957,13 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
       return a.queuedMessage === bq.queuedMessage && a.isNext === bq.isNext;
     }
     case "working":
-    case "thinking":
       return a.createdAt === (b as typeof a).createdAt;
+    case "thinking": {
+      // The gap and real thinking share one id and one createdAt, so the idle
+      // marker is the only thing that tells them apart between renders.
+      const bt = b as typeof a;
+      return a.createdAt === bt.createdAt && a.idle === bt.idle;
+    }
     case "worktree-setup":
       return a.snapshot === (b as typeof a).snapshot;
 

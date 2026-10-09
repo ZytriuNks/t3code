@@ -3447,6 +3447,91 @@ describe("deriveMessagesTimelineRows", () => {
       expect(liveEntryIds(rows)).toContain("current-attempt-command");
     });
   });
+
+  describe("restructured idle label", () => {
+    // The thinking row carries two meanings that the structure cannot tell apart
+    // by itself: the model starting to think at the top of a turn, and the gap
+    // after the last tool finished. Only the gap is idle, and only the gap has a
+    // completed tool behind it.
+    const finishedTool = {
+      id: "finished-command-entry",
+      kind: "work" as const,
+      createdAt: "2026-01-01T00:00:05Z",
+      entry: {
+        id: "finished-command",
+        createdAt: "2026-01-01T00:00:05Z",
+        runId: "turn-1" as never,
+        label: "Ran read",
+        command: "read src",
+        requestKind: "command",
+        tone: "tool" as const,
+        toolLifecycleStatus: "completed" as const,
+      },
+    };
+    const userEntry = {
+      id: "user-entry",
+      kind: "message" as const,
+      createdAt: "2026-01-01T00:00:00Z",
+      message: {
+        id: MessageId.make("user-1"),
+        role: "user" as const,
+        text: "Do the thing.",
+        runId: null,
+        createdAt: "2026-01-01T00:00:00Z",
+        updatedAt: "2026-01-01T00:00:00Z",
+        streaming: false,
+      },
+    };
+
+    function deriveIdle(
+      timelineEntries: TimelineEntry[],
+      conversationStructure: ConversationStructure | undefined,
+    ) {
+      return deriveMessagesTimelineRows({
+        timelineEntries,
+        latestRun: {
+          runId: "turn-1" as never,
+          status: "running",
+          startedAt: "2026-01-01T00:00:00Z",
+          completedAt: null,
+        },
+        isWorking: true,
+        activeTurnStartedAt: "2026-01-01T00:00:00Z",
+        turnDiffSummaries: [],
+        supportsConversationRollback: false,
+        conversationStructure,
+      });
+    }
+
+    function thinkingRow(rows: MessagesTimelineRow[]) {
+      return rows.find((row) => row.kind === "thinking");
+    }
+
+    it("marks the thinking row idle once the turn's tools are all done", () => {
+      const rows = deriveIdle([userEntry, finishedTool], "restructured");
+
+      expect(thinkingRow(rows)).toMatchObject({ kind: "thinking", idle: true });
+    });
+
+    it("leaves the turn-opening thinking row unmarked", () => {
+      // No tool has run yet, so this is the model really starting to think.
+      const rows = deriveIdle([userEntry], "restructured");
+
+      expect(thinkingRow(rows)).toMatchObject({ kind: "thinking" });
+      expect(thinkingRow(rows)).not.toHaveProperty("idle");
+    });
+
+    it("leaves the default structure's thinking row unmarked", () => {
+      // Default keeps a finished tool in the live label, so the same tail has no
+      // thinking row at all — and the turn-opening row stays unmarked, which
+      // keeps the default shape byte for byte what it was.
+      expect(thinkingRow(deriveIdle([userEntry, finishedTool], "default"))).toBeUndefined();
+
+      const openingRow = thinkingRow(deriveIdle([userEntry], "default"));
+      expect(openingRow).toMatchObject({ kind: "thinking" });
+      expect(openingRow).not.toHaveProperty("idle");
+    });
+  });
 });
 
 describe("computeStableMessagesTimelineRows", () => {
@@ -3476,6 +3561,27 @@ describe("computeStableMessagesTimelineRows", () => {
 
     expect(updated).not.toBe(initial);
     expect(updated.result[0]).toBe(enrichedRow);
+  });
+
+  it("replaces a cached thinking row when only the idle marker changes", () => {
+    // The idle gap and real thinking share one row id and one createdAt, so
+    // without an idle comparison the label would stay whatever it was when the
+    // row was first cached.
+    const initialRow: MessagesTimelineRow = {
+      kind: "thinking",
+      id: "live-activity-row",
+      createdAt: "2026-01-01T00:00:00Z",
+    };
+    const idleRow: MessagesTimelineRow = { ...initialRow, idle: true };
+    const initial = computeStableMessagesTimelineRows([initialRow], {
+      byId: new Map(),
+      result: [],
+    });
+
+    const updated = computeStableMessagesTimelineRows([idleRow], initial);
+
+    expect(updated).not.toBe(initial);
+    expect(updated.result[0]).toBe(idleRow);
   });
 
   it.each(["", " \n"])("keeps Thinking after assistant content grows from %j", (text) => {

@@ -915,6 +915,22 @@ export const EN_MESSAGES = {
   "settings.search.item.response-streaming.title": "Response streaming",
   "settings.search.item.response-streaming.keywords":
     "output smooth realtime real-time incremental token paragraph buffered wait turn",
+  "settings.search.item.conversation-structure.title": "Conversation structure",
+  "settings.search.item.conversation-structure.keywords":
+    "conversation structure chat timeline live activity label tools archive restructured idle planning 对话 结构 活动 标签",
+  "settings.general.section.conversation": "Conversation structure",
+  "settings.general.conversation.structure.description":
+    "Choose how live activity and tool calls are arranged in the timeline.",
+  "settings.general.conversation.structure.default": "Current layout",
+  "settings.general.conversation.structure.restructured": "Restructured",
+  "settings.general.conversation.structure.resetLabel": "conversation structure",
+  "settings.general.conversation.idleLabel.title": "Live activity label",
+  "settings.general.conversation.idleLabel.description":
+    "Shown between a tool finishing and the response starting.",
+  "settings.general.conversation.idleLabel.resetLabel": "live activity label",
+  "settings.general.conversation.idleLabel.ariaLabel": "Live activity label",
+  "settings.general.streaming.requiresRestructured":
+    "Smooth output is only available with the restructured conversation layout.",
   "settings.search.item.hide-whitespace-changes.title": "Hide whitespace changes",
   "settings.search.item.hide-whitespace-changes.keywords": "diff ignore spaces edits default",
   "settings.search.item.default-diff-file-state.title": "Default diff file state",
@@ -3449,6 +3465,20 @@ export const ZH_CN_MESSAGES = {
   "settings.search.item.response-streaming.title": "响应流式传输",
   "settings.search.item.response-streaming.keywords":
     "平滑输出 实时输出 逐步 增量 token 段落 缓冲 等待 轮次",
+  "settings.search.item.conversation-structure.title": "对话结构",
+  "settings.search.item.conversation-structure.keywords":
+    "对话 结构 聊天 消息 时间线 活动 标签 工具 归档 重制 空闲 规划",
+  "settings.general.section.conversation": "对话结构",
+  "settings.general.conversation.structure.description":
+    "选择时间线中活动状态与工具调用的排列方式。",
+  "settings.general.conversation.structure.default": "现有布局",
+  "settings.general.conversation.structure.restructured": "重制",
+  "settings.general.conversation.structure.resetLabel": "对话结构",
+  "settings.general.conversation.idleLabel.title": "活动标签",
+  "settings.general.conversation.idleLabel.description": "工具结束、正文开始之前显示的文案。",
+  "settings.general.conversation.idleLabel.resetLabel": "活动标签",
+  "settings.general.conversation.idleLabel.ariaLabel": "活动标签",
+  "settings.general.streaming.requiresRestructured": "平滑输出仅在重制对话结构下可用。",
   "settings.search.item.hide-whitespace-changes.title": "隐藏空白字符更改",
   "settings.search.item.hide-whitespace-changes.keywords": "差异 忽略 空格 编辑 默认",
   "settings.search.item.default-diff-file-state.title": "默认差异文件状态",

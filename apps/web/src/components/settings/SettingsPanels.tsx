@@ -25,6 +25,7 @@ import {
   DEFAULT_ENVIRONMENT_IDENTIFICATION_MODE,
   DEFAULT_UNIFIED_SETTINGS,
   type ChatWidth,
+  type ConversationStructure,
   type DiffLayout,
   type EnvironmentIdentificationMode,
   type LanguagePreference,
@@ -2625,6 +2626,7 @@ function GeneralSettingsRows() {
     "zh-CN": t("settings.language.simplifiedChinese"),
   };
   const mixedResponseStreamingMode = useScopedSettingsMixed(["responseStreamingMode"]);
+  const mixedConversationStructure = useScopedSettingsMixed(["conversationStructure"]);
   const lastEnabledProjectGroupingMode = useRef<SidebarProjectGroupingMode>(
     readLastEnabledProjectGroupingMode(),
   );
@@ -2983,7 +2985,11 @@ function GeneralSettingsRows() {
           description={
             mixedResponseStreamingMode
               ? t("settings.general.streaming.mixed")
-              : t(RESPONSE_STREAMING_MODE_DESCRIPTION_KEYS[settings.responseStreamingMode])
+              : `${t(RESPONSE_STREAMING_MODE_DESCRIPTION_KEYS[settings.responseStreamingMode])} ${
+                  settings.conversationStructure === "restructured"
+                    ? ""
+                    : t("settings.general.streaming.requiresRestructured")
+                }`
           }
           resetAction={
             settings.responseStreamingMode !== DEFAULT_UNIFIED_SETTINGS.responseStreamingMode ? (
@@ -3804,6 +3810,101 @@ function GeneralSettingsRows() {
             }
           />
         ) : null}
+      </SettingsSection>
+
+      <SettingsSection
+        id="conversation-structure-section"
+        title={t("settings.general.section.conversation")}
+      >
+        <SettingsRow
+          serverScoped
+          settingKeys={["conversationStructure"]}
+          {...searchableSetting("conversation-structure", t)}
+          description={
+            mixedConversationStructure
+              ? t("settings.row.copy.mixedAcrossEnvironments")
+              : t("settings.general.conversation.structure.description")
+          }
+          resetAction={
+            settings.conversationStructure !== DEFAULT_UNIFIED_SETTINGS.conversationStructure ? (
+              <SettingResetButton
+                label={t("settings.general.conversation.structure.resetLabel")}
+                onClick={() =>
+                  updateSettings({
+                    conversationStructure: DEFAULT_UNIFIED_SETTINGS.conversationStructure,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Select
+              value={mixedConversationStructure ? null : settings.conversationStructure}
+              onValueChange={(value) => {
+                if (value === "default" || value === "restructured") {
+                  updateSettings({ conversationStructure: value });
+                }
+              }}
+            >
+              <SelectTrigger
+                size="sm"
+                className="w-full sm:w-56"
+                aria-label={t("settings.general.conversation.structure.description")}
+              >
+                <SelectValue>
+                  {(value: ConversationStructure | null) =>
+                    value === null
+                      ? t("settings.row.copy.mixedAcrossEnvironments")
+                      : t(
+                          value === "restructured"
+                            ? "settings.general.conversation.structure.restructured"
+                            : "settings.general.conversation.structure.default",
+                        )
+                  }
+                </SelectValue>
+              </SelectTrigger>
+              <SelectPopup align="end" alignItemWithTrigger={false}>
+                <SelectItem hideIndicator value="default">
+                  {t("settings.general.conversation.structure.default")}
+                </SelectItem>
+                <SelectItem hideIndicator value="restructured">
+                  {t("settings.general.conversation.structure.restructured")}
+                </SelectItem>
+              </SelectPopup>
+            </Select>
+          }
+        />
+        <SettingsRow
+          serverScoped
+          settingKeys={["conversationStructureIdleLabel"]}
+          title={t("settings.general.conversation.idleLabel.title")}
+          description={t("settings.general.conversation.idleLabel.description")}
+          resetAction={
+            settings.conversationStructureIdleLabel !==
+            DEFAULT_UNIFIED_SETTINGS.conversationStructureIdleLabel ? (
+              <SettingResetButton
+                label={t("settings.general.conversation.idleLabel.resetLabel")}
+                onClick={() =>
+                  updateSettings({
+                    conversationStructureIdleLabel:
+                      DEFAULT_UNIFIED_SETTINGS.conversationStructureIdleLabel,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Input
+              size="sm"
+              value={settings.conversationStructureIdleLabel}
+              disabled={settings.conversationStructure !== "restructured"}
+              aria-label={t("settings.general.conversation.idleLabel.ariaLabel")}
+              onChange={(event) =>
+                updateSettings({ conversationStructureIdleLabel: event.target.value })
+              }
+            />
+          }
+        />
       </SettingsSection>
 
       <SettingsSection id="text-generation" title={t("settings.general.section.textGeneration")}>

@@ -3362,6 +3362,101 @@ describe("restructured live activity layer", () => {
     expect(thinkingMarkup).not.toContain('data-timeline-row-kind="thinking"');
   });
 
+  it("labels the gap after a finished tool with the idle text", () => {
+    // Same shape as the running-tool fixture, except the tool is done: the live
+    // label empties out and the gap takes over.
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        conversationStructure="restructured"
+        isWorking
+        runningRunId={RUN_ID}
+        latestRun={{
+          runId: RUN_ID,
+          status: "running",
+          startedAt: MESSAGE_CREATED_AT,
+          completedAt: null,
+        }}
+        timelineEntries={buildRunningToolEntries("completed")}
+      />,
+    );
+
+    expect(markup).toContain('data-testid="timeline-live-activity-layer"');
+    expect(markup).toContain("Planning next move");
+    expect(markup).not.toContain("Thinking");
+  });
+
+  it("shows the configured idle text in the same gap", () => {
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        conversationStructure="restructured"
+        conversationStructureIdleLabel="Deciding what to do next"
+        isWorking
+        runningRunId={RUN_ID}
+        latestRun={{
+          runId: RUN_ID,
+          status: "running",
+          startedAt: MESSAGE_CREATED_AT,
+          completedAt: null,
+        }}
+        timelineEntries={buildRunningToolEntries("completed")}
+      />,
+    );
+
+    expect(markup).toContain("Deciding what to do next");
+  });
+
+  it("keeps Thinking in the default structure where a gap would be", () => {
+    // Default keeps the finished tool in the live label, so no gap opens up and
+    // the idle text must never appear on this path.
+    const finishedToolMarkup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        conversationStructure="default"
+        isWorking
+        runningRunId={RUN_ID}
+        latestRun={{
+          runId: RUN_ID,
+          status: "running",
+          startedAt: MESSAGE_CREATED_AT,
+          completedAt: null,
+        }}
+        timelineEntries={buildRunningToolEntries("completed")}
+      />,
+    );
+    expect(finishedToolMarkup).not.toContain("Planning next move");
+    expect(finishedToolMarkup).toContain('data-timeline-row-kind="work-live"');
+
+    // The row default does render still says Thinking.
+    const openingMarkup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        conversationStructure="default"
+        isWorking
+        timelineEntries={[buildUserTimelineEntry("Hello")]}
+      />,
+    );
+    expect(openingMarkup).toContain("Thinking");
+    expect(openingMarkup).not.toContain("Planning next move");
+  });
+
+  it("keeps Thinking at the start of a restructured turn", () => {
+    // No tool has run yet, so the row is real thinking rather than the idle gap
+    // — even though the structure is the one that owns the idle text.
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        conversationStructure="restructured"
+        isWorking
+        timelineEntries={[buildUserTimelineEntry("Hello")]}
+      />,
+    );
+
+    expect(markup).toContain("Thinking");
+    expect(markup).not.toContain("Planning next move");
+  });
+
   it("leaves the list data and extraData consistent with the filtered rows", () => {
     // LegendList derives scroll offsets from its own data array, so a row
     // count that disagrees with `data` would misplace every scroll target.
