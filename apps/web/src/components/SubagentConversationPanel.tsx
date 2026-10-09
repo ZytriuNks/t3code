@@ -14,6 +14,7 @@ import { ArrowLeft, Maximize2, X } from "lucide-react";
 import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import * as Option from "effect/Option";
 import { useTheme } from "~/hooks/useTheme";
+import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { useEnvironmentSettings } from "~/hooks/useSettings";
 import { useEnvironments } from "~/state/environments";
 import { useEnvironmentThread } from "~/state/threads";
@@ -139,7 +140,18 @@ export function SubagentConversationPanel({
   );
   const { environments } = useEnvironments();
   const { resolvedTheme } = useTheme();
-  const settings = useEnvironmentSettings(threadRef.environmentId);
+  const environmentSettings = useEnvironmentSettings(threadRef.environmentId);
+  // The conversation structure is a project-scoped key, so the environment
+  // values alone would leave a project that opted in showing the default
+  // layout inside the very same session as its parent thread.
+  const projectSettings = useMemo(
+    () => resolveProjectSettings(environmentSettings, project?.id ?? null, project).settings,
+    [environmentSettings, project],
+  );
+  const settings = useMemo(
+    () => ({ ...environmentSettings, ...projectSettings }),
+    [environmentSettings, projectSettings],
+  );
   const listRef = useRef<LegendListRef | null>(null);
   const timelineViewportRef = useRef<HTMLDivElement | null>(null);
   const timelineProjection = useMemo<TimelineEntriesProjection>(

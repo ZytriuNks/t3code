@@ -27,6 +27,7 @@ import {
   type ChatWidth,
   type ConversationStructure,
   type DiffLayout,
+  DEFAULT_CONVERSATION_IDLE_LABEL,
   type EnvironmentIdentificationMode,
   type LanguagePreference,
   MAX_APPEARANCE_CONTRAST,
@@ -3902,7 +3903,11 @@ function GeneralSettingsRows() {
               value={
                 mixedConversationStructureIdleLabel ? "" : settings.conversationStructureIdleLabel
               }
-              onCommit={(next) => updateSettings({ conversationStructureIdleLabel: next })}
+              onCommit={(next) =>
+                updateSettings({
+                  conversationStructureIdleLabel: next || DEFAULT_CONVERSATION_IDLE_LABEL,
+                })
+              }
               placeholder={
                 mixedConversationStructureIdleLabel ? t("settings.general.mixed") : undefined
               }

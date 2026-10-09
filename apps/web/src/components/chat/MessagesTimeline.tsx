@@ -1273,10 +1273,22 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       scrollHeight: scrollElement.scrollHeight,
       clientHeight: scrollElement.clientHeight,
       footerGap: readTimelineFooterGap(),
-      contentInsetEndAdjustment,
+      // The footer and LegendList take the composer inset between them, and an
+      // anchored end space hands it to the list. Counting it here too would
+      // float the label a full composer height above the last line.
+      contentInsetEndAdjustment: anchoredEndSpace ? 0 : contentInsetEndAdjustment,
     })}px`;
     if (overlay.style.bottom !== next) overlay.style.bottom = next;
-  }, [contentInsetEndAdjustment, listRef, readTimelineFooterGap]);
+  }, [anchoredEndSpace, contentInsetEndAdjustment, listRef, readTimelineFooterGap]);
+
+  // The overlay has no offset until something writes one, and neither the
+  // scroll handler nor the resize handler runs on the frame the node appears.
+  // Its CSS fallback sits at the raw footer gap, so the first activity row of a
+  // turn would open hidden behind the composer until the reader scrolled.
+  useLayoutEffect(() => {
+    if (!liveActivityOverlayNode) return;
+    updateLiveOverlayPosition();
+  }, [liveActivityOverlayNode, updateLiveOverlayPosition]);
   const handleItemSizeChanged = useCallback(() => {
     requestSmoothFollow();
     updateLiveOverlayPosition();
