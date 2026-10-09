@@ -231,6 +231,23 @@ describe("smooth streaming scroll edge", () => {
     expect(at(0)).toBe(1_312);
   });
 
+  it("keeps a fractional leave of the edge visible in the overlay offset", () => {
+    const at = (scrollTop: number) =>
+      resolveTimelineLiveOverlayBottom({
+        scrollTop,
+        scrollHeight: 2_000,
+        clientHeight: 800,
+        footerGap: 16,
+        contentInsetEndAdjustment: 96,
+      });
+
+    // A quarter pixel above the real end is already off the edge. The offset
+    // has to say so, or an epsilon added to the formula later would silently
+    // pin the label to the composer gap again.
+    expect(at(1_200)).toBe(112);
+    expect(at(1_199.75)).toBe(112.25);
+  });
+
   it("clamps the lift of the live overlay when the content underflows the viewport", () => {
     expect(
       resolveTimelineLiveOverlayBottom({

@@ -1246,10 +1246,33 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onContentOverflowChange(measureContentOverflow());
     });
   }, [measureContentOverflow, onContentOverflowChange]);
+  // A row resize above the fold moves the last line without moving the
+  // viewport: the container is `overflow-anchor: none` and the follow pass has
+  // already stopped writing scrollTop, so nothing raises a scroll event. The
+  // offset therefore has to be written from the size change too, not only from
+  // the scroll handler. It stays a compare-then-write, with no frame and no
+  // state update.
+  const updateLiveOverlayPosition = useCallback(() => {
+    const overlay = liveActivityOverlayRef.current;
+    const scrollElement = listRef.current?.getScrollableNode();
+    if (!overlay || !scrollElement) return;
+    // Skip no-op writes for the same reason the minimap strips skip theirs:
+    // this runs on every scroll tick and every row resize, and rewriting an
+    // unchanged property still dirties style state.
+    const next = `${resolveTimelineLiveOverlayBottom({
+      scrollTop: scrollElement.scrollTop,
+      scrollHeight: scrollElement.scrollHeight,
+      clientHeight: scrollElement.clientHeight,
+      footerGap: readTimelineFooterGap(),
+      contentInsetEndAdjustment,
+    })}px`;
+    if (overlay.style.bottom !== next) overlay.style.bottom = next;
+  }, [contentInsetEndAdjustment, listRef, readTimelineFooterGap]);
   const handleItemSizeChanged = useCallback(() => {
     requestSmoothFollow();
+    updateLiveOverlayPosition();
     reportContentOverflow();
-  }, [reportContentOverflow, requestSmoothFollow]);
+  }, [reportContentOverflow, requestSmoothFollow, updateLiveOverlayPosition]);
   useEffect(() => cancelContentOverflowFrame, [cancelContentOverflowFrame]);
   // The list's own layout effects have already run here, so estimated row
   // positions are in place. Reporting before the first paint lets a thread
@@ -1321,25 +1344,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     const state = listRef.current?.getState?.();
     const scrollElement = listRef.current?.getScrollableNode();
     const nativeIsAtEnd = scrollElement ? resolveTimelineDomIsAtEnd(scrollElement) : undefined;
-    if (scrollElement) {
-      const overlay = liveActivityOverlayRef.current;
-      if (overlay) {
-        // Skip no-op writes for the same reason the minimap strips skip theirs:
-        // this runs on every scroll tick, and rewriting an unchanged property
-        // still dirties style state.
-        const next = `${resolveTimelineLiveOverlayBottom({
-          scrollTop: scrollElement.scrollTop,
-          scrollHeight: scrollElement.scrollHeight,
-          clientHeight: scrollElement.clientHeight,
-          footerGap: readTimelineFooterGap(),
-          contentInsetEndAdjustment,
-        })}px`;
-        if (overlay.style.bottom !== next) overlay.style.bottom = next;
-        const atEdge = smoothFollowControl.current?.isAtEdge() ?? nativeIsAtEnd ?? false;
-        const nextAtEdge = atEdge ? "true" : "false";
-        if (overlay.dataset.atEdge !== nextAtEdge) overlay.dataset.atEdge = nextAtEdge;
-      }
-    }
+    updateLiveOverlayPosition();
     if (restoringThreadPosition || state?.data !== listRows) return;
     // Smooth output follows the real DOM edge. LegendList's near-end band is
     // still useful for non-streaming history navigation, but it must not
@@ -1414,7 +1419,6 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     );
   }, [
     citationPositioning,
-    contentInsetEndAdjustment,
     detectNativeNavigation,
     paintedExpandedRunIds,
     paintedExpandedWorkGroupIds,
@@ -1422,7 +1426,6 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     workGroupViewState,
     listRows,
     listIdentityKey,
-    readTimelineFooterGap,
     restoringThreadPosition,
     listRef,
     minimapItems,
@@ -1431,6 +1434,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     reportContentOverflow,
     smoothFollowControl,
     smoothStreaming,
+    updateLiveOverlayPosition,
   ]);
 
   useEffect(() => {
@@ -4127,9 +4131,10 @@ function LiveWorkEntryTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "
  * It sits beside LegendList rather than inside it: as a child of the scroll
  * container it would travel with the content instead of staying pinned.
  *
- * Its bottom offset is written per scroll tick from the live geometry, so it
- * rests on the viewport bottom while the reader is at the end and rides up with
- * the last line of content once they leave it.
+ * Its bottom offset is written imperatively from the live geometry, on every
+ * scroll tick and on every row resize. At the end of the content it rests in
+ * the gap above the composer, and it rides up with the last line once the
+ * reader leaves the end.
  */
 function LiveActivityOverlay({
   rows,

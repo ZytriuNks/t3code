@@ -21,6 +21,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { create, type ReactTestRenderer } from "react-test-renderer";
 import { shouldUseRestingComposerLayout } from "../composerFooterLayout";
 import { useComposerFocusState } from "./useComposerFocusState";
+import { resolveTimelineLiveOverlayBottom } from "./MessagesTimeline.logic";
 import { rememberTimelinePosition } from "./timelineScrollAnchoring";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import type { LegendListRef } from "@legendapp/list/react";
@@ -3682,6 +3683,117 @@ describe("restructured live activity layer", () => {
       expect(className!.split(" ")).not.toContain("pb-2");
       // Above the overlay scrollbar and the minimap, below the body rows.
       expect(className!.split(" ")).toContain("z-10");
+    });
+
+    /**
+     * Renders the live layer over a scroll container whose geometry the test
+     * owns, and hands back the overlay node so the imperative write is
+     * observable. Only the overlay gets a node mock; every other host ref
+     * stays null, so the footer gap falls back to its declared constant and no
+     * DOM is needed.
+     */
+    function createDrivenOverlayRenderer() {
+      const viewport = {
+        scrollTop: 900,
+        scrollHeight: 2_000,
+        clientHeight: 800,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      };
+      const overlayNode = { offsetHeight: 40, style: {} as { bottom?: string } };
+      const props = buildOverlayProps();
+      props.listRef.current = {
+        getState: () => null,
+        getScrollableNode: () => viewport,
+      } as unknown as LegendListRef;
+      const renderer = create(<MessagesTimeline {...props} />, {
+        createNodeMock: (element) =>
+          (element as { props?: Record<string, unknown> }).props?.["data-testid"] ===
+          "timeline-live-activity-layer"
+            ? overlayNode
+            : null,
+      });
+      return { renderer, overlayNode, viewport };
+    }
+
+    /**
+     * The list owns the two callbacks the position write hangs off, so the
+     * test drives them the way the real list would.
+     */
+    function findDrivenList(renderer: ReactTestRenderer) {
+      return renderer.root.find(
+        (node) => Array.isArray(node.props.data) && typeof node.props.keyExtractor === "function",
+      );
+    }
+
+    async function withDrivenOverlayRenderer(
+      run: (fixture: ReturnType<typeof createDrivenOverlayRenderer>) => Promise<void>,
+    ) {
+      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+      vi.stubGlobal("requestAnimationFrame", () => 0);
+      vi.stubGlobal("cancelAnimationFrame", () => {});
+      stubResizeObserver();
+      let fixture: ReturnType<typeof createDrivenOverlayRenderer> | undefined;
+      try {
+        await act(() => {
+          fixture = createDrivenOverlayRenderer();
+        });
+        await run(fixture!);
+      } finally {
+        await act(() => fixture?.renderer.unmount());
+      }
+    }
+
+    const overlayBottom = (fixture: { overlayNode: { style: { bottom?: string } } }) =>
+      Number.parseFloat(fixture.overlayNode.style.bottom ?? "");
+
+    it("writes the overlay offset from the live geometry on scroll", async () => {
+      await withDrivenOverlayRenderer(async (fixture) => {
+        await act(() => findDrivenList(fixture.renderer).props.onScroll());
+
+        // 300px above the end, plus the fallback footer gap and composer inset.
+        expect(fixture.overlayNode.style.bottom).toBe("408px");
+        expect(overlayBottom(fixture)).toBe(
+          resolveTimelineLiveOverlayBottom({
+            scrollTop: fixture.viewport.scrollTop,
+            scrollHeight: fixture.viewport.scrollHeight,
+            clientHeight: fixture.viewport.clientHeight,
+            footerGap: 12,
+            contentInsetEndAdjustment: 96,
+          }),
+        );
+      });
+    });
+
+    it("lifts the overlay by exactly the distance the reader scrolls up", async () => {
+      await withDrivenOverlayRenderer(async (fixture) => {
+        await act(() => findDrivenList(fixture.renderer).props.onScroll());
+        const atRest = overlayBottom(fixture);
+
+        // Monotonic growth is the whole point: the label follows the last line
+        // instead of sitting on the composer gap while the reader is above it.
+        for (const scrollTop of [800, 600, 400]) {
+          fixture.viewport.scrollTop = scrollTop;
+          await act(() => findDrivenList(fixture.renderer).props.onScroll());
+          expect(overlayBottom(fixture)).toBe(atRest + (900 - scrollTop));
+        }
+      });
+    });
+
+    it("moves the overlay when content grows while the reader is above the end", async () => {
+      await withDrivenOverlayRenderer(async (fixture) => {
+        fixture.viewport.scrollTop = 600;
+        await act(() => findDrivenList(fixture.renderer).props.onScroll());
+        const beforeGrowth = overlayBottom(fixture);
+
+        // A row resize grows the content without moving the viewport, and the
+        // container raises no scroll event for it. The offset still has to
+        // follow, or the label detaches from the last line.
+        fixture.viewport.scrollHeight = 2_400;
+        await act(() => findDrivenList(fixture.renderer).props.onItemSizeChanged());
+
+        expect(overlayBottom(fixture)).toBe(beforeGrowth + 400);
+      });
     });
   });
 });
