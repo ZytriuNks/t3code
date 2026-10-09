@@ -18,10 +18,9 @@ import {
   type ReactElement,
 } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { create, type ReactTestRenderer } from "react-test-renderer";
+import { create, type ReactTestInstance, type ReactTestRenderer } from "react-test-renderer";
 import { shouldUseRestingComposerLayout } from "../composerFooterLayout";
 import { useComposerFocusState } from "./useComposerFocusState";
-import { resolveTimelineLiveOverlayBottom } from "./MessagesTimeline.logic";
 import { rememberTimelinePosition } from "./timelineScrollAnchoring";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import type { LegendListRef } from "@legendapp/list/react";
@@ -3295,11 +3294,11 @@ describe("restructured live activity layer", () => {
     expect(markup).not.toContain('data-testid="timeline-live-activity-layer"');
   });
 
-  it("renders the same tool label in the overlay as the row it replaces", () => {
+  it("renders the same tool label in the live layer as the row it replaces", () => {
     const defaultMarkup = renderRunningTool("default");
     const restructuredMarkup = renderRunningTool("restructured");
 
-    // The overlay reuses LiveWorkEntryTimelineRow, so the derived label and the
+    // The live layer reuses LiveWorkEntryTimelineRow, so the derived label and the
     // expansion affordance survive the move instead of being re-computed.
     for (const markup of [defaultMarkup, restructuredMarkup]) {
       expect(markup).toContain("Running pnpm");
@@ -3307,7 +3306,7 @@ describe("restructured live activity layer", () => {
     }
   });
 
-  it("keeps the overlay row expandable through its group toggle", async () => {
+  it("keeps the live layer row expandable through its group toggle", async () => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     let renderer: ReactTestRenderer | undefined;
     try {
@@ -3329,11 +3328,11 @@ describe("restructured live activity layer", () => {
         );
       });
 
-      const overlay = renderer!.root.findByProps({
+      const layer = renderer!.root.findByProps({
         "data-testid": "timeline-live-activity-layer",
       });
-      expect(overlay).toBeDefined();
-      // The toggle lives inside the overlay, not in a virtualized row.
+      expect(layer).toBeDefined();
+      // The toggle lives inside the live layer, not in a virtualized row.
       expect(renderer!.root.findAllByProps({ "aria-expanded": false })).toHaveLength(1);
       expect(
         renderer!.root.findAll(
@@ -3348,7 +3347,7 @@ describe("restructured live activity layer", () => {
     }
   });
 
-  it("moves the thinking row into the overlay when nothing is running", () => {
+  it("moves the thinking row into the live layer when nothing is running", () => {
     const thinkingMarkup = renderToStaticMarkup(
       <MessagesTimeline
         {...buildProps()}
@@ -3660,35 +3659,13 @@ describe("restructured live activity layer", () => {
     }
   });
 
-  describe("live overlay placement", () => {
-    /** A 40px overlay reserves 48px once the 8px clearance is added. */
-    const OVERLAY_INSET = 48;
+  describe("live label placement", () => {
+    const COMPOSER_INSET = 96;
 
-    function stubResizeObserver() {
-      class StubResizeObserver implements ResizeObserver {
-        observe() {}
-        unobserve() {}
-        disconnect() {}
-      }
-      vi.stubGlobal("ResizeObserver", StubResizeObserver);
-    }
-
-    function createOverlayRenderer(node: Parameters<typeof create>[0]) {
-      return create(node, {
-        // Only the overlay is measured here; every other host ref stays null so
-        // the test exercises the live layer without a DOM.
-        createNodeMock: (element) =>
-          (element as { props?: Record<string, unknown> }).props?.["data-testid"] ===
-          "timeline-live-activity-layer"
-            ? { offsetHeight: 40 }
-            : null,
-      });
-    }
-
-    function buildOverlayProps() {
+    function buildLiveLabelProps() {
       return {
         ...buildProps(),
-        contentInsetEndAdjustment: 96,
+        contentInsetEndAdjustment: COMPOSER_INSET,
         conversationStructure: "restructured" as const,
         isWorking: true,
         runningRunId: RUN_ID,
@@ -3702,26 +3679,75 @@ describe("restructured live activity layer", () => {
       };
     }
 
-    it("reserves the measured overlay height above the composer gap", async () => {
+    /** The footer's own block: the label and the reservations below it. */
+    function findFooterBlock(liveLabel: ReactTestInstance) {
+      const footer = liveLabel.parent;
+      expect(footer?.props["aria-hidden"]).toBe(false);
+      return footer!;
+    }
+
+    async function withLiveLabelRenderer(
+      node: Parameters<typeof create>[0],
+      run: (fixture: {
+        renderer: ReactTestRenderer;
+        liveLabel: ReactTestInstance;
+      }) => Promise<void>,
+    ) {
       vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-      stubResizeObserver();
       let renderer: ReactTestRenderer | undefined;
       try {
         await act(() => {
-          renderer = createOverlayRenderer(<MessagesTimeline {...buildOverlayProps()} />);
+          renderer = create(node);
         });
-
-        const reserves = renderer!.root.findAllByProps({
-          "data-testid": "timeline-live-activity-inset",
+        const liveLabel = renderer!.root.findByProps({
+          "data-testid": "timeline-live-activity-layer",
         });
-        expect(reserves).toHaveLength(1);
-        expect(reserves[0]!.props.style).toEqual({ height: OVERLAY_INSET });
+        await run({ renderer: renderer!, liveLabel });
       } finally {
         await act(() => renderer?.unmount());
       }
+    }
+
+    it("renders the live label in the list footer, not beside the scroll container", async () => {
+      await withLiveLabelRenderer(
+        <MessagesTimeline {...buildLiveLabelProps()} />,
+        async (fixture) => {
+          // Inside the footer the label is ordinary content: it travels with the
+          // body, so it cannot move against the text or be covered by the composer.
+          expect(String(fixture.liveLabel.props.className).split(" ")).not.toContain("absolute");
+          const footer = findFooterBlock(fixture.liveLabel);
+          // The label's own parent is the footer block, so nothing sits between
+          // them that could offset it away from the end of the content.
+          expect(footer.children).toContain(fixture.liveLabel);
+          // And that footer block is rendered inside LegendList's scroll container.
+          expect(
+            fixture.renderer.root
+              .findByProps({ "data-testid": "legend-list" })
+              .findAllByProps({ "data-testid": "timeline-live-activity-layer" }),
+          ).toHaveLength(1);
+        },
+      );
     });
 
-    it("leaves the footer markup untouched while no live overlay is rendered", () => {
+    it("stacks the live label above the composer inset reservation", async () => {
+      await withLiveLabelRenderer(
+        <MessagesTimeline {...buildLiveLabelProps()} />,
+        async (fixture) => {
+          const footer = findFooterBlock(fixture.liveLabel);
+          const children = footer.children.filter(
+            (child): child is ReactTestInstance => typeof child !== "string",
+          );
+          const insetIndex = children.findIndex(
+            (child) =>
+              (child.props as { style?: { height?: number } }).style?.height === COMPOSER_INSET,
+          );
+
+          expect(insetIndex).toBeGreaterThan(children.indexOf(fixture.liveLabel));
+        },
+      );
+    });
+
+    it("leaves the footer markup untouched while no live label is rendered", () => {
       const markup = renderToStaticMarkup(
         <MessagesTimeline
           {...buildProps()}
@@ -3731,164 +3757,11 @@ describe("restructured live activity layer", () => {
       );
 
       // Byte-for-byte the pre-restructuring footer: the composer gap block and
-      // the responsive gap, with no extra node for an absent overlay.
+      // the responsive gap, with no extra node for an absent label.
       expect(markup).toContain(
         '<div aria-hidden="true"><div style="height:96px"></div><div class="h-3 sm:h-4"></div></div>',
       );
-      expect(markup).not.toContain('data-testid="timeline-live-activity-inset"');
-    });
-
-    it("drops the overlay reservation while an anchored end space holds the edge", async () => {
-      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-      stubResizeObserver();
-      let renderer: ReactTestRenderer | undefined;
-      try {
-        await act(() => {
-          renderer = createOverlayRenderer(
-            <MessagesTimeline
-              {...buildOverlayProps()}
-              anchorMessageId={MessageId.make("message-1")}
-            />,
-          );
-        });
-
-        // The anchor owns the end space, exactly as it does for the composer
-        // gap, so a second reservation would push the anchored message away.
-        expect(
-          renderer!.root.findByProps({ "data-testid": "legend-list" }).props["data-anchor-index"],
-        ).toBe(0);
-        expect(
-          renderer!.root.findAllByProps({ "data-testid": "timeline-live-activity-inset" }),
-        ).toHaveLength(0);
-      } finally {
-        await act(() => renderer?.unmount());
-      }
-    });
-
-    it("stops pinning the overlay to the viewport bottom in its classes", () => {
-      const markup = renderRunningTool("restructured");
-      const className = /data-testid="timeline-live-activity-layer" class="([^"]*)"/.exec(
-        markup,
-      )?.[1];
-
-      expect(className).toBeDefined();
-      // The offset is written imperatively on every scroll tick, so the class
-      // list must not pin the overlay to the bottom of the viewport.
-      expect(className!.split(" ")).not.toContain("bottom-0");
-      expect(className!.split(" ")).not.toContain("pb-2");
-      // Above the overlay scrollbar and the minimap, below the body rows.
-      expect(className!.split(" ")).toContain("z-10");
-    });
-
-    /**
-     * Renders the live layer over a scroll container whose geometry the test
-     * owns, and hands back the overlay node so the imperative write is
-     * observable. Only the overlay gets a node mock; every other host ref
-     * stays null, so the footer gap falls back to its declared constant and no
-     * DOM is needed.
-     */
-    function createDrivenOverlayRenderer() {
-      const viewport = {
-        scrollTop: 900,
-        scrollHeight: 2_000,
-        clientHeight: 800,
-        addEventListener: () => {},
-        removeEventListener: () => {},
-      };
-      const overlayNode = { offsetHeight: 40, style: {} as { bottom?: string } };
-      const props = buildOverlayProps();
-      props.listRef.current = {
-        getState: () => null,
-        getScrollableNode: () => viewport,
-      } as unknown as LegendListRef;
-      const renderer = create(<MessagesTimeline {...props} />, {
-        createNodeMock: (element) =>
-          (element as { props?: Record<string, unknown> }).props?.["data-testid"] ===
-          "timeline-live-activity-layer"
-            ? overlayNode
-            : null,
-      });
-      return { renderer, overlayNode, viewport };
-    }
-
-    /**
-     * The list owns the two callbacks the position write hangs off, so the
-     * test drives them the way the real list would.
-     */
-    function findDrivenList(renderer: ReactTestRenderer) {
-      return renderer.root.find(
-        (node) => Array.isArray(node.props.data) && typeof node.props.keyExtractor === "function",
-      );
-    }
-
-    async function withDrivenOverlayRenderer(
-      run: (fixture: ReturnType<typeof createDrivenOverlayRenderer>) => Promise<void>,
-    ) {
-      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-      vi.stubGlobal("requestAnimationFrame", () => 0);
-      vi.stubGlobal("cancelAnimationFrame", () => {});
-      stubResizeObserver();
-      let fixture: ReturnType<typeof createDrivenOverlayRenderer> | undefined;
-      try {
-        await act(() => {
-          fixture = createDrivenOverlayRenderer();
-        });
-        await run(fixture!);
-      } finally {
-        await act(() => fixture?.renderer.unmount());
-      }
-    }
-
-    const overlayBottom = (fixture: { overlayNode: { style: { bottom?: string } } }) =>
-      Number.parseFloat(fixture.overlayNode.style.bottom ?? "");
-
-    it("writes the overlay offset from the live geometry on scroll", async () => {
-      await withDrivenOverlayRenderer(async (fixture) => {
-        await act(() => findDrivenList(fixture.renderer).props.onScroll());
-
-        // 300px above the end, plus the fallback footer gap and composer inset.
-        expect(fixture.overlayNode.style.bottom).toBe("408px");
-        expect(overlayBottom(fixture)).toBe(
-          resolveTimelineLiveOverlayBottom({
-            scrollTop: fixture.viewport.scrollTop,
-            scrollHeight: fixture.viewport.scrollHeight,
-            clientHeight: fixture.viewport.clientHeight,
-            footerGap: 12,
-            contentInsetEndAdjustment: 96,
-          }),
-        );
-      });
-    });
-
-    it("lifts the overlay by exactly the distance the reader scrolls up", async () => {
-      await withDrivenOverlayRenderer(async (fixture) => {
-        await act(() => findDrivenList(fixture.renderer).props.onScroll());
-        const atRest = overlayBottom(fixture);
-
-        // Monotonic growth is the whole point: the label follows the last line
-        // instead of sitting on the composer gap while the reader is above it.
-        for (const scrollTop of [800, 600, 400]) {
-          fixture.viewport.scrollTop = scrollTop;
-          await act(() => findDrivenList(fixture.renderer).props.onScroll());
-          expect(overlayBottom(fixture)).toBe(atRest + (900 - scrollTop));
-        }
-      });
-    });
-
-    it("moves the overlay when content grows while the reader is above the end", async () => {
-      await withDrivenOverlayRenderer(async (fixture) => {
-        fixture.viewport.scrollTop = 600;
-        await act(() => findDrivenList(fixture.renderer).props.onScroll());
-        const beforeGrowth = overlayBottom(fixture);
-
-        // A row resize grows the content without moving the viewport, and the
-        // container raises no scroll event for it. The offset still has to
-        // follow, or the label detaches from the last line.
-        fixture.viewport.scrollHeight = 2_400;
-        await act(() => findDrivenList(fixture.renderer).props.onItemSizeChanged());
-
-        expect(overlayBottom(fixture)).toBe(beforeGrowth + 400);
-      });
+      expect(markup).not.toContain('data-testid="timeline-live-activity-layer"');
     });
   });
 });

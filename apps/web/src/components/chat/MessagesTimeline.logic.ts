@@ -203,28 +203,6 @@ export function resolveTimelineDomIsAtEnd(input: {
 }
 
 /**
- * Bottom offset for the live-activity overlay, in px from the viewport bottom.
- * At the end of the content it degenerates to the footer gap plus the composer
- * inset, so the label rests on the same line the body ends on; above the end it
- * grows by exactly the distance the reader scrolled up, which carries the label
- * along with the last line instead of covering it. One formula covers both, so
- * no separate "am I following" state can drift from the rendered position.
- */
-export function resolveTimelineLiveOverlayBottom(input: {
-  readonly scrollTop: number;
-  readonly scrollHeight: number;
-  readonly clientHeight: number;
-  readonly footerGap: number;
-  readonly contentInsetEndAdjustment: number;
-}): number {
-  return (
-    Math.max(0, input.scrollHeight - input.clientHeight - input.scrollTop) +
-    input.footerGap +
-    input.contentInsetEndAdjustment
-  );
-}
-
-/**
  * Row-size compensation pins the reader's current content to the same screen
  * offset whenever a row resizes. Smooth output resizes the thinking block every
  * frame while it is still inside the viewport, so compensation would keep

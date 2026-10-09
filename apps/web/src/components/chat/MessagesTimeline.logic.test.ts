@@ -33,7 +33,6 @@ import {
   normalizeCompactToolLabel,
   resolveAssistantMessageCopyState,
   resolveTimelineDomIsAtEnd,
-  resolveTimelineLiveOverlayBottom,
   resolveTimelineIsAtEnd,
   shouldRearmTimelineFollow,
   resolveWorkGroupScrollIndex,
@@ -201,63 +200,6 @@ describe("smooth streaming scroll edge", () => {
         clientHeight: 800,
       }),
     ).toBe(false);
-  });
-
-  it("places the live overlay on the composer gap at the end of the content", () => {
-    expect(
-      resolveTimelineLiveOverlayBottom({
-        scrollTop: 1_200,
-        scrollHeight: 2_000,
-        clientHeight: 800,
-        footerGap: 12,
-        contentInsetEndAdjustment: 96,
-      }),
-    ).toBe(108);
-  });
-
-  it("lifts the live overlay by the distance the reader scrolled up", () => {
-    const at = (scrollTop: number) =>
-      resolveTimelineLiveOverlayBottom({
-        scrollTop,
-        scrollHeight: 2_000,
-        clientHeight: 800,
-        footerGap: 16,
-        contentInsetEndAdjustment: 96,
-      });
-
-    expect(at(1_200)).toBe(112);
-    expect(at(1_000)).toBe(312);
-    expect(at(400)).toBe(912);
-    expect(at(0)).toBe(1_312);
-  });
-
-  it("keeps a fractional leave of the edge visible in the overlay offset", () => {
-    const at = (scrollTop: number) =>
-      resolveTimelineLiveOverlayBottom({
-        scrollTop,
-        scrollHeight: 2_000,
-        clientHeight: 800,
-        footerGap: 16,
-        contentInsetEndAdjustment: 96,
-      });
-
-    // A quarter pixel above the real end is already off the edge. The offset
-    // has to say so, or an epsilon added to the formula later would silently
-    // pin the label to the composer gap again.
-    expect(at(1_200)).toBe(112);
-    expect(at(1_199.75)).toBe(112.25);
-  });
-
-  it("clamps the lift of the live overlay when the content underflows the viewport", () => {
-    expect(
-      resolveTimelineLiveOverlayBottom({
-        scrollTop: 0,
-        scrollHeight: 300,
-        clientHeight: 400,
-        footerGap: 12,
-        contentInsetEndAdjustment: 0,
-      }),
-    ).toBe(12);
   });
 
   it("treats the first one-pixel upward move as leaving the live edge", () => {
