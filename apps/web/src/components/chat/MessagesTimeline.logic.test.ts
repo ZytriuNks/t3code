@@ -3119,8 +3119,17 @@ describe("deriveMessagesTimelineRows", () => {
     ];
 
     function deriveWithStructure(conversationStructure: ConversationStructure | undefined) {
+      return deriveWithStructureFor(streamingTools, conversationStructure);
+    }
+
+    function deriveWithStructureFor(
+      timelineEntries: TimelineEntry[],
+      conversationStructure: ConversationStructure | undefined,
+      expandedAttemptIds?: ReadonlySet<RunAttemptId>,
+    ) {
       return deriveMessagesTimelineRows({
-        timelineEntries: streamingTools,
+        timelineEntries,
+        ...(expandedAttemptIds ? { expandedAttemptIds } : {}),
         latestRun: {
           runId: "turn-1" as never,
           status: "running",
@@ -3143,6 +3152,13 @@ describe("deriveMessagesTimelineRows", () => {
             (entry) => entry.id,
           ),
         );
+    }
+
+    /** Every row that names this entry, live or archived. */
+    function liveEntryIds(rows: MessagesTimelineRow[]): string[] {
+      return rows.flatMap((row) =>
+        row.kind === "work-live" ? row.groupedEntries.map((entry) => entry.id) : [],
+      );
     }
 
     it("releases a finished tool from the live set so it archives into the body", () => {
@@ -3171,6 +3187,139 @@ describe("deriveMessagesTimelineRows", () => {
 
       expect(bodyWorkEntryIds(rows)).not.toContain("finished-command");
       expect(rows.filter((row) => row.kind === "work-live")).toHaveLength(1);
+    });
+
+    // A completed tool with nothing in flight is the idle gap between two
+    // calls. The tool has already left the live set, so a live row built from
+    // the last visible tool would show it a second time next to its body row.
+    const idleGapEntries: TimelineEntry[] = [
+      {
+        id: "solo-command-entry",
+        kind: "work",
+        createdAt: "2026-01-01T00:00:05Z",
+        entry: {
+          id: "solo-command",
+          createdAt: "2026-01-01T00:00:05Z",
+          runId: "turn-1" as never,
+          label: "Ran read",
+          command: "read src",
+          requestKind: "command",
+          tone: "tool" as const,
+          toolLifecycleStatus: "completed" as const,
+        },
+      },
+    ];
+
+    it("archives the last finished tool without also keeping it live in the idle gap", () => {
+      const rows = deriveWithStructureFor(idleGapEntries, "restructured");
+
+      // Archived once into the body...
+      expect(bodyWorkEntryIds(rows)).toEqual(["solo-command"]);
+      // ...and not repeated by a live row that has nothing running to show.
+      expect(liveEntryIds(rows)).toEqual([]);
+      expect(rows.some((row) => row.kind === "work-live")).toBe(false);
+      // The gap falls back to the idle/thinking row rather than a stale label.
+      expect(rows.some((row) => row.kind === "thinking")).toBe(true);
+    });
+
+    it("still keeps the idle-gap tool live under the default structure", () => {
+      const rows = deriveWithStructureFor(idleGapEntries, "default");
+
+      expect(bodyWorkEntryIds(rows)).toEqual([]);
+      expect(liveEntryIds(rows)).toEqual(["solo-command"]);
+      expect(rows.some((row) => row.kind === "thinking")).toBe(false);
+    });
+
+    it("archives a failed tool into the body under the restructured structure", () => {
+      const failedEntries: TimelineEntry[] = [
+        {
+          id: "failed-command-entry",
+          kind: "work",
+          createdAt: "2026-01-01T00:00:05Z",
+          entry: {
+            id: "failed-command",
+            createdAt: "2026-01-01T00:00:05Z",
+            runId: "turn-1" as never,
+            label: "Ran tests",
+            command: "vp test run",
+            requestKind: "command",
+            tone: "tool" as const,
+            toolLifecycleStatus: "failed" as const,
+          },
+        },
+      ];
+
+      const rows = deriveWithStructureFor(failedEntries, "restructured");
+
+      expect(bodyWorkEntryIds(rows)).toContain("failed-command");
+      expect(liveEntryIds(rows)).toEqual([]);
+      expect(rows.some((row) => row.kind === "work-live")).toBe(false);
+    });
+
+    it("does not duplicate a running tool that starts a new attempt", () => {
+      // A retry opens a new attempt, so the trailing-tool scan stops at the
+      // boundary and the previous attempt's finished tool is outside the live
+      // set entirely. Expanding the fold is what puts it back on the timeline,
+      // and it must show up there exactly once.
+      const crossAttemptEntries: TimelineEntry[] = [
+        {
+          id: "previous-attempt-entry",
+          kind: "work",
+          createdAt: "2026-01-01T00:00:05Z",
+          attempt: {
+            id: "attempt-1" as never,
+            runId: "turn-1" as never,
+            status: "superseded" as const,
+            attemptOrdinal: 0,
+            rootNodeId: "root-1" as never,
+          },
+          entry: {
+            id: "previous-attempt-command",
+            createdAt: "2026-01-01T00:00:05Z",
+            runId: "turn-1" as never,
+            label: "Ran read",
+            command: "read src",
+            requestKind: "command",
+            tone: "tool" as const,
+            toolLifecycleStatus: "completed" as const,
+          },
+        },
+        {
+          id: "current-attempt-entry",
+          kind: "work",
+          createdAt: "2026-01-01T00:00:06Z",
+          attempt: {
+            id: "attempt-2" as never,
+            runId: "turn-1" as never,
+            status: "running" as const,
+            attemptOrdinal: 1,
+            rootNodeId: "root-1" as never,
+          },
+          entry: {
+            id: "current-attempt-command",
+            createdAt: "2026-01-01T00:00:06Z",
+            runId: "turn-1" as never,
+            label: "Running rg",
+            command: "rg toolCall",
+            requestKind: "command",
+            tone: "tool" as const,
+            toolLifecycleStatus: "inProgress" as const,
+          },
+        },
+      ];
+
+      const rows = deriveWithStructureFor(
+        crossAttemptEntries,
+        "restructured",
+        new Set(["attempt-1" as never]),
+      );
+
+      // The prior attempt is archived exactly once...
+      expect(bodyWorkEntryIds(rows)).toEqual(["previous-attempt-command"]);
+      expect(liveEntryIds(rows)).not.toContain("previous-attempt-command");
+      // ...and the in-flight tool of the current attempt owns the live label.
+      expect(bodyWorkEntryIds(rows)).not.toContain("current-attempt-command");
+      expect(liveEntryIds(rows)).toContain("current-attempt-command");
     });
   });
 });

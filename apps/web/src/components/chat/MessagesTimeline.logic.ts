@@ -1255,8 +1255,15 @@ export function deriveMessagesTimelineRows(input: {
     workEntryDisplayIndicatesToolFailure(latestVisibleToolEntry.entry);
 
   const activeWorkPlacementEntryId = latestVisibleToolEntry?.id;
+  // Restructured narrows the live label to the running operation only, so once
+  // the tail has nothing in flight the label empties out. Keeping a row built
+  // from latestVisibleToolEntry here would double-render the just-finished tool:
+  // it already left the live set above, so the body pass archives it into its
+  // own `work` row. The gap renders as the thinking/idle row instead.
+  const restructuredLiveScope =
+    input.conversationStructure === "restructured" && latestRunningToolEntry === undefined;
   const activeWorkRow =
-    activeWorkAnchor && latestVisibleToolEntry && !latestToolFailed
+    activeWorkAnchor && latestVisibleToolEntry && !latestToolFailed && !restructuredLiveScope
       ? (() => {
           const groupId = workGroupId(activeWorkAnchor.id);
           return {
