@@ -3637,7 +3637,7 @@ describe("restructured live activity layer", () => {
       // Byte-for-byte the pre-restructuring footer: the composer gap block and
       // the responsive gap, with no extra node for an absent overlay.
       expect(markup).toContain(
-        '<div aria-hidden="true"><div style="height:96px"></div><div class="h-(--timeline-footer-gap)"></div></div>',
+        '<div aria-hidden="true"><div style="height:96px"></div><div class="h-3 sm:h-4"></div></div>',
       );
       expect(markup).not.toContain('data-testid="timeline-live-activity-inset"');
     });

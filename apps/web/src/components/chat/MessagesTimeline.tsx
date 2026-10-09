@@ -415,7 +415,7 @@ function TimelineListFooter({
         <div data-testid="timeline-live-activity-inset" style={{ height: liveOverlayInset }} />
       ) : null}
       <div style={{ height: composerInset }} />
-      <div className="h-(--timeline-footer-gap)" />
+      <div className="h-3 sm:h-4" />
     </div>
   );
 }
