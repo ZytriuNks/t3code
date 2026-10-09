@@ -6,7 +6,10 @@ import {
   ClientSettingsSchema,
   ClientSettingsPatch,
   ClaudeSettings,
+  DEFAULT_CONVERSATION_IDLE_LABEL,
+  DEFAULT_CONVERSATION_STRUCTURE,
   DEFAULT_SERVER_SETTINGS,
+  ProjectSettingsOverrides,
   resolveProviderInstanceEnabled,
   ServerSettings,
   ServerSettingsPatch,
@@ -19,6 +22,26 @@ const decodeServerSettings = Schema.decodeUnknownSync(ServerSettings);
 const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
+const decodeProjectSettingsOverrides = Schema.decodeSync(ProjectSettingsOverrides);
+
+describe("conversationStructure", () => {
+  it("defaults to the current behaviour with an idle label", () => {
+    const decoded = decodeProjectSettingsOverrides({});
+    expect(decoded.conversationStructure).toBeUndefined();
+    expect(decoded.conversationStructureIdleLabel).toBeUndefined();
+    expect(DEFAULT_CONVERSATION_STRUCTURE).toBe("default");
+    expect(DEFAULT_CONVERSATION_IDLE_LABEL).toBe("Planning next move");
+  });
+
+  it("accepts both structure values and a custom idle label", () => {
+    const decoded = decodeProjectSettingsOverrides({
+      conversationStructure: "restructured",
+      conversationStructureIdleLabel: "考虑下一步",
+    });
+    expect(decoded.conversationStructure).toBe("restructured");
+    expect(decoded.conversationStructureIdleLabel).toBe("考虑下一步");
+  });
+});
 
 describe("ClientSettings context menu visibility", () => {
   it("defaults to showing unavailable context menu items", () => {

@@ -1093,6 +1093,13 @@ export type BackgroundActivitySettings = typeof BackgroundActivitySettings.Type;
 export const ResponseStreamingMode = Schema.Literals(["turn", "paragraph", "realtime", "smooth"]);
 export type ResponseStreamingMode = typeof ResponseStreamingMode.Type;
 
+/** 0: current timeline shape. 1: live label shows one operation, tools archive as they finish. */
+export const ConversationStructure = Schema.Literals(["default", "restructured"]);
+export type ConversationStructure = typeof ConversationStructure.Type;
+
+export const DEFAULT_CONVERSATION_STRUCTURE = "default" as const;
+export const DEFAULT_CONVERSATION_IDLE_LABEL = "Planning next move" as const;
+
 /**
  * Server settings a project may override. Every other server setting is
  * environment-wide: providers, keybindings, observability, device hosts,
@@ -1138,6 +1145,8 @@ export const PROJECT_SCOPED_SERVER_SETTING_KEYS = [
   "sidebarAutoSettleAfterDays",
   "continueThreadsAfterServerUpdate",
   "responseStreamingMode",
+  "conversationStructure",
+  "conversationStructureIdleLabel",
 ] as const;
 export type ProjectScopedServerSettingKey = (typeof PROJECT_SCOPED_SERVER_SETTING_KEYS)[number];
 
@@ -1165,6 +1174,8 @@ export const ProjectSettingsOverrides = Schema.Struct({
   sidebarAutoSettleAfterDays: Schema.optionalKey(Schema.NullOr(SidebarAutoSettleAfterDays)),
   continueThreadsAfterServerUpdate: Schema.optionalKey(Schema.Boolean),
   responseStreamingMode: Schema.optionalKey(ResponseStreamingMode),
+  conversationStructure: Schema.optionalKey(ConversationStructure),
+  conversationStructureIdleLabel: Schema.optionalKey(Schema.String),
 } satisfies Record<ProjectScopedServerSettingKey, unknown>);
 export type ProjectSettingsOverrides = typeof ProjectSettingsOverrides.Type;
 
@@ -1207,6 +1218,12 @@ export const ServerSettings = Schema.Struct({
   ),
   responseStreamingMode: ResponseStreamingMode.pipe(
     Schema.withDecodingDefault(Effect.succeed("paragraph" as const)),
+  ),
+  conversationStructure: ConversationStructure.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_CONVERSATION_STRUCTURE)),
+  ),
+  conversationStructureIdleLabel: Schema.String.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_CONVERSATION_IDLE_LABEL)),
   ),
   enableProviderUpdateChecks: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   // Retain the update-era key; recovery now needs an environment-owned opt-in.
