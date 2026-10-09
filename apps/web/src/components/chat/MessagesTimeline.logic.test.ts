@@ -3521,6 +3521,24 @@ describe("deriveMessagesTimelineRows", () => {
       expect(thinkingRow(rows)).not.toHaveProperty("idle");
     });
 
+    it("leaves a failed tool's thinking row unmarked", () => {
+      // A failure is not idle planning. Labelling it so hides the error behind
+      // a calm message exactly when the user needs to notice it.
+      const failedTool = {
+        ...finishedTool,
+        id: "failed-command-entry",
+        entry: {
+          ...finishedTool.entry,
+          id: "failed-command",
+          toolLifecycleStatus: "failed" as const,
+        },
+      };
+
+      const row = thinkingRow(deriveIdle([userEntry, failedTool], "restructured"));
+      expect(row).toMatchObject({ kind: "thinking" });
+      expect(row).not.toHaveProperty("idle");
+    });
+
     it("leaves the default structure's thinking row unmarked", () => {
       // Default keeps a finished tool in the live label, so the same tail has no
       // thinking row at all — and the turn-opening row stays unmarked, which

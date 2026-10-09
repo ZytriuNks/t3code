@@ -1725,11 +1725,14 @@ export function deriveMessagesTimelineRows(input: {
       kind: "thinking",
       id: LIVE_ACTIVITY_ROW_ID,
       createdAt: input.activeTurnStartedAt ?? null,
-      // Restructured shows this row in two situations that read differently:
-      // the model starting to think at the top of a turn, and the gap after the
-      // turn's last tool finished. Only a tool having already run makes it the
-      // gap, and the label picks its wording from that.
-      ...(input.conversationStructure === "restructured" && latestVisibleToolEntry !== undefined
+      // Restructured shows this row in three situations that read differently:
+      // the model starting to think at the top of a turn, the gap after the
+      // turn's last tool finished, and a tool that failed. Only a finished tool
+      // without a failure makes it the gap; a failure is not idle planning, and
+      // telling the user otherwise hides the error behind a calm label.
+      ...(input.conversationStructure === "restructured" &&
+      latestVisibleToolEntry !== undefined &&
+      !latestToolFailed
         ? { idle: true as const }
         : {}),
     });
