@@ -1,6 +1,6 @@
 import { ScrollFrame } from "~/components/ui/scroll-frame";
 import { WorkLogBlock, WorkLogButton, WorkLogDetails, WorkLogList, WorkLogRow } from "./WorkLog";
-import type { WorktreeSetupSnapshot } from "@t3tools/contracts";
+import type { ConversationStructure, WorktreeSetupSnapshot } from "@t3tools/contracts";
 import { ReadOnlySourcePreview } from "../files/AttachmentFilePreview";
 import { useRightPanelStore } from "~/rightPanelStore";
 import {
@@ -410,6 +410,8 @@ function TimelineListFooter({ composerInset }: { readonly composerInset: number 
   );
 }
 const EMPTY_TIMELINE_SKILLS: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">> = [];
+/** Stable empty so the default path never allocates a new overlay array. */
+const EMPTY_LIVE_ACTIVITY_ROWS: ReadonlyArray<TimelineLiveActivityRow> = [];
 /** Fraction of the viewport a scrollbar step triangle moves per step. */
 const TIMELINE_SCROLLBAR_STEP_RATIO = 0.3;
 const TIMELINE_MAINTAIN_SCROLL_AT_END = {
@@ -463,6 +465,11 @@ interface MessagesTimelineProps {
   isWorking: boolean;
   activeTurnInProgress: boolean;
   activeTurnStartedAt?: string | null;
+  /**
+   * Drives live-label scope and tool archiving. Undefined behaves as "default",
+   * which leaves the timeline byte-identical to the pre-restructuring shape.
+   */
+  conversationStructure?: ConversationStructure | undefined;
   worktreeSetup?: WorktreeSetupSnapshot | null;
   queuedMessages?: ReadonlyArray<QueuedComposerMessage>;
   onSteerQueuedMessage?: (id: string) => void;
@@ -554,6 +561,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   isWorking,
   activeTurnInProgress,
   activeTurnStartedAt = null,
+  conversationStructure,
   worktreeSetup = null,
   queuedMessages = EMPTY_QUEUED_MESSAGES,
   onSteerQueuedMessage = NOOP_QUEUE_MESSAGE_ACTION,
@@ -824,6 +832,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         expandedWorkGroupIds,
         isWorking,
         activeTurnStartedAt,
+        conversationStructure,
         turnDiffSummaries,
         supportsConversationRollback,
         worktreeSetup,
@@ -847,11 +856,28 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     expandedWorkGroupIds,
     isWorking,
     activeTurnStartedAt,
+    conversationStructure,
     turnDiffSummaries,
     supportsConversationRollback,
     worktreeSetup,
   ]);
   const rows = useStableRows(rawRows, listIdentityKey);
+  // The restructured shape pins the live label outside the virtualized rows so
+  // it cannot be measured, recycled, or displaced as body rows grow. Those rows
+  // leave the list and render in the sibling overlay instead. Under "default"
+  // both arrays are the full projection, unchanged.
+  const [listRows, liveActivityRows] = useMemo(() => {
+    if (conversationStructure !== "restructured") return [rows, EMPTY_LIVE_ACTIVITY_ROWS];
+    const list: MessagesTimelineRow[] = [];
+    const live: TimelineLiveActivityRow[] = [];
+    for (const row of rows) {
+      if (row.kind === "thinking" || row.kind === "work-live") live.push(row);
+      else list.push(row);
+    }
+    // Never hand LegendList a fresh array when nothing was filtered out, so the
+    // default path keeps its reference identity across renders.
+    return [live.length === 0 ? rows : list, live];
+  }, [conversationStructure, rows]);
   useLayoutEffect(() => {
     if (rows.length !== 0) return;
     loadedThreadKeyRef.current = listIdentityKey;
@@ -865,10 +891,14 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   // Run status/timestamps churn on every stream event; the shared row context
   // must not change with them or every timeline row re-renders per event.
   const runs = useStableHandoffRuns(runsProp);
-  const minimapItems = useMemo(() => deriveTimelineMinimapItems(rows), [rows]);
+  // Both of these index into LegendList's own array, so they must read
+  // `listRows`: filtering removes only the live label rows, never a user
+  // message, so the minimap keeps every item while its indices stay aligned
+  // with the data the list was actually given.
+  const minimapItems = useMemo(() => deriveTimelineMinimapItems(listRows), [listRows]);
   const restoreRowIndex =
     restoringThreadPosition && rememberedPosition?.atEnd === false
-      ? rows.findIndex((row) => row.id === rememberedPosition.rowId)
+      ? listRows.findIndex((row) => row.id === rememberedPosition.rowId)
       : -1;
   const restoringAlwaysRender = useMemo(
     () =>
@@ -913,7 +943,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     viewport?.addEventListener("pointerdown", cancelForNavigation, { passive: true });
     viewport?.ownerDocument.addEventListener("keydown", onScrollKey);
     const position = rememberedPosition;
-    const index = position ? rows.findIndex((row) => row.id === position.rowId) : -1;
+    const index = position ? listRows.findIndex((row) => row.id === position.rowId) : -1;
     if (position?.atEnd === false) onManualNavigation();
     if (cancelPositionRestoreRef) cancelPositionRestoreRef.current = cancelRestoration;
     const scrolling =
@@ -987,7 +1017,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     onManualNavigation,
     rememberedPosition,
     restoringThreadPosition,
-    rows,
+    listRows,
   ]);
 
   const [timelineViewportElement, setTimelineViewportElement] = useState<HTMLDivElement | null>(
@@ -1218,7 +1248,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     const state = listRef.current?.getState?.();
     const scrollElement = listRef.current?.getScrollableNode();
     const nativeIsAtEnd = scrollElement ? resolveTimelineDomIsAtEnd(scrollElement) : undefined;
-    if (restoringThreadPosition || state?.data !== rows) return;
+    if (restoringThreadPosition || state?.data !== listRows) return;
     // Smooth output follows the real DOM edge. LegendList's near-end band is
     // still useful for non-streaming history navigation, but it must not
     // re-arm live-follow after a user has scrolled up.
@@ -1297,7 +1327,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     paintedExpandedWorkGroupIds,
     paintedExpandedAttemptIds,
     workGroupViewState,
-    rows,
+    listRows,
     listIdentityKey,
     restoringThreadPosition,
     listRef,
@@ -1561,8 +1591,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
           ) : null}
           <LegendList<MessagesTimelineRow>
             ref={listRef}
-            data={rows}
-            extraData={`${listIdentityKey}:${rows.length}`}
+            data={listRows}
+            extraData={`${listIdentityKey}:${listRows.length}`}
             keyExtractor={keyExtractor}
             getItemType={getItemType}
             renderItem={renderItem}
@@ -1606,6 +1636,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
             ListHeaderComponent={listHeader}
             ListFooterComponent={timelineListFooter}
           />
+          <LiveActivityOverlay rows={liveActivityRows} />
           <OverlayScrollbar
             scrollable={timelineScrollableNode}
             triangles
@@ -1984,6 +2015,8 @@ function TimelineMinimapNavigationButton({
 
 type TimelineWorkEntry = Extract<MessagesTimelineRow, { kind: "work" }>["groupedEntries"][number];
 type TimelineRow = MessagesTimelineRow;
+/** Rows the restructured structure hands to the fixed layer instead of the list. */
+type TimelineLiveActivityRow = Extract<MessagesTimelineRow, { kind: "thinking" | "work-live" }>;
 
 const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: TimelineRow }) {
   const isExpandedToolGroup = row.kind === "work" && row.isExpandedToolGroup;
@@ -3861,7 +3894,6 @@ function LiveActivityRow({
   return (
     <div
       ref={animated ? observeVisibleAnimation : undefined}
-      data-timeline-live-label={animated ? "" : undefined}
       className="relative min-h-6 w-fit max-w-full min-w-0 overflow-hidden rounded-md text-sm leading-relaxed"
     >
       <LiveActivityContent
@@ -3985,6 +4017,37 @@ function LiveWorkEntryTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "
         active={row.active}
       />
     </button>
+  );
+}
+
+/**
+ * The restructured live label lives outside the virtualized rows, so it cannot
+ * be measured, recycled, or displaced by body growth. It renders the very same
+ * row components the list used to render, which keeps expansion, failure, and
+ * question-answer behavior identical instead of re-deriving the label here.
+ *
+ * It sits beside LegendList rather than inside it: as a child of the scroll
+ * container it would travel with the content instead of staying pinned.
+ */
+function LiveActivityOverlay({ rows }: { rows: ReadonlyArray<TimelineLiveActivityRow> }) {
+  if (rows.length === 0) return null;
+  return (
+    <div
+      data-testid="timeline-live-activity-layer"
+      className="pointer-events-none absolute inset-x-0 bottom-0 z-10 flex justify-center px-3 pb-2 sm:px-5"
+    >
+      <div className="pointer-events-auto mx-auto flex w-full max-w-(--chat-max-width) min-w-0 flex-col">
+        {rows.map((row) => (
+          <div key={row.id} data-timeline-live-row-kind={row.kind}>
+            {row.kind === "work-live" ? (
+              <LiveWorkEntryTimelineRow row={row} />
+            ) : (
+              <ThinkingTimelineRow />
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 

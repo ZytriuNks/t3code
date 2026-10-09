@@ -1,6 +1,7 @@
 import {
   ApprovalRequestId,
   CheckpointRef,
+  ConversationStructure,
   EnvironmentId,
   MessageId,
   ProviderInstanceId,
@@ -21,6 +22,8 @@ import { create, type ReactTestRenderer } from "react-test-renderer";
 import { shouldUseRestingComposerLayout } from "../composerFooterLayout";
 import { useComposerFocusState } from "./useComposerFocusState";
 import { rememberTimelinePosition } from "./timelineScrollAnchoring";
+import { deriveTimelineMinimapItems } from "./timelineMinimapItems";
+import { deriveMessagesTimelineRows } from "./MessagesTimeline.logic";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import type { LegendListRef } from "@legendapp/list/react";
 
@@ -93,6 +96,7 @@ vi.mock("@legendapp/list/react", async () => {
 
   const LegendList = (props: {
     data: Array<{ id: string }>;
+    extraData?: unknown;
     keyExtractor: (item: { id: string }) => string;
     renderItem: (args: { item: { id: string } }) => ReactNode;
     ListHeaderComponent?: ReactNode;
@@ -135,6 +139,8 @@ vi.mock("@legendapp/list/react", async () => {
       <div
         data-testid={legendListTestId}
         data-class-name={props.className}
+        data-timeline-row-count={props.data.length}
+        data-timeline-extra-data={String(props.extraData)}
         data-anchor-index={props.anchoredEndSpace?.anchorIndex}
         data-anchor-max-size={props.anchoredEndSpace?.anchorMaxSize}
         data-anchor-offset={props.anchoredEndSpace?.anchorOffset}
@@ -3218,5 +3224,191 @@ describe("MessagesTimeline", () => {
     } finally {
       await act(() => renderer?.unmount());
     }
+  });
+});
+
+describe("restructured live activity layer", () => {
+  const RUN_ID = RunId.make("restructured-run");
+
+  /**
+   * A tool still in flight inside the active run. This is the only shape that
+   * makes the projection emit a `work-live` row, so an `isWorking`-only
+   * fixture would assert nothing about the label.
+   */
+  function buildRunningToolEntries(toolLifecycleStatus: "inProgress" | "completed") {
+    return [
+      buildUserTimelineEntry("Do the thing."),
+      {
+        id: "running-tool-entry",
+        kind: "work" as const,
+        createdAt: MESSAGE_CREATED_AT,
+        entry: {
+          id: "running-tool",
+          runId: RUN_ID,
+          createdAt: MESSAGE_CREATED_AT,
+          label: "Run the build",
+          command: "pnpm build",
+          requestKind: "command" as const,
+          tone: "tool" as const,
+          toolLifecycleStatus,
+        },
+      },
+    ];
+  }
+
+  function renderRunningTool(structure: ConversationStructure | undefined) {
+    return renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        conversationStructure={structure}
+        isWorking
+        runningRunId={RUN_ID}
+        latestRun={{
+          runId: RUN_ID,
+          status: "running",
+          startedAt: MESSAGE_CREATED_AT,
+          completedAt: null,
+        }}
+        timelineEntries={buildRunningToolEntries("inProgress")}
+      />,
+    );
+  }
+
+  it("moves the live label out of the virtual list under the restructured structure", () => {
+    const markup = renderRunningTool("restructured");
+
+    expect(markup).toContain('data-testid="timeline-live-activity-layer"');
+    expect(markup).not.toContain('data-timeline-row-kind="work-live"');
+    expect(markup).not.toContain('data-timeline-row-kind="thinking"');
+  });
+
+  it("keeps the live label inside the virtual list under the default structure", () => {
+    const markup = renderRunningTool("default");
+
+    expect(markup).toContain('data-timeline-row-kind="work-live"');
+    expect(markup).not.toContain('data-testid="timeline-live-activity-layer"');
+  });
+
+  it("keeps the live label inside the virtual list when no structure is set", () => {
+    const markup = renderRunningTool(undefined);
+
+    expect(markup).toContain('data-timeline-row-kind="work-live"');
+    expect(markup).not.toContain('data-testid="timeline-live-activity-layer"');
+  });
+
+  it("renders the same tool label in the overlay as the row it replaces", () => {
+    const defaultMarkup = renderRunningTool("default");
+    const restructuredMarkup = renderRunningTool("restructured");
+
+    // The overlay reuses LiveWorkEntryTimelineRow, so the derived label and the
+    // expansion affordance survive the move instead of being re-computed.
+    for (const markup of [defaultMarkup, restructuredMarkup]) {
+      expect(markup).toContain("Running pnpm");
+      expect(markup).toContain('aria-expanded="false"');
+    }
+  });
+
+  it("keeps the overlay row expandable through its group toggle", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    let renderer: ReactTestRenderer | undefined;
+    try {
+      await act(() => {
+        renderer = create(
+          <MessagesTimeline
+            {...buildProps()}
+            conversationStructure="restructured"
+            isWorking
+            runningRunId={RUN_ID}
+            latestRun={{
+              runId: RUN_ID,
+              status: "running",
+              startedAt: MESSAGE_CREATED_AT,
+              completedAt: null,
+            }}
+            timelineEntries={buildRunningToolEntries("inProgress")}
+          />,
+        );
+      });
+
+      const overlay = renderer!.root.findByProps({
+        "data-testid": "timeline-live-activity-layer",
+      });
+      expect(overlay).toBeDefined();
+      // The toggle lives inside the overlay, not in a virtualized row.
+      expect(renderer!.root.findAllByProps({ "aria-expanded": false })).toHaveLength(1);
+      expect(
+        renderer!.root.findAll(
+          (node) => node.type === "div" && node.props["data-timeline-row-kind"] === "work-live",
+        ),
+      ).toHaveLength(0);
+
+      await act(() => renderer!.root.findByProps({ "aria-expanded": false }).props.onClick());
+      expect(renderer!.root.findAllByProps({ "aria-expanded": true })).toHaveLength(1);
+    } finally {
+      await act(() => renderer?.unmount());
+    }
+  });
+
+  it("moves the thinking row into the overlay when nothing is running", () => {
+    const thinkingMarkup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        conversationStructure="restructured"
+        isWorking
+        timelineEntries={[buildUserTimelineEntry("Hello")]}
+      />,
+    );
+
+    expect(thinkingMarkup).toContain('data-testid="timeline-live-activity-layer"');
+    expect(thinkingMarkup).not.toContain('data-timeline-row-kind="thinking"');
+  });
+
+  it("leaves the list data and extraData consistent with the filtered rows", () => {
+    // LegendList derives scroll offsets from its own data array, so a row
+    // count that disagrees with `data` would misplace every scroll target.
+    const restructuredMarkup = renderRunningTool("restructured");
+
+    // Two rows survive filtering: the user message and the working indicator.
+    expect(restructuredMarkup).toContain('data-timeline-row-kind="message"');
+    expect(restructuredMarkup).toContain('data-timeline-row-kind="working"');
+    expect(restructuredMarkup).toContain('data-timeline-row-count="2"');
+    // extraData carries the same count, so the list refreshes on every change.
+    expect(restructuredMarkup).toContain('data-timeline-extra-data="environment-local:thread-1:2"');
+  });
+
+  it("keeps the default structure's list data and extraData untouched", () => {
+    const defaultMarkup = renderRunningTool("default");
+
+    // Nothing is filtered under "default", so the list keeps all three rows and
+    // extraData still reports the full projection length.
+    expect(defaultMarkup).toContain('data-timeline-row-count="3"');
+    expect(defaultMarkup).toContain('data-timeline-extra-data="environment-local:thread-1:3"');
+  });
+
+  it("keeps minimap indices aligned with the rows the list was given", () => {
+    // A minimap item's rowIndex is fed straight to LegendList's
+    // scrollToIndex/positionAtIndex. Deriving it from the unfiltered array
+    // would shift every index once the live label leaves the list.
+    const minimapItems = deriveTimelineMinimapItems(
+      deriveMessagesTimelineRows({
+        timelineEntries: buildRunningToolEntries("inProgress"),
+        latestRun: {
+          runId: RUN_ID,
+          status: "running",
+          startedAt: MESSAGE_CREATED_AT,
+          completedAt: null,
+        },
+        runningRunId: RUN_ID,
+        isWorking: true,
+        turnDiffSummaries: [],
+        supportsConversationRollback: false,
+        conversationStructure: "restructured",
+      }).filter((row) => row.kind !== "thinking" && row.kind !== "work-live"),
+    );
+
+    expect(minimapItems).toHaveLength(1);
+    // Index 0 in the filtered list is the user message the item names.
+    expect(minimapItems[0]?.rowIndex).toBe(0);
+    expect(minimapItems[0]?.userText).toBe("Do the thing.");
   });
 });
