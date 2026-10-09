@@ -189,6 +189,7 @@ import {
   resolveAssistantMessageCopyState,
   resolveTimelineDomIsAtEnd,
   resolveTimelineIsAtEnd,
+  resolveTimelineLiveOverlayBottom,
   shouldCancelTimelineFollowOnNativeScroll,
   shouldMaintainVisibleTimelineContent,
   resolveTimelineMinimapHasPersistentGutter,
@@ -401,17 +402,30 @@ function TimelineLoadEarlierHeader({
     </div>
   );
 }
-function TimelineListFooter({ composerInset }: { readonly composerInset: number }) {
+function TimelineListFooter({
+  composerInset,
+  liveOverlayInset,
+}: {
+  readonly composerInset: number;
+  readonly liveOverlayInset: number;
+}) {
   return (
     <div aria-hidden>
+      {liveOverlayInset > 0 ? (
+        <div data-testid="timeline-live-activity-inset" style={{ height: liveOverlayInset }} />
+      ) : null}
       <div style={{ height: composerInset }} />
-      <div className="h-3 sm:h-4" />
+      <div className="h-(--timeline-footer-gap)" />
     </div>
   );
 }
 const EMPTY_TIMELINE_SKILLS: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">> = [];
 /** Stable empty so the default path never allocates a new overlay array. */
 const EMPTY_LIVE_ACTIVITY_ROWS: ReadonlyArray<TimelineLiveActivityRow> = [];
+/** Clearance between the reserved footer block and the body above it. */
+const TIMELINE_LIVE_OVERLAY_INSET_GAP = 8;
+/** `--timeline-footer-gap` fallback for environments without computed styles. */
+const TIMELINE_FOOTER_GAP_FALLBACK = 12;
 /** Fraction of the viewport a scrollbar step triangle moves per step. */
 const TIMELINE_SCROLLBAR_STEP_RATIO = 0.3;
 const TIMELINE_MAINTAIN_SCROLL_AT_END = {
@@ -1119,10 +1133,69 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     }),
     [shouldRestoreVisibleContentPosition],
   );
-  const timelineListFooter = useMemo(
-    () => <TimelineListFooter composerInset={anchoredEndSpace ? 0 : contentInsetEndAdjustment} />,
-    [anchoredEndSpace, contentInsetEndAdjustment],
+  // The live overlay is measured so the footer can reserve its height and keep
+  // the last line of body content clear of the label. It is absolutely
+  // positioned, so growing the footer cannot change what was measured.
+  const liveActivityOverlayRef = useRef<HTMLDivElement | null>(null);
+  const [liveActivityOverlayNode, setLiveActivityOverlayNode] = useState<HTMLDivElement | null>(
+    null,
   );
+  const attachLiveActivityOverlay = useCallback((node: HTMLDivElement | null) => {
+    // The ref carries the node to the scroll handler, which owns the imperative
+    // per-tick writes; state only tells the observer which node to watch.
+    liveActivityOverlayRef.current = node;
+    setLiveActivityOverlayNode(node);
+  }, []);
+  const [measuredLiveOverlayInset, setMeasuredLiveOverlayInset] = useState(0);
+  useLayoutEffect(() => {
+    if (!liveActivityOverlayNode) return;
+    const measure = () => {
+      const next = liveActivityOverlayNode.offsetHeight + TIMELINE_LIVE_OVERLAY_INSET_GAP;
+      setMeasuredLiveOverlayInset((current) => (current === next ? current : next));
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(liveActivityOverlayNode);
+    return () => observer.disconnect();
+  }, [liveActivityOverlayNode]);
+  const timelineListFooter = useMemo(
+    () => (
+      <TimelineListFooter
+        composerInset={anchoredEndSpace ? 0 : contentInsetEndAdjustment}
+        // An anchored end space already holds the end of the content; a second
+        // reservation would push the anchored message off screen.
+        liveOverlayInset={
+          anchoredEndSpace || !liveActivityOverlayNode ? 0 : measuredLiveOverlayInset
+        }
+      />
+    ),
+    [
+      anchoredEndSpace,
+      contentInsetEndAdjustment,
+      liveActivityOverlayNode,
+      measuredLiveOverlayInset,
+    ],
+  );
+
+  // The footer gap is a responsive CSS variable so the footer gap block and the
+  // overlay offset can never disagree about it. Reading computed style forces a
+  // style flush, so the value is cached and only re-read when the viewport is
+  // re-measured (a breakpoint or chat-width change).
+  const timelineFooterGapRef = useRef<number | null>(null);
+  const readTimelineFooterGap = useCallback(() => {
+    const cached = timelineFooterGapRef.current;
+    if (cached !== null) return cached;
+    const viewport = timelineViewportElement;
+    let gap = TIMELINE_FOOTER_GAP_FALLBACK;
+    if (viewport && typeof getComputedStyle === "function") {
+      const declared = Number.parseFloat(
+        getComputedStyle(viewport).getPropertyValue("--timeline-footer-gap"),
+      );
+      if (Number.isFinite(declared)) gap = declared;
+    }
+    timelineFooterGapRef.current = gap;
+    return gap;
+  }, [timelineViewportElement]);
 
   const localSmoothScrollRef = useRef<SmoothScrollHandle | null>(null);
   const smoothFollowControl = smoothScrollRef ?? localSmoothScrollRef;
@@ -1248,6 +1321,25 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     const state = listRef.current?.getState?.();
     const scrollElement = listRef.current?.getScrollableNode();
     const nativeIsAtEnd = scrollElement ? resolveTimelineDomIsAtEnd(scrollElement) : undefined;
+    if (scrollElement) {
+      const overlay = liveActivityOverlayRef.current;
+      if (overlay) {
+        // Skip no-op writes for the same reason the minimap strips skip theirs:
+        // this runs on every scroll tick, and rewriting an unchanged property
+        // still dirties style state.
+        const next = `${resolveTimelineLiveOverlayBottom({
+          scrollTop: scrollElement.scrollTop,
+          scrollHeight: scrollElement.scrollHeight,
+          clientHeight: scrollElement.clientHeight,
+          footerGap: readTimelineFooterGap(),
+          contentInsetEndAdjustment,
+        })}px`;
+        if (overlay.style.bottom !== next) overlay.style.bottom = next;
+        const atEdge = smoothFollowControl.current?.isAtEdge() ?? nativeIsAtEnd ?? false;
+        const nextAtEdge = atEdge ? "true" : "false";
+        if (overlay.dataset.atEdge !== nextAtEdge) overlay.dataset.atEdge = nextAtEdge;
+      }
+    }
     if (restoringThreadPosition || state?.data !== listRows) return;
     // Smooth output follows the real DOM edge. LegendList's near-end band is
     // still useful for non-streaming history navigation, but it must not
@@ -1322,6 +1414,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     );
   }, [
     citationPositioning,
+    contentInsetEndAdjustment,
     detectNativeNavigation,
     paintedExpandedRunIds,
     paintedExpandedWorkGroupIds,
@@ -1329,6 +1422,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     workGroupViewState,
     listRows,
     listIdentityKey,
+    readTimelineFooterGap,
     restoringThreadPosition,
     listRef,
     minimapItems,
@@ -1366,6 +1460,9 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     }
 
     const measure = () => {
+      // The responsive footer gap may have crossed the sm breakpoint with this
+      // resize, so the cached value the overlay offset reads is dropped here.
+      timelineFooterGapRef.current = null;
       const viewportWidth = timelineViewportElement.getBoundingClientRect().width;
       // Without a mounted row, treat the column as full width so the strip stays inert.
       const contentWidth =
@@ -1578,7 +1675,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       <TimelineRowActivityCtx value={activityState}>
         <div
           ref={setTimelineViewportElement}
-          className="relative h-full min-h-0"
+          className="relative h-full min-h-0 [--timeline-footer-gap:12px] sm:[--timeline-footer-gap:16px]"
           data-assistant-citation-viewport="true"
           data-timeline-empty={rows.length === 0 ? "true" : undefined}
         >
@@ -1636,7 +1733,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
             ListHeaderComponent={listHeader}
             ListFooterComponent={timelineListFooter}
           />
-          <LiveActivityOverlay rows={liveActivityRows} />
+          <LiveActivityOverlay rows={liveActivityRows} overlayRef={attachLiveActivityOverlay} />
           <OverlayScrollbar
             scrollable={timelineScrollableNode}
             triangles
@@ -4029,13 +4126,24 @@ function LiveWorkEntryTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "
  *
  * It sits beside LegendList rather than inside it: as a child of the scroll
  * container it would travel with the content instead of staying pinned.
+ *
+ * Its bottom offset is written per scroll tick from the live geometry, so it
+ * rests on the viewport bottom while the reader is at the end and rides up with
+ * the last line of content once they leave it.
  */
-function LiveActivityOverlay({ rows }: { rows: ReadonlyArray<TimelineLiveActivityRow> }) {
+function LiveActivityOverlay({
+  rows,
+  overlayRef,
+}: {
+  rows: ReadonlyArray<TimelineLiveActivityRow>;
+  overlayRef: (node: HTMLDivElement | null) => void;
+}) {
   if (rows.length === 0) return null;
   return (
     <div
       data-testid="timeline-live-activity-layer"
-      className="pointer-events-none absolute inset-x-0 bottom-0 z-10 flex justify-center px-3 pb-2 sm:px-5"
+      ref={overlayRef}
+      className="pointer-events-none absolute inset-x-0 bottom-[var(--timeline-footer-gap)] z-10 flex justify-center px-3 sm:px-5"
     >
       <div className="pointer-events-auto mx-auto flex w-full max-w-(--chat-max-width) min-w-0 flex-col">
         {rows.map((row) => (

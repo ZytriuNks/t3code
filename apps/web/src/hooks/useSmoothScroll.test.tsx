@@ -309,3 +309,110 @@ describe("useSmoothScroll", () => {
     expect(element.scrollTop).toBe(10);
   });
 });
+
+describe("useSmoothScroll isAtEdge", () => {
+  it("reports the viewport as at the edge while it sits on the end", () => {
+    const element = makeScrollElement(1_600, 2_000, 400);
+    scrollElements.push(element);
+    render(element);
+
+    expect(controlRef.current?.isAtEdge()).toBe(true);
+
+    element.setHeight(2_040);
+    act(() => MockResizeObserver.instances.at(-1)?.trigger());
+    expect(controlRef.current?.isAtEdge()).toBe(true);
+  });
+
+  it("reports the viewport as away from the edge once the reader scrolls up", () => {
+    const element = makeScrollElement(1_600, 2_000, 400);
+    scrollElements.push(element);
+    render(element);
+
+    element.scrollTop = 1_200;
+    expect(controlRef.current?.isAtEdge()).toBe(false);
+
+    element.scrollTop = 0;
+    expect(controlRef.current?.isAtEdge()).toBe(false);
+  });
+
+  it("reports the edge again after the reader scrolls back down past a cancel", () => {
+    const element = makeScrollElement(1_600, 2_000, 400);
+    scrollElements.push(element);
+    render(element);
+
+    act(() => controlRef.current?.cancel());
+    element.scrollTop = 1_200;
+    expect(controlRef.current?.isFollowing()).toBe(false);
+    expect(controlRef.current?.isAtEdge()).toBe(false);
+
+    // The reader owns the viewport now: cancelled and lastPinnedTop describe
+    // controller ownership, not where the viewport is. Reading the edge must
+    // still report the real position.
+    element.scrollTop = 1_600;
+    expect(controlRef.current?.isFollowing()).toBe(false);
+    expect(controlRef.current?.isAtEdge()).toBe(true);
+
+    element.scrollTop = 0;
+    expect(controlRef.current?.isAtEdge()).toBe(false);
+  });
+
+  it("leaves the edge on a sub-pixel upward step", () => {
+    const element = makeScrollElement(1_600, 2_000, 400);
+    scrollElements.push(element);
+    render(element);
+
+    element.scrollTop = 1_599.75;
+    expect(controlRef.current?.isAtEdge()).toBe(false);
+    expect(element.scrollTop).toBe(1_599.75);
+
+    element.scrollTop = 1_600;
+    expect(controlRef.current?.isAtEdge()).toBe(true);
+  });
+
+  it("treats content that underflows the viewport as being at the edge", () => {
+    const element = makeScrollElement(0, 300, 400);
+    scrollElements.push(element);
+    render(element);
+
+    expect(controlRef.current?.isAtEdge()).toBe(true);
+  });
+
+  it("publishes no handle while disabled so the caller falls back to the DOM", () => {
+    const element = makeScrollElement(1_600, 2_000, 400);
+    scrollElements.push(element);
+    render(element, false);
+
+    expect(controlRef.current).toBeNull();
+    expect(element.scrollTop).toBe(1_600);
+  });
+
+  it("reads without moving the viewport or disturbing follow", () => {
+    const element = makeScrollElement(1_600, 2_000, 400);
+    scrollElements.push(element);
+    const marker = document.createElement("div");
+    marker.dataset.smoothTextEnd = "";
+    element.firstElementChild?.append(marker);
+    render(element);
+
+    // Growth still pins to the new end with reads interleaved, and the reads
+    // themselves never take ownership of the viewport.
+    for (const height of [2_040, 2_080, 2_120]) {
+      expect(controlRef.current?.isAtEdge()).toBe(true);
+      element.setHeight(height);
+      act(() => setSmoothTextEnd(marker, null));
+      expect(element.scrollTop).toBe(height - 400);
+      expect(controlRef.current?.isAtEdge()).toBe(true);
+    }
+    expect(controlRef.current?.isFollowing()).toBe(true);
+
+    // A read from above the edge leaves the reader's offset untouched, so it
+    // cannot re-pin or detach follow behind the caller's back.
+    act(() => controlRef.current?.cancel());
+    element.scrollTop = 1_500;
+    expect(controlRef.current?.isAtEdge()).toBe(false);
+    element.setHeight(2_160);
+    expect(controlRef.current?.isAtEdge()).toBe(false);
+    expect(element.scrollTop).toBe(1_500);
+    expect(controlRef.current?.isFollowing()).toBe(false);
+  });
+});

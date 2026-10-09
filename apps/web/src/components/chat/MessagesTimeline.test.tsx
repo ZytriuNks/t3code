@@ -3563,4 +3563,125 @@ describe("restructured live activity layer", () => {
       await act(() => renderer?.unmount());
     }
   });
+
+  describe("live overlay placement", () => {
+    /** A 40px overlay reserves 48px once the 8px clearance is added. */
+    const OVERLAY_INSET = 48;
+
+    function stubResizeObserver() {
+      class StubResizeObserver implements ResizeObserver {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      }
+      vi.stubGlobal("ResizeObserver", StubResizeObserver);
+    }
+
+    function createOverlayRenderer(node: Parameters<typeof create>[0]) {
+      return create(node, {
+        // Only the overlay is measured here; every other host ref stays null so
+        // the test exercises the live layer without a DOM.
+        createNodeMock: (element) =>
+          (element as { props?: Record<string, unknown> }).props?.["data-testid"] ===
+          "timeline-live-activity-layer"
+            ? { offsetHeight: 40 }
+            : null,
+      });
+    }
+
+    function buildOverlayProps() {
+      return {
+        ...buildProps(),
+        contentInsetEndAdjustment: 96,
+        conversationStructure: "restructured" as const,
+        isWorking: true,
+        runningRunId: RUN_ID,
+        latestRun: {
+          runId: RUN_ID,
+          status: "running" as const,
+          startedAt: MESSAGE_CREATED_AT,
+          completedAt: null,
+        },
+        timelineEntries: buildRunningToolEntries("inProgress"),
+      };
+    }
+
+    it("reserves the measured overlay height above the composer gap", async () => {
+      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+      stubResizeObserver();
+      let renderer: ReactTestRenderer | undefined;
+      try {
+        await act(() => {
+          renderer = createOverlayRenderer(<MessagesTimeline {...buildOverlayProps()} />);
+        });
+
+        const reserves = renderer!.root.findAllByProps({
+          "data-testid": "timeline-live-activity-inset",
+        });
+        expect(reserves).toHaveLength(1);
+        expect(reserves[0]!.props.style).toEqual({ height: OVERLAY_INSET });
+      } finally {
+        await act(() => renderer?.unmount());
+      }
+    });
+
+    it("leaves the footer markup untouched while no live overlay is rendered", () => {
+      const markup = renderToStaticMarkup(
+        <MessagesTimeline
+          {...buildProps()}
+          contentInsetEndAdjustment={96}
+          timelineEntries={[buildUserTimelineEntry("Hello")]}
+        />,
+      );
+
+      // Byte-for-byte the pre-restructuring footer: the composer gap block and
+      // the responsive gap, with no extra node for an absent overlay.
+      expect(markup).toContain(
+        '<div aria-hidden="true"><div style="height:96px"></div><div class="h-(--timeline-footer-gap)"></div></div>',
+      );
+      expect(markup).not.toContain('data-testid="timeline-live-activity-inset"');
+    });
+
+    it("drops the overlay reservation while an anchored end space holds the edge", async () => {
+      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+      stubResizeObserver();
+      let renderer: ReactTestRenderer | undefined;
+      try {
+        await act(() => {
+          renderer = createOverlayRenderer(
+            <MessagesTimeline
+              {...buildOverlayProps()}
+              anchorMessageId={MessageId.make("message-1")}
+            />,
+          );
+        });
+
+        // The anchor owns the end space, exactly as it does for the composer
+        // gap, so a second reservation would push the anchored message away.
+        expect(
+          renderer!.root.findByProps({ "data-testid": "legend-list" }).props["data-anchor-index"],
+        ).toBe(0);
+        expect(
+          renderer!.root.findAllByProps({ "data-testid": "timeline-live-activity-inset" }),
+        ).toHaveLength(0);
+      } finally {
+        await act(() => renderer?.unmount());
+      }
+    });
+
+    it("stops pinning the overlay to the viewport bottom in its classes", () => {
+      const markup = renderRunningTool("restructured");
+      const className = /data-testid="timeline-live-activity-layer" class="([^"]*)"/.exec(
+        markup,
+      )?.[1];
+
+      expect(className).toBeDefined();
+      // The offset is written imperatively on every scroll tick, so the class
+      // list must not pin the overlay to the bottom of the viewport.
+      expect(className!.split(" ")).not.toContain("bottom-0");
+      expect(className!.split(" ")).not.toContain("pb-2");
+      // Above the overlay scrollbar and the minimap, below the body rows.
+      expect(className!.split(" ")).toContain("z-10");
+    });
+  });
 });

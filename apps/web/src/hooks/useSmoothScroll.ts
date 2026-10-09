@@ -7,6 +7,13 @@ export interface SmoothScrollHandle {
   jumpToEnd(): void;
   cancel(): void;
   isFollowing(): boolean;
+  /**
+   * Whether the viewport currently sits on the content's bottom edge. This is
+   * a pure read of the geometry: it says nothing about who last moved the
+   * viewport, so a reader who scrolled back down to the end reports `true`
+   * even after follow was cancelled.
+   */
+  isAtEdge(): boolean;
 }
 
 /** Keeps the real scroll edge pinned while the text frame animates its height. */
@@ -93,6 +100,7 @@ export function useSmoothScroll({
         cancelled = true;
       },
       isFollowing: () => !cancelled && lastPinnedTop !== null,
+      isAtEdge: () => element.scrollTop >= Math.max(0, element.scrollHeight - element.clientHeight),
     };
     controllerRef.current = handle;
     controlRef.current = handle;
