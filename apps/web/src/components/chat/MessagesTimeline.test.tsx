@@ -3418,7 +3418,23 @@ describe("restructured live activity layer", () => {
     return [
       ...turn(1),
       ...turn(2),
-      ...turn(3),
+      // The running turn starts here, so the working indicator is projected
+      // before this message. A user row after that point is the only one whose
+      // index moves once the working and live rows leave the list.
+      {
+        id: "entry-user-3",
+        kind: "message" as const,
+        createdAt: MESSAGE_CREATED_AT,
+        message: {
+          id: MessageId.make("message-user-3"),
+          role: "user" as const,
+          text: "Ask 3.",
+          runId: null,
+          createdAt: MESSAGE_CREATED_AT,
+          updatedAt: MESSAGE_CREATED_AT,
+          streaming: false,
+        },
+      },
       {
         id: "running-tool-entry",
         kind: "work" as const,
@@ -3432,6 +3448,37 @@ describe("restructured live activity layer", () => {
           requestKind: "command" as const,
           tone: "tool" as const,
           toolLifecycleStatus: "inProgress" as const,
+        },
+      },
+      {
+        id: "entry-assistant-3",
+        kind: "message" as const,
+        createdAt: MESSAGE_CREATED_AT,
+        message: {
+          id: MessageId.make("message-assistant-3"),
+          role: "assistant" as const,
+          text: "Answer 3.",
+          runId: RUN_ID,
+          createdAt: MESSAGE_CREATED_AT,
+          updatedAt: MESSAGE_CREATED_AT,
+          streaming: false,
+        },
+      },
+      // A user message after the working indicator: this is the only row whose
+      // index differs between the unfiltered projection and the list the
+      // restructured structure actually hands to LegendList.
+      {
+        id: "entry-user-4",
+        kind: "message" as const,
+        createdAt: MESSAGE_CREATED_AT,
+        message: {
+          id: MessageId.make("message-user-4"),
+          role: "user" as const,
+          text: "Ask 4.",
+          runId: null,
+          createdAt: MESSAGE_CREATED_AT,
+          updatedAt: MESSAGE_CREATED_AT,
+          streaming: false,
         },
       },
     ];
@@ -3482,38 +3529,36 @@ describe("restructured live activity layer", () => {
         );
       });
 
-      // The live label left the list, so the list holds seven of the eight
-      // projected rows. Everything the minimap can name is still in it.
+      // The live label left the list, so the list holds one row fewer than the
+      // projection. Everything the minimap can name is still in it.
       const list = renderer!.root.find(
         (node) => Array.isArray(node.props.data) && typeof node.props.keyExtractor === "function",
       );
-      expect(list.props.data).toHaveLength(7);
-      // Row 4 of the list LegendList was actually handed is "Ask 3."
-      expect(list.props.data[4]).toMatchObject({
-        kind: "message",
-        message: { text: "Ask 3." },
-      });
+      expect(list.props.data).toHaveLength(8);
 
+      // "Ask 4." comes after the working indicator in the projection, so its
+      // index in the filtered list is one lower than in the projection. An
+      // index derived from the unfiltered rows would name a row the list no
+      // longer holds, and both assertions below fail.
       const noop = () => {};
       await act(() => findMinimapJumpButton(renderer!).props.onFocus());
-      await act(() =>
-        findMinimapJumpButton(renderer!).props.onKeyDown({
-          key: "ArrowDown",
-          preventDefault: noop,
-        }),
-      );
-      await act(() =>
-        findMinimapJumpButton(renderer!).props.onKeyDown({
-          key: "ArrowDown",
-          preventDefault: noop,
-        }),
-      );
+      for (let step = 0; step < 3; step += 1) {
+        await act(() =>
+          findMinimapJumpButton(renderer!).props.onKeyDown({
+            key: "ArrowDown",
+            preventDefault: noop,
+          }),
+        );
+      }
       await act(() =>
         findMinimapJumpButton(renderer!).props.onKeyDown({ key: "Enter", preventDefault: noop }),
       );
 
-      // The minimap item for "Ask 3." scrolls the list to that message's own row.
-      expect(scrollToIndexRequests).toEqual([{ index: 4, animated: true, viewOffset: 24 }]);
+      expect(scrollToIndexRequests).toEqual([{ index: 6, animated: true, viewOffset: 24 }]);
+      expect(list.props.data[6]).toMatchObject({
+        kind: "message",
+        message: { text: "Ask 4." },
+      });
     } finally {
       await act(() => renderer?.unmount());
     }
