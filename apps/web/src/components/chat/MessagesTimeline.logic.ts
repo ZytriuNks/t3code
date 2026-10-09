@@ -35,6 +35,7 @@ import {
 } from "../../session-logic";
 import { type ChatMessage, type ProposedPlan, type TurnDiffSummary } from "../../types";
 import {
+  type ConversationStructure,
   type MessageId,
   type WorktreeSetupSnapshot,
   type OrchestrationV2ProjectedTurnItem,
@@ -1134,6 +1135,8 @@ export function deriveMessagesTimelineRows(input: {
   supportsConversationRollback: boolean;
   /** Task ids of subagents still working, used by the active tool indicator. */
   liveAgentTaskIds?: ReadonlySet<string> | undefined;
+  /** Drives live-label scope and tool archiving. Undefined behaves as "default". */
+  conversationStructure?: ConversationStructure | undefined;
   /** Live bootstrap progress. Renders a stage card under the first user message. */
   worktreeSetup?: WorktreeSetupSnapshot | null;
 }): MessagesTimelineRow[] {
@@ -1270,8 +1273,20 @@ export function deriveMessagesTimelineRows(input: {
           };
         })()
       : null;
+  // Default keeps the whole trailing tool set live until the turn ends, so the
+  // label can expand to the full turn history. Restructured releases each tool
+  // the moment it finishes, letting the existing grouping archive it upward
+  // while the label narrows to the single running operation. Entries left in
+  // this set are skipped by the body pass below, so it holds the tools that
+  // stay live — not the ones being archived.
   const activeWorkEntryIds = new Set(
-    activeWorkRow !== null || latestToolFailed ? activeToolEntries.map((entry) => entry.id) : [],
+    input.conversationStructure === "restructured"
+      ? activeToolEntries
+          .filter((entry) => workEntryIsActiveTurnActivity(entry.entry))
+          .map((entry) => entry.id)
+      : activeWorkRow !== null || latestToolFailed
+        ? activeToolEntries.map((entry) => entry.id)
+        : [],
   );
   const appendWorkingRow = () => {
     nextRows.push({

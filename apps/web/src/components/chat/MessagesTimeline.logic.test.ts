@@ -1,4 +1,9 @@
-import { ProviderInstanceId, ThreadId, type WorktreeSetupSnapshot } from "@t3tools/contracts";
+import {
+  ProviderInstanceId,
+  ThreadId,
+  type ConversationStructure,
+  type WorktreeSetupSnapshot,
+} from "@t3tools/contracts";
 import {
   CheckpointRef,
   NodeId,
@@ -3075,6 +3080,99 @@ describe("deriveMessagesTimelineRows", () => {
       }
     },
   );
+
+  describe("restructured tool archiving", () => {
+    // One finished tool followed by one still-running tool: the shape where
+    // "keep everything live until the turn ends" and "release each tool the
+    // moment it finishes" disagree.
+    const streamingTools = [
+      {
+        id: "finished-command-entry",
+        kind: "work" as const,
+        createdAt: "2026-01-01T00:00:05Z",
+        entry: {
+          id: "finished-command",
+          createdAt: "2026-01-01T00:00:05Z",
+          runId: "turn-1" as never,
+          label: "Ran read",
+          command: "read src",
+          requestKind: "command",
+          tone: "tool" as const,
+          toolLifecycleStatus: "completed" as const,
+        },
+      },
+      {
+        id: "running-command-entry",
+        kind: "work" as const,
+        createdAt: "2026-01-01T00:00:06Z",
+        entry: {
+          id: "running-command",
+          createdAt: "2026-01-01T00:00:06Z",
+          runId: "turn-1" as never,
+          label: "Running rg",
+          command: "rg toolCall",
+          requestKind: "command",
+          tone: "tool" as const,
+          toolLifecycleStatus: "inProgress" as const,
+        },
+      },
+    ];
+
+    function deriveWithStructure(conversationStructure: ConversationStructure | undefined) {
+      return deriveMessagesTimelineRows({
+        timelineEntries: streamingTools,
+        latestRun: {
+          runId: "turn-1" as never,
+          status: "running",
+          startedAt: "2026-01-01T00:00:00Z",
+          completedAt: null,
+        },
+        isWorking: true,
+        activeTurnStartedAt: "2026-01-01T00:00:00Z",
+        turnDiffSummaries: [],
+        supportsConversationRollback: false,
+        conversationStructure,
+      });
+    }
+
+    function bodyWorkEntryIds(rows: MessagesTimelineRow[]): string[] {
+      return rows
+        .filter((row) => row.kind === "work")
+        .flatMap((row) =>
+          (row as Extract<MessagesTimelineRow, { kind: "work" }>).groupedEntries.map(
+            (entry) => entry.id,
+          ),
+        );
+    }
+
+    it("releases a finished tool from the live set so it archives into the body", () => {
+      const rows = deriveWithStructure("restructured");
+
+      // w1 finished, so it must appear in the body, not the live label.
+      expect(bodyWorkEntryIds(rows)).toContain("finished-command");
+      // w2 is still running, so it stays out of the body.
+      expect(bodyWorkEntryIds(rows)).not.toContain("running-command");
+      // The live row still names the one running operation.
+      expect(rows.find((row) => row.kind === "work-live")).toMatchObject({
+        entry: { id: "running-command" },
+        active: true,
+      });
+    });
+
+    it("keeps the whole turn live under the default structure", () => {
+      const rows = deriveWithStructure("default");
+
+      expect(bodyWorkEntryIds(rows)).not.toContain("finished-command");
+      expect(rows.filter((row) => row.kind === "work-live")).toHaveLength(1);
+    });
+
+    it("keeps the whole turn live when no structure is set", () => {
+      const rows = deriveWithStructure(undefined);
+
+      expect(bodyWorkEntryIds(rows)).not.toContain("finished-command");
+      expect(rows.filter((row) => row.kind === "work-live")).toHaveLength(1);
+    });
+  });
 });
 
 describe("computeStableMessagesTimelineRows", () => {
