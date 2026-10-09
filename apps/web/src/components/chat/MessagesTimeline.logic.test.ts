@@ -3539,6 +3539,27 @@ describe("deriveMessagesTimelineRows", () => {
       expect(row).not.toHaveProperty("idle");
     });
 
+    it("leaves a declined tool's thinking row unmarked under the default structure", () => {
+      // The restructured guard is the only thing keeping this row clean: a
+      // declined tool is neither a success nor a failure, so `activeWorkRow` is
+      // inactive, the thinking row is produced, and without the guard default
+      // would grow the idle key and greet the user with "Planning next move"
+      // right after their tool was denied.
+      const declinedTool = {
+        ...finishedTool,
+        id: "declined-command-entry",
+        entry: {
+          ...finishedTool.entry,
+          id: "declined-command",
+          toolLifecycleStatus: "declined" as const,
+        },
+      };
+
+      const row = thinkingRow(deriveIdle([userEntry, declinedTool], "default"));
+      expect(row).toMatchObject({ kind: "thinking" });
+      expect(row).not.toHaveProperty("idle");
+    });
+
     it("leaves the default structure's thinking row unmarked", () => {
       // Default keeps a finished tool in the live label, so the same tail has no
       // thinking row at all — and the turn-opening row stays unmarked, which

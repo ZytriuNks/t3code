@@ -2627,6 +2627,9 @@ function GeneralSettingsRows() {
   };
   const mixedResponseStreamingMode = useScopedSettingsMixed(["responseStreamingMode"]);
   const mixedConversationStructure = useScopedSettingsMixed(["conversationStructure"]);
+  const mixedConversationStructureIdleLabel = useScopedSettingsMixed([
+    "conversationStructureIdleLabel",
+  ]);
   const lastEnabledProjectGroupingMode = useRef<SidebarProjectGroupingMode>(
     readLastEnabledProjectGroupingMode(),
   );
@@ -2985,11 +2988,10 @@ function GeneralSettingsRows() {
           description={
             mixedResponseStreamingMode
               ? t("settings.general.streaming.mixed")
-              : `${t(RESPONSE_STREAMING_MODE_DESCRIPTION_KEYS[settings.responseStreamingMode])} ${
-                  settings.conversationStructure === "restructured"
-                    ? ""
-                    : t("settings.general.streaming.requiresRestructured")
-                }`
+              : settings.responseStreamingMode === "smooth" &&
+                  settings.conversationStructure !== "restructured"
+                ? `${t(RESPONSE_STREAMING_MODE_DESCRIPTION_KEYS[settings.responseStreamingMode])} ${t("settings.general.streaming.requiresRestructured")}`
+                : t(RESPONSE_STREAMING_MODE_DESCRIPTION_KEYS[settings.responseStreamingMode])
           }
           resetAction={
             settings.responseStreamingMode !== DEFAULT_UNIFIED_SETTINGS.responseStreamingMode ? (
@@ -3894,14 +3896,18 @@ function GeneralSettingsRows() {
             ) : null
           }
           control={
-            <Input
+            <DraftInput
               size="sm"
-              value={settings.conversationStructureIdleLabel}
+              className="w-full sm:w-72"
+              value={
+                mixedConversationStructureIdleLabel ? "" : settings.conversationStructureIdleLabel
+              }
+              onCommit={(next) => updateSettings({ conversationStructureIdleLabel: next })}
+              placeholder={
+                mixedConversationStructureIdleLabel ? t("settings.general.mixed") : undefined
+              }
               disabled={settings.conversationStructure !== "restructured"}
               aria-label={t("settings.general.conversation.idleLabel.ariaLabel")}
-              onChange={(event) =>
-                updateSettings({ conversationStructureIdleLabel: event.target.value })
-              }
             />
           }
         />
