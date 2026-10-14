@@ -468,7 +468,11 @@ describe("createSmoothText", () => {
     expect(controller.nextOffset).toBe(5);
     expect(controller.advance(1_025)).toBe(5);
     expect(controller.advance(1_030)).toBe(5);
-    expect(controller.advance(1_046)).toBe(6);
+    const afterLabel = controller.nextRevealAt(1_030);
+    // One glyph past the source pace, not four times it: the framed surface is
+    // released as one unit and cannot charge its own length to what follows.
+    expect(afterLabel - 1_025).toBeLessThanOrEqual((1_000 / 48) * 2);
+    expect(controller.advance(afterLabel)).toBe(6);
   });
 
   it("does not charge an atomic character surface as a long token-sized pause", () => {
@@ -477,7 +481,9 @@ describe("createSmoothText", () => {
       atomicRanges: [{ start: 1, end: 301 }],
     });
     expect(controller.advance(0)).toBe(301);
-    expect(controller.advance(25)).toBe(302);
+    const afterSurface = controller.nextRevealAt(0);
+    expect(afterSurface).toBeLessThanOrEqual((1_000 / 48) * 2);
+    expect(controller.advance(afterSurface)).toBe(302);
   });
 
   it("retains character-weighted token cadence after an atomic surface", () => {
@@ -816,9 +822,16 @@ describe("createSmoothText", () => {
     const controller = createSmoothText("");
     controller.update("xxxx", true, 0);
     expect(controller.advance(1_000)).toBe(1);
-    expect(controller.advance(1_023)).toBe(2);
-    expect(advanceNext(controller, 1_044)).toBe(3);
-    expect(advanceNext(controller, 1_065)).toBe(4);
+    // While the pool sits at or below its target the clock stays at the
+    // source pace: the start window must not leave credit that releases a
+    // burst, and the tail must not crawl either.
+    const second = controller.nextRevealAt(1_000);
+    expect(second - 1_000).toBeGreaterThanOrEqual(1_000 / 48 - 0.001);
+    expect(controller.advance(second)).toBe(2);
+    const third = controller.nextRevealAt(second);
+    expect(third - second).toBeGreaterThanOrEqual(1_000 / 48 - 0.001);
+    expect(controller.advance(third)).toBe(3);
+    expect(advanceNext(controller, third)).toBe(4);
     const previous = controller.lastRevealAt!;
     controller.update("xxxxx", true, previous + 1);
     const next = controller.nextRevealAt(previous + 1);
@@ -1381,7 +1394,11 @@ describe("createSmoothTextLines", () => {
     expect(controller.advance(0, 101)).toBe(101);
     expect(controller.advance(10, 201)).toBe(201);
     expect(controller.advance(20, 301)).toBe(301);
-    expect(controller.advance(45)).toBe(302);
+    // Three partial admissions of one framed surface must not leave a pause
+    // proportional to its 300 glyphs behind it.
+    const afterSurface = controller.nextRevealAt(20);
+    expect(afterSurface - 20).toBeLessThanOrEqual((1_000 / 48) * 2);
+    expect(controller.advance(afterSurface)).toBe(302);
   });
 
   it("reveals explicit lines strictly in FIFO order on one character clock", () => {
@@ -1487,7 +1504,9 @@ describe("createSmoothTextLines", () => {
     const controller = createSmoothTextLines("");
     controller.update("A\n", true, 0, { lineStarts: [0, 2] });
     expect(controller.advance(1_000)).toBe(1);
-    expect(controller.advance(1_025)).toBe(2);
+    const rest = controller.nextRevealAt(1_000);
+    expect(rest - 1_000).toBeLessThanOrEqual((1_000 / 48) * 2);
+    expect(controller.advance(rest)).toBe(2);
     controller.update("A\nBCDE", true, 1_500, { lineStarts: [0, 2] });
     expect(controller.nextRevealAt(1_500)).toBe(1_500);
     expect(controller.nextStart).toBe(2);
@@ -1522,7 +1541,7 @@ describe("createSmoothTextLines", () => {
     const controller = createSmoothTextLines("");
     controller.update("A\n", true, 0, { lineStarts: [0, 2] });
     controller.advance(1_000);
-    controller.advance(1_025);
+    controller.advance(controller.nextRevealAt(1_000));
     controller.update("A\nQRST", false, 1_500, {
       lineStarts: [0, 2],
       drainWithinMs: 100,

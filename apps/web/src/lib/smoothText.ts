@@ -5,9 +5,10 @@ const BASE_GRAPHEMES_PER_SECOND = 48;
 const ARRIVAL_WINDOW_MS = 1_000;
 export const SMOOTH_TEXT_BUFFER_MS = 80;
 const TARGET_BUFFER_GRAPHEMES = 32;
-const CATCH_UP_WINDOW_MS = 120;
-const REFILL_WINDOW_MS = 500;
 const MAX_CATCH_UP_RATE = 2;
+const POOL_FEEDBACK_GAIN = 0.8;
+const REFILL_HEADROOM = 0.35;
+const MIN_POOL_GRAPHEMES = 4;
 const RECENT_INTERVAL_COUNT = 3;
 const MAX_ARRIVAL_SAMPLES = 256;
 
@@ -226,12 +227,21 @@ export function createSmoothText(
       1,
       Math.min(TARGET_BUFFER_GRAPHEMES, (rate * SMOOTH_TEXT_BUFFER_MS) / 1_000),
     );
-    // Recover layout debt quickly, but refill a sparse queue gently so a
-    // short label or final character never inherits a new artificial pause.
-    const corrected =
-      rate +
-      ((backlog - target) * 1_000) / (backlog > target ? CATCH_UP_WINDOW_MS : REFILL_WINDOW_MS);
-    return 1_000 / Math.max(rate / 2, Math.min(rate * MAX_CATCH_UP_RATE, corrected));
+    // The pool is the smoothing reserve, so hold it at the target instead of
+    // only following the source. Merely matching the arrival rate is neutral:
+    // once a burst drains the pool nothing rebuilds it, and every later batch
+    // then plays at full speed, which is what makes streamed text look chunky.
+    // The surplus term repays real debt quickly; the deficit term is capped
+    // twice over, because a pool too small to absorb an arrival gap has nothing
+    // worth holding back and stretching for it only delays text that is
+    // already on screen.
+    const ratio =
+      backlog > target
+        ? (backlog - target) / target
+        : backlog > MIN_POOL_GRAPHEMES
+          ? Math.max(-REFILL_HEADROOM, (backlog - target) / target)
+          : 0;
+    return 1_000 / (rate * Math.min(MAX_CATCH_UP_RATE, 1 + ratio * POOL_FEEDBACK_GAIN));
   };
   // Slow frames spend the completion budget too. Keep the deadline fixed and
   // redistribute its remaining time over the unread FIFO after each paint.
@@ -262,8 +272,11 @@ export function createSmoothText(
   };
   const nextUnitAt = (now: number) => {
     const interval = revealInterval(now);
-    const minimumGlyphInterval =
-      drainingInterval(now) ?? characterInterval(now, Number.POSITIVE_INFINITY);
+    // Bounding this by the current backlog keeps the cap at the source's own
+    // pace. An unbounded backlog saturated the catch-up term, pinning every
+    // reveal at the catch-up ceiling and draining the pool at twice the rate
+    // the provider delivers.
+    const minimumGlyphInterval = drainingInterval(now) ?? characterInterval(now);
     const minimumInterval = Math.max(
       minimumGlyphInterval,
       minimumGlyphInterval * lastRevealSize - (lastRevealSize > 1 ? lastUnitLayoutMs : 0),
