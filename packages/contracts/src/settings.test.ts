@@ -6,8 +6,6 @@ import {
   ClientSettingsSchema,
   ClientSettingsPatch,
   ClaudeSettings,
-  DEFAULT_CONVERSATION_IDLE_LABEL,
-  DEFAULT_CONVERSATION_THINKING_LABEL,
   DEFAULT_CONVERSATION_STRUCTURE,
   DEFAULT_SERVER_SETTINGS,
   ProjectSettingsOverrides,
@@ -27,7 +25,7 @@ const decodeProjectSettingsOverrides = Schema.decodeSync(ProjectSettingsOverride
 
 describe("conversationStructure", () => {
   it("validates and preserves text fade duration in defaults, overrides and patches", () => {
-    expect(decodeServerSettings({}).smoothTextFadeDurationMs).toBe(180);
+    expect(decodeServerSettings({}).smoothTextFadeDurationMs).toBe(200);
     expect(decodeProjectSettingsOverrides({}).smoothTextFadeDurationMs).toBeUndefined();
     for (const duration of [0, 180, 1000]) {
       expect(
@@ -47,8 +45,6 @@ describe("conversationStructure", () => {
     expect(decoded.conversationStructureThinkingLabel).toBeUndefined();
     expect(decoded.conversationStructureIdleLabel).toBeUndefined();
     expect(DEFAULT_CONVERSATION_STRUCTURE).toBe("default");
-    expect(DEFAULT_CONVERSATION_THINKING_LABEL).toBe("Thinking");
-    expect(DEFAULT_CONVERSATION_IDLE_LABEL).toBe("Planning next move");
   });
 
   it("accepts both structure values and a custom idle label", () => {
@@ -65,8 +61,9 @@ describe("conversationStructure", () => {
   it("defaults both keys on the environment-wide server settings", () => {
     const decoded = decodeServerSettings({});
     expect(decoded.conversationStructure).toBe(DEFAULT_CONVERSATION_STRUCTURE);
-    expect(decoded.conversationStructureThinkingLabel).toBe(DEFAULT_CONVERSATION_THINKING_LABEL);
-    expect(decoded.conversationStructureIdleLabel).toBe(DEFAULT_CONVERSATION_IDLE_LABEL);
+    // Empty labels mean the client's translated built-in text.
+    expect(decoded.conversationStructureThinkingLabel).toBe("");
+    expect(decoded.conversationStructureIdleLabel).toBe("");
   });
 
   it("round-trips both keys through the environment-wide settings write path", () => {

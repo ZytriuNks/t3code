@@ -3080,7 +3080,7 @@ export function useSmoothText(
     onSettled,
     onPlaybackComplete,
     initialBufferMs,
-    fadeDurationMs = 180,
+    fadeDurationMs = 200,
     drainOnComplete = true,
     claimInitialText,
     sourceText,

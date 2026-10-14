@@ -27,8 +27,6 @@ import {
   type ChatWidth,
   type ConversationStructure,
   type DiffLayout,
-  DEFAULT_CONVERSATION_IDLE_LABEL,
-  DEFAULT_CONVERSATION_THINKING_LABEL,
   type EnvironmentIdentificationMode,
   type LanguagePreference,
   MAX_APPEARANCE_CONTRAST,
@@ -138,6 +136,7 @@ import {
   NumberFieldInput,
 } from "../ui/number-field";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
+import { Slider } from "../ui/slider";
 import { Switch } from "../ui/switch";
 import { ScopedSwitch } from "./ScopedSwitch";
 import { stackedThreadToast, toastManager } from "../ui/toast";
@@ -327,6 +326,41 @@ const BACKGROUND_ACTIVITY_BOOLEAN_OVERRIDES: ReadonlyArray<{
   },
   { key: "pauseWhenOnBattery", labelKey: "settings.general.backgroundActivity.pauseWhenOnBattery" },
 ];
+
+/** Drags locally and saves once on release, so a drag is one settings write. */
+function SmoothTextFadeDurationSlider({
+  value,
+  onCommit,
+  ariaLabel,
+  formatValue,
+}: {
+  value: number | null;
+  onCommit: (value: number) => void;
+  ariaLabel: string;
+  formatValue: (value: number | null) => string;
+}) {
+  const [draft, setDraft] = useState<number | null>(null);
+  const shown = draft ?? value;
+  return (
+    <div className="flex w-full items-center gap-3 sm:w-64">
+      <Slider
+        value={shown ?? DEFAULT_UNIFIED_SETTINGS.smoothTextFadeDurationMs}
+        min={0}
+        max={1000}
+        step={50}
+        aria-label={ariaLabel}
+        onValueChange={setDraft}
+        onValueCommitted={(next) => {
+          setDraft(null);
+          if (next !== value) onCommit(next);
+        }}
+      />
+      <span className="w-16 shrink-0 text-right text-xs text-muted-foreground tabular-nums">
+        {formatValue(shown)}
+      </span>
+    </div>
+  );
+}
 
 function resetBackgroundActivitySettings() {
   return {
@@ -2672,6 +2706,10 @@ function GeneralSettingsRows() {
   const mixedSmoothOutputLineMode = useScopedSettingsMixed(["smoothOutputLineMode"]);
   const mixedSmoothTextFadeDuration = useScopedSettingsMixed(["smoothTextFadeDurationMs"]);
   const mixedConversationStructure = useScopedSettingsMixed(["conversationStructure"]);
+  // Smooth output animates the restructured timeline only; the current layout
+  // already animates the same growing body, and two clocks would compete.
+  const smoothOutputAvailable =
+    !mixedConversationStructure && settings.conversationStructure === "restructured";
   const mixedConversationStructureIdleLabel = useScopedSettingsMixed([
     "conversationStructureIdleLabel",
   ]);
@@ -3863,8 +3901,7 @@ function GeneralSettingsRows() {
           description={
             mixedResponseStreamingMode
               ? t("settings.general.streaming.mixed")
-              : settings.responseStreamingMode === "smooth" &&
-                  settings.conversationStructure !== "restructured"
+              : !smoothOutputAvailable
                 ? `${t(RESPONSE_STREAMING_MODE_DESCRIPTION_KEYS[settings.responseStreamingMode])} ${t("settings.general.streaming.requiresRestructured")}`
                 : t(RESPONSE_STREAMING_MODE_DESCRIPTION_KEYS[settings.responseStreamingMode])
           }
@@ -3917,7 +3954,7 @@ function GeneralSettingsRows() {
                 <SelectItem hideIndicator value="realtime">
                   {t(RESPONSE_STREAMING_MODE_LABEL_KEYS.realtime)}
                 </SelectItem>
-                <SelectItem hideIndicator value="smooth">
+                <SelectItem hideIndicator value="smooth" disabled={!smoothOutputAvailable}>
                   {t(RESPONSE_STREAMING_MODE_LABEL_KEYS.smooth)}
                 </SelectItem>
               </SelectPopup>
@@ -4042,22 +4079,18 @@ function GeneralSettingsRows() {
               ) : null
             }
             control={
-              <NumberField
+              <SmoothTextFadeDurationSlider
                 value={mixedSmoothTextFadeDuration ? null : settings.smoothTextFadeDurationMs}
-                min={0}
-                max={1000}
-                step={10}
-                size="sm"
-                className="w-32"
-                onValueChange={(value) => {
-                  if (value !== null && Number.isInteger(value))
-                    updateSettings({ smoothTextFadeDurationMs: value });
-                }}
-              >
-                <NumberFieldGroup>
-                  <NumberFieldInput aria-label={t("settings.general.streaming.fade.title")} />
-                </NumberFieldGroup>
-              </NumberField>
+                onCommit={(value) => updateSettings({ smoothTextFadeDurationMs: value })}
+                ariaLabel={t("settings.general.streaming.fade.title")}
+                formatValue={(value) =>
+                  value === null
+                    ? t("settings.general.streaming.mixedValue")
+                    : value === 0
+                      ? t("settings.general.streaming.fade.off")
+                      : t("settings.general.streaming.fade.value", { value })
+                }
+              />
             }
           />
         )}
@@ -4149,13 +4182,14 @@ function GeneralSettingsRows() {
                   ? ""
                   : settings.conversationStructureThinkingLabel
               }
+              // Empty means the built-in label, which follows the app language.
               onCommit={(next) =>
-                updateSettings({
-                  conversationStructureThinkingLabel: next || DEFAULT_CONVERSATION_THINKING_LABEL,
-                })
+                updateSettings({ conversationStructureThinkingLabel: next.trim() })
               }
               placeholder={
-                mixedConversationStructureThinkingLabel ? t("settings.general.mixed") : undefined
+                mixedConversationStructureThinkingLabel
+                  ? t("settings.general.mixed")
+                  : t("chat.liveActivity.thinkingDefault")
               }
               aria-label={t("settings.general.conversation.thinkingLabel.ariaLabel")}
             />
@@ -4187,13 +4221,11 @@ function GeneralSettingsRows() {
               value={
                 mixedConversationStructureIdleLabel ? "" : settings.conversationStructureIdleLabel
               }
-              onCommit={(next) =>
-                updateSettings({
-                  conversationStructureIdleLabel: next || DEFAULT_CONVERSATION_IDLE_LABEL,
-                })
-              }
+              onCommit={(next) => updateSettings({ conversationStructureIdleLabel: next.trim() })}
               placeholder={
-                mixedConversationStructureIdleLabel ? t("settings.general.mixed") : undefined
+                mixedConversationStructureIdleLabel
+                  ? t("settings.general.mixed")
+                  : t("chat.liveActivity.idleDefault")
               }
               disabled={settings.conversationStructure !== "restructured"}
               aria-label={t("settings.general.conversation.idleLabel.ariaLabel")}

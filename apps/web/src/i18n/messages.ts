@@ -179,9 +179,11 @@ export const EN_MESSAGES = {
   "settings.general.footnotesAutoCollapse.title": "Automatically collapse footnotes",
   "settings.general.footnotesAutoCollapse.description":
     "Keep footnotes collapsed. While generating, show only the current footnote and collapse it after it appears. Following a reference opens all footnotes.",
-  "settings.general.streaming.fade.title": "Text fade duration (ms)",
+  "settings.general.streaming.fade.title": "Text fade duration",
   "settings.general.streaming.fade.description":
-    "How long each character or token takes to fade in. Default: 180 ms. Set to 0 to disable text fading; output speed and line movement stay independent.",
+    "How long each character or token takes to fade in. Default: 200 ms. Set to 0 to disable text fading; output speed and line movement stay independent.",
+  "settings.general.streaming.fade.off": "Off",
+  "settings.general.streaming.fade.value": "{value} ms",
   "settings.general.streaming.preload.title": "Preload Markdown formatting",
   "settings.general.streaming.preload.description":
     "Prepare formatting while text is buffered. Incomplete syntax and image references wait for a stable form while surrounding text continues to appear.",
@@ -945,6 +947,8 @@ export const EN_MESSAGES = {
   "settings.general.conversation.structure.default": "Current layout",
   "settings.general.conversation.structure.restructured": "Restructured",
   "settings.general.conversation.structure.resetLabel": "conversation structure",
+  "chat.liveActivity.thinkingDefault": "Thinking",
+  "chat.liveActivity.idleDefault": "Planning next move",
   "settings.general.conversation.thinkingLabel.title": "Thinking label",
   "settings.general.conversation.thinkingLabel.description":
     "Shown while the agent is thinking or continuing to write a response.",
@@ -2831,9 +2835,11 @@ export const ZH_CN_MESSAGES = {
   "settings.general.footnotesAutoCollapse.title": "脚注自动折叠",
   "settings.general.footnotesAutoCollapse.description":
     "默认收起脚注。生成时仅展开当前脚注，绘制完成后自动收起；点击正文引用会展开全部脚注。",
-  "settings.general.streaming.fade.title": "文字淡入时长（毫秒）",
+  "settings.general.streaming.fade.title": "文字淡入时长",
   "settings.general.streaming.fade.description":
-    "每个字符或 token 的淡入时长，默认 180 毫秒。设为 0 可关闭文字淡入；输出速度和让位动画独立调节。",
+    "每个字符或 token 的淡入时长，默认 200 毫秒。设为 0 可关闭文字淡入；输出速度和让位动画独立调节。",
+  "settings.general.streaming.fade.off": "关闭",
+  "settings.general.streaming.fade.value": "{value} 毫秒",
   "settings.general.streaming.preload.title": "预加载md格式",
   "settings.general.streaming.preload.description":
     "在缓存中提前准备格式。未完成的语法和图片引用等待格式稳定，周围正文继续显示，减少原文与格式之间的跳变。",
@@ -3521,6 +3527,8 @@ export const ZH_CN_MESSAGES = {
   "settings.general.conversation.structure.default": "现有布局",
   "settings.general.conversation.structure.restructured": "重制",
   "settings.general.conversation.structure.resetLabel": "对话结构",
+  "chat.liveActivity.thinkingDefault": "思考中",
+  "chat.liveActivity.idleDefault": "规划下一步",
   "settings.general.conversation.thinkingLabel.title": "Thinking 文案",
   "settings.general.conversation.thinkingLabel.description": "代理思考或继续输出正文时显示的文案。",
   "settings.general.conversation.thinkingLabel.resetLabel": "Thinking 文案",

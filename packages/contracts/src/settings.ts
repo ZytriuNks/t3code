@@ -1119,8 +1119,6 @@ export const ConversationStructure = Schema.Literals(["default", "restructured"]
 export type ConversationStructure = typeof ConversationStructure.Type;
 
 export const DEFAULT_CONVERSATION_STRUCTURE = "default" as const;
-export const DEFAULT_CONVERSATION_IDLE_LABEL = "Planning next move" as const;
-export const DEFAULT_CONVERSATION_THINKING_LABEL = "Thinking" as const;
 
 /**
  * Server settings a project may override. Every other server setting is
@@ -1261,17 +1259,18 @@ export const ServerSettings = Schema.Struct({
   ),
   smoothMarkdownPreload: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   smoothTextFadeDurationMs: SmoothTextFadeDurationMs.pipe(
-    Schema.withDecodingDefault(Effect.succeed(180)),
+    Schema.withDecodingDefault(Effect.succeed(200)),
   ),
   footnotesAutoCollapse: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   conversationStructure: ConversationStructure.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_CONVERSATION_STRUCTURE)),
   ),
+  // Empty uses the client's built-in label, translated into the app language.
   conversationStructureThinkingLabel: Schema.String.pipe(
-    Schema.withDecodingDefault(Effect.succeed(DEFAULT_CONVERSATION_THINKING_LABEL)),
+    Schema.withDecodingDefault(Effect.succeed("")),
   ),
   conversationStructureIdleLabel: Schema.String.pipe(
-    Schema.withDecodingDefault(Effect.succeed(DEFAULT_CONVERSATION_IDLE_LABEL)),
+    Schema.withDecodingDefault(Effect.succeed("")),
   ),
   enableProviderUpdateChecks: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   // Retain the update-era key; recovery now needs an environment-owned opt-in.

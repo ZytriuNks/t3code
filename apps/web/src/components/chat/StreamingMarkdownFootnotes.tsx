@@ -138,7 +138,7 @@ export function StreamingMarkdownFootnotes({
   lineMode,
   scope,
   autoCollapse = false,
-  fadeDurationMs = 180,
+  fadeDurationMs = 200,
   items = EMPTY_ITEMS,
   ...sectionProps
 }: React.ComponentProps<"section"> & {

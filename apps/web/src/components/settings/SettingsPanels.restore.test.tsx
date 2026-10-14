@@ -75,9 +75,9 @@ describe("restoring V2 settings", () => {
     state.settings = { ...DEFAULT_UNIFIED_SETTINGS, smoothTextFadeDurationMs: 420 };
     hooks.beginRender();
     const restore = useSettingsRestore();
-    expect(restore.changedSettingLabels).toEqual(["Text fade duration (ms)"]);
+    expect(restore.changedSettingLabels).toEqual(["Text fade duration"]);
     await restore.restoreDefaults();
-    expect(state.update.mock.calls[0]?.[0].smoothTextFadeDurationMs).toBe(180);
+    expect(state.update.mock.calls[0]?.[0].smoothTextFadeDurationMs).toBe(200);
   });
 
   it.each([

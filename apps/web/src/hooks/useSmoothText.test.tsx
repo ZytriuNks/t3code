@@ -4643,7 +4643,7 @@ describe("useSmoothText", () => {
     async (hasExistingProperty) => {
       let now = 0;
       vi.spyOn(performance, "now").mockImplementation(() => now);
-      await render(<Probe text="History" coloredText />);
+      await render(<Probe fadeDurationMs={180} text="History" coloredText />);
       const code = container.querySelector("span")!;
       const property = "--t3-smooth-foreground";
       code.style.color = "rgb(90, 140, 180)";
@@ -4652,7 +4652,7 @@ describe("useSmoothText", () => {
       const previousPriority = code.style.getPropertyPriority(property);
       const foreground = getComputedStyle(code).color;
       expect(foreground).toBe("rgb(90, 140, 180)");
-      await render(<Probe text="HistoryAB" coloredText />);
+      await render(<Probe fadeDurationMs={180} text="HistoryAB" coloredText />);
 
       for (const frameTime of [16, 48]) {
         const next = frames.entries().next().value!;
@@ -4860,8 +4860,8 @@ describe("useSmoothText", () => {
         <strong style={{ color: "rgb(220, 130, 40)" }}>{tail ? "B" : ""}</strong>
       </span>
     );
-    await render(<Probe text="History" richText={content()} />);
-    await render(<Probe text="HistoryAB" richText={content(true)} />);
+    await render(<Probe fadeDurationMs={180} text="History" richText={content()} />);
+    await render(<Probe fadeDurationMs={180} text="HistoryAB" richText={content(true)} />);
     for (const time of [16, 48]) {
       now = time;
       const callbacks = [...frames.values()];
@@ -6264,8 +6264,8 @@ describe("useSmoothText", () => {
   it("keeps individual character fades when work ends with a queued tail", async () => {
     let now = 0;
     vi.spyOn(performance, "now").mockImplementation(() => now);
-    await render(<Probe text="History" coloredText />);
-    await render(<Probe text="HistoryABCDE" coloredText />);
+    await render(<Probe fadeDurationMs={180} text="History" coloredText />);
+    await render(<Probe fadeDurationMs={180} text="HistoryABCDE" coloredText />);
     now = 16;
     const callbacks = [...frames.values()];
     frames.clear();
@@ -6273,7 +6273,9 @@ describe("useSmoothText", () => {
     const existingRange = fadeRanges()[0]!;
     const existingBucket = [...highlights].find(([, ranges]) => ranges.has(existingRange))?.[0];
     now = 20;
-    await render(<Probe text="HistoryABCDEFGH" coloredText streaming={false} complete />);
+    await render(
+      <Probe fadeDurationMs={180} text="HistoryABCDEFGH" coloredText streaming={false} complete />,
+    );
     expect(hiddenHighlight()).toBeUndefined();
     expect(fadeRanges().map(rangeText)).toEqual(["A", "B", "C", "D", "E", "F", "G", "H"]);
     expect([...(highlights.get(existingBucket!) ?? [])].map(rangeText)).toContain("A");
@@ -6294,8 +6296,8 @@ describe("useSmoothText", () => {
   it("keeps a completed token snapshot's fade together without restarting a previous batch", async () => {
     let now = 0;
     vi.spyOn(performance, "now").mockImplementation(() => now);
-    await render(<Probe text="History" mode="token" />);
-    await render(<Probe text="HistoryABCDE" mode="token" />);
+    await render(<Probe fadeDurationMs={180} text="History" mode="token" />);
+    await render(<Probe fadeDurationMs={180} text="HistoryABCDE" mode="token" />);
     now = 16;
     const callbacks = [...frames.values()];
     frames.clear();

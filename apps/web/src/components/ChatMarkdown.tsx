@@ -3020,7 +3020,7 @@ const SmoothMarkdownContext = React.createContext({
   lineMode: "adaptive" as NonNullable<ChatMarkdownProps["smoothOutputLineMode"]>,
   scope: "",
   autoCollapse: false,
-  fadeDurationMs: 180,
+  fadeDurationMs: 200,
 });
 
 // Screen readers take a heading's level from its tag, which would let a `#` in a
@@ -3852,7 +3852,7 @@ function ChatMarkdown({
   smoothOutputMode = "character",
   smoothOutputLineMode = "adaptive",
   smoothMarkdownPreload = true,
-  smoothTextFadeDurationMs = 180,
+  smoothTextFadeDurationMs = 200,
   footnotesAutoCollapse = false,
   smoothComplete = false,
   claimInitialSmoothText,

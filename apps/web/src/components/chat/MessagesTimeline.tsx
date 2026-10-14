@@ -267,11 +267,7 @@ import { SMOOTH_TEXT_LAYOUT_EVENT, type SmoothTextLayoutDetail } from "~/lib/smo
 import { flushSync } from "react-dom";
 import { OverlayScrollbar } from "~/components/ui/overlay-scrollbar";
 import { useUiStateStore } from "~/uiStateStore";
-import {
-  DEFAULT_CONVERSATION_IDLE_LABEL,
-  DEFAULT_CONVERSATION_THINKING_LABEL,
-  type TimestampFormat,
-} from "@t3tools/contracts/settings";
+import { type TimestampFormat } from "@t3tools/contracts/settings";
 import {
   formatChatTimestampTooltip,
   formatDayAwareTimestamp,
@@ -649,7 +645,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   smoothOutputMode = "character",
   smoothOutputLineMode = "adaptive",
   smoothMarkdownPreload = true,
-  smoothTextFadeDurationMs = 180,
+  smoothTextFadeDurationMs = 200,
   footnotesAutoCollapse = false,
   smoothScrollRef,
   smoothEndRequest = 0,
@@ -661,8 +657,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   activeTurnInProgress,
   activeTurnStartedAt = null,
   conversationStructure,
-  conversationStructureIdleLabel = DEFAULT_CONVERSATION_IDLE_LABEL,
-  conversationStructureThinkingLabel = DEFAULT_CONVERSATION_THINKING_LABEL,
+  conversationStructureIdleLabel = "",
+  conversationStructureThinkingLabel = "",
   worktreeSetup = null,
   queuedMessages = EMPTY_QUEUED_MESSAGES,
   onSteerQueuedMessage = NOOP_QUEUE_MESSAGE_ACTION,
@@ -4434,26 +4430,25 @@ function CompactingLabel() {
 }
 
 function ThinkingTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "thinking" }> }) {
+  const { t } = useI18n();
   const {
     isCompacting,
     isPreparingWorktree,
     conversationStructureIdleLabel,
     conversationStructureThinkingLabel,
   } = use(TimelineRowActivityCtx);
+  // An empty setting means the built-in label, which follows the app language.
+  const label =
+    row.idle === true
+      ? conversationStructureIdleLabel || t("chat.liveActivity.idleDefault")
+      : conversationStructureThinkingLabel || t("chat.liveActivity.thinkingDefault");
   // Reserve the activity row during setup so the handoff keeps the same height.
   return isPreparingWorktree || isCompacting ? (
     <WorkLogRow label="" />
   ) : (
     <>
       <StreamingFootnoteHost />
-      <LiveActivityRow
-        label={
-          row.idle === true ? conversationStructureIdleLabel : conversationStructureThinkingLabel
-        }
-        iconName="brain"
-        active
-        shimmer
-      />
+      <LiveActivityRow label={label} iconName="brain" active shimmer />
     </>
   );
 }
