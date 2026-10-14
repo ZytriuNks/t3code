@@ -1,35 +1,73 @@
 export const SMOOTH_TEXT_LAYOUT_EVENT = "t3-smooth-text-layout";
-export const SMOOTH_TEXT_BEFORE_LAYOUT_EVENT = "t3-smooth-text-before-layout";
-
-/** Check the viewport before making room for text, then commit the new height. */
-export function setSmoothTextFrameHeight(element: HTMLElement, height: number | null) {
-  const value = height === null ? "" : `${height}px`;
-  if (element.style.height === value) return;
-  element.dispatchEvent(new Event(SMOOTH_TEXT_BEFORE_LAYOUT_EVENT, { bubbles: true }));
-  element.style.height = value;
-  element.dispatchEvent(new Event(SMOOTH_TEXT_LAYOUT_EVENT, { bubbles: true }));
-  // A frame can write more than once before the browser paints. Each write
-  // leaves the viewport short of the new edge, so the label above the growing
-  // text drops for that frame and springs back once the follow catches up.
-  // Settle the viewport against the final height of the frame instead.
-  flushSmoothTextFrameLayout(element);
-}
 
 /**
- * Runs once per frame, after every height write for that frame has landed, so
- * the follow compensates by the total growth rather than one write at a time.
+ * How far the frame's bottom edge moved down, in CSS pixels. The scroll
+ * controller only needs this to keep the viewport on the content's edge: it
+ * used to read `scrollHeight` before and after every height write to
+ * rediscover the same number, which forced layout twice per animation frame.
+ * A viewport follows growth by moving down by exactly this much.
  */
-export function flushSmoothTextFrameLayout(element: HTMLElement) {
-  if (scheduledFrameLayout.has(element)) return;
-  scheduledFrameLayout.add(element);
-  requestAnimationFrame(() => {
-    scheduledFrameLayout.delete(element);
-    if (!element.isConnected) return;
-    element.dispatchEvent(new Event(SMOOTH_TEXT_LAYOUT_EVENT, { bubbles: true }));
-  });
+export interface SmoothTextLayoutDetail {
+  readonly delta: number;
+  readonly synchronous?: boolean;
+  readonly phase?: "before" | "after";
+  /** Filled by the virtual list's capture listener before end-follow runs. */
+  rowFraction?: number;
 }
 
 const scheduledFrameLayout = new WeakSet<HTMLElement>();
+
+/**
+ * Commit a new frame height and tell listeners exactly how far the edge moved.
+ * A callback can write more than once before the browser paints. Settle its
+ * last write in a microtask, so a second text/footnote edge does not wait for
+ * the next delivered frame to move the viewport.
+ */
+export function setSmoothTextFrameHeight(
+  element: HTMLElement,
+  height: number | null,
+  synchronous = false,
+) {
+  const previous = element.style.height;
+  const value = height === null ? "" : `${height}px`;
+  if (previous === value && !synchronous) return;
+  // Native overflow may clamp the viewport during this direct DOM write,
+  // before the virtual row can publish its new size. Capture ownership first.
+  element.dispatchEvent(
+    new CustomEvent<SmoothTextLayoutDetail>(SMOOTH_TEXT_LAYOUT_EVENT, {
+      bubbles: true,
+      detail: { delta: 0, phase: "before" },
+    }),
+  );
+  if (previous !== value) element.style.height = value;
+  const from = Number.parseFloat(previous);
+  // Clearing an explicit height restores natural layout; it does not remove
+  // the content. Reporting zero made end-follow scroll backwards by the whole
+  // response exactly when its Thinking label closed.
+  const to = height ?? element.getBoundingClientRect().height;
+  element.dispatchEvent(
+    new CustomEvent<SmoothTextLayoutDetail>(SMOOTH_TEXT_LAYOUT_EVENT, {
+      bubbles: true,
+      detail: {
+        delta: to - (Number.isFinite(from) ? from : 0),
+        phase: "after",
+        ...(synchronous ? { synchronous } : {}),
+      },
+    }),
+  );
+  if (scheduledFrameLayout.has(element)) return;
+  scheduledFrameLayout.add(element);
+  queueMicrotask(() => {
+    scheduledFrameLayout.delete(element);
+    if (!element.isConnected) return;
+    element.dispatchEvent(
+      new CustomEvent<SmoothTextLayoutDetail>(SMOOTH_TEXT_LAYOUT_EVENT, {
+        bubbles: true,
+        detail: { delta: 0 },
+      }),
+    );
+  });
+}
 
 const revealedEnds = new WeakMap<HTMLElement, { range: Range | null; fullRange: Range | null }>();
 
@@ -40,8 +78,7 @@ export function setSmoothTextEnd(
   fullRange: Range | null = range,
 ) {
   revealedEnds.set(element, { range, fullRange });
-  element.dataset.smoothTextEnd = "";
-  element.dispatchEvent(new Event(SMOOTH_TEXT_LAYOUT_EVENT, { bubbles: true }));
+  if (element.dataset.smoothTextEnd === undefined) element.dataset.smoothTextEnd = "";
 }
 
 export function clearSmoothTextEnd(element: HTMLElement) {

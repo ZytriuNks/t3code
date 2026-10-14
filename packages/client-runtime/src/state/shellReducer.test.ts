@@ -1,4 +1,6 @@
-import { ProjectId, ThreadId } from "@t3tools/contracts";
+import { OrchestrationV2ThreadShell, ProjectId, ThreadId } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
+import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 
 import { v2Project, v2ShellSnapshot, v2ThreadShell } from "./orchestrationV2TestFixtures.ts";
@@ -22,7 +24,61 @@ const otherIdentity = {
   },
 };
 
+const decodeShell = Schema.decodeSync(OrchestrationV2ThreadShell);
+const encodeShell = Schema.encodeSync(OrchestrationV2ThreadShell);
+
 describe("applyShellStreamEvent", () => {
+  const roundTrip = (thread: OrchestrationV2ThreadShell) => decodeShell(encodeShell(thread));
+
+  it("retains unchanged decoded metadata during streaming without losing status or clock updates", () => {
+    const previous = roundTrip({ ...v2ThreadShell, pendingBackgroundTasks: [] });
+    const incoming = roundTrip({
+      ...previous,
+      status: "running",
+      updatedAt: DateTime.makeUnsafe("2026-06-20T00:00:01.000Z"),
+    });
+    const next = applyShellStreamEvent(
+      { ...v2ShellSnapshot, threads: [previous] },
+      { kind: "thread.updated", sequence: 1, location: "active", thread: incoming },
+    );
+    const thread = next.threads[0]!;
+    expect(thread).toEqual(incoming);
+    expect(thread.modelSelection).toBe(previous.modelSelection);
+    expect(thread.lineage).toBe(previous.lineage);
+    expect(thread.pendingBackgroundTasks).toBe(previous.pendingBackgroundTasks);
+    expect(thread.createdAt).toBe(previous.createdAt);
+    expect(thread.updatedAt).toBe(incoming.updatedAt);
+    expect(thread.status).toBe("running");
+    expect(previous.status).toBe("idle");
+  });
+
+  it("keeps a repeated decoded shell stable and still advances its sequence", () => {
+    const previous = roundTrip(v2ThreadShell);
+    const next = applyShellStreamEvent(
+      { ...v2ShellSnapshot, threads: [previous] },
+      { kind: "thread.updated", sequence: 1, location: "active", thread: roundTrip(previous) },
+    );
+    expect(next.snapshotSequence).toBe(1);
+    expect(next.threads[0]).toBe(previous);
+  });
+
+  it("applies changed nested metadata and removes absent optional fields", () => {
+    const previous = roundTrip({ ...v2ThreadShell, linkedPullRequest: null });
+    const incoming = roundTrip({
+      ...v2ThreadShell,
+      modelSelection: { ...v2ThreadShell.modelSelection, model: "different-model" },
+      lineage: { ...v2ThreadShell.lineage, parentThreadId: ThreadId.make("parent") },
+    });
+    const next = applyShellStreamEvent(
+      { ...v2ShellSnapshot, threads: [previous] },
+      { kind: "thread.updated", sequence: 1, location: "active", thread: incoming },
+    ).threads[0]!;
+    expect(next).toEqual(incoming);
+    expect(next.modelSelection).not.toBe(previous.modelSelection);
+    expect(next.lineage).not.toBe(previous.lineage);
+    expect(Object.hasOwn(next, "linkedPullRequest")).toBe(false);
+  });
+
   it("updates a thread in place without moving its siblings", () => {
     const threads = ["a", "b", "c"].map((id) => ({ ...v2ThreadShell, id: ThreadId.make(id) }));
     const updated = { ...threads[1]!, title: "Streaming" };

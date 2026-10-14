@@ -28,6 +28,7 @@ import {
   type ConversationStructure,
   type DiffLayout,
   DEFAULT_CONVERSATION_IDLE_LABEL,
+  DEFAULT_CONVERSATION_THINKING_LABEL,
   type EnvironmentIdentificationMode,
   type LanguagePreference,
   MAX_APPEARANCE_CONTRAST,
@@ -266,6 +267,17 @@ const INHERITED_RESPONSE_STREAMING_MODE_LABEL_KEYS: Readonly<Record<string, Mess
   token: "settings.row.copy.settingValue.streamingMode.token",
 };
 
+const SMOOTH_OUTPUT_MODE_LABEL_KEYS: Readonly<Record<string, MessageKey>> = {
+  character: "settings.general.streaming.unit.character",
+  token: "settings.general.streaming.unit.token",
+  auto: "settings.general.streaming.unit.auto",
+};
+
+const SMOOTH_OUTPUT_LINE_MODE_LABEL_KEYS: Readonly<Record<string, MessageKey>> = {
+  adaptive: "settings.general.streaming.lines.adaptive",
+  parallel: "settings.general.streaming.lines.parallel",
+};
+
 const INHERITED_WORKTREE_SUBMODULE_LABEL_KEYS: Readonly<Record<string, MessageKey>> = {
   recursive: "settings.general.submodules.recursive",
   "top-level": "settings.general.submodules.topLevel",
@@ -282,9 +294,13 @@ function inheritedSettingValueLabel(
       ? INHERITED_RUNTIME_MODE_LABEL_KEYS[value]
       : key === "responseStreamingMode"
         ? INHERITED_RESPONSE_STREAMING_MODE_LABEL_KEYS[value]
-        : key === "worktreeSubmodules"
-          ? INHERITED_WORKTREE_SUBMODULE_LABEL_KEYS[value]
-          : undefined;
+        : key === "smoothOutputMode"
+          ? SMOOTH_OUTPUT_MODE_LABEL_KEYS[value]
+          : key === "smoothOutputLineMode"
+            ? SMOOTH_OUTPUT_LINE_MODE_LABEL_KEYS[value]
+            : key === "worktreeSubmodules"
+              ? INHERITED_WORKTREE_SUBMODULE_LABEL_KEYS[value]
+              : undefined;
   return messageKey === undefined ? value : t(messageKey);
 }
 
@@ -789,6 +805,21 @@ export function useSettingsRestore(onRestored?: () => void) {
       ...(settings.responseStreamingMode !== DEFAULT_UNIFIED_SETTINGS.responseStreamingMode
         ? [t("settings.restore.label.responseStreaming")]
         : []),
+      ...(settings.smoothOutputMode !== DEFAULT_UNIFIED_SETTINGS.smoothOutputMode
+        ? [t("settings.general.streaming.unit.title")]
+        : []),
+      ...(settings.smoothOutputLineMode !== DEFAULT_UNIFIED_SETTINGS.smoothOutputLineMode
+        ? [t("settings.general.streaming.lines.title")]
+        : []),
+      ...(settings.footnotesAutoCollapse !== DEFAULT_UNIFIED_SETTINGS.footnotesAutoCollapse
+        ? [t("settings.general.footnotesAutoCollapse.title")]
+        : []),
+      ...(settings.smoothTextFadeDurationMs !== DEFAULT_UNIFIED_SETTINGS.smoothTextFadeDurationMs
+        ? [t("settings.general.streaming.fade.title")]
+        : []),
+      ...(settings.smoothMarkdownPreload !== DEFAULT_UNIFIED_SETTINGS.smoothMarkdownPreload
+        ? [t("settings.general.streaming.preload.title")]
+        : []),
       ...(settings.enableProviderUpdateChecks !==
       DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks
         ? [t("settings.restore.label.providerUpdateChecks")]
@@ -875,6 +906,11 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.glassOpacity,
       settings.panelAnimationDurationMs,
       settings.responseStreamingMode,
+      settings.smoothOutputMode,
+      settings.smoothOutputLineMode,
+      settings.smoothMarkdownPreload,
+      settings.smoothTextFadeDurationMs,
+      settings.footnotesAutoCollapse,
       settings.persistComposerContextStrip,
       settings.enableProviderUpdateChecks,
       settings.continueThreadsAfterServerUpdate,
@@ -991,6 +1027,11 @@ export function useSettingsRestore(onRestored?: () => void) {
       autoResumeLimitedThreads: DEFAULT_UNIFIED_SETTINGS.autoResumeLimitedThreads,
       snoozeLimitedThreads: DEFAULT_UNIFIED_SETTINGS.snoozeLimitedThreads,
       responseStreamingMode: DEFAULT_UNIFIED_SETTINGS.responseStreamingMode,
+      smoothOutputMode: DEFAULT_UNIFIED_SETTINGS.smoothOutputMode,
+      smoothOutputLineMode: DEFAULT_UNIFIED_SETTINGS.smoothOutputLineMode,
+      smoothMarkdownPreload: DEFAULT_UNIFIED_SETTINGS.smoothMarkdownPreload,
+      smoothTextFadeDurationMs: DEFAULT_UNIFIED_SETTINGS.smoothTextFadeDurationMs,
+      footnotesAutoCollapse: DEFAULT_UNIFIED_SETTINGS.footnotesAutoCollapse,
       enableProviderUpdateChecks: DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks,
       continueThreadsAfterServerUpdate: DEFAULT_UNIFIED_SETTINGS.continueThreadsAfterServerUpdate,
       backgroundActivity: DEFAULT_UNIFIED_SETTINGS.backgroundActivity,
@@ -2627,9 +2668,15 @@ function GeneralSettingsRows() {
     "zh-CN": t("settings.language.simplifiedChinese"),
   };
   const mixedResponseStreamingMode = useScopedSettingsMixed(["responseStreamingMode"]);
+  const mixedSmoothOutputMode = useScopedSettingsMixed(["smoothOutputMode"]);
+  const mixedSmoothOutputLineMode = useScopedSettingsMixed(["smoothOutputLineMode"]);
+  const mixedSmoothTextFadeDuration = useScopedSettingsMixed(["smoothTextFadeDurationMs"]);
   const mixedConversationStructure = useScopedSettingsMixed(["conversationStructure"]);
   const mixedConversationStructureIdleLabel = useScopedSettingsMixed([
     "conversationStructureIdleLabel",
+  ]);
+  const mixedConversationStructureThinkingLabel = useScopedSettingsMixed([
+    "conversationStructureThinkingLabel",
   ]);
   const lastEnabledProjectGroupingMode = useRef<SidebarProjectGroupingMode>(
     readLastEnabledProjectGroupingMode(),
@@ -2977,74 +3024,6 @@ function GeneralSettingsRows() {
                 </SelectItem>
                 <SelectItem hideIndicator value="24-hour">
                   {t(TIMESTAMP_FORMAT_LABEL_KEYS["24-hour"])}
-                </SelectItem>
-              </SelectPopup>
-            </Select>
-          }
-        />
-        <SettingsRow
-          serverScoped
-          settingKeys={["responseStreamingMode"]}
-          {...searchableSetting("response-streaming", t)}
-          description={
-            mixedResponseStreamingMode
-              ? t("settings.general.streaming.mixed")
-              : settings.responseStreamingMode === "smooth" &&
-                  settings.conversationStructure !== "restructured"
-                ? `${t(RESPONSE_STREAMING_MODE_DESCRIPTION_KEYS[settings.responseStreamingMode])} ${t("settings.general.streaming.requiresRestructured")}`
-                : t(RESPONSE_STREAMING_MODE_DESCRIPTION_KEYS[settings.responseStreamingMode])
-          }
-          resetAction={
-            settings.responseStreamingMode !== DEFAULT_UNIFIED_SETTINGS.responseStreamingMode ? (
-              <SettingResetButton
-                label={t("settings.general.streaming.resetLabel")}
-                onClick={() =>
-                  updateSettings({
-                    responseStreamingMode: DEFAULT_UNIFIED_SETTINGS.responseStreamingMode,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Select
-              value={mixedResponseStreamingMode ? null : settings.responseStreamingMode}
-              onValueChange={(value) => {
-                if (
-                  value === "turn" ||
-                  value === "paragraph" ||
-                  value === "realtime" ||
-                  value === "smooth"
-                ) {
-                  updateSettings({ responseStreamingMode: value });
-                }
-              }}
-            >
-              <SelectTrigger
-                size="sm"
-                className="w-full sm:w-56"
-                aria-label={t("settings.general.streaming.ariaLabel")}
-              >
-                <SelectValue>
-                  {(value: ResponseStreamingMode | null) =>
-                    value === null
-                      ? t("settings.general.streaming.mixedValue")
-                      : t(RESPONSE_STREAMING_MODE_LABEL_KEYS[value])
-                  }
-                </SelectValue>
-              </SelectTrigger>
-              <SelectPopup align="end" alignItemWithTrigger={false}>
-                <SelectItem hideIndicator value="turn">
-                  {t(RESPONSE_STREAMING_MODE_LABEL_KEYS.turn)}
-                </SelectItem>
-                <SelectItem hideIndicator value="paragraph">
-                  {t(RESPONSE_STREAMING_MODE_LABEL_KEYS.paragraph)}
-                </SelectItem>
-                <SelectItem hideIndicator value="realtime">
-                  {t(RESPONSE_STREAMING_MODE_LABEL_KEYS.realtime)}
-                </SelectItem>
-                <SelectItem hideIndicator value="smooth">
-                  {t(RESPONSE_STREAMING_MODE_LABEL_KEYS.smooth)}
                 </SelectItem>
               </SelectPopup>
             </Select>
@@ -3875,6 +3854,311 @@ function GeneralSettingsRows() {
                 </SelectItem>
               </SelectPopup>
             </Select>
+          }
+        />
+        <SettingsRow
+          serverScoped
+          settingKeys={["responseStreamingMode"]}
+          {...searchableSetting("response-streaming", t)}
+          description={
+            mixedResponseStreamingMode
+              ? t("settings.general.streaming.mixed")
+              : settings.responseStreamingMode === "smooth" &&
+                  settings.conversationStructure !== "restructured"
+                ? `${t(RESPONSE_STREAMING_MODE_DESCRIPTION_KEYS[settings.responseStreamingMode])} ${t("settings.general.streaming.requiresRestructured")}`
+                : t(RESPONSE_STREAMING_MODE_DESCRIPTION_KEYS[settings.responseStreamingMode])
+          }
+          resetAction={
+            settings.responseStreamingMode !== DEFAULT_UNIFIED_SETTINGS.responseStreamingMode ? (
+              <SettingResetButton
+                label={t("settings.general.streaming.resetLabel")}
+                onClick={() =>
+                  updateSettings({
+                    responseStreamingMode: DEFAULT_UNIFIED_SETTINGS.responseStreamingMode,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Select
+              value={mixedResponseStreamingMode ? null : settings.responseStreamingMode}
+              onValueChange={(value) => {
+                if (
+                  value === "turn" ||
+                  value === "paragraph" ||
+                  value === "realtime" ||
+                  value === "smooth"
+                ) {
+                  updateSettings({ responseStreamingMode: value });
+                }
+              }}
+            >
+              <SelectTrigger
+                size="sm"
+                className="w-full sm:w-56"
+                aria-label={t("settings.general.streaming.ariaLabel")}
+              >
+                <SelectValue>
+                  {(value: ResponseStreamingMode | null) =>
+                    value === null
+                      ? t("settings.general.streaming.mixedValue")
+                      : t(RESPONSE_STREAMING_MODE_LABEL_KEYS[value])
+                  }
+                </SelectValue>
+              </SelectTrigger>
+              <SelectPopup align="end" alignItemWithTrigger={false}>
+                <SelectItem hideIndicator value="turn">
+                  {t(RESPONSE_STREAMING_MODE_LABEL_KEYS.turn)}
+                </SelectItem>
+                <SelectItem hideIndicator value="paragraph">
+                  {t(RESPONSE_STREAMING_MODE_LABEL_KEYS.paragraph)}
+                </SelectItem>
+                <SelectItem hideIndicator value="realtime">
+                  {t(RESPONSE_STREAMING_MODE_LABEL_KEYS.realtime)}
+                </SelectItem>
+                <SelectItem hideIndicator value="smooth">
+                  {t(RESPONSE_STREAMING_MODE_LABEL_KEYS.smooth)}
+                </SelectItem>
+              </SelectPopup>
+            </Select>
+          }
+        />
+        {!mixedResponseStreamingMode && settings.responseStreamingMode === "smooth" && (
+          <SettingsRow
+            id="smooth-output-mode"
+            serverScoped
+            settingKeys={["smoothOutputMode"]}
+            title={t("settings.general.streaming.unit.title")}
+            description={t("settings.general.streaming.unit.description")}
+            resetAction={
+              settings.smoothOutputMode !== DEFAULT_UNIFIED_SETTINGS.smoothOutputMode ? (
+                <SettingResetButton
+                  label={t("settings.general.streaming.unit.title")}
+                  onClick={() =>
+                    updateSettings({ smoothOutputMode: DEFAULT_UNIFIED_SETTINGS.smoothOutputMode })
+                  }
+                />
+              ) : null
+            }
+            control={
+              <Select
+                value={mixedSmoothOutputMode ? null : settings.smoothOutputMode}
+                onValueChange={(value) => {
+                  if (value === "character" || value === "token" || value === "auto")
+                    updateSettings({ smoothOutputMode: value });
+                }}
+              >
+                <SelectTrigger size="sm" aria-label={t("settings.general.streaming.unit.title")}>
+                  <SelectValue>
+                    {(value: string | null) =>
+                      value === null
+                        ? t("settings.general.streaming.mixedValue")
+                        : t(SMOOTH_OUTPUT_MODE_LABEL_KEYS[value]!)
+                    }
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectPopup align="end" alignItemWithTrigger={false}>
+                  <SelectItem hideIndicator value="character">
+                    {t("settings.general.streaming.unit.character")}
+                  </SelectItem>
+                  <SelectItem hideIndicator value="token">
+                    {t("settings.general.streaming.unit.token")}
+                  </SelectItem>
+                  <SelectItem hideIndicator value="auto">
+                    {t("settings.general.streaming.unit.auto")}
+                  </SelectItem>
+                </SelectPopup>
+              </Select>
+            }
+          />
+        )}
+        {!mixedResponseStreamingMode && settings.responseStreamingMode === "smooth" && (
+          <SettingsRow
+            id="smooth-output-lines"
+            serverScoped
+            settingKeys={["smoothOutputLineMode"]}
+            title={t("settings.general.streaming.lines.title")}
+            description={t("settings.general.streaming.lines.description")}
+            resetAction={
+              settings.smoothOutputLineMode !== DEFAULT_UNIFIED_SETTINGS.smoothOutputLineMode ? (
+                <SettingResetButton
+                  label={t("settings.general.streaming.lines.title")}
+                  onClick={() =>
+                    updateSettings({
+                      smoothOutputLineMode: DEFAULT_UNIFIED_SETTINGS.smoothOutputLineMode,
+                    })
+                  }
+                />
+              ) : null
+            }
+            control={
+              <Select
+                value={mixedSmoothOutputLineMode ? null : settings.smoothOutputLineMode}
+                onValueChange={(value) => {
+                  if (value === "adaptive" || value === "parallel")
+                    updateSettings({ smoothOutputLineMode: value });
+                }}
+              >
+                <SelectTrigger size="sm" aria-label={t("settings.general.streaming.lines.title")}>
+                  <SelectValue>
+                    {(value: string | null) =>
+                      value === null
+                        ? t("settings.general.streaming.mixedValue")
+                        : t(SMOOTH_OUTPUT_LINE_MODE_LABEL_KEYS[value]!)
+                    }
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectPopup align="end" alignItemWithTrigger={false}>
+                  <SelectItem hideIndicator value="adaptive">
+                    {t("settings.general.streaming.lines.adaptive")}
+                  </SelectItem>
+                  <SelectItem hideIndicator value="parallel">
+                    {t("settings.general.streaming.lines.parallel")}
+                  </SelectItem>
+                </SelectPopup>
+              </Select>
+            }
+          />
+        )}
+        {!mixedResponseStreamingMode && settings.responseStreamingMode === "smooth" && (
+          <SettingsRow
+            id="smooth-text-fade-duration"
+            serverScoped
+            settingKeys={["smoothTextFadeDurationMs"]}
+            title={t("settings.general.streaming.fade.title")}
+            description={t("settings.general.streaming.fade.description")}
+            resetAction={
+              settings.smoothTextFadeDurationMs !==
+              DEFAULT_UNIFIED_SETTINGS.smoothTextFadeDurationMs ? (
+                <SettingResetButton
+                  label={t("settings.general.streaming.fade.title")}
+                  onClick={() =>
+                    updateSettings({
+                      smoothTextFadeDurationMs: DEFAULT_UNIFIED_SETTINGS.smoothTextFadeDurationMs,
+                    })
+                  }
+                />
+              ) : null
+            }
+            control={
+              <NumberField
+                value={mixedSmoothTextFadeDuration ? null : settings.smoothTextFadeDurationMs}
+                min={0}
+                max={1000}
+                step={10}
+                size="sm"
+                className="w-32"
+                onValueChange={(value) => {
+                  if (value !== null && Number.isInteger(value))
+                    updateSettings({ smoothTextFadeDurationMs: value });
+                }}
+              >
+                <NumberFieldGroup>
+                  <NumberFieldInput aria-label={t("settings.general.streaming.fade.title")} />
+                </NumberFieldGroup>
+              </NumberField>
+            }
+          />
+        )}
+        {!mixedResponseStreamingMode && settings.responseStreamingMode === "smooth" && (
+          <SettingsRow
+            id="smooth-markdown-preload"
+            serverScoped
+            settingKeys={["smoothMarkdownPreload"]}
+            title={t("settings.general.streaming.preload.title")}
+            description={t("settings.general.streaming.preload.description")}
+            resetAction={
+              settings.smoothMarkdownPreload !== DEFAULT_UNIFIED_SETTINGS.smoothMarkdownPreload ? (
+                <SettingResetButton
+                  label={t("settings.general.streaming.preload.title")}
+                  onClick={() =>
+                    updateSettings({
+                      smoothMarkdownPreload: DEFAULT_UNIFIED_SETTINGS.smoothMarkdownPreload,
+                    })
+                  }
+                />
+              ) : null
+            }
+            control={
+              <ScopedSwitch
+                settingKeys={["smoothMarkdownPreload"]}
+                checked={settings.smoothMarkdownPreload}
+                onCheckedChange={(checked) =>
+                  updateSettings({ smoothMarkdownPreload: Boolean(checked) })
+                }
+                aria-label={t("settings.general.streaming.preload.title")}
+              />
+            }
+          />
+        )}
+        <SettingsRow
+          id="footnotes-auto-collapse"
+          serverScoped
+          settingKeys={["footnotesAutoCollapse"]}
+          title={t("settings.general.footnotesAutoCollapse.title")}
+          description={t("settings.general.footnotesAutoCollapse.description")}
+          resetAction={
+            settings.footnotesAutoCollapse !== DEFAULT_UNIFIED_SETTINGS.footnotesAutoCollapse ? (
+              <SettingResetButton
+                label={t("settings.general.footnotesAutoCollapse.title")}
+                onClick={() =>
+                  updateSettings({
+                    footnotesAutoCollapse: DEFAULT_UNIFIED_SETTINGS.footnotesAutoCollapse,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <ScopedSwitch
+              settingKeys={["footnotesAutoCollapse"]}
+              checked={settings.footnotesAutoCollapse}
+              onCheckedChange={(checked) =>
+                updateSettings({ footnotesAutoCollapse: Boolean(checked) })
+              }
+              aria-label={t("settings.general.footnotesAutoCollapse.title")}
+            />
+          }
+        />
+        <SettingsRow
+          serverScoped
+          settingKeys={["conversationStructureThinkingLabel"]}
+          title={t("settings.general.conversation.thinkingLabel.title")}
+          description={t("settings.general.conversation.thinkingLabel.description")}
+          resetAction={
+            settings.conversationStructureThinkingLabel !==
+            DEFAULT_UNIFIED_SETTINGS.conversationStructureThinkingLabel ? (
+              <SettingResetButton
+                label={t("settings.general.conversation.thinkingLabel.resetLabel")}
+                onClick={() =>
+                  updateSettings({
+                    conversationStructureThinkingLabel:
+                      DEFAULT_UNIFIED_SETTINGS.conversationStructureThinkingLabel,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <DraftInput
+              size="sm"
+              className="w-full sm:w-72"
+              value={
+                mixedConversationStructureThinkingLabel
+                  ? ""
+                  : settings.conversationStructureThinkingLabel
+              }
+              onCommit={(next) =>
+                updateSettings({
+                  conversationStructureThinkingLabel: next || DEFAULT_CONVERSATION_THINKING_LABEL,
+                })
+              }
+              placeholder={
+                mixedConversationStructureThinkingLabel ? t("settings.general.mixed") : undefined
+              }
+              aria-label={t("settings.general.conversation.thinkingLabel.ariaLabel")}
+            />
           }
         />
         <SettingsRow

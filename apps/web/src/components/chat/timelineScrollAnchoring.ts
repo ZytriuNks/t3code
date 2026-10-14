@@ -77,12 +77,16 @@ export function getRowBottom(state: TimelineListMeasurementState, index: number)
 /**
  * Whether the timeline's real rows extend past the viewport left above the
  * composer. The list's own content length includes the composer inset
- * spacer, so this measures from the last row instead. Unknown row geometry
- * or an unmeasured viewport counts as fitting.
+ * spacer, so this measures from the last row plus any live activity footer.
+ * Unknown row geometry or an unmeasured viewport counts as fitting.
  */
 export function timelineContentOverflowsViewport(
   state: TimelineListMeasurementState | undefined,
-  input: { readonly composerInset: number; readonly anchorOffset: number },
+  input: {
+    readonly composerInset: number;
+    readonly anchorOffset: number;
+    readonly footerHeight?: number;
+  },
 ): boolean {
   if (!state || !state.data || state.data.length === 0) {
     return false;
@@ -96,7 +100,7 @@ export function timelineContentOverflowsViewport(
     return false;
   }
   const visibleScrollLength = Math.max(0, scrollLength - input.composerInset - input.anchorOffset);
-  return lastBottom > visibleScrollLength;
+  return lastBottom + (input.footerHeight ?? 0) > visibleScrollLength;
 }
 
 export function getAnchoredTurnMetrics({
@@ -104,11 +108,13 @@ export function getAnchoredTurnMetrics({
   anchorIndex,
   composerOverlayHeight,
   anchorOffset,
+  footerHeight = 0,
 }: {
   readonly state: TimelineListMeasurementState;
   readonly anchorIndex: number;
   readonly composerOverlayHeight: number;
   readonly anchorOffset: number;
+  readonly footerHeight?: number;
 }): AnchoredTurnMetrics | null {
   if (state.data.length === 0) {
     return null;
@@ -116,10 +122,11 @@ export function getAnchoredTurnMetrics({
 
   const boundedAnchorIndex = Math.max(0, Math.min(anchorIndex, state.data.length - 1));
   const anchorTop = state.positionAtIndex(boundedAnchorIndex);
-  const lastBottom = getRowBottom(state, state.data.length - 1);
-  if (typeof anchorTop !== "number" || !Number.isFinite(anchorTop) || lastBottom === null) {
+  const rowBottom = getRowBottom(state, state.data.length - 1);
+  if (typeof anchorTop !== "number" || !Number.isFinite(anchorTop) || rowBottom === null) {
     return null;
   }
+  const lastBottom = rowBottom + footerHeight;
 
   const usableViewportHeight = Math.max(
     0,
@@ -136,7 +143,7 @@ export function getAnchoredTurnMetrics({
     turnHeight,
     usableViewportHeight,
     visibleUsableBottom,
-    overflowsUsableViewport: turnHeight > usableViewportHeight,
+    overflowsUsableViewport: turnHeight >= usableViewportHeight,
     targetScrollToRevealEnd,
     scrollDeltaToRevealEnd,
   };

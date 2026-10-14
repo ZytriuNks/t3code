@@ -137,11 +137,25 @@ describe("readSmoothTextEnd", () => {
 });
 
 describe("setSmoothTextFrameHeight", () => {
-  it("settles the viewport once per frame instead of once per height write", async () => {
+  it("releases the explicit height without reporting the preserved body as removed", () => {
+    root = document.createElement("div");
+    document.body.append(root);
+    root.style.height = "240px";
+    setRect(root, 0, 240);
+    const deltas: number[] = [];
+    root.addEventListener("t3-smooth-text-layout", (event) =>
+      deltas.push((event as CustomEvent<{ delta: number }>).detail.delta),
+    );
+    setSmoothTextFrameHeight(root, null);
+    expect(root.style.height).toBe("");
+    expect(deltas).toEqual([0, 0]);
+  });
+  it("settles the batch before the next paint instead of once per height write", async () => {
     const frame = document.createElement("div");
     document.body.append(frame);
     const seen: string[] = [];
-    const listener = () => seen.push("layout");
+    const listener = (event: Event) =>
+      seen.push((event as CustomEvent<{ phase?: string }>).detail.phase ?? "settle");
     document.addEventListener("t3-smooth-text-layout", listener);
 
     // Several writes land before the browser paints, as streaming does.
@@ -149,13 +163,13 @@ describe("setSmoothTextFrameHeight", () => {
     setSmoothTextFrameHeight(frame, 40);
     setSmoothTextFrameHeight(frame, 60);
     // The immediate notifications still run synchronously.
-    expect(seen.length).toBe(3);
+    expect(seen).toEqual(["before", "after", "before", "after", "before", "after"]);
 
-    await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
-    await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
+    await Promise.resolve();
 
-    // Exactly one settling pass per frame, not one per write.
-    expect(seen.length).toBe(4);
+    // Exactly one settling pass before another frame can be delivered.
+    expect(seen.at(-1)).toBe("settle");
+    expect(seen.length).toBe(7);
     document.removeEventListener("t3-smooth-text-layout", listener);
     frame.remove();
   });

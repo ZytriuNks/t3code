@@ -338,7 +338,13 @@ export function SubagentConversationPanel({
               activeTurnInProgress={isActiveRun(activityRun?.status)}
               activeTurnStartedAt={activityRun?.startedAt ?? null}
               conversationStructure={settings.conversationStructure}
+              smoothOutputMode={settings.smoothOutputMode}
+              smoothOutputLineMode={settings.smoothOutputLineMode}
+              smoothMarkdownPreload={settings.smoothMarkdownPreload}
+              smoothTextFadeDurationMs={settings.smoothTextFadeDurationMs}
+              footnotesAutoCollapse={settings.footnotesAutoCollapse}
               conversationStructureIdleLabel={settings.conversationStructureIdleLabel}
+              conversationStructureThinkingLabel={settings.conversationStructureThinkingLabel}
               listRef={listRef}
               timelineEntries={timelineProjection.entries}
               latestRun={activityRun}

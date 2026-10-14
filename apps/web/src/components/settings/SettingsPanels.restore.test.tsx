@@ -71,6 +71,15 @@ beforeEach(() => {
 });
 
 describe("restoring V2 settings", () => {
+  it("detects and restores a changed text fade duration", async () => {
+    state.settings = { ...DEFAULT_UNIFIED_SETTINGS, smoothTextFadeDurationMs: 420 };
+    hooks.beginRender();
+    const restore = useSettingsRestore();
+    expect(restore.changedSettingLabels).toEqual(["Text fade duration (ms)"]);
+    await restore.restoreDefaults();
+    expect(state.update.mock.calls[0]?.[0].smoothTextFadeDurationMs).toBe(180);
+  });
+
   it.each([
     ["persistComposerContextStrip", "Composer context"],
     ["autoResumeLimitedThreads", "Auto-resume limited threads"],
@@ -97,6 +106,37 @@ describe("restoring V2 settings", () => {
 
     expect(state.confirm).toHaveBeenCalledOnce();
     expect(state.update).not.toHaveBeenCalled();
+  });
+
+  it("detects and restores the line animation without changing the output unit", async () => {
+    state.settings = { ...DEFAULT_UNIFIED_SETTINGS, smoothOutputLineMode: "parallel" };
+    hooks.beginRender();
+    const restore = useSettingsRestore();
+    expect(restore.changedSettingLabels).toEqual(["Line animation"]);
+
+    await restore.restoreDefaults();
+
+    expect(state.confirm.mock.calls[0]?.[0]).toContain("Line animation");
+    expect(state.update.mock.calls[0]?.[0]).toMatchObject({
+      smoothOutputLineMode: "adaptive",
+      smoothOutputMode: DEFAULT_UNIFIED_SETTINGS.smoothOutputMode,
+    });
+  });
+  it("detects disabled Markdown preload and restores its enabled default", async () => {
+    state.settings = { ...DEFAULT_UNIFIED_SETTINGS, smoothMarkdownPreload: false };
+    hooks.beginRender();
+    const restore = useSettingsRestore();
+    expect(restore.changedSettingLabels).toEqual(["Preload Markdown formatting"]);
+    await restore.restoreDefaults();
+    expect(state.update.mock.calls[0]?.[0].smoothMarkdownPreload).toBe(true);
+  });
+  it("restores automatic footnote collapse to its default expanded behavior", async () => {
+    state.settings = { ...DEFAULT_UNIFIED_SETTINGS, footnotesAutoCollapse: true };
+    hooks.beginRender();
+    const restore = useSettingsRestore();
+    expect(restore.changedSettingLabels).toEqual(["Automatically collapse footnotes"]);
+    await restore.restoreDefaults();
+    expect(state.update.mock.calls[0]?.[0].footnotesAutoCollapse).toBe(false);
   });
 
   it("restores the no-project chats base directory", async () => {

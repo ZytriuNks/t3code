@@ -7,12 +7,18 @@ import {
   ProviderInstanceId,
   RunId,
   ThreadId,
+  TurnItemId,
+  type OrchestrationV2ProjectedTurnItem,
 } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
+import { deriveTimelineEntriesFromVisibleTurnItems } from "../../session-logic";
 import type { QueuedComposerMessage } from "../../queuedMessageStore";
 import {
   act,
   createRef,
+  useCallback,
   useLayoutEffect,
+  useState,
   type ReactNode,
   type Ref,
   type ReactElement,
@@ -21,15 +27,19 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { create, type ReactTestInstance, type ReactTestRenderer } from "react-test-renderer";
 import { shouldUseRestingComposerLayout } from "../composerFooterLayout";
 import { useComposerFocusState } from "./useComposerFocusState";
-import { rememberTimelinePosition } from "./timelineScrollAnchoring";
+import { readTimelinePosition, rememberTimelinePosition } from "./timelineScrollAnchoring";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import type { LegendListRef } from "@legendapp/list/react";
+import type { SmoothScrollHandle } from "../../hooks/useSmoothScroll";
+import type { SmoothTextLayoutDetail } from "../../lib/smoothTextLayout";
 
 const activityTestState = vi.hoisted(() => ({
   expanded: false,
   expandedRuns: false,
   subagentTooltips: false,
   listOnLoad: null as (() => void) | null,
+  onListLayout: null as (() => void) | null,
+  listDataHistory: [] as Array<{ data: Array<{ id: string }>; extraData: unknown }>,
 }));
 
 // Expose tooltip contents in the renderer without requiring a browser portal.
@@ -87,6 +97,8 @@ beforeEach(() => {
   activityTestState.expanded = false;
   activityTestState.expandedRuns = false;
   activityTestState.listOnLoad = null;
+  activityTestState.onListLayout = null;
+  activityTestState.listDataHistory = [];
 });
 
 vi.mock("@legendapp/list/react", async () => {
@@ -129,6 +141,8 @@ vi.mock("@legendapp/list/react", async () => {
     ref?: Ref<LegendListRef>;
   }) => {
     activityTestState.listOnLoad = props.onLoad ?? null;
+    activityTestState.listDataHistory.push({ data: props.data, extraData: props.extraData });
+    useLayoutEffect(() => activityTestState.onListLayout?.());
     if (props.anchoredEndSpace) {
       props.anchoredEndSpace.onSizeChanged?.(240);
       props.anchoredEndSpace.onReady?.({ anchorIndex: props.anchoredEndSpace.anchorIndex });
@@ -372,6 +386,633 @@ function buildSnapShotTimelineEntry(previewUrl?: string) {
 }
 
 describe("MessagesTimeline", () => {
+  it.each(["default", "restructured"] as const)(
+    "updates streaming text without rebuilding the %s virtual list or historical Markdown",
+    async (conversationStructure) => {
+      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+      const historyText = "**Historical answer** remains unchanged.";
+      const historyEntry = {
+        ...buildAssistantTimelineEntry(historyText),
+        id: "entry-history",
+        message: {
+          ...buildAssistantTimelineEntry(historyText).message,
+          id: MessageId.make("message-history"),
+        },
+      };
+      const streamEntry = (text: string) => ({
+        ...buildAssistantTimelineEntry(text),
+        id: "entry-stream",
+        message: {
+          ...buildAssistantTimelineEntry(text).message,
+          id: MessageId.make("message-stream"),
+          streaming: true,
+        },
+      });
+      const props = {
+        ...buildProps(),
+        routeThreadKey: `environment-local:stable-stream-${conversationStructure}`,
+        conversationStructure,
+        isWorking: true,
+      };
+      const latestData = () =>
+        activityTestState.listDataHistory.findLast(
+          ({ extraData }) =>
+            typeof extraData === "string" && extraData.startsWith(`${props.routeThreadKey}:`),
+        )!.data;
+      let renderer: ReactTestRenderer | undefined;
+      const historyMarkdown = () =>
+        renderer!.root.findByProps({ "data-timeline-row-id": "entry-history" }).findByType("p");
+      const renderedText = (root: ReactTestInstance) =>
+        root
+          .findAll(() => true)
+          .flatMap((node) => node.children.filter((child) => typeof child === "string"))
+          .join("");
+      try {
+        await act(() => {
+          renderer = create(
+            <MessagesTimeline
+              {...props}
+              timelineEntries={[historyEntry, streamEntry("First streamed words")]}
+            />,
+          );
+        });
+        const initialData = latestData();
+        const initialHistoryMarkdown = historyMarkdown();
+        const initialHistoryMarkdownProps = initialHistoryMarkdown.props;
+        expect(renderedText(initialHistoryMarkdown.findByType("strong"))).toContain(
+          "Historical answer",
+        );
+        for (const text of [
+          "First streamed words followed by **formatted text**.",
+          "First streamed words followed by **formatted text** and the final batch.",
+        ]) {
+          await act(() => {
+            renderer!.update(
+              <MessagesTimeline {...props} timelineEntries={[historyEntry, streamEntry(text)]} />,
+            );
+          });
+          const body = renderer!.root.findByProps({ "data-timeline-row-id": "entry-stream" });
+          expect(renderedText(body.findByType("strong"))).toContain("formatted text");
+          if (text.endsWith("final batch.")) {
+            expect(renderedText(body)).toContain("final batch.");
+          }
+          expect(latestData()).toBe(initialData);
+          expect(historyMarkdown()).toBe(initialHistoryMarkdown);
+          expect(historyMarkdown().props).toBe(initialHistoryMarkdownProps);
+        }
+      } finally {
+        await act(() => renderer?.unmount());
+      }
+    },
+  );
+
+  it("refreshes a stable tool group and rebuilds virtual data only when rows enter or leave", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const props = {
+      ...buildProps(),
+      routeThreadKey: "environment-local:stable-tool-group",
+      conversationStructure: "restructured" as const,
+    };
+    const toolEntry = (
+      id: string,
+      command: string,
+      detail: string,
+      toolLifecycleStatus: "completed" | "failed" = "completed",
+    ) => ({
+      id: `entry-${id}`,
+      kind: "work" as const,
+      createdAt: MESSAGE_CREATED_AT,
+      entry: {
+        id,
+        createdAt: MESSAGE_CREATED_AT,
+        label: "Ran command",
+        command,
+        detail,
+        tone: "tool" as const,
+        itemType: "command_execution" as const,
+        toolLifecycleStatus,
+      },
+    });
+    const first = toolEntry("tool-first", "node first.js", "Initial command output");
+    const second = toolEntry("tool-second", "node second.js", "Second command output");
+    const updatedFirst = toolEntry(
+      "tool-first",
+      "node first-updated.js",
+      "Updated command output",
+      "failed",
+    );
+    const third = toolEntry("tool-third", "node third.js", "Third command output");
+    const latestData = () =>
+      activityTestState.listDataHistory.findLast(
+        ({ extraData }) =>
+          typeof extraData === "string" && extraData.startsWith(`${props.routeThreadKey}:`),
+      )!.data;
+    const group = () => renderer!.root.findByProps({ "data-timeline-row-kind": "work-toggle" });
+    const tool = (command: string) =>
+      renderer!.root.find(
+        (node) =>
+          node.type === "div" &&
+          node.props.role === "button" &&
+          String(node.props["aria-label"]).includes(command),
+      );
+    let renderer: ReactTestRenderer | undefined;
+    try {
+      await act(() => {
+        renderer = create(<MessagesTimeline {...props} timelineEntries={[first, second]} />);
+      });
+      const collapsedData = latestData();
+      const groupId = group().props["data-timeline-row-id"];
+      await act(() => group().findByType("button").props.onClick());
+      const expandedData = latestData();
+      expect(expandedData).not.toBe(collapsedData);
+      await act(() => tool("node first.js").props.onClick());
+      expect(JSON.stringify(renderer!.toJSON())).toContain("Initial command output");
+      await act(() => {
+        renderer!.update(
+          <MessagesTimeline {...props} timelineEntries={[updatedFirst, second, third]} />,
+        );
+      });
+      expect(latestData()).toBe(expandedData);
+      expect(group().props["data-timeline-row-id"]).toBe(groupId);
+      expect(JSON.stringify(renderer!.toJSON())).toContain("Updated command output");
+      expect(renderer!.root.findAllByProps({ "aria-label": "Tool call failed" })).toHaveLength(1);
+      for (const command of ["node first-updated.js", "node second.js", "node third.js"]) {
+        expect(tool(command)).toBeDefined();
+      }
+      const answer = {
+        ...buildAssistantTimelineEntry("A new answer after the tools."),
+        id: "entry-new-answer",
+        message: {
+          ...buildAssistantTimelineEntry("A new answer after the tools.").message,
+          id: MessageId.make("message-new-answer"),
+        },
+      };
+      await act(() => {
+        renderer!.update(
+          <MessagesTimeline {...props} timelineEntries={[updatedFirst, second, third, answer]} />,
+        );
+      });
+      const withAnswerData = latestData();
+      expect(withAnswerData).not.toBe(expandedData);
+      expect(JSON.stringify(renderer!.toJSON())).toContain("A new answer after the tools.");
+      await act(() => {
+        renderer!.update(
+          <MessagesTimeline {...props} timelineEntries={[updatedFirst, second, third]} />,
+        );
+      });
+      expect(latestData()).not.toBe(withAnswerData);
+      expect(JSON.stringify(renderer!.toJSON())).not.toContain("A new answer after the tools.");
+      const beforeCollapse = latestData();
+      await act(() => group().findByType("button").props.onClick());
+      expect(latestData()).not.toBe(beforeCollapse);
+      expect(renderer!.root.findAllByProps({ "data-timeline-row-kind": "work" })).toHaveLength(0);
+      await act(() => group().findByType("button").props.onClick());
+      for (const command of ["node first-updated.js", "node second.js", "node third.js"]) {
+        expect(tool(command)).toBeDefined();
+      }
+    } finally {
+      await act(() => renderer?.unmount());
+    }
+  });
+
+  it.each(["live-end", "reading", "cancelled"] as const)(
+    "respects the %s destination when text grows during the restore reveal commit",
+    async (destination) => {
+      const frames = new Map<number, FrameRequestCallback>();
+      let nextFrame = 0;
+      vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+        frames.set(++nextFrame, callback);
+        return nextFrame;
+      });
+      vi.stubGlobal("cancelAnimationFrame", (frame: number) => frames.delete(frame));
+      vi.stubGlobal(
+        "ResizeObserver",
+        class {
+          observe() {}
+          disconnect() {}
+        },
+      );
+      const flushFrame = () =>
+        act(() => {
+          const callbacks = [...frames.values()];
+          frames.clear();
+          callbacks.forEach((callback) => callback(0));
+        });
+      const props = buildProps();
+      props.routeThreadKey = `environment-local:restore-growing-${destination}`;
+      rememberTimelinePosition(props.routeThreadKey, {
+        rowId: destination === "reading" ? "missing-row" : "entry-1",
+        offsetWithinRow: 0,
+        scrollOffset: 300,
+        atEnd: destination !== "reading",
+      });
+      const listeners = new Map<string, Set<(event?: Event) => void>>();
+      const viewport = {
+        scrollTop: 300,
+        scrollHeight: 1600,
+        clientHeight: 300,
+        setAttribute: vi.fn(),
+        removeAttribute: vi.fn(),
+        addEventListener: (type: string, listener: (event?: Event) => void) => {
+          const callbacks = listeners.get(type) ?? new Set();
+          callbacks.add(listener);
+          listeners.set(type, callbacks);
+        },
+        removeEventListener: (type: string, listener: (event?: Event) => void) =>
+          listeners.get(type)?.delete(listener),
+        ownerDocument: { addEventListener: () => {}, removeEventListener: () => {} },
+      };
+      let finishReadingScroll: (() => void) | undefined;
+      props.listRef.current = {
+        getScrollableNode: () => viewport,
+        scrollToEnd: async () => {
+          viewport.scrollTop = viewport.scrollHeight - viewport.clientHeight;
+        },
+        scrollToOffset: async ({ offset }: { offset: number }) => {
+          viewport.scrollTop = offset;
+          if (destination === "reading") {
+            await new Promise<void>((resolve) => (finishReadingScroll = resolve));
+          }
+        },
+      } as unknown as LegendListRef;
+      const smoothScrollRef = createRef<SmoothScrollHandle | null>();
+      let growDuringReveal = false;
+      activityTestState.onListLayout = () => {
+        if (!growDuringReveal) return;
+        growDuringReveal = false;
+        // A child row's layout runs before the parent's new follow controller.
+        viewport.scrollHeight += 24;
+      };
+      const timelineEntries = [buildAssistantTimelineEntry("Streaming response")];
+      function TimelineProbe() {
+        const [liveFollowEnabled, setLiveFollowEnabled] = useState(true);
+        const onManualNavigation = useCallback(() => setLiveFollowEnabled(false), []);
+        return (
+          <MessagesTimeline
+            {...props}
+            smoothStreaming
+            smoothScrollRef={smoothScrollRef}
+            liveFollowEnabled={liveFollowEnabled}
+            onManualNavigation={onManualNavigation}
+            timelineEntries={timelineEntries}
+          />
+        );
+      }
+      let renderer: ReactTestRenderer | null = null;
+      try {
+        await act(() => {
+          renderer = create(<TimelineProbe />);
+        });
+        await act(() => activityTestState.listOnLoad?.());
+        if (destination === "live-end") {
+          await flushFrame();
+          growDuringReveal = true;
+          await flushFrame();
+        } else if (destination === "cancelled") {
+          growDuringReveal = true;
+          await act(() => {
+            viewport.scrollTop -= 8;
+            for (const listener of listeners.get("wheel") ?? []) listener();
+          });
+          await flushFrame();
+        } else {
+          growDuringReveal = true;
+          await act(() => finishReadingScroll?.());
+        }
+        expect(
+          renderer!.root.findByProps({ "data-assistant-citation-viewport": "true" }).props.style
+            ?.visibility,
+        ).not.toBe("hidden");
+        const expectedTop =
+          destination === "live-end" ? 1324 : destination === "reading" ? 300 : 1292;
+        expect(viewport.scrollTop).toBe(expectedTop);
+        expect(smoothScrollRef.current?.isFollowing() ?? false).toBe(destination === "live-end");
+
+        viewport.scrollHeight += 24;
+        await act(() => {
+          for (const listener of listeners.get("t3-smooth-text-layout") ?? [])
+            listener(new CustomEvent("t3-smooth-text-layout", { detail: { delta: 24 } }));
+        });
+        expect(viewport.scrollTop).toBe(destination === "live-end" ? 1348 : expectedTop);
+        expect(smoothScrollRef.current?.isFollowing() ?? false).toBe(destination === "live-end");
+      } finally {
+        await act(() => renderer?.unmount());
+        activityTestState.onListLayout = null;
+      }
+    },
+  );
+
+  it("retains owned follow across a native clamp but cancels the next reader movement", async () => {
+    vi.stubGlobal("requestAnimationFrame", () => 1);
+    vi.stubGlobal("cancelAnimationFrame", () => {});
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        observe() {}
+        disconnect() {}
+      },
+    );
+    const listeners = new Map<string, Set<() => void>>();
+    const viewport = {
+      scrollTop: 1000,
+      scrollHeight: 1300,
+      clientHeight: 300,
+      setAttribute: vi.fn(),
+      removeAttribute: vi.fn(),
+      addEventListener(type: string, listener: () => void) {
+        const callbacks = listeners.get(type) ?? new Set();
+        callbacks.add(listener);
+        listeners.set(type, callbacks);
+      },
+      removeEventListener: (type: string, listener: () => void) =>
+        listeners.get(type)?.delete(listener),
+      ownerDocument: { addEventListener() {}, removeEventListener() {} },
+    };
+    const props = buildProps();
+    props.routeThreadKey = "environment-local:owned-native-clamp";
+    props.listRef.current = { getScrollableNode: () => viewport } as unknown as LegendListRef;
+    const smoothScrollRef = createRef<SmoothScrollHandle | null>();
+    const onManualNavigation = vi.fn(() => smoothScrollRef.current?.cancel());
+    let renderer: ReactTestRenderer | null = null;
+    try {
+      await act(() => {
+        renderer = create(
+          <MessagesTimeline
+            {...props}
+            smoothStreaming
+            smoothScrollRef={smoothScrollRef}
+            onManualNavigation={onManualNavigation}
+            timelineEntries={[buildAssistantTimelineEntry("Response")]}
+          />,
+        );
+      });
+      const finish = smoothScrollRef.current?.beginLayout();
+      expect(finish).toBeTypeOf("function");
+      await act(() => {
+        viewport.scrollTop--;
+        for (const listener of listeners.get("scroll") ?? []) listener();
+      });
+      expect(onManualNavigation).not.toHaveBeenCalled();
+      await act(() => {
+        finish?.();
+        for (const listener of listeners.get("scroll") ?? []) listener();
+      });
+      expect(viewport.scrollTop).toBe(1000);
+      expect(smoothScrollRef.current?.isFollowing()).toBe(true);
+      await act(() => {
+        viewport.scrollTop -= 0.25;
+        for (const listener of listeners.get("scroll") ?? []) listener();
+      });
+      expect(onManualNavigation).toHaveBeenCalledTimes(1);
+      expect(smoothScrollRef.current?.isFollowing()).toBe(false);
+      expect(viewport.scrollTop).toBe(999.75);
+    } finally {
+      await act(() => renderer?.unmount());
+    }
+  });
+
+  it("publishes an animated row size before following its new native edge", async () => {
+    vi.stubGlobal("requestAnimationFrame", () => 1);
+    vi.stubGlobal("cancelAnimationFrame", () => {});
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        observe() {}
+        disconnect() {}
+      },
+    );
+    const listeners = new Map<string, Set<(event: Event) => void>>();
+    const viewport = {
+      scrollTop: 1000,
+      scrollHeight: 1300,
+      clientHeight: 300,
+      setAttribute: vi.fn(),
+      removeAttribute: vi.fn(),
+      addEventListener(type: string, listener: (event: Event) => void) {
+        const callbacks = listeners.get(type) ?? new Set();
+        callbacks.add(listener);
+        listeners.set(type, callbacks);
+      },
+      removeEventListener: (type: string, listener: (event: Event) => void) =>
+        listeners.get(type)?.delete(listener),
+      ownerDocument: { addEventListener() {}, removeEventListener() {} },
+    };
+    const props = buildProps();
+    props.routeThreadKey = "environment-local:immediate-smooth-row-size";
+    const sizes = new Map<string, number>([["entry-1", 24]]);
+    const publishedSizes: number[] = [];
+    props.listRef.current = {
+      getScrollableNode: () => viewport,
+      getState: () => ({ sizes }),
+      setItemSize(id: string, size: { height: number }) {
+        const height = Math.round(size.height);
+        publishedSizes.push(height);
+        viewport.scrollHeight += height - (sizes.get(id) ?? 0);
+        sizes.set(id, height);
+      },
+    } as unknown as LegendListRef;
+    let renderer: ReactTestRenderer | null = null;
+    try {
+      await act(() => {
+        renderer = create(
+          <MessagesTimeline
+            {...props}
+            smoothStreaming
+            timelineEntries={[buildAssistantTimelineEntry("Response")]}
+          />,
+        );
+      });
+      const grow = async (height: number, synchronous = false) => {
+        const event = new CustomEvent<SmoothTextLayoutDetail>("t3-smooth-text-layout", {
+          detail: { delta: 0.1, synchronous },
+        });
+        Object.defineProperty(event, "target", {
+          value: {
+            closest: () => ({
+              dataset: { timelineRowId: "entry-1" },
+              getBoundingClientRect: () => ({ width: 600, height }),
+            }),
+          },
+        });
+        await act(() => {
+          for (const listener of listeners.get("t3-smooth-text-layout") ?? []) listener(event);
+        });
+        return event.detail.rowFraction;
+      };
+      await grow(48);
+      expect(sizes.get("entry-1")).toBe(48);
+      expect(viewport.scrollTop).toBe(1024);
+      expect(await grow(48.1)).toBeCloseTo(0.1);
+      expect(await grow(48.2)).toBeCloseTo(0.2);
+      expect(publishedSizes).toEqual([48]);
+      await grow(48.3, true);
+      expect(publishedSizes).toEqual([48, 48]);
+      await grow(48.6);
+      expect(viewport.scrollTop).toBe(1025);
+      expect(publishedSizes).toEqual([48, 48, 49]);
+    } finally {
+      await act(() => renderer?.unmount());
+      expect(listeners.get("t3-smooth-text-layout")?.size ?? 0).toBe(0);
+    }
+  });
+
+  it("keeps the saved live edge when leaving before restoration completes", async () => {
+    const props = buildProps();
+    props.routeThreadKey = "environment-local:leave-pending-end-restore";
+    rememberTimelinePosition(props.routeThreadKey, {
+      rowId: "entry-1",
+      offsetWithinRow: 0,
+      scrollOffset: 300,
+      atEnd: true,
+    });
+    const viewport = {
+      scrollTop: 100,
+      scrollHeight: 1600,
+      clientHeight: 300,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      ownerDocument: { addEventListener: () => {}, removeEventListener: () => {} },
+    };
+    let finishScroll!: () => void;
+    const scrollToEnd = vi.fn(() => new Promise<void>((resolve) => (finishScroll = resolve)));
+    const scrollToOffset = vi.fn(async () => {});
+    props.listRef.current = {
+      getScrollableNode: () => viewport,
+      scrollToEnd,
+      scrollToOffset,
+    } as unknown as LegendListRef;
+    let renderer: ReactTestRenderer | null = null;
+    const renderTimeline = () => (
+      <MessagesTimeline {...props} timelineEntries={[buildAssistantTimelineEntry("Response")]} />
+    );
+    try {
+      await act(() => {
+        renderer = create(renderTimeline());
+      });
+      await act(() => renderer!.unmount());
+      expect(readTimelinePosition(props.routeThreadKey)?.atEnd).toBe(true);
+      await act(() => finishScroll());
+      await act(() => {
+        renderer = create(renderTimeline());
+      });
+      expect(scrollToEnd).toHaveBeenCalledTimes(2);
+      expect(scrollToOffset).not.toHaveBeenCalled();
+    } finally {
+      await act(() => renderer?.unmount());
+      await act(() => finishScroll());
+    }
+  });
+
+  it.each([false, true])(
+    "captures the actual edge on leaving without a scroll event, scrollable=%s",
+    async (scrollable) => {
+      const props = buildProps();
+      props.routeThreadKey = `environment-local:leave-without-scroll-${scrollable}`;
+      rememberTimelinePosition(props.routeThreadKey, {
+        rowId: "old-row",
+        offsetWithinRow: 0,
+        scrollOffset: 0,
+        atEnd: false,
+      });
+      const viewport = {
+        scrollTop: 0,
+        scrollHeight: scrollable ? 600 : 300,
+        clientHeight: 300,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+        ownerDocument: { addEventListener: () => {}, removeEventListener: () => {} },
+      };
+      props.listRef.current = {
+        getScrollableNode: () => viewport,
+        scrollToOffset: async () => {},
+      } as unknown as LegendListRef;
+      let renderer: ReactTestRenderer | null = null;
+      try {
+        await act(() => {
+          renderer = create(
+            <MessagesTimeline
+              {...props}
+              timelineEntries={[buildAssistantTimelineEntry("Current response")]}
+            />,
+          );
+        });
+      } finally {
+        await act(() => renderer?.unmount());
+      }
+      expect(readTimelinePosition(props.routeThreadKey)?.atEnd).toBe(!scrollable);
+    },
+  );
+
+  it.each([0, 800])(
+    "restores a saved live edge using measured geometry, old bottom=%s",
+    async (oldBottom) => {
+      const frames = new Map<number, FrameRequestCallback>();
+      let nextFrame = 0;
+      vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+        frames.set(++nextFrame, callback);
+        return nextFrame;
+      });
+      vi.stubGlobal("cancelAnimationFrame", (frame: number) => frames.delete(frame));
+      const flushFrame = () =>
+        act(() => {
+          const callbacks = [...frames.values()];
+          frames.clear();
+          callbacks.forEach((callback) => callback(0));
+        });
+      const props = buildProps();
+      props.routeThreadKey = `environment-local:restore-live-edge-${oldBottom}`;
+      rememberTimelinePosition(props.routeThreadKey, {
+        rowId: "entry-1",
+        offsetWithinRow: 0,
+        scrollOffset: oldBottom,
+        atEnd: true,
+      });
+      const viewport = {
+        scrollTop: oldBottom,
+        scrollHeight: 1600,
+        clientHeight: 300,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+        ownerDocument: { addEventListener: () => {}, removeEventListener: () => {} },
+      };
+      const scrollToEnd = vi.fn(async () => {
+        viewport.scrollTop = 1100;
+      });
+      props.listRef.current = {
+        getScrollableNode: () => viewport,
+        scrollToEnd,
+      } as unknown as LegendListRef;
+      let renderer: ReactTestRenderer | null = null;
+      const viewportStyle = () =>
+        renderer!.root.findByProps({ "data-assistant-citation-viewport": "true" }).props.style;
+      try {
+        await act(() => {
+          renderer = create(
+            <MessagesTimeline
+              {...props}
+              timelineEntries={[buildAssistantTimelineEntry("New content while away")]}
+            />,
+          );
+        });
+        expect(scrollToEnd).toHaveBeenCalled();
+        expect(viewport.scrollTop).toBe(1300);
+        expect(viewportStyle()?.visibility).toBe("hidden");
+        await flushFrame();
+        expect(viewportStyle()?.visibility).toBe("hidden");
+        viewport.scrollHeight = 1800;
+        await act(() => activityTestState.listOnLoad?.());
+        await flushFrame();
+        expect(viewport.scrollTop).toBe(1500);
+        expect(viewportStyle()?.visibility).toBe("hidden");
+        await flushFrame();
+        expect(viewport.scrollTop).toBe(1500);
+        expect(viewportStyle()?.visibility).not.toBe("hidden");
+      } finally {
+        await act(() => renderer?.unmount());
+      }
+    },
+  );
+
   it("signals initial layout after a populated list loads", async () => {
     const onInitialLayout = vi.fn();
     let renderer: ReactTestRenderer | null = null;
@@ -390,6 +1031,88 @@ describe("MessagesTimeline", () => {
       await act(() => {
         activityTestState.listOnLoad?.();
       });
+      expect(onInitialLayout).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(() => renderer?.unmount());
+    }
+  });
+
+  it("reveals a measured reused list at the live edge without another onLoad", async () => {
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextFrame = 0;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frames.set(++nextFrame, callback);
+      return nextFrame;
+    });
+    vi.stubGlobal("cancelAnimationFrame", (frame: number) => frames.delete(frame));
+    const flushFrame = () =>
+      act(() => {
+        const callbacks = [...frames.values()];
+        frames.clear();
+        callbacks.forEach((callback) => callback(0));
+      });
+    const props = buildProps();
+    props.routeThreadKey = "environment-local:restore-reused-live-edge";
+    rememberTimelinePosition(props.routeThreadKey, {
+      rowId: "old-row",
+      offsetWithinRow: 0,
+      scrollOffset: 300,
+      atEnd: true,
+    });
+    const viewport = {
+      scrollTop: 300,
+      scrollHeight: 1600,
+      clientHeight: 300,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      ownerDocument: { addEventListener: () => {}, removeEventListener: () => {} },
+    };
+    let measured = false;
+    const scrollToEnd = vi.fn(async () => {
+      viewport.scrollTop = 1100;
+    });
+    props.listRef.current = {
+      getScrollableNode: () => viewport,
+      scrollToEnd,
+      getState: () => ({
+        indexByKey: () => 0,
+        elementAtIndex: () => (measured ? {} : undefined),
+        sizeAtIndex: () => (measured ? 1500 : undefined),
+      }),
+    } as unknown as LegendListRef;
+    const onInitialLayout = vi.fn();
+    let renderer: ReactTestRenderer | null = null;
+    const visibility = () =>
+      renderer!.root.findByProps({ "data-assistant-citation-viewport": "true" }).props.style
+        ?.visibility;
+    try {
+      await act(() => {
+        renderer = create(
+          <MessagesTimeline
+            {...props}
+            onInitialLayout={onInitialLayout}
+            timelineEntries={[buildAssistantTimelineEntry("Saved response")]}
+          />,
+        );
+      });
+      expect(visibility()).toBe("hidden");
+      measured = true;
+      await flushFrame();
+      expect(visibility()).toBe("hidden");
+      viewport.scrollHeight = 1800;
+      await act(() => {
+        renderer!.update(
+          <MessagesTimeline
+            {...props}
+            onInitialLayout={onInitialLayout}
+            timelineEntries={[buildAssistantTimelineEntry("More output while positioning")]}
+          />,
+        );
+      });
+      await flushFrame();
+      expect(viewport.scrollTop).toBe(1500);
+      expect(visibility()).not.toBe("hidden");
+      expect(scrollToEnd).toHaveBeenCalledTimes(1);
       expect(onInitialLayout).toHaveBeenCalledTimes(1);
     } finally {
       await act(() => renderer?.unmount());
@@ -1354,8 +2077,8 @@ describe("MessagesTimeline", () => {
 
     expect(markup).toContain('href="https://example.com"');
     expect(markup).toContain('src="https://example.com/image.png"');
-    expect(markup).not.toContain('title="link tip"');
-    expect(markup).not.toContain('title="image tip"');
+    expect(markup).not.toMatch(/\stitle="link tip"/);
+    expect(markup).not.toMatch(/\stitle="image tip"/);
   });
 
   it("renders unsafe user HTML as inert source text", async () => {
@@ -3323,7 +4046,20 @@ describe("restructured live activity layer", () => {
               startedAt: MESSAGE_CREATED_AT,
               completedAt: null,
             }}
-            timelineEntries={buildRunningToolEntries("inProgress")}
+            timelineEntries={[
+              ...buildRunningToolEntries("inProgress"),
+              {
+                ...buildAssistantTimelineEntry("More prose after the running tool. ".repeat(50)),
+                id: "later-prose",
+                message: {
+                  ...buildAssistantTimelineEntry("").message,
+                  id: MessageId.make("later-prose"),
+                  runId: RUN_ID,
+                  text: "More prose after the running tool. ".repeat(50),
+                  streaming: true,
+                },
+              },
+            ]}
           />,
         );
       });
@@ -3342,10 +4078,243 @@ describe("restructured live activity layer", () => {
 
       await act(() => renderer!.root.findByProps({ "aria-expanded": false }).props.onClick());
       expect(renderer!.root.findAllByProps({ "aria-expanded": true })).toHaveLength(1);
+      expect(layer.findAllByProps({ "data-tool-group-scroll": true })).toHaveLength(1);
+      expect(layer.findAllByProps({ "data-timeline-row-kind": "work" })).toHaveLength(1);
     } finally {
       await act(() => renderer?.unmount());
     }
   });
+
+  it("keeps every body tool accessible while the current operation expands in the live layer", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const statuses = ["stopped", "declined", "inProgress", "completed", "failed"] as const;
+    const entries = statuses.map((status) => ({
+      id: `audit-${status}`,
+      kind: "work" as const,
+      createdAt: MESSAGE_CREATED_AT,
+      entry: {
+        id: `audit-${status}`,
+        runId: RUN_ID,
+        createdAt: MESSAGE_CREATED_AT,
+        label: `audit-${status}`,
+        command: `audit-${status}`,
+        detail: `Output from audit-${status}`,
+        itemType: "command_execution" as const,
+        tone: "tool" as const,
+        toolLifecycleStatus: status,
+      },
+    }));
+    const running = buildRunningToolEntries("inProgress")[1]!;
+    const props = {
+      ...buildProps(),
+      conversationStructure: "restructured" as const,
+      isWorking: true,
+      runningRunId: RUN_ID,
+      latestRun: {
+        runId: RUN_ID,
+        status: "running" as const,
+        startedAt: MESSAGE_CREATED_AT,
+        completedAt: null,
+      },
+    };
+    let renderer: ReactTestRenderer | undefined;
+    try {
+      await act(() => {
+        renderer = create(<MessagesTimeline {...props} timelineEntries={[...entries, running]} />);
+      });
+      const body = renderer!.root.findByProps({ "data-timeline-row-kind": "work-toggle" });
+      await act(() => body.findByType("button").props.onClick());
+      for (const status of statuses) {
+        const tool = renderer!.root.findAll(
+          (node) =>
+            node.type === "div" &&
+            node.props.role === "button" &&
+            String(node.props["aria-label"]).includes(`audit-${status}`),
+        );
+        expect(tool).toHaveLength(1);
+        await act(() => tool[0]!.props.onClick());
+        expect(JSON.stringify(renderer!.toJSON())).toContain(`Output from audit-${status}`);
+      }
+      const layer = renderer!.root.findByProps({ "data-testid": "timeline-live-activity-layer" });
+      await act(() => layer.findByType("button").props.onClick());
+      expect(layer.findAllByProps({ "data-tool-group-scroll": true })).toHaveLength(1);
+      expect(
+        layer.findAll(
+          (node) =>
+            node.type === "div" &&
+            node.props.role === "button" &&
+            String(node.props["aria-label"]).includes("audit-"),
+        ),
+      ).toHaveLength(0);
+
+      // When the current operation settles its entry joins the existing body group.
+      const completed = buildRunningToolEntries("completed")[1]!;
+      await act(() =>
+        renderer!.update(
+          <MessagesTimeline
+            {...props}
+            timelineEntries={[
+              ...entries.map((entry) => ({
+                ...entry,
+                entry: {
+                  ...entry.entry,
+                  toolLifecycleStatus:
+                    entry.entry.toolLifecycleStatus === "inProgress"
+                      ? ("completed" as const)
+                      : entry.entry.toolLifecycleStatus,
+                },
+              })),
+              completed,
+            ]}
+          />,
+        ),
+      );
+      expect(
+        renderer!.root.findAllByProps({ "data-timeline-live-row-kind": "work-live" }),
+      ).toHaveLength(0);
+      expect(
+        renderer!.root.findAll(
+          (node) =>
+            node.type === "div" &&
+            node.props.role === "button" &&
+            String(node.props["aria-label"]).includes("pnpm"),
+        ),
+      ).toHaveLength(1);
+      for (const status of statuses) {
+        expect(
+          renderer!.root.findAll(
+            (node) =>
+              node.type === "div" &&
+              node.props.role === "button" &&
+              String(node.props["aria-label"]).includes(`audit-${status}`),
+          ),
+        ).toHaveLength(1);
+      }
+    } finally {
+      await act(() => renderer?.unmount());
+    }
+  });
+
+  it.each([
+    { types: ["dynamic_tool"], runId: RunId.make("run-1") },
+    { types: ["file_change"], runId: RunId.make("run-1") },
+    { types: ["dynamic_tool", "file_change", "file_search"], runId: null },
+    {
+      types: ["command_execution", "file_change", "dynamic_tool", "file_search"],
+      runId: RunId.make("run-1"),
+    },
+  ] as const)(
+    "opens every projected record in a $types group (run=$runId)",
+    async ({ types, runId }) => {
+      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+      const now = DateTime.makeUnsafe(MESSAGE_CREATED_AT);
+      const threadId = ThreadId.make("thread-record-audit");
+      const projectedItems: OrchestrationV2ProjectedTurnItem[] = types.map((type, ordinal) => {
+        const common = {
+          id: TurnItemId.make(`audit-${type}`),
+          threadId,
+          runId,
+          nodeId: null,
+          providerThreadId: null,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal,
+          status: "completed" as const,
+          title: null,
+          startedAt: now,
+          completedAt: now,
+          updatedAt: now,
+        };
+        const item: OrchestrationV2ProjectedTurnItem["item"] =
+          type === "file_change"
+            ? { ...common, type, fileName: "src/audit.ts", additions: 2, deletions: 1 }
+            : type === "dynamic_tool"
+              ? {
+                  ...common,
+                  type,
+                  toolName: "mcp__t3_code__preview_navigate",
+                  input: { url: "https://example.com/record-audit" },
+                }
+              : type === "file_search"
+                ? {
+                    ...common,
+                    type,
+                    pattern: "record-audit",
+                    results: [
+                      { fileName: "src/audit.ts", line: 7, preview: "record-audit search match" },
+                    ],
+                  }
+                : { ...common, type, input: "echo record-audit" };
+        return {
+          position: ordinal,
+          visibility: "local",
+          sourceThreadId: threadId,
+          sourceItemId: item.id,
+          item,
+        };
+      });
+      const timelineEntries = deriveTimelineEntriesFromVisibleTurnItems({
+        visibleTurnItems: projectedItems,
+        optimisticMessages: [],
+      });
+      const onOpenTurnDiff = vi.fn();
+      let renderer: ReactTestRenderer | undefined;
+      try {
+        await act(() => {
+          renderer = create(
+            <MessagesTimeline
+              {...buildProps()}
+              conversationStructure="restructured"
+              timelineEntries={timelineEntries}
+              onOpenTurnDiff={onOpenTurnDiff}
+            />,
+          );
+        });
+        if (runId) {
+          const turn = renderer!.root.findByProps({ "data-timeline-row-kind": "turn-fold" });
+          await act(() => turn.findByType("button").props.onClick());
+        }
+        const group = () => renderer!.root.findByProps({ "data-timeline-row-kind": "work-toggle" });
+        expect(renderer!.root.findAllByProps({ "data-tool-group-scroll": true })).toHaveLength(0);
+        await act(() => group().findByType("button").props.onClick());
+        const calls = () => renderer!.root.findByProps({ "data-tool-group-scroll": true });
+        for (const type of types) {
+          const row = calls().findAll(
+            (node) =>
+              node.type === "div" &&
+              node.props["data-v2-item-type"] === type &&
+              node.props.role === "button",
+          );
+          expect(row).toHaveLength(1);
+          await act(() => row[0]!.props.onClick());
+          const inspector = calls().findByProps({ "data-v2-item-inspector": type });
+          const content = inspector
+            .findAll((node) => typeof node.type === "string")
+            .flatMap((node) => node.children.filter((child) => typeof child === "string"))
+            .join(" ");
+          if (type === "dynamic_tool")
+            expect(content).toContain("https://example.com/record-audit");
+          if (type === "file_search") expect(content).toContain("record-audit search match");
+          if (type === "file_change") {
+            expect(content).toContain("src/audit.ts");
+            if (runId) {
+              await act(() => inspector.findByType("button").props.onClick());
+              expect(onOpenTurnDiff).toHaveBeenCalledWith(runId, "src/audit.ts");
+            }
+          }
+          if (type === "command_execution") expect(content).toContain("echo record-audit");
+        }
+        // Collapsing a batch must preserve the individual disclosures when reopened.
+        await act(() => group().findByType("button").props.onClick());
+        await act(() => group().findByType("button").props.onClick());
+        for (const type of types)
+          expect(calls().findAllByProps({ "data-v2-item-inspector": type })).toHaveLength(1);
+      } finally {
+        await act(() => renderer?.unmount());
+      }
+    },
+  );
 
   it("moves the thinking row into the live layer when nothing is running", () => {
     const thinkingMarkup = renderToStaticMarkup(
@@ -3454,6 +4423,40 @@ describe("restructured live activity layer", () => {
 
     expect(markup).toContain("Thinking");
     expect(markup).not.toContain("Planning next move");
+  });
+
+  it("uses the configured Thinking text without changing the idle gap text", () => {
+    const thinkingMarkup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        conversationStructure="restructured"
+        conversationStructureThinkingLabel="Working it out"
+        isWorking
+        timelineEntries={[buildUserTimelineEntry("Hello")]}
+      />,
+    );
+    expect(thinkingMarkup).toContain("Working it out");
+    expect(thinkingMarkup).not.toContain(">Thinking<");
+
+    const idleMarkup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        conversationStructure="restructured"
+        conversationStructureThinkingLabel="Working it out"
+        conversationStructureIdleLabel="Deciding what to do next"
+        isWorking
+        runningRunId={RUN_ID}
+        latestRun={{
+          runId: RUN_ID,
+          status: "running",
+          startedAt: MESSAGE_CREATED_AT,
+          completedAt: null,
+        }}
+        timelineEntries={buildRunningToolEntries("completed")}
+      />,
+    );
+    expect(idleMarkup).toContain("Deciding what to do next");
+    expect(idleMarkup).not.toContain("Working it out");
   });
 
   it("leaves the list data and extraData consistent with the filtered rows", () => {
@@ -3589,6 +4592,171 @@ describe("restructured live activity layer", () => {
     );
   }
 
+  it.each(["default", "restructured"] as const)(
+    "reuses %s minimap strips while hovered previews stay current and new turns remain navigable",
+    async (conversationStructure) => {
+      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+      const scrollToIndex = vi.fn(async () => {});
+      const props = {
+        ...buildProps(),
+        routeThreadKey: `environment-local:stable-minimap-${conversationStructure}`,
+        conversationStructure,
+        isWorking: true,
+        runningRunId: RUN_ID,
+        latestRun: {
+          runId: RUN_ID,
+          status: "running" as const,
+          startedAt: MESSAGE_CREATED_AT,
+          completedAt: null,
+        },
+      };
+      props.listRef.current = {
+        getState: () => null,
+        getScrollableNode: () => null,
+        scrollToIndex,
+        scrollToOffset: async () => {},
+        scrollToEnd: async () => {},
+      } as unknown as LegendListRef;
+      const initialEntries = buildMinimapFixtureEntries();
+      const answer = (index: number, text: string) => ({
+        ...buildAssistantTimelineEntry(text),
+        id: `entry-assistant-${index}`,
+        message: {
+          ...buildAssistantTimelineEntry(text).message,
+          id: MessageId.make(`message-assistant-${index}`),
+          runId: RUN_ID,
+          streaming: true,
+        },
+      });
+      const strips = () =>
+        renderer!.root.findAll(
+          (node) => node.type === "span" && node.props["data-minimap-strip"] === true,
+        );
+      const previewText = () =>
+        renderer!.root
+          .findByProps({ "data-minimap-preview": true })
+          .findAll(() => true)
+          .flatMap((node) => node.children.filter((child) => typeof child === "string"))
+          .join("");
+      const latestData = () =>
+        activityTestState.listDataHistory.findLast(
+          ({ extraData }) =>
+            typeof extraData === "string" && extraData.startsWith(`${props.routeThreadKey}:`),
+        )!.data;
+      let renderer: ReactTestRenderer | undefined;
+      try {
+        await act(() => {
+          renderer = create(
+            <MessagesTimeline
+              {...props}
+              timelineEntries={[...initialEntries, answer(4, "Initial answer for the last turn.")]}
+            />,
+          );
+        });
+        await act(() =>
+          findMinimapJumpButton(renderer!).props.onMouseMove({
+            clientY: 399,
+            currentTarget: { getBoundingClientRect: () => ({ top: 0, height: 400 }) },
+          }),
+        );
+        expect(previewText()).toContain("Ask 4.");
+        expect(previewText()).toContain("Initial answer for the last turn.");
+        const initialStrips = strips();
+        const initialStripProps = initialStrips.map((strip) => strip.props);
+        expect(initialStrips).toHaveLength(4);
+        for (const text of [
+          "The last answer now has its first batch.",
+          "The last answer now has its first batch and a second batch.",
+          "The last answer now has its first batch and a second batch followed by the final batch.",
+        ]) {
+          await act(() => {
+            renderer!.update(
+              <MessagesTimeline
+                {...props}
+                timelineEntries={[...initialEntries, answer(4, text)]}
+              />,
+            );
+          });
+          expect(previewText()).toContain(text);
+          for (const [index, strip] of strips().entries()) {
+            expect(strip).toBe(initialStrips[index]);
+            expect(strip.props).toBe(initialStripProps[index]);
+          }
+        }
+        const updatedEntries = initialEntries.map((entry) =>
+          entry.id === "entry-user-4" && entry.kind === "message"
+            ? { ...entry, message: { ...entry.message, text: "Updated question for turn four." } }
+            : entry,
+        );
+        await act(() => {
+          renderer!.update(
+            <MessagesTimeline
+              {...props}
+              timelineEntries={[
+                ...updatedEntries,
+                answer(4, "Current answer to the updated question."),
+              ]}
+            />,
+          );
+        });
+        expect(previewText()).toContain("Updated question for turn four.");
+        expect(previewText()).toContain("Current answer to the updated question.");
+        expect(findMinimapJumpButton(renderer!).props["aria-label"]).toBe(
+          "Jump to message: Updated question for turn four.",
+        );
+        for (const [index, strip] of strips().entries()) {
+          expect(strip).toBe(initialStrips[index]);
+          expect(strip.props).toBe(initialStripProps[index]);
+        }
+        const nextUser = {
+          ...buildUserTimelineEntry("Question for the new fifth turn."),
+          id: "entry-user-5",
+          message: {
+            ...buildUserTimelineEntry("Question for the new fifth turn.").message,
+            id: MessageId.make("message-user-5"),
+          },
+        };
+        await act(() => {
+          renderer!.update(
+            <MessagesTimeline
+              {...props}
+              timelineEntries={[
+                ...updatedEntries,
+                answer(4, "Current answer to the updated question."),
+                nextUser,
+                answer(5, "Answer for the new fifth turn."),
+              ]}
+            />,
+          );
+        });
+        expect(strips()).toHaveLength(5);
+        await act(() =>
+          findMinimapJumpButton(renderer!).props.onKeyDown({
+            key: "End",
+            preventDefault: () => {},
+          }),
+        );
+        expect(previewText()).toContain("Question for the new fifth turn.");
+        expect(previewText()).toContain("Answer for the new fifth turn.");
+        await act(() =>
+          findMinimapJumpButton(renderer!).props.onKeyDown({
+            key: "Enter",
+            preventDefault: () => {},
+          }),
+        );
+        const index = latestData().findIndex((row) => row.id === "entry-user-5");
+        expect(index).toBeGreaterThan(0);
+        expect(scrollToIndex).toHaveBeenCalledExactlyOnceWith({
+          index,
+          animated: true,
+          viewOffset: 24,
+        });
+      } finally {
+        await act(() => renderer?.unmount());
+      }
+    },
+  );
+
   it("scrolls the list to the row a minimap item names once the live label left", async () => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     const scrollToIndexRequests: Array<{ index: number; animated: boolean; viewOffset: number }> =
@@ -3682,7 +4850,7 @@ describe("restructured live activity layer", () => {
     /** The footer's own block: the label and the reservations below it. */
     function findFooterBlock(liveLabel: ReactTestInstance) {
       const footer = liveLabel.parent;
-      expect(footer?.props["aria-hidden"]).toBe(false);
+      expect(footer?.props["aria-hidden"]).not.toBe(true);
       return footer!;
     }
 
@@ -3747,7 +4915,7 @@ describe("restructured live activity layer", () => {
       );
     });
 
-    it("leaves the footer markup untouched while no live label is rendered", () => {
+    it("keeps the fallback footnote host accessible and the composer reservation when no live label is rendered", () => {
       const markup = renderToStaticMarkup(
         <MessagesTimeline
           {...buildProps()}
@@ -3756,10 +4924,11 @@ describe("restructured live activity layer", () => {
         />,
       );
 
-      // Byte-for-byte the pre-restructuring footer: the composer gap block and
-      // the responsive gap, with no extra node for an absent label.
+      // The fallback host can contain footnotes while the Thinking host unmounts.
+      expect(markup).toContain('data-stream-footnote-host=""');
+      expect(markup).not.toContain('<div aria-hidden="true"><div class="mx-auto');
       expect(markup).toContain(
-        '<div aria-hidden="true"><div style="height:96px"></div><div class="h-3 sm:h-4"></div></div>',
+        '<div style="height:96px"></div><div class="h-3 sm:h-4"></div></div>',
       );
       expect(markup).not.toContain('data-testid="timeline-live-activity-layer"');
     });

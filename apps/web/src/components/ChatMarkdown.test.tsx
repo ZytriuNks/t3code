@@ -1,11 +1,14 @@
 import { EnvironmentId } from "@t3tools/contracts";
 import { act, type ComponentProps, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { create, type ReactTestRenderer } from "react-test-renderer";
+import { create, type ReactTestInstance, type ReactTestRenderer } from "react-test-renderer";
 import { describe, expect, it, vi } from "vite-plus/test";
+import type { Root } from "mdast";
+import type { Plugin } from "unified";
 
 import { getSyntaxHighlighterPromise } from "../lib/syntaxHighlighting";
 import * as syntaxHighlighting from "../lib/syntaxHighlighting";
+import * as skillInlineText from "./chat/SkillInlineText";
 import { GitHubIcon } from "./Icons";
 import { Button } from "./ui/button";
 import { setMarkdownTaskChecked } from "./files/filePreviewMode";
@@ -73,6 +76,382 @@ function codeButton(renderer: ReactTestRenderer, label: string) {
   if (!button) throw new Error(`Missing code button: ${label}`);
   return button.props as ComponentProps<typeof Button>;
 }
+
+describe("streamed Markdown media", () => {
+  it("keeps remote favicon requests out of the entire smooth playback", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    let renderer: ReactTestRenderer | undefined;
+    const source = "See [reference][ref].\n\n[ref]: https://example.com\n";
+    const view = (text: string, streaming = true) => (
+      <ChatMarkdown cwd={undefined} text={text} smoothStreaming isStreaming={streaming} />
+    );
+    try {
+      await act(() => {
+        renderer = create(view(source));
+      });
+      const label = renderer!.root.findByType("a");
+      expect(label.props.href).toBe("https://example.com");
+      expect(renderer!.root.findAllByType("img")).toHaveLength(0);
+      await act(() => renderer!.update(view(source + "\nFollowing text")));
+      expect(renderer!.root.findAllByType("img")).toHaveLength(0);
+      await act(() => renderer!.update(view(source + "\nFollowing text", false)));
+      expect(renderer!.root.findAllByType("img")).toHaveLength(1);
+      expect(renderer!.root.findByType("a")).toBe(label);
+    } finally {
+      await act(() => renderer?.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it.each(["- [x]", "- [ ]\n  - [x]", "- [x]\n\n**unfinished"])(
+    "keeps bodyless checkbox controls at stream completion: %s",
+    async (text) => {
+      let renderer: ReactTestRenderer | undefined;
+      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+      const message = (streaming: boolean) => (
+        <ChatMarkdown
+          cwd={undefined}
+          text={text}
+          smoothStreaming
+          isStreaming={streaming}
+          smoothComplete={!streaming}
+        />
+      );
+      try {
+        await act(() => {
+          renderer = create(message(true));
+        });
+        const checks = renderer!.root.findAllByType("input");
+        expect(checks.length).toBeGreaterThan(0);
+        await act(() => renderer!.update(message(false)));
+        expect(renderer!.root.findAllByType("input")).toEqual(checks);
+        expect(JSON.stringify(renderer!.toJSON())).not.toMatch(/\[[ xX]\]/u);
+      } finally {
+        await act(() => renderer?.unmount());
+        vi.unstubAllGlobals();
+      }
+    },
+  );
+  it("preserves footnote ownership while authored details open, nest and close", async () => {
+    let renderer: ReactTestRenderer | undefined;
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const prefix = "Reference[^one].\n\n[^one]: Existing footnote.\n\n";
+    const message = (suffix: string) => (
+      <ChatMarkdown cwd={undefined} text={prefix + suffix} smoothStreaming isStreaming />
+    );
+    try {
+      await act(() => {
+        renderer = create(message(""));
+      });
+      const footnote = renderer!.root.findByType("section");
+      const item = footnote.findByType("li");
+      for (const suffix of [
+        "<details open>\n<summary>More</summary>\n\nGrowing paragraph",
+        "<details open>\n<summary>More</summary>\n\nGrowing paragraph\n\n<details>\n<summary>Nested</summary>\n\nNested text",
+        "<details open>\n<summary>More</summary>\n\nGrowing paragraph\n\n</details>\n\nTail",
+        "<section>\n\nAnother section\n\n</section>\n\nTail",
+        "<section>\n\nAnother section\n\n</section>\n\n<section>\n\nA second section\n\n</section>\n\nTail",
+      ]) {
+        await act(() => renderer!.update(message(suffix)));
+        const current = renderer!.root
+          .findAllByType("section")
+          .find((section) => section.props["data-footnotes"] !== undefined);
+        expect(current).toBe(footnote);
+        expect(current!.findByType("li")).toBe(item);
+      }
+    } finally {
+      await act(() => renderer?.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
+  it("preserves decoded media and footnotes while appended paragraphs cross history groups", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+    let renderer: ReactTestRenderer | undefined;
+    const prefix =
+      "![Picture](https://example.com/image.png)\n\nReference[^one].\n\n[^one]: Existing footnote.\n\n";
+    const view = (count: number) => (
+      <ChatMarkdown
+        cwd={undefined}
+        smoothStreaming
+        isStreaming
+        text={prefix + Array.from({ length: count }, (_, i) => `Paragraph ${i}.`).join("\n\n")}
+      />
+    );
+    try {
+      await act(() => {
+        renderer = create(view(12));
+      });
+      const image = renderer!.root.findByType("img");
+      await act(() => image.props.onLoad());
+      const surface = renderer!.root.findByProps({ "data-smooth-media": "" });
+      const footnote = renderer!.root.findByType("section");
+      const item = footnote.findByType("li");
+      for (const count of [16, 31, 32, 48, 65, 97]) {
+        await act(() => renderer!.update(view(count)));
+        await act(() => vi.advanceTimersByTime(100));
+        expect(renderer!.root.findByType("img")).toBe(image);
+        expect(renderer!.root.findByProps({ "data-smooth-media": "" })).toBe(surface);
+        expect(renderer!.root.findAllByProps({ "data-markdown-media-pending": "" })).toHaveLength(
+          0,
+        );
+        expect(renderer!.root.findByType("section")).toBe(footnote);
+        expect(footnote.findByType("li")).toBe(item);
+        expect(JSON.stringify(renderer!.toJSON())).toContain(`Paragraph ${count - 1}.`);
+      }
+    } finally {
+      await act(() => renderer?.unmount());
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it.each(["list", "table"])(
+    "keeps historical %s rows mounted across groups and updates late references",
+    async (kind) => {
+      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+      let renderer: ReactTestRenderer | undefined;
+      const view = (count: number, resolved = false) => {
+        const rows = Array.from({ length: count }, (_, i) =>
+          kind === "list" ? `- Row ${i} [target][ref]` : `| Row ${i} | [target][ref] |`,
+        ).join("\n");
+        return (
+          <ChatMarkdown
+            cwd={undefined}
+            smoothStreaming
+            text={
+              (kind === "table" ? "| Name | Link |\n| --- | --- |\n" : "") +
+              rows +
+              (resolved ? "\n\n[ref]: https://example.com/resolved" : "")
+            }
+          />
+        );
+      };
+      try {
+        await act(() => {
+          renderer = create(view(16));
+        });
+        const tag = kind === "list" ? "li" : "tr";
+        const rows = renderer!.root.findAllByType(tag);
+        for (const count of [32, 48, 65]) {
+          await act(() => renderer!.update(view(count)));
+          const current = renderer!.root.findAllByType(tag);
+          rows.forEach((row, index) => expect(current[index]).toBe(row));
+        }
+        await act(() => renderer!.update(view(65, true)));
+        expect(
+          renderer!.root
+            .findAllByType("a")
+            .filter((link) => link.props.href === "https://example.com/resolved"),
+        ).toHaveLength(65);
+        rows.forEach((row, index) => expect(renderer!.root.findAllByType(tag)[index]).toBe(row));
+      } finally {
+        await act(() => renderer?.unmount());
+        vi.unstubAllGlobals();
+      }
+    },
+  );
+
+  it("retains an existing footnote node when a new reference changes footnote order", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    let renderer: ReactTestRenderer | undefined;
+    const definitions = "\n\n[^one]: Existing footnote.\n\n[^two]: New footnote.";
+    const message = (references: string) => (
+      <ChatMarkdown cwd={undefined} text={references + definitions} smoothStreaming isStreaming />
+    );
+    try {
+      await act(() => {
+        renderer = create(message("Reference[^one]."));
+      });
+      const original = renderer!.root
+        .findAllByType("li")
+        .find((item) => String(item.props.id).endsWith("fn-one"));
+      expect(original).toBeDefined();
+      await act(() => renderer!.update(message("New[^two] before existing[^one].")));
+      expect(
+        renderer!.root.findAllByType("li").find((item) => String(item.props.id).endsWith("fn-one")),
+      ).toBe(original);
+    } finally {
+      await act(() => renderer?.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
+  it("preloads a linked image and preserves its loader while the outer URL and following output arrive", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+    let renderer: ReactTestRenderer | undefined;
+    const source = "[![Picture](https://example.com/image.png)](https://example.com/full.png)";
+    const imageEnd = source.indexOf(")") + 1;
+    const view = (text: string, isStreaming = true) => (
+      <ChatMarkdown text={text} cwd={undefined} isStreaming={isStreaming} smoothStreaming />
+    );
+    try {
+      await act(async () => {
+        renderer = create(view(""));
+      });
+      for (let end = 1; end < imageEnd; end++) {
+        await act(async () => renderer!.update(view(source.slice(0, end))));
+        expect(renderer!.root.findAllByType("img")).toHaveLength(0);
+      }
+      await act(async () => renderer!.update(view(source.slice(0, imageEnd))));
+      await act(async () => vi.advanceTimersByTime(32));
+      const image = renderer!.root.findByType("img");
+      await act(async () => image.props.onLoad());
+      const surface = renderer!.root.findByProps({ "data-smooth-media": "" });
+      for (let end = imageEnd + 1; end <= source.length; end++) {
+        await act(async () => renderer!.update(view(source.slice(0, end))));
+        await act(async () => vi.advanceTimersByTime(32));
+        expect(renderer!.root.findByType("img")).toBe(image);
+        expect(renderer!.root.findByProps({ "data-smooth-media": "" })).toBe(surface);
+      }
+      for (const suffix of ["\n", "\n\n正文", "\n\n正文\n\n[^one]: 注释"]) {
+        await act(async () => renderer!.update(view(source + suffix)));
+        await act(async () => vi.advanceTimersByTime(32));
+        expect(renderer!.root.findByType("img")).toBe(image);
+        expect(renderer!.root.findByProps({ "data-smooth-media": "" })).toBe(surface);
+        expect(renderer!.root.findAllByProps({ "data-markdown-media-pending": "" })).toHaveLength(
+          0,
+        );
+      }
+      await act(async () => renderer!.update(view(source + "\n\n正文", false)));
+      expect(renderer!.root.findByType("img")).toBe(image);
+    } finally {
+      await act(async () => renderer?.unmount());
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps a standalone image's admitted surface and loader mounted when decoding finishes", async () => {
+    let renderer: ReactTestRenderer | undefined;
+    try {
+      await act(async () => {
+        renderer = create(
+          <ChatMarkdown text="![Fixture](https://example.com/fixture.png)" cwd={undefined} />,
+        );
+      });
+      const image = renderer!.root.findByType("img");
+      const surface = renderer!.root.findByProps({ "data-markdown-media-pending": "" });
+      await act(async () => image.props.onLoad());
+      expect(renderer!.root.findByType("img")).toBe(image);
+      expect(
+        renderer!.root.findAllByProps({
+          "data-markdown-copy": "![Fixture](https://example.com/fixture.png)",
+        }),
+      ).toContain(surface);
+      expect(renderer!.root.findAllByProps({ "data-markdown-media-pending": "" })).toHaveLength(0);
+    } finally {
+      await act(async () => renderer?.unmount());
+    }
+  });
+
+  it.each(["", "<div>Header</div>\n\n", "<details open>\n<summary>More</summary>\n\n"])(
+    "shows the standalone image slot through HTML parsing: %s",
+    async (prefix) => {
+      let renderer: ReactTestRenderer | undefined;
+      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+      const view = (text: string) => (
+        <ChatMarkdown text={prefix + text} cwd={undefined} smoothStreaming isStreaming />
+      );
+      try {
+        await act(async () => {
+          renderer = create(view("![Fixture](https://example.com/part"));
+        });
+        expect(renderer!.root.findAllByProps({ "aria-label": "Loading image" })).toHaveLength(1);
+        expect(renderer!.root.findAllByType("img")).toHaveLength(0);
+        const surface = renderer!.root.findByProps({ "data-smooth-media": "" });
+        await act(async () =>
+          renderer!.update(view("![Fixture](https://example.com/complete.png)")),
+        );
+        const image = renderer!.root.findByType("img");
+        expect(image.props.src).toBe("https://example.com/complete.png");
+        expect(renderer!.root.findByProps({ "data-smooth-media": "" })).toBe(surface);
+        await act(async () => image.props.onLoad());
+        expect(renderer!.root.findAllByProps({ "aria-label": "Loading image" })).toHaveLength(0);
+        expect(renderer!.root.findByProps({ "data-smooth-media": "" })).toBe(surface);
+        await act(async () =>
+          renderer!.update(view("![Fixture](https://example.com/replacement.png)")),
+        );
+        expect(renderer!.root.findByProps({ "data-smooth-media": "" })).toBe(surface);
+        expect(renderer!.root.findAllByProps({ "aria-label": "Loading image" })).toHaveLength(1);
+        await act(async () => renderer!.root.findByType("img").props.onLoad());
+        expect(renderer!.root.findAllByProps({ "aria-label": "Loading image" })).toHaveLength(0);
+      } finally {
+        await act(async () => renderer?.unmount());
+        vi.unstubAllGlobals();
+      }
+    },
+  );
+
+  it("keeps a reference image loading until its definition finishes, then reports only a real load error", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+    let renderer: ReactTestRenderer | undefined;
+    const view = (text: string) => (
+      <ChatMarkdown text={text} cwd={undefined} smoothStreaming isStreaming />
+    );
+    try {
+      await act(async () => {
+        renderer = create(view("!["));
+      });
+      const surface = renderer!.root.findByProps({ "data-smooth-media": "" });
+      const before = "![Fixture][photo]\n\nFollowing text.\n\n";
+      const definition = "[photo]: https://example.com/fixture.png";
+      for (const source of [
+        "![Fixture",
+        "![Fixture]",
+        "![Fixture][pho",
+        before,
+        before + definition,
+      ]) {
+        await act(async () => renderer!.update(view(source)));
+        await act(async () => vi.advanceTimersByTime(100));
+        expect(renderer!.root.findByProps({ "data-smooth-media": "" })).toBe(surface);
+        expect(renderer!.root.findAllByType("img")).toHaveLength(0);
+        expect(renderer!.root.findAllByProps({ role: "alert" })).toHaveLength(0);
+      }
+      await act(async () => renderer!.update(view(before + definition + "\n")));
+      await act(async () => vi.advanceTimersByTime(100));
+      const image = renderer!.root.findByType("img");
+      expect(image.props.src).toBe("https://example.com/fixture.png");
+      expect(renderer!.root.findByProps({ "data-smooth-media": "" })).toBe(surface);
+      await act(async () => image.props.onError());
+      expect(renderer!.root.findByProps({ role: "alert" })).toBe(surface);
+    } finally {
+      await act(async () => renderer?.unmount());
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("releases pending syntax when Markdown preload is disabled", async () => {
+    let renderer: ReactTestRenderer | undefined;
+    const text = "前文 ![Fixture][photo]\n\n后文";
+    const view = (preload: boolean) => (
+      <ChatMarkdown
+        text={text}
+        cwd={undefined}
+        isStreaming
+        smoothStreaming
+        smoothMarkdownPreload={preload}
+      />
+    );
+    try {
+      await act(async () => {
+        renderer = create(view(true));
+      });
+      const content = () => JSON.stringify(renderer!.toJSON());
+      expect(content()).not.toContain("![Fixture][photo]");
+      expect(content()).toContain("后文");
+      await act(async () => renderer!.update(view(false)));
+      expect(content()).toContain("![Fixture][photo]");
+      await act(async () => renderer!.update(view(true)));
+      expect(content()).not.toContain("![Fixture][photo]");
+    } finally {
+      await act(async () => renderer?.unmount());
+    }
+  });
+});
 
 describe("ChatMarkdown context references", () => {
   it("renders text and image references through the chip renderer, with readable fallback", async () => {
@@ -143,6 +522,45 @@ describe("ChatMarkdown context references", () => {
 });
 
 describe("ChatMarkdown favicon privacy", () => {
+  it("resolves a preloaded reference without replacing its label or inserting another icon slot", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    vi.useFakeTimers();
+    let renderer: ReactTestRenderer | undefined;
+    const text = "正文[引用标签逐字符出现][ref]，后文继续。\n\n";
+    const view = (source: string) => (
+      <ChatMarkdown cwd={undefined} text={source} smoothStreaming isStreaming />
+    );
+    try {
+      await act(() => {
+        renderer = create(view(text));
+      });
+      const link = renderer!.root.findByType("a");
+      const icon = link.findAll((node) => node.type === "span" && node.props["aria-hidden"])[0]!;
+      const labels = link
+        .findAllByType("span")
+        .filter((node) => node.children.some((child) => typeof child === "string"));
+      expect(
+        labels
+          .flatMap((node) => node.children.filter((child) => typeof child === "string"))
+          .join(""),
+      ).toBe("引用标签逐字符出现");
+      expect(link.props.href).toBeUndefined();
+      await act(() => renderer!.update(view(text + "[ref]: https://example.com/reference\n")));
+      await act(() => vi.advanceTimersByTimeAsync(120));
+      const resolved = renderer!.root.findByType("a");
+      expect(resolved).toBe(link);
+      expect(resolved.props.href).toBe("https://example.com/reference");
+      expect(resolved.findAll((node) => node.type === "span" && node.props["aria-hidden"])).toEqual(
+        [icon],
+      );
+      for (const label of labels) expect(resolved.findAllByType("span")).toContain(label);
+    } finally {
+      await act(() => renderer?.unmount());
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("suppresses private link images while preserving public links across updates", async () => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     let renderer: ReactTestRenderer | undefined;
@@ -180,6 +598,124 @@ describe("ChatMarkdown favicon privacy", () => {
 });
 
 describe("ChatMarkdown streaming", () => {
+  it("buffers literal idle edits again when streaming resumes with the same source", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    let renderer: ReactTestRenderer | undefined;
+    const text = "Visible\n\n**unfinished";
+    try {
+      await act(() => {
+        renderer = create(<ChatMarkdown cwd={undefined} text={text} smoothStreaming />);
+      });
+      expect(JSON.stringify(renderer!.toJSON())).toContain("**unfinished");
+      await act(() => {
+        renderer!.update(<ChatMarkdown cwd={undefined} text={text} smoothStreaming isStreaming />);
+      });
+      expect(JSON.stringify(renderer!.toJSON())).not.toContain("**unfinished");
+      await act(() => {
+        renderer!.update(
+          <ChatMarkdown cwd={undefined} text={text} smoothStreaming smoothComplete />,
+        );
+      });
+      expect(JSON.stringify(renderer!.toJSON())).toContain("**unfinished");
+    } finally {
+      await act(() => renderer?.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
+  it("reuses the complete Markdown parse when upstream and working activity finish", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const parses = vi.fn();
+    const observeParsing: Plugin<[], Root> = function () {
+      const parse = this.parser!;
+      this.parser = (source, file) => {
+        parses(source);
+        return parse(source, file);
+      };
+    };
+    const extraRemarkPlugins = [observeParsing];
+    const text = "**Complete text** and `inline code`.\n\n| A | B |\n|---|---|\n| one | two |";
+    const markdown = (isStreaming: boolean, smoothComplete = false) => (
+      <ChatMarkdown
+        cwd={undefined}
+        text={text}
+        smoothStreaming
+        isStreaming={isStreaming}
+        smoothComplete={smoothComplete}
+        extraRemarkPlugins={extraRemarkPlugins}
+      />
+    );
+    let renderer: ReactTestRenderer | undefined;
+    try {
+      await act(async () => {
+        renderer = create(markdown(true));
+      });
+      const count = parses.mock.calls.length;
+      await act(async () => {
+        renderer!.update(markdown(false));
+      });
+      await act(async () => {
+        renderer!.update(markdown(false, true));
+      });
+      expect(parses).toHaveBeenCalledTimes(count);
+      expect(renderer!.root.findAllByType("table")).toHaveLength(1);
+    } finally {
+      await act(async () => renderer?.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it.each(["**unfinished", "[unfinished", "`unfinished", "| A | B |"])(
+    "releases withheld literal Markdown at completion without a second finish parse: %s",
+    async (suffix) => {
+      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+      const parses = vi.fn();
+      const observeParsing: Plugin<[], Root> = function () {
+        const parse = this.parser!;
+        this.parser = (source, file) => {
+          parses(source);
+          return parse(source, file);
+        };
+      };
+      const extraRemarkPlugins = [observeParsing];
+      const text = "Visible\n\n" + suffix;
+      const markdown = (isStreaming: boolean, smoothComplete = false, source = text) => (
+        <ChatMarkdown
+          cwd={undefined}
+          text={source}
+          smoothStreaming
+          isStreaming={isStreaming}
+          smoothComplete={smoothComplete}
+          extraRemarkPlugins={extraRemarkPlugins}
+        />
+      );
+      let renderer: ReactTestRenderer | undefined;
+      try {
+        await act(async () => {
+          renderer = create(markdown(true));
+        });
+        expect(JSON.stringify(renderer!.toJSON())).not.toContain(suffix);
+        parses.mockClear();
+        await act(async () => {
+          renderer!.update(markdown(false));
+        });
+        expect(JSON.stringify(renderer!.toJSON())).toContain(suffix);
+        expect(parses).toHaveBeenCalledTimes(1);
+        await act(async () => {
+          renderer!.update(markdown(false, true));
+        });
+        expect(parses).toHaveBeenCalledTimes(1);
+        // A later idle edit remains literal instead of being buffered again.
+        await act(async () => {
+          renderer!.update(markdown(false, true, text + " more"));
+        });
+        expect(JSON.stringify(renderer!.toJSON())).toContain(suffix + " more");
+      } finally {
+        await act(async () => renderer?.unmount());
+        vi.unstubAllGlobals();
+      }
+    },
+  );
+
   it("marks pending code until the highlighter renders its text", async () => {
     const highlighter = await getSyntaxHighlighterPromise("text");
     let resolveHighlight!: (value: typeof highlighter) => void;
@@ -208,74 +744,136 @@ describe("ChatMarkdown streaming", () => {
     }
   });
 
-  it("runs only a complete single-line shell block after a click", async () => {
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-    const onRunShellCommand = vi.fn();
-    let renderer: ReactTestRenderer | undefined;
-    const message = (text: string, isStreaming = false) => (
-      <ChatMarkdown
-        cwd="/tmp/project"
-        text={text}
-        isStreaming={isStreaming}
-        onRunShellCommand={onRunShellCommand}
-      />
-    );
-    try {
-      await act(async () => {
-        renderer = create(message("```bash\necho hello\n```", true));
+  it.each([false, true])(
+    "keeps completed smooth code readable before highlighting when initially complete is %s",
+    async (initiallyComplete) => {
+      const highlighter = await getSyntaxHighlighterPromise("text");
+      let resolveHighlight!: (value: typeof highlighter) => void;
+      const pendingHighlight = new Promise<typeof highlighter>((resolve) => {
+        resolveHighlight = resolve;
       });
-      const mounted = renderer!;
-      expect(
-        mounted.root
-          .findAllByType(Button)
-          .some((button) => button.props["aria-label"] === "Run in terminal"),
-      ).toBe(false);
-
-      await act(async () => {
-        mounted.update(message("```bash\necho hello\n```"));
-      });
-      await act(async () => {
-        codeButton(mounted, "Run in terminal").onClick?.({} as never);
-      });
-      expect(onRunShellCommand).toHaveBeenCalledExactlyOnceWith("echo hello");
-
-      for (const text of [
-        "~~~bash\necho tilde\n~~~",
-        "> ```bash\n> echo quote\n> ```",
-        "````bash\necho four\n````",
-      ]) {
+      vi.spyOn(syntaxHighlighting, "getSyntaxHighlighterPromise").mockReturnValue(pendingHighlight);
+      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+      let renderer: ReactTestRenderer | undefined;
+      const code = `completed smooth code ${initiallyComplete}`;
+      const text = `\`\`\`text\n${code}\n\`\`\``;
+      const plainText = (node: ReactTestInstance): string =>
+        node.children
+          .map((child) => (typeof child === "string" ? child : plainText(child)))
+          .join("");
+      try {
         await act(async () => {
-          mounted.update(message(text));
+          renderer = create(
+            <ChatMarkdown
+              cwd={undefined}
+              text={text}
+              isStreaming={!initiallyComplete}
+              smoothStreaming
+              smoothComplete={initiallyComplete}
+            />,
+          );
         });
-        expect(codeButton(mounted, "Run in terminal")).toBeDefined();
+        if (!initiallyComplete) {
+          const pendingCode = renderer!.root.findByType("pre");
+          expect(pendingCode.props.className).not.toBe("invisible");
+          expect(plainText(pendingCode)).toContain(code);
+          await act(async () => {
+            renderer!.update(
+              <ChatMarkdown cwd={undefined} text={text} smoothStreaming smoothComplete />,
+            );
+          });
+        }
+        const fallback = renderer!.root.findByType("pre");
+        expect(plainText(fallback)).toContain(code);
+        expect(fallback.props.className).not.toBe("invisible");
+        expect(fallback.props["aria-hidden"]).toBeUndefined();
+        expect(renderer!.root.findAllByProps({ "data-markdown-code-pending": "" })).toHaveLength(0);
+
+        await act(async () => resolveHighlight(highlighter));
+        const highlighted = renderer!.root.findByProps({ className: "chat-markdown-shiki" });
+        expect(
+          highlighted.props.dangerouslySetInnerHTML?.__html ?? plainText(highlighted),
+        ).toContain(code);
+      } finally {
+        await act(() => renderer?.unmount());
+        vi.restoreAllMocks();
+        vi.unstubAllGlobals();
       }
+    },
+  );
 
-      for (const text of [
-        "```bash\necho one\necho two\n```",
-        "```typescript\necho hello\n```",
-        "```bash\n\n```",
-        "```bash\necho hello\n\n```",
-        "```bash\necho hello\\\n```",
-        "```bash\necho safe \u202e#\n```",
-        "```bash\necho incomplete",
-        "~~~bash\necho incomplete",
-        "````bash\necho incomplete\n```",
-        '<pre><code class="language-bash">echo html</code></pre>',
-      ]) {
+  it.each([true, false])(
+    "runs only a complete single-line shell block (raw HTML: %s)",
+    async (parseRawHtml) => {
+      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+      const onRunShellCommand = vi.fn();
+      let renderer: ReactTestRenderer | undefined;
+      const message = (text: string, isStreaming = false) => (
+        <ChatMarkdown
+          cwd="/tmp/project"
+          text={text}
+          isStreaming={isStreaming}
+          parseRawHtml={parseRawHtml}
+          onRunShellCommand={onRunShellCommand}
+        />
+      );
+      try {
         await act(async () => {
-          mounted.update(message(text));
+          renderer = create(message("```bash\necho hello\n```", true));
         });
+        const mounted = renderer!;
         expect(
           mounted.root
             .findAllByType(Button)
             .some((button) => button.props["aria-label"] === "Run in terminal"),
         ).toBe(false);
+
+        await act(async () => {
+          mounted.update(message("```bash\necho hello\n```"));
+        });
+        await act(async () => {
+          codeButton(mounted, "Run in terminal").onClick?.({} as never);
+        });
+        expect(onRunShellCommand).toHaveBeenCalledExactlyOnceWith("echo hello");
+
+        for (const text of [
+          "~~~bash\necho tilde\n~~~",
+          "> ```bash\n> echo quote\n> ```",
+          "````bash\necho four\n````",
+        ]) {
+          await act(async () => {
+            mounted.update(message(text));
+          });
+          expect(codeButton(mounted, "Run in terminal")).toBeDefined();
+        }
+
+        for (const text of [
+          "```bash\necho one\necho two\n```",
+          "```typescript\necho hello\n```",
+          "```bash\n\n```",
+          "```bash\necho hello\n\n```",
+          "```bash\necho hello\\\n```",
+          "```bash\necho safe \u202e#\n```",
+          "```bash\necho incomplete",
+          "~~~bash\necho incomplete",
+          "````bash\necho incomplete\n```",
+          '<pre><code class="language-bash">echo html</code></pre>',
+        ]) {
+          await act(async () => {
+            mounted.update(message(text));
+          });
+          expect(
+            mounted.root
+              .findAllByType(Button)
+              .some((button) => button.props["aria-label"] === "Run in terminal"),
+          ).toBe(false);
+        }
+      } finally {
+        await act(async () => renderer?.unmount());
+        vi.unstubAllGlobals();
       }
-    } finally {
-      await act(async () => renderer?.unmount());
-      vi.unstubAllGlobals();
-    }
-  });
+    },
+  );
 
   it("does not retokenize completed lines when streaming finishes", async () => {
     const highlighter = await getSyntaxHighlighterPromise("typescript");
@@ -297,6 +895,47 @@ describe("ChatMarkdown streaming", () => {
       await act(async () => renderer?.unmount());
       vi.unstubAllGlobals();
       vi.restoreAllMocks();
+    }
+  });
+
+  it("preserves mounted text and code when streaming and working activity finish", async () => {
+    await getSyntaxHighlighterPromise("text");
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    let renderer: ReactTestRenderer | undefined;
+    const text =
+      "# Stable title\n\nBefore **bold text**.\n\n```text\nstable code\n```\n\nAfter code.";
+    try {
+      await act(async () => {
+        renderer = create(<ChatMarkdown cwd={undefined} text={text} isStreaming smoothStreaming />);
+      });
+      const mounted = renderer!;
+      const heading = mounted.root.findByType("h1");
+      const paragraphs = mounted.root.findAllByType("p");
+      const codeBlock = mounted.root.findByProps({ "data-language": "text" });
+      const highlighted = mounted.root.findByProps({ className: "chat-markdown-shiki" });
+
+      await act(async () => {
+        mounted.update(<ChatMarkdown cwd={undefined} text={text} smoothStreaming />);
+      });
+      expect(mounted.root.findByType("h1")).toBe(heading);
+      const finishedParagraphs = mounted.root.findAllByType("p");
+      expect(finishedParagraphs).toHaveLength(paragraphs.length);
+      finishedParagraphs.forEach((paragraph, index) => expect(paragraph).toBe(paragraphs[index]));
+      expect(mounted.root.findByProps({ "data-language": "text" })).toBe(codeBlock);
+      expect(mounted.root.findByProps({ className: "chat-markdown-shiki" })).toBe(highlighted);
+
+      await act(async () => {
+        mounted.update(<ChatMarkdown cwd={undefined} text={text} smoothStreaming smoothComplete />);
+      });
+      expect(mounted.root.findByType("h1")).toBe(heading);
+      mounted.root
+        .findAllByType("p")
+        .forEach((paragraph, index) => expect(paragraph).toBe(paragraphs[index]));
+      expect(mounted.root.findByProps({ "data-language": "text" })).toBe(codeBlock);
+      expect(mounted.root.findByProps({ className: "chat-markdown-shiki" })).toBe(highlighted);
+    } finally {
+      await act(async () => renderer?.unmount());
+      vi.unstubAllGlobals();
     }
   });
 
@@ -426,54 +1065,58 @@ describe("ChatMarkdown streaming", () => {
     }
   });
 
-  it("edits the current task text and marker after reusing a renderer", async () => {
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-    let renderer: ReactTestRenderer | undefined;
-    let editedText: string | undefined;
-    const message = (text: string) => (
-      <ChatMarkdown
-        cwd="/tmp/project"
-        text={text}
-        onTaskListChange={({ markerOffset, checked }) => {
-          editedText = setMarkdownTaskChecked(text, markerOffset, checked);
-          renderer!.update(message(editedText));
-        }}
-      />
-    );
+  it.each([true, false])(
+    "edits current task markers after reusing a renderer (raw HTML: %s)",
+    async (parseRawHtml) => {
+      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+      let renderer: ReactTestRenderer | undefined;
+      let editedText: string | undefined;
+      const message = (text: string) => (
+        <ChatMarkdown
+          cwd="/tmp/project"
+          text={text}
+          parseRawHtml={parseRawHtml}
+          onTaskListChange={({ markerOffset, checked }) => {
+            editedText = setMarkdownTaskChecked(text, markerOffset, checked);
+            renderer!.update(message(editedText));
+          }}
+        />
+      );
 
-    try {
-      await act(async () => {
-        renderer = create(message("- [ ] First\n- [ ] Second"));
-      });
-      const mounted = renderer!;
-      const originalInput = mounted.root.findAllByType("input")[1]!;
-      await act(async () => {
-        mounted.update(message("- [ ] A longer first task\n- [ ] Second"));
-      });
+      try {
+        await act(async () => {
+          renderer = create(message("- [ ] First\n- [ ] Second"));
+        });
+        const mounted = renderer!;
+        const originalInput = mounted.root.findAllByType("input")[1]!;
+        await act(async () => {
+          mounted.update(message("- [ ] A longer first task\n- [ ] Second"));
+        });
 
-      const input = mounted.root.findAllByType("input")[1]!;
-      const listItem = mounted.root.findAllByType("li")[1]!;
-      const { onChange } = input.props as ComponentProps<"input">;
-      if (!onChange) throw new Error("Task checkbox has no edit handler");
-      await act(async () => {
-        onChange({
-          currentTarget: {
-            checked: true,
-            closest: () => ({
-              dataset: { taskMarkerOffset: String(listItem.props["data-task-marker-offset"]) },
-            }),
-          },
-        } as unknown as Parameters<typeof onChange>[0]);
-      });
+        const input = mounted.root.findAllByType("input")[1]!;
+        const listItem = mounted.root.findAllByType("li")[1]!;
+        const { onChange } = input.props as ComponentProps<"input">;
+        if (!onChange) throw new Error("Task checkbox has no edit handler");
+        await act(async () => {
+          onChange({
+            currentTarget: {
+              checked: true,
+              closest: () => ({
+                dataset: { taskMarkerOffset: String(listItem.props["data-task-marker-offset"]) },
+              }),
+            },
+          } as unknown as Parameters<typeof onChange>[0]);
+        });
 
-      expect(input).toBe(originalInput);
-      expect(editedText).toBe("- [ ] A longer first task\n- [x] Second");
-      expect(mounted.root.findAllByType("input")[1]!.props.checked).toBe(true);
-    } finally {
-      await act(async () => renderer?.unmount());
-      vi.unstubAllGlobals();
-    }
-  });
+        expect(input).toBe(originalInput);
+        expect(editedText).toBe("- [ ] A longer first task\n- [x] Second");
+        expect(mounted.root.findAllByType("input")[1]!.props.checked).toBe(true);
+      } finally {
+        await act(async () => renderer?.unmount());
+        vi.unstubAllGlobals();
+      }
+    },
+  );
 });
 
 describe("canUseMarkdownFileShellActions", () => {
@@ -534,6 +1177,81 @@ describe("hasMarkdownFilePrimaryAction", () => {
 });
 
 describe("ChatMarkdown skill chips", () => {
+  it("retains unchanged history while updating equal-length inline content and attributes", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const renderSkills = vi.spyOn(skillInlineText, "renderSkillInlineMarkdownChildren");
+    const history = Array.from({ length: 96 }, (_, i) => `Paragraph ${i}`).join("\n\n");
+    const view = (tail: string) => <ChatMarkdown cwd={undefined} text={`${history}\n\n${tail}`} />;
+    let renderer: ReactTestRenderer | undefined;
+    try {
+      await act(() => {
+        renderer = create(view("[label](/first) **bold**"));
+      });
+      const paragraphs = renderer!.root.findAllByType("p").slice(0, -1);
+      for (const tail of [
+        "[label](/other) ~~bold~~",
+        "[other](/other) **bold**",
+        "[other](/other)",
+      ]) {
+        renderSkills.mockClear();
+        await act(() => renderer!.update(view(tail)));
+        expect(renderSkills).toHaveBeenCalledTimes(1);
+        renderer!.root
+          .findAllByType("p")
+          .slice(0, -1)
+          .forEach((p, i) => expect(p).toBe(paragraphs[i]));
+        expect(renderer!.root.findByType("a").props.href).toBe("/other");
+        expect(renderer!.root.findAllByType("del")).toHaveLength(tail.includes("~~") ? 1 : 0);
+        expect(renderer!.root.findAllByType("strong")).toHaveLength(tail.includes("**") ? 1 : 0);
+      }
+    } finally {
+      await act(() => renderer?.unmount());
+      renderSkills.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("does not render historical paragraphs again when only streaming activity finishes", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const renderSkills = vi.spyOn(skillInlineText, "renderSkillInlineMarkdownChildren");
+    const text = Array.from({ length: 64 }, (_, i) => `Paragraph ${i} uses $review`).join("\n\n");
+    let renderer: ReactTestRenderer | undefined;
+    try {
+      await act(() => {
+        renderer = create(<ChatMarkdown cwd={undefined} text={text} smoothStreaming isStreaming />);
+      });
+      const paragraphs = renderer!.root.findAllByType("p");
+      renderSkills.mockClear();
+      await act(() =>
+        renderer!.update(
+          <ChatMarkdown cwd={undefined} text={text} smoothStreaming smoothComplete />,
+        ),
+      );
+      expect(renderSkills).not.toHaveBeenCalled();
+      renderer!.root
+        .findAllByType("p")
+        .forEach((paragraph, i) => expect(paragraph).toBe(paragraphs[i]));
+      await act(() =>
+        renderer!.update(
+          <ChatMarkdown
+            cwd={undefined}
+            text={text}
+            smoothStreaming
+            smoothComplete
+            skills={[{ name: "review", displayName: "Review" }]}
+          />,
+        ),
+      );
+      expect(
+        renderer!.root.findAllByProps({ "data-markdown-copy": "$review" }).length,
+      ).toBeGreaterThanOrEqual(64);
+    } finally {
+      await act(() => renderer?.unmount());
+      renderSkills.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("updates digit-leading skill labels when discovered skills change", async () => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     let renderer: ReactTestRenderer | undefined;

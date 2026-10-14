@@ -1115,6 +1115,24 @@ export type CodexDynamicToolItem = Extract<
   { readonly type: "mcpToolCall" | "dynamicToolCall" }
 >;
 
+// Codex emits clock.sleep as a native item, rather than a dynamicToolCall.
+// Normalize it here so persistence, interruption and the tool history use the
+// same lifecycle as every other tool.
+function codexSleepToolItem(
+  item: Extract<CodexSchema.V2ItemStartedNotification__ThreadItem, { readonly type: "sleep" }>,
+  completed: boolean,
+): CodexDynamicToolItem {
+  return {
+    type: "dynamicToolCall",
+    id: item.id,
+    namespace: "clock",
+    tool: "sleep",
+    arguments: { duration_ms: item.durationMs },
+    status: completed ? "completed" : "inProgress",
+    ...(completed ? { success: true } : {}),
+  };
+}
+
 type CodexCollabAgentToolCallItem = Extract<
   CodexSchema.V2ItemCompletedNotification__ThreadItem,
   { readonly type: "collabAgentToolCall" }
@@ -3143,6 +3161,16 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
               type: "file_change",
               fileName: firstChange.path,
               diffStr: firstChange.diff,
+              changes: item.changes.map((change) => ({
+                operation: change.kind.type,
+                path:
+                  change.kind.type === "update"
+                    ? (change.kind.move_path ?? change.path)
+                    : change.path,
+                ...(change.kind.type === "update" && change.kind.move_path
+                  ? { oldPath: change.path }
+                  : {}),
+              })),
             };
             return { node, turnItem };
           });
@@ -3980,11 +4008,35 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
               return;
             }
 
-            if (payload.item.type === "mcpToolCall" || payload.item.type === "dynamicToolCall") {
-              if (!codexItemStatus(payload.item.status).completed) {
-                yield* trackRunningDynamicTool(payload.turnId, payload.item);
+            if (
+              payload.item.type === "mcpToolCall" ||
+              payload.item.type === "dynamicToolCall" ||
+              payload.item.type === "sleep"
+            ) {
+              const toolItem =
+                payload.item.type === "sleep"
+                  ? codexSleepToolItem(payload.item, false)
+                  : payload.item;
+              if (!codexItemStatus(toolItem.status).completed) {
+                yield* trackRunningDynamicTool(payload.turnId, toolItem);
               }
-              const artifacts = yield* buildDynamicToolArtifacts(context, payload.item);
+              const artifacts = yield* buildDynamicToolArtifacts(context, toolItem);
+              yield* emitProviderEvent({
+                type: "node.updated",
+                driver: CODEX_PROVIDER,
+                node: artifacts.node,
+              });
+              yield* emitProviderEvent({
+                type: "turn_item.updated",
+                driver: CODEX_PROVIDER,
+                turnItem: artifacts.turnItem,
+              });
+              return;
+            }
+
+            if (payload.item.type === "fileChange") {
+              const artifacts = yield* buildFileChangeArtifacts(context, payload.item);
+              if (artifacts === null) return;
               yield* emitProviderEvent({
                 type: "node.updated",
                 driver: CODEX_PROVIDER,
@@ -4122,9 +4174,18 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
               return;
             }
 
-            if (payload.item.type === "mcpToolCall" || payload.item.type === "dynamicToolCall") {
+            if (
+              payload.item.type === "mcpToolCall" ||
+              payload.item.type === "dynamicToolCall" ||
+              payload.item.type === "sleep"
+            ) {
               yield* clearRunningDynamicTool(payload.turnId, payload.item.id);
-              const artifacts = yield* buildDynamicToolArtifacts(context, payload.item);
+              const artifacts = yield* buildDynamicToolArtifacts(
+                context,
+                payload.item.type === "sleep"
+                  ? codexSleepToolItem(payload.item, true)
+                  : payload.item,
+              );
               yield* emitProviderEvent({
                 type: "node.updated",
                 driver: CODEX_PROVIDER,

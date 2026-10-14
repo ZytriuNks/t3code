@@ -782,6 +782,25 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
     display: none;
   }
 
+  /* During a streaming Markdown response the smooth text frame owns vertical
+     movement.  Letting a details panel run its own 200ms height transition
+     would race that reservation and reveal the whole panel between RAFs. */
+  .chat-markdown[data-smooth-output] [data-markdown-details] [data-slot="collapsible-panel"] {
+    transition-property: none;
+  }
+
+  .chat-markdown[data-smooth-output]
+    [data-markdown-details]
+    [data-slot="collapsible-panel"][data-open] {
+    height: auto !important;
+  }
+
+  .chat-markdown[data-smooth-output]
+    [data-markdown-details]
+    [data-slot="collapsible-panel"][data-closed] {
+    display: none;
+  }
+
   /* Each maintainer palette gives the same line art its own material: rose
      vellum, forest drafting paper, marine cyanotype, copper, and violet ink.
      These colors stay deliberately deep at the top edge so the white stage
@@ -2030,6 +2049,10 @@ code {
   list-style-type: none;
 }
 
+.chat-markdown li[data-smooth-list-empty]::marker {
+  color: transparent;
+}
+
 .chat-markdown li.task-list-item input[type="checkbox"] {
   margin: 0 0.35em 0.15em calc(-1 * var(--list-gutter, 1.25rem));
   vertical-align: middle;
@@ -2076,8 +2099,38 @@ code {
   margin: 0;
 }
 
-.chat-markdown section[data-footnotes] li + li {
+.chat-markdown section[data-footnotes] li {
+  margin-top: 0;
+}
+
+.chat-markdown section[data-footnotes] li:not([hidden]) ~ li:not([hidden]) {
   margin-top: 0.35rem;
+}
+
+[data-stream-footnotes] section[data-footnotes] {
+  margin-top: 0;
+  border-top: 0;
+  padding-top: 0;
+}
+
+/* A newly queued note already grows through its own line reservations. The
+   disclosure must follow that height, not chase it with a second transition.
+   Manual opening and all closing transitions keep the normal panel curve. */
+[data-smooth-footnote-reveal] > [data-slot="collapsible-panel"][data-open] {
+  height: auto !important;
+  transition-property: none;
+}
+
+.streaming-markdown-footnotes {
+  position: relative;
+  margin-top: 1.25rem;
+  border-top: 1px solid var(--contrast-border);
+  padding-top: 0.25rem;
+  color: var(--contrast-muted-foreground);
+}
+
+[data-stream-footnote-host]:not(:empty) {
+  padding-bottom: 0.5rem;
 }
 
 .chat-markdown a[data-footnote-ref],
@@ -2153,8 +2206,8 @@ code {
    so opening a finished thread never replays the fade. Opacity only, one
    shot, no layout change. */
 @media (prefers-reduced-motion: no-preference) {
-  .chat-markdown[data-streaming] > *,
-  .chat-markdown[data-streaming] .chat-markdown-shiki {
+  .chat-markdown[data-streaming]:not([data-smooth-streaming]) > *,
+  .chat-markdown[data-streaming]:not([data-smooth-streaming]) .chat-markdown-shiki {
     transition: opacity 600ms ease-out;
 
     @starting-style {
@@ -2176,44 +2229,80 @@ code {
 /* Keep the original text and layout for copying and citations. Only newly
    received glyphs are masked; the registry is empty whenever reveal is idle. */
 @media (prefers-reduced-motion: no-preference) and (forced-colors: none) {
-  ::highlight(t3-smooth-hidden) {
+  [data-smooth-output]::highlight(t3-smooth-hidden) {
     color: transparent;
     text-shadow: none;
     text-decoration-color: transparent;
   }
 }
 
-/* New graphemes reuse the completed-paragraph fade without adding spans or
-   React work. Each fixed bucket keeps the highlight registry bounded. */
-::highlight(t3-smooth-fade-0) {
-  color: color-mix(in srgb, currentColor 0%, transparent);
+/* Framed inline content shares one fade for its border, icon and all text. */
+.chat-markdown [data-smooth-surface] {
+  opacity: var(--t3-smooth-surface-opacity, 1);
 }
-::highlight(t3-smooth-fade-1) {
-  color: color-mix(in srgb, currentColor 33%, transparent);
-}
-::highlight(t3-smooth-fade-2) {
-  color: color-mix(in srgb, currentColor 58%, transparent);
-}
-::highlight(t3-smooth-fade-3) {
-  color: color-mix(in srgb, currentColor 76%, transparent);
-}
-::highlight(t3-smooth-fade-4) {
-  color: color-mix(in srgb, currentColor 88%, transparent);
-}
-::highlight(t3-smooth-fade-5) {
-  color: color-mix(in srgb, currentColor 95%, transparent);
-}
-::highlight(t3-smooth-fade-6) {
-  color: color-mix(in srgb, currentColor 99%, transparent);
-}
-::highlight(t3-smooth-fade-7) {
-  color: currentColor;
+.chat-markdown [data-smooth-inline-pending] {
+  visibility: hidden;
+  pointer-events: none;
 }
 
-/* Smooth text grows inside a clipped frame. At the live edge the real list
-   scrolls to its new maximum, moving every earlier row together; away from the
-   edge the same frame grows downward and leaves the reader's viewport alone. */
+/* The line that just obtained its space rises in the same direction the text
+   above it moved, on the same clock. One element, compositor-only properties:
+   the compositor moves it, where per-glyph text-shadow repainted the whole run.
+   Translation preserves the measured line boxes; scaling a growing paragraph
+   would move its glyphs according to the height of its still-hidden tail.
+   The mask and glyph fade run underneath, so nothing is cut in half.
+   The duration outlasts a typical reservation so consecutive rises overlap
+   into one movement instead of restarting. */
+@media (prefers-reduced-motion: no-preference) and (forced-colors: none) {
+  [data-smooth-line-enter] {
+    animation: t3-smooth-line-enter 160ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  [data-smooth-line-enter="down"] {
+    animation-name: t3-smooth-line-enter-down;
+  }
+  .chat-markdown li[data-smooth-line-enter] {
+    animation-name: t3-smooth-list-line-enter;
+  }
+  .chat-markdown li[data-smooth-line-enter="down"] {
+    animation-name: t3-smooth-list-line-enter-down;
+  }
+}
+
+@keyframes t3-smooth-list-line-enter {
+  from {
+    translate: 0 var(--t3-smooth-line-offset, 2px);
+  }
+}
+
+@keyframes t3-smooth-list-line-enter-down {
+  from {
+    translate: 0 calc(-1 * var(--t3-smooth-line-offset, 2px));
+  }
+}
+
+@keyframes t3-smooth-line-enter {
+  from {
+    opacity: 0;
+    translate: 0 var(--t3-smooth-line-offset, 2px);
+  }
+}
+
+@keyframes t3-smooth-line-enter-down {
+  from {
+    opacity: 0;
+    translate: 0 calc(-1 * var(--t3-smooth-line-offset, 2px));
+  }
+}
+
+/* Only lines still obtaining space need a clipped frame. Fully admitted text
+   uses native overflow so glyphs extending past the line box remain intact. */
 [data-smooth-text-frame] {
+  /* Footnote accessibility headings are absolute. Anchor them inside this
+     frame so a hidden footer cannot extend the timeline's scrollable area. */
+  position: relative;
+}
+
+[data-smooth-text-frame][data-smooth-text-clipping] {
   overflow: clip;
 }
 

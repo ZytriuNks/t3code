@@ -1,4 +1,5 @@
 import { usePullRequestLinking } from "~/hooks/usePullRequestLinking";
+import { flushSync } from "react-dom";
 import { useAtomValue } from "@effect/atom-react";
 import {
   COMPOSER_CONTEXT_CLIPBOARD_MIME,
@@ -68,6 +69,8 @@ import React, {
   useCallback,
   memo,
   useEffect,
+  useLayoutEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -81,6 +84,7 @@ import type {
 import ReactMarkdown from "react-markdown";
 import { toHtml } from "hast-util-to-html";
 import { createIncrementalMarkdownPlugin } from "../markdown-incremental";
+import { rehypeRawIfPresent, remarkStableTaskCheckboxes } from "../markdown-streaming";
 import { defaultUrlTransform } from "react-markdown";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
@@ -88,8 +92,14 @@ import remarkBreaks from "remark-breaks";
 import { parseAssistantCitationHref } from "@t3tools/shared/assistantCitations";
 import { parseComposerContextHref } from "@t3tools/shared/composerContextReferences";
 import { AssistantCitationChip } from "./chat/AssistantCitationChip";
+import {
+  StreamingFootnoteHostContext,
+  StreamingFootnoteItemVisibilityContext,
+  StreamingMarkdownFootnoteItem,
+  StreamingMarkdownFootnotes,
+} from "./chat/StreamingMarkdownFootnotes";
 import remarkGfm from "remark-gfm";
-import type { Processor } from "unified";
+import type { Plugin, Processor } from "unified";
 import { isWindowsAbsolutePath } from "@t3tools/shared/path";
 import { remarkGithubAlerts } from "../markdown-github-alerts";
 import {
@@ -143,6 +153,7 @@ import { HighlightedCodeLines } from "./chat/HighlightedCodeLines";
 import { RenderErrorBoundary } from "./RenderErrorBoundary";
 import { useTheme } from "../hooks/useTheme";
 import { useSmoothText } from "../hooks/useSmoothText";
+import { useStreamingMarkdownText } from "../hooks/useStreamingMarkdownText";
 import { getClientSettings, useClientSettings } from "../hooks/useSettings";
 import {
   chatMarkdownClipboardPayload,
@@ -150,6 +161,9 @@ import {
   serializeTableElementToMarkdown,
 } from "../markdown-clipboard";
 import { remarkNormalizeListItemIndentation } from "../markdown-list-indentation";
+import { createInlineBufferPlugin } from "../markdown-streaming";
+import { SMOOTH_TEXT_BUFFER_MS } from "../lib/smoothText";
+import type { SmoothOutputMode, SmoothOutputLineMode } from "@t3tools/contracts";
 import {
   extractMarkdownLinkHrefs,
   isWindowsDrivePathHref,
@@ -215,8 +229,15 @@ interface ChatMarkdownProps {
   onTaskListChange?: ((input: { markerOffset: number; checked: boolean }) => void) | undefined;
   isStreaming?: boolean;
   smoothStreaming?: boolean;
-  /** Called once smooth output has painted its final visible prefix. */
-  onSmoothSettled?: (() => void) | undefined;
+  smoothOutputMode?: SmoothOutputMode;
+  smoothOutputLineMode?: SmoothOutputLineMode;
+  smoothMarkdownPreload?: boolean;
+  smoothTextFadeDurationMs?: number;
+  footnotesAutoCollapse?: boolean;
+  /** Reveal any remaining text in the same commit that closes the working activity. */
+  smoothComplete?: boolean;
+  /** Claims the first snapshot of a newly received timeline entry for buffering. */
+  claimInitialSmoothText?: (() => boolean) | undefined;
   skills?: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
   className?: string;
   /** Treat single newlines as hard breaks — chat-style user input. */
@@ -402,6 +423,7 @@ type MarkdownImageHastNode = {
   tagName?: string;
   properties?: Record<string, unknown>;
   children?: MarkdownImageHastNode[];
+  position?: { start: { offset?: number }; end?: { offset?: number } };
 };
 
 function meaningfulHastChildren(node: MarkdownImageHastNode): MarkdownImageHastNode[] {
@@ -455,7 +477,8 @@ function markStandaloneImages(node: MarkdownImageHastNode) {
 
 /** Carries authored image source metadata through the sanitizer to the image renderer. */
 function rehypePreserveImageSourceMeta() {
-  return (tree: MarkdownImageHastNode) => {
+  return (tree: MarkdownImageHastNode, file: { toString(): string }) => {
+    const source = String(file);
     const visit = (node: MarkdownImageHastNode) => {
       const src = node.properties?.src;
       const title = node.properties?.title;
@@ -466,6 +489,18 @@ function rehypePreserveImageSourceMeta() {
           ...(typeof title === "string" ? { dataMarkdownTitle: title } : {}),
         };
       }
+      if (node.type === "element" && node.tagName === "li") {
+        const start = node.position?.start.offset;
+        const markerOffset =
+          typeof start === "number" ? findTaskListMarkerOffset(source, start) : null;
+        if (markerOffset !== null)
+          node.properties = { ...node.properties, dataTaskMarkerOffset: markerOffset };
+      }
+      if (node.type === "element" && node.tagName === "pre")
+        node.properties = {
+          ...node.properties,
+          dataClosedCodeFence: isClosedCodeFence(node, source),
+        };
       node.children?.forEach(visit);
     };
 
@@ -483,11 +518,14 @@ const CHAT_MARKDOWN_SANITIZE_SCHEMA = {
     blockquote: [...(defaultSchema.attributes?.blockquote ?? []), "dataAlert"],
     div: [...(defaultSchema.attributes?.div ?? []), ...CODEX_ARTIFACT_TEMPLATE_HAST_PROPERTIES],
     a: [...(defaultSchema.attributes?.a ?? []), "dataPullRequestAutolink"],
+    li: [...(defaultSchema.attributes?.li ?? []), "dataTaskMarkerOffset"],
+    pre: [...(defaultSchema.attributes?.pre ?? []), "dataClosedCodeFence"],
     img: [
       ...(defaultSchema.attributes?.img ?? []),
       "dataLocalSrc",
       "dataMarkdownTitle",
       "dataStandalone",
+      "dataStreamImagePending",
     ],
   },
   protocols: {
@@ -523,6 +561,13 @@ const CHAT_MARKDOWN_REHYPE_PLUGINS = [
   rehypePreserveImageSourceMeta,
   [rehypeSanitize, CHAT_MARKDOWN_SANITIZE_SCHEMA],
 ] satisfies NonNullable<ReactMarkdownOptions["rehypePlugins"]>;
+
+const SMOOTH_MARKDOWN_REHYPE_PLUGINS = [
+  rehypeRawIfPresent,
+  rehypePreserveImageSourceMeta,
+  [rehypeSanitize, CHAT_MARKDOWN_SANITIZE_SCHEMA],
+] satisfies NonNullable<ReactMarkdownOptions["rehypePlugins"]>;
+const LITERAL_MARKDOWN_REHYPE_PLUGINS = [rehypePreserveImageSourceMeta];
 
 /** GitHub's own five alert kinds, in its colors: the glyph names the urgency, the title says it. */
 const GITHUB_ALERT_PRESENTATIONS: Record<
@@ -598,9 +643,9 @@ function extractPreCodeMeta(node: unknown): string | undefined {
   return typeof meta === "string" && meta.trim().length > 0 ? meta.trim() : undefined;
 }
 
-function isClosedCodeFence(node: ReactMarkdownExtraProps["node"], text: string): boolean {
+function isClosedCodeFence(node: MarkdownImageHastNode | undefined, text: string): boolean {
   const start = node?.position?.start.offset;
-  const end = node?.position?.end.offset;
+  const end = node?.position?.end?.offset;
   if (start === undefined || end === undefined) return false;
   const source = text.slice(start, end);
   const opening = /^(?:`{3,}|~{3,})/.exec(source)?.[0];
@@ -759,6 +804,8 @@ function readInitialWordWrapSetting(): boolean {
   return getClientSettings().wordWrap;
 }
 
+const EMPTY_MARKDOWN_FILE_LINKS = new Map<string, MarkdownFileLinkMeta>();
+
 function MarkdownTable({ children, ...props }: React.ComponentProps<"table">) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const tableRef = useRef<HTMLTableElement | null>(null);
@@ -839,7 +886,7 @@ function MarkdownTable({ children, ...props }: React.ComponentProps<"table">) {
           {children}
         </table>
       </ScrollArea>
-      <div className="mt-0.5 flex items-center justify-between select-none">
+      <div data-smooth-atomic="" className="mt-0.5 flex items-center justify-between select-none">
         <Tooltip>
           <TooltipTrigger
             render={
@@ -914,6 +961,7 @@ function MarkdownDetails({
         <CollapsibleTrigger
           className="flex w-full items-center gap-2 py-2 text-left text-sm font-medium text-foreground data-panel-open:[&_svg]:rotate-90"
           data-markdown-details-summary=""
+          data-smooth-atomic=""
         >
           <ChevronRightIcon
             className="size-4 shrink-0 text-muted-foreground transition-transform"
@@ -921,7 +969,7 @@ function MarkdownDetails({
           />
           <span>{summary}</span>
         </CollapsibleTrigger>
-        <CollapsiblePanel>
+        <CollapsiblePanel keepMounted>
           <div
             className="pb-3 ps-6 text-foreground/[calc(80%+var(--appearance-contrast-boost)/5)]"
             data-markdown-details-content=""
@@ -1336,6 +1384,7 @@ const MARKDOWN_LINK_FAVICON_CLASS_NAME = "block size-full shrink-0 select-none";
 
 /** Hosts whose favicon request already failed this session — skip straight to the globe. */
 const failedFaviconHosts = new Set<string>();
+const MarkdownRemoteIconsContext = React.createContext(true);
 
 /** Sites whose brand mark (drawn in `currentColor`) replaces the fetched favicon so it follows the theme. */
 function brandLinkIcon(host: string): typeof GitHubIcon | null {
@@ -1344,32 +1393,49 @@ function brandLinkIcon(host: string): typeof GitHubIcon | null {
   return null;
 }
 
-const MarkdownLinkFavicon = memo(function MarkdownLinkFavicon({ host }: { host: string }) {
+const MarkdownLinkFavicon = memo(function MarkdownLinkFavicon({ host }: { host: string | null }) {
+  const remoteIconsReady = use(MarkdownRemoteIconsContext);
   const [failedHost, setFailedHost] = useState<string | null>(null);
-  const BrandIcon = brandLinkIcon(host);
-  const faviconUrl = BrandIcon ? null : faviconUrlForOrigin(`https://${host}`);
+  const [loadedHost, setLoadedHost] = useState<string | null>(null);
+  const BrandIcon = host ? brandLinkIcon(host) : null;
+  const faviconUrl =
+    !remoteIconsReady || !host || BrandIcon ? null : faviconUrlForOrigin(`https://${host}`);
   return (
     <span
-      className="ms-[0.25em] me-[0.2em] inline-flex size-[14px] [vertical-align:-0.125em]"
+      className="relative ms-[0.25em] me-[0.2em] inline-block size-[14px] align-[-0.125em] [contain:strict]"
       aria-hidden
     >
-      {BrandIcon ? (
-        <BrandIcon className={MARKDOWN_LINK_FAVICON_CLASS_NAME} />
-      ) : faviconUrl === null || failedHost === host || failedFaviconHosts.has(host) ? (
-        <GlobeIcon className={MARKDOWN_LINK_FAVICON_CLASS_NAME} />
-      ) : (
-        <img
-          src={faviconUrl}
-          alt=""
-          loading="lazy"
-          draggable={false}
-          className={cn(MARKDOWN_LINK_FAVICON_CLASS_NAME, "rounded-sm")}
-          onError={() => {
-            failedFaviconHosts.add(host);
-            setFailedHost(host);
-          }}
-        />
-      )}
+      <span className="absolute inset-0 flex">
+        {BrandIcon ? (
+          <BrandIcon className={MARKDOWN_LINK_FAVICON_CLASS_NAME} />
+        ) : faviconUrl === null || failedHost === host || (host && failedFaviconHosts.has(host)) ? (
+          <GlobeIcon className={MARKDOWN_LINK_FAVICON_CLASS_NAME} />
+        ) : (
+          <>
+            <GlobeIcon
+              className={cn(MARKDOWN_LINK_FAVICON_CLASS_NAME, loadedHost === host && "invisible")}
+            />
+            <img
+              src={faviconUrl}
+              alt=""
+              loading="lazy"
+              decoding="async"
+              draggable={false}
+              className={cn(
+                MARKDOWN_LINK_FAVICON_CLASS_NAME,
+                "absolute inset-0 rounded-sm transition-opacity duration-150 motion-reduce:transition-none",
+                loadedHost === host ? "opacity-100" : "opacity-0",
+              )}
+              onLoad={() => setLoadedHost(host)}
+              onError={() => {
+                if (!host) return;
+                failedFaviconHosts.add(host);
+                setFailedHost(host);
+              }}
+            />
+          </>
+        )}
+      </span>
     </span>
   );
 });
@@ -1495,13 +1561,13 @@ const CHAT_MARKDOWN_IMAGE_FRAME_CLASS_NAME = cn(
 );
 
 /**
- * A standalone image holds a 16:9 slot (or its authored size) until it has
- * decoded, and keeps that slot if it fails, so a timeline row moves at most
- * once: when the natural size arrives. A bare `<img>` is zero height until
- * then. Once decoded the image renders bare again so its box, hit area, and
- * alignment are exactly the image's own. Inline images (badges, icons in a
- * sentence) skip the slot: a placeholder taller than the image would move the
- * page more than the image does.
+ * A standalone image reserves a 16:9 slot (or its authored size) before it
+ * decodes, and keeps that slot if loading fails. Loaded images adopt their
+ * authored or natural size; the smooth text frame animates any size change.
+ * The wrapper keeps its DOM identity throughout, preserving
+ * admitted space and the clipping clock. Inline
+ * images (badges, icons in a sentence) skip the slot: a placeholder taller than
+ * the image would move the page more than the image does.
  *
  * Callers key this on the file's identity, not its URL: a re-signed URL for
  * the same file keeps the decoded image on screen while the new bytes arrive,
@@ -1510,6 +1576,8 @@ const CHAT_MARKDOWN_IMAGE_FRAME_CLASS_NAME = cn(
 function ChatMarkdownImage(props: {
   /** Null while the URL is being resolved; the last decoded image stays up. */
   readonly src: string | null;
+  /** Signed URL refreshes keep the same decoded asset visible. */
+  readonly preserveDecodedImage?: boolean;
   readonly sourceFailed?: boolean | undefined;
   readonly alt: string;
   readonly copyMarkdown: string | undefined;
@@ -1524,17 +1592,22 @@ function ChatMarkdownImage(props: {
   readonly originalUrl?: string | undefined;
   readonly onImageExpand?: ((preview: ExpandedImagePreview) => void) | undefined;
 }) {
+  const smooth = use(SmoothMarkdownContext).smooth;
   const [loadedSrc, setLoadedSrc] = useState<string | null>(null);
   const [failedSrc, setFailedSrc] = useState<string | null>(null);
   const src = props.src ?? loadedSrc;
   const failed = props.sourceFailed === true || (src !== null && failedSrc === src);
   // A failure forgets the decoded image so the next URL loads behind the slot.
-  const settled = src !== null && !failed && (!props.standalone || loadedSrc !== null);
+  const settled =
+    src !== null &&
+    !failed &&
+    (!props.standalone ||
+      (loadedSrc !== null && (props.preserveDecodedImage || loadedSrc === src)));
   // Cached images are complete before `onLoad` can fire.
   const markLoadedIfComplete = useCallback(
     (image: HTMLImageElement | null) => {
       if (!image) return;
-      if (image.complete && image.naturalWidth > 0) setLoadedSrc(image.currentSrc || image.src);
+      if (image.complete && image.naturalWidth > 0) setLoadedSrc(src);
       markdownImageItems.set(image, {
         src,
         name: props.alt.trim() || "image",
@@ -1555,7 +1628,7 @@ function ChatMarkdownImage(props: {
     },
   });
 
-  if (settled) {
+  if (settled && !props.standalone) {
     return (
       <MediaActions source={props.actionsSource}>
         <img
@@ -1590,6 +1663,7 @@ function ChatMarkdownImage(props: {
         id={props.imageProps?.id}
         data-markdown-copy={props.copyMarkdown}
         role="status"
+        data-markdown-media-pending=""
         aria-label="Loading image"
         className={CHAT_MARKDOWN_MEDIA_LAYOUT_CLASS_NAME}
       />
@@ -1598,30 +1672,53 @@ function ChatMarkdownImage(props: {
   return (
     <MediaActions source={props.actionsSource}>
       <span
-        id={props.imageProps?.id}
+        id={settled ? undefined : props.imageProps?.id}
         data-markdown-copy={props.copyMarkdown}
+        data-smooth-media=""
+        data-markdown-media-pending={settled || failed ? undefined : ""}
         className={cn(
           CHAT_MARKDOWN_MEDIA_LAYOUT_CLASS_NAME,
-          CHAT_MARKDOWN_IMAGE_FRAME_CLASS_NAME,
-          "relative",
+          !settled && CHAT_MARKDOWN_IMAGE_FRAME_CLASS_NAME,
+          CHAT_MARKDOWN_MEDIA_FRAME_CLASS_NAME,
+          CHAT_MARKDOWN_MEDIA_MAX_WIDTH_CLASS_NAME,
+          "relative overflow-hidden align-bottom",
         )}
         style={props.style}
-        {...(failed
-          ? { role: "alert" as const }
-          : { role: "status" as const, "aria-label": "Loading image" })}
+        {...(settled
+          ? {}
+          : failed
+            ? { role: "alert" as const }
+            : { role: "status" as const, "aria-label": "Loading image" })}
       >
+        {!settled && !failed ? (
+          <span aria-hidden className="absolute inset-0 flex items-center justify-center">
+            <ImageIcon className="size-6 text-muted-foreground/50" />
+          </span>
+        ) : null}
         {failed ? (
           <span className="flex size-full items-center justify-center p-2 text-center text-xs text-muted-foreground">
             <ChatMarkdownMediaUnavailableLabel alt={props.alt} />
           </span>
         ) : src !== null ? (
           <img
+            {...(settled ? props.imageProps : {})}
             ref={markLoadedIfComplete}
             src={src}
             alt={props.alt}
             decoding="async"
             draggable={false}
-            className="invisible absolute inset-0 size-full"
+            className={
+              settled
+                ? cn(
+                    CHAT_MARKDOWN_IMAGE_SIZE_CLASS_NAME,
+                    props.className,
+                    smooth && "transition-opacity duration-150 motion-reduce:transition-none",
+                    props.onImageExpand && "cursor-zoom-in",
+                  )
+                : "absolute inset-0 size-full opacity-0"
+            }
+            style={settled ? props.style : undefined}
+            {...(settled ? expandableMarkdownImageProps(props.onImageExpand, props.alt) : {})}
             {...imageEvents(src)}
           />
         ) : null}
@@ -1771,12 +1868,15 @@ export const ChatMarkdownAssetImage = memo(function ChatMarkdownAssetImage(props
     <ChatMarkdownImage
       key={JSON.stringify([props.environmentId, props.resource, props.srcFragment])}
       src={src}
+      preserveDecodedImage
       sourceFailed={assetUrl._tag === "Failure" && fallbackSrc === undefined}
       alt={props.alt}
       copyMarkdown={props.copyMarkdown}
       standalone={props.standalone ?? true}
       className={cn(
-        props.framed === false ? undefined : CHAT_MARKDOWN_WORKSPACE_IMAGE_CLASS_NAME,
+        props.framed !== false && props.standalone === false
+          ? CHAT_MARKDOWN_WORKSPACE_IMAGE_CLASS_NAME
+          : undefined,
         props.className,
       )}
       style={style}
@@ -1792,15 +1892,6 @@ function leadingExternalLinkTextLength(text: string): number {
   const protocol = /^(?:https?:\/\/)/i.exec(text)?.[0];
   if (protocol) return protocol.length;
   return Math.min(text.length, 1);
-}
-
-function breakableExternalLinkText(text: string): ReactNode[] {
-  return Array.from(text, (character, index) => (
-    <React.Fragment key={`${index}:${character}`}>
-      {character}
-      <wbr />
-    </React.Fragment>
-  ));
 }
 
 function plainHastText(node: unknown): string | null {
@@ -1830,6 +1921,14 @@ function plainHastText(node: unknown): string | null {
  */
 function hastPlainTextDeep(node: unknown): string {
   if (!node || typeof node !== "object") return "";
+  if (
+    "properties" in node &&
+    node.properties &&
+    typeof node.properties === "object" &&
+    "dataFootnoteBackref" in node.properties
+  )
+    // Generated navigation updates must not requeue an already played footnote.
+    return "";
   if ("type" in node && node.type === "text" && "value" in node && typeof node.value === "string") {
     return node.value;
   }
@@ -1881,6 +1980,15 @@ function findMarkdownFragmentTarget(anchor: HTMLAnchorElement, href: string): HT
   const matchesFragment = (element: HTMLElement) =>
     element.id === decodedId || normalizeSanitizedFragmentId(element.id) === normalizedId;
   const markdownRoot = anchor.closest<HTMLElement>(".chat-markdown");
+  const footnoteScope = anchor.closest<HTMLElement>("[data-markdown-footnote-scope]")?.dataset
+    .markdownFootnoteScope;
+  if (footnoteScope) {
+    for (const scope of document.querySelectorAll<HTMLElement>("[data-markdown-footnote-scope]")) {
+      if (scope.dataset.markdownFootnoteScope !== footnoteScope) continue;
+      const target = Array.from(scope.querySelectorAll<HTMLElement>("[id]")).find(matchesFragment);
+      if (target) return target;
+    }
+  }
   if (markdownRoot) {
     const localTargets = Array.from(markdownRoot.querySelectorAll<HTMLElement>("[id]"));
     const localTarget = localTargets.find(matchesFragment);
@@ -1910,6 +2018,10 @@ function handleMarkdownFragmentClick(event: ReactMouseEvent<HTMLAnchorElement>, 
   if (!target) return;
 
   event.preventDefault();
+  const footnotes = target.closest("[data-stream-footnotes]");
+  if (footnotes) flushSync(() => footnotes.dispatchEvent(new Event("t3-expand-footnotes")));
+  const disclosure = target.closest("details");
+  if (disclosure && !disclosure.open) disclosure.open = true;
   const nextUrl = new URL(window.location.href);
   nextUrl.hash = href.slice(1);
   window.history.pushState(window.history.state, "", nextUrl);
@@ -1921,7 +2033,7 @@ function MarkdownExternalLinkContent({
   plainText,
   children,
 }: {
-  host: string;
+  host: string | null;
   plainText: string | null;
   children: ReactNode;
 }) {
@@ -1933,7 +2045,7 @@ function MarkdownExternalLinkContent({
           <MarkdownLinkFavicon host={host} />
           {plainText.slice(0, leadingLength)}
         </span>
-        {breakableExternalLinkText(plainText.slice(leadingLength))}
+        <span className="[overflow-wrap:anywhere]">{plainText.slice(leadingLength)}</span>
       </>
     );
   }
@@ -1949,7 +2061,7 @@ function MarkdownExternalLinkContent({
           <MarkdownLinkFavicon host={host} />
           {firstChild.slice(0, leadingLength)}
         </span>
-        {breakableExternalLinkText(firstChild.slice(leadingLength))}
+        <span className="[overflow-wrap:anywhere]">{firstChild.slice(leadingLength)}</span>
         {childNodes.slice(1)}
       </>
     );
@@ -2266,6 +2378,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
               render={<a href={href} />}
               className={MARKDOWN_FILE_LINK_CLASS_NAME}
               data-markdown-copy={copyMarkdown}
+              data-smooth-atomic=""
               onClick={(event) => {
                 event.preventDefault();
                 event.stopPropagation();
@@ -2291,6 +2404,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
               aria-haspopup="menu"
               className={cn(MARKDOWN_FILE_LINK_CLASS_NAME, "select-text")}
               data-markdown-copy={copyMarkdown}
+              data-smooth-atomic=""
               onClick={handleContextMenu}
               onContextMenu={handleContextMenu}
             >
@@ -2335,6 +2449,30 @@ function areMarkdownFileLinkPropsEqual(
   );
 }
 
+function useStableMarkdownFileLinks(next: Map<string, MarkdownFileLinkMeta>) {
+  const [previous, setPrevious] = useState(next);
+  const stable =
+    previous.size === next.size &&
+    [...next].every(([key, value]) => {
+      const old = previous.get(key);
+      return (
+        old !== undefined &&
+        old.filePath === value.filePath &&
+        old.targetPath === value.targetPath &&
+        old.displayPath === value.displayPath &&
+        old.workspaceRelativePath === value.workspaceRelativePath &&
+        old.basename === value.basename &&
+        old.line === value.line &&
+        old.column === value.column
+      );
+    })
+      ? previous
+      : next;
+  // Unchanged links must not invalidate every historical Markdown consumer.
+  if (stable !== previous) setPrevious(stable);
+  return stable;
+}
+
 function useChatMarkdownState({
   text,
   cwd,
@@ -2343,7 +2481,7 @@ function useChatMarkdownState({
   environmentId: explicitEnvironmentId,
   onTaskListChange,
   isStreaming = false,
-  skills = EMPTY_MARKDOWN_SKILLS,
+  smoothComplete = false,
   onUseArtifactTemplate,
   onRunShellCommand,
   imageBaseDir,
@@ -2426,7 +2564,10 @@ function useChatMarkdownState({
   );
   const serverConfig = useAtomValue(serverEnvironment.configValueAtom(environmentId));
   const projects = useProjects();
-  const availableEditors = serverConfig?.availableEditors ?? [];
+  const availableEditors = useMemo(
+    () => serverConfig?.availableEditors ?? [],
+    [serverConfig?.availableEditors],
+  );
   const [preferredEditor] = usePreferredEditor(availableEditors);
   const preferredEditorMenuLabel = openInEditorMenuLabel(preferredEditor);
   const openInPreferredEditor = useOpenInPreferredEditor(environmentId, availableEditors);
@@ -2474,7 +2615,7 @@ function useChatMarkdownState({
     [environmentId, openInEditor],
   );
   const diffThemeName = resolveDiffThemeName(resolvedTheme);
-  const markdownFileLinkMetaByHref = useMemo(() => {
+  const parsedMarkdownFileLinks = useMemo(() => {
     const metaByHref = new Map<
       string,
       NonNullable<ReturnType<typeof resolveMarkdownFileLinkMeta>>
@@ -2488,9 +2629,9 @@ function useChatMarkdownState({
         metaByHref.set(normalizedHref, meta);
       }
     }
-    return metaByHref;
+    return metaByHref.size ? metaByHref : EMPTY_MARKDOWN_FILE_LINKS;
   }, [cwd, imageBaseDir, text]);
-  const inlineCodeFileLinkMetaByText = useMemo(() => {
+  const parsedInlineCodeFileLinks = useMemo(() => {
     const metaByText = new Map<string, MarkdownFileLinkMeta>();
     for (const span of extractInlineCodeSpans(text)) {
       if (metaByText.has(span)) continue;
@@ -2499,8 +2640,10 @@ function useChatMarkdownState({
         metaByText.set(span, meta);
       }
     }
-    return metaByText;
+    return metaByText.size ? metaByText : EMPTY_MARKDOWN_FILE_LINKS;
   }, [cwd, imageBaseDir, text]);
+  const markdownFileLinkMetaByHref = useStableMarkdownFileLinks(parsedMarkdownFileLinks);
+  const inlineCodeFileLinkMetaByText = useStableMarkdownFileLinks(parsedInlineCodeFileLinks);
   const fileLinkParentSuffixByPath = useMemo(() => {
     const filePaths = [
       ...[...markdownFileLinkMetaByHref.values()].map((meta) => meta.filePath),
@@ -2799,6 +2942,7 @@ function useChatMarkdownState({
       imageBaseDir,
       inlineCodeFileLinkMetaByText,
       isStreaming,
+      smoothComplete,
       linkTargetPreference,
       markdownFileLinkMetaByHref,
       onTaskListChange,
@@ -2813,8 +2957,6 @@ function useChatMarkdownState({
       resolveThreadPullRequest,
       resolvedTheme,
       serverConfig,
-      skills,
-      text,
       threadRef,
       updateThreadPullRequestLink,
     }),
@@ -2830,6 +2972,7 @@ function useChatMarkdownState({
       imageBaseDir,
       inlineCodeFileLinkMetaByText,
       isStreaming,
+      smoothComplete,
       linkTargetPreference,
       markdownFileLinkMetaByHref,
       onTaskListChange,
@@ -2844,8 +2987,6 @@ function useChatMarkdownState({
       resolveThreadPullRequest,
       resolvedTheme,
       serverConfig,
-      skills,
-      text,
       threadRef,
       updateThreadPullRequestLink,
     ],
@@ -2863,6 +3004,23 @@ function useChatMarkdownState({
 const ChatMarkdownRendererContext = React.createContext<
   ReturnType<typeof useChatMarkdownState>["componentState"]
 >(null!);
+const ChatMarkdownSourceContext = React.createContext("");
+// Paragraphs only need skills. Completion and link metadata must not render
+// every historical paragraph through the full renderer context again.
+const ChatMarkdownSkillsContext = React.createContext(EMPTY_MARKDOWN_SKILLS);
+
+const SmoothMarkdownContext = React.createContext({
+  host: null as HTMLElement | null,
+  inlineHost: null as HTMLElement | null,
+  detached: false,
+  streaming: false,
+  smooth: false,
+  mode: "character" as NonNullable<ChatMarkdownProps["smoothOutputMode"]>,
+  lineMode: "adaptive" as NonNullable<ChatMarkdownProps["smoothOutputLineMode"]>,
+  scope: "",
+  autoCollapse: false,
+  fadeDurationMs: 180,
+});
 
 // Screen readers take a heading's level from its tag, which would let a `#` in a
 // message outrank the heading placed above it. Override only the exposed level:
@@ -2902,7 +3060,7 @@ const CHAT_MARKDOWN_COMPONENTS = {
     return <div {...props}>{children}</div>;
   },
   p: function MarkdownParagraph({ node: _node, children, ...props }) {
-    const { skills } = use(ChatMarkdownRendererContext);
+    const skills = use(ChatMarkdownSkillsContext);
     return <p {...props}>{renderSkillInlineMarkdownChildren(children, skills)}</p>;
   },
   blockquote: function MarkdownBlockquote({ node: _node, children, ...props }) {
@@ -2933,12 +3091,24 @@ const CHAT_MARKDOWN_COMPONENTS = {
     );
   },
   li: function MarkdownListItem({ node, children, ...props }) {
-    const { text, skills } = use(ChatMarkdownRendererContext);
-    const listItemStart = node?.position?.start.offset;
-    const markerOffset =
-      typeof listItemStart === "number" ? findTaskListMarkerOffset(text, listItemStart) : null;
+    const skills = use(ChatMarkdownSkillsContext);
+    const footnotes = use(StreamingFootnoteItemVisibilityContext);
+    const { smooth } = use(SmoothMarkdownContext);
+    if (footnotes?.items.some((item) => item.id === props.id))
+      return (
+        <StreamingMarkdownFootnoteItem {...props}>
+          {renderSkillInlineMarkdownChildren(children, skills)}
+        </StreamingMarkdownFootnoteItem>
+      );
+    // The parser owns source offsets. Completed list rows no longer subscribe
+    // to every new character in the document just to keep their checkbox target.
+    const markerOffset = node?.properties.dataTaskMarkerOffset;
     return (
-      <li {...props} data-task-marker-offset={markerOffset ?? undefined}>
+      <li
+        {...props}
+        data-task-marker-offset={typeof markerOffset === "number" ? markerOffset : undefined}
+        data-smooth-list-empty={smooth && !hastPlainTextDeep(node).trim() ? "" : undefined}
+      >
         {renderSkillInlineMarkdownChildren(children, skills)}
       </li>
     );
@@ -2972,6 +3142,25 @@ const CHAT_MARKDOWN_COMPONENTS = {
     );
   },
   a: function MarkdownAnchor({ node, href, children, title: _title, ...props }) {
+    if (
+      node?.properties?.dataFootnoteRef !== undefined ||
+      node?.properties?.dataFootnoteBackref !== undefined
+    ) {
+      // Footnote navigation is native document navigation. It does not depend
+      // on the changing message context or workspace/external-link resolution.
+      return (
+        <a
+          {...props}
+          href={href || undefined}
+          onClick={(event) => {
+            props.onClick?.(event);
+            if (href) handleMarkdownFragmentClick(event, href);
+          }}
+        >
+          {children}
+        </a>
+      );
+    }
     const {
       cwd,
       environmentId,
@@ -2992,12 +3181,17 @@ const CHAT_MARKDOWN_COMPONENTS = {
       renderContextReference,
     } = use(ChatMarkdownRendererContext);
     const citation = href ? parseAssistantCitationHref(href) : null;
-    if (citation) return <AssistantCitationChip citation={citation} />;
+    if (citation)
+      return (
+        <span data-smooth-atomic="">
+          <AssistantCitationChip citation={citation} />
+        </span>
+      );
     const contextReference = href ? parseComposerContextHref(href) : null;
     if (contextReference) {
       const label = hastPlainTextDeep(node) || contextReference.contextId;
       return renderContextReference ? (
-        renderContextReference({ ...contextReference, label })
+        <span data-smooth-atomic="">{renderContextReference({ ...contextReference, label })}</span>
       ) : (
         <span>{label}</span>
       );
@@ -3039,7 +3233,8 @@ const CHAT_MARKDOWN_COMPONENTS = {
           {...props}
           className={cn(props.className, pullRequestAutolink === "commit" && "font-mono")}
           data-markdown-copy={pullRequestCopy}
-          href={href}
+          data-smooth-atomic={isPullRequestAutolink ? "" : undefined}
+          href={href || undefined}
           target={isSameDocumentLink ? undefined : "_blank"}
           rel={isSameDocumentLink ? undefined : "noopener noreferrer"}
           onClick={(event) => {
@@ -3157,7 +3352,7 @@ const CHAT_MARKDOWN_COMPONENTS = {
             });
           }}
         >
-          {faviconHost && hastHasText(node) && !isPullRequestAutolink ? (
+          {(faviconHost || href === "") && hastHasText(node) && !isPullRequestAutolink ? (
             <MarkdownExternalLinkContent host={faviconHost} plainText={plainHastText(node)}>
               {linkChildren}
             </MarkdownExternalLinkContent>
@@ -3166,7 +3361,7 @@ const CHAT_MARKDOWN_COMPONENTS = {
           )}
         </a>
       );
-      if (!faviconHost || !href) {
+      if (href !== "" && (!faviconHost || !href)) {
         return link;
       }
       if (pullRequestPreviewTarget !== null) {
@@ -3263,6 +3458,18 @@ const CHAT_MARKDOWN_COMPONENTS = {
     const copyMarkdown = markdownImageCopy(altText, srcString, authoredTitle);
     const { className, style: _style, width, height, ...imageProps } = props;
     const authoredSizeStyle = authoredImageSizeStyle(width, height);
+    // rehype-raw serializes custom data attributes when HTML shares the document.
+    if (node?.properties?.dataStreamImagePending !== undefined) {
+      return (
+        <ChatMarkdownImage
+          src={null}
+          alt={altText}
+          copyMarkdown={undefined}
+          standalone={standalone}
+          actionsSource={{ kind: "image", name: altText || "image", src: null }}
+        />
+      );
+    }
     const imageSource = classifyMarkdownImageSource(classifiedSrc, imageBaseDir ?? cwd);
     const kind = mediaKindFromPath(classifiedSrc) ?? "image";
     const directUri = imageSource._tag === "Direct" ? imageSource.uri : null;
@@ -3323,7 +3530,6 @@ const CHAT_MARKDOWN_COMPONENTS = {
       }
       return (
         <ChatMarkdownImage
-          key={mediaSrc}
           src={mediaSrc}
           alt={altText}
           copyMarkdown={copyMarkdown}
@@ -3362,11 +3568,57 @@ const CHAT_MARKDOWN_COMPONENTS = {
   table: function MarkdownTableRenderer({ node: _node, ...props }) {
     return <MarkdownTable {...props} />;
   },
+  section: function MarkdownSection({ node, children, ...props }) {
+    const smooth = use(SmoothMarkdownContext);
+    const text = use(ChatMarkdownSourceContext);
+    if (node?.properties?.dataFootnotes === undefined)
+      return <section {...props}>{children}</section>;
+    const stableChildren = React.Children.toArray(children).map((child) => {
+      if (
+        !React.isValidElement<ReactMarkdownExtraProps & { children?: ReactNode }>(child) ||
+        child.props.node?.tagName !== "ol"
+      )
+        return child;
+      return React.cloneElement(child, {
+        children: React.Children.toArray(child.props.children).map((item) =>
+          React.isValidElement<{ id?: string }>(item) && item.props.id
+            ? React.cloneElement(item, { key: item.props.id })
+            : item,
+        ),
+      });
+    });
+    return (
+      <StreamingMarkdownFootnotes
+        {...props}
+        {...smooth}
+        items={node.children.flatMap((list) =>
+          list.type === "element" && list.tagName === "ol"
+            ? list.children.flatMap((item) =>
+                item.type === "element" && item.tagName === "li"
+                  ? [
+                      {
+                        id: String(item.properties.id),
+                        text: hastPlainTextDeep(item).trimEnd(),
+                        complete:
+                          !smooth.streaming ||
+                          !!text.slice(item.position?.end.offset ?? text.length).trim(),
+                      },
+                    ]
+                  : [],
+              )
+            : [],
+        )}
+      >
+        {stableChildren}
+      </StreamingMarkdownFootnotes>
+    );
+  },
   details: function MarkdownDetailsRenderer({ node: _node, children, open: detailsOpen }) {
     return <MarkdownDetails open={detailsOpen}>{children}</MarkdownDetails>;
   },
   pre: function MarkdownPre({ node, children, ...props }) {
-    const { resolvedTheme, diffThemeName, isStreaming, onRunShellCommand, text } = use(
+    const { smooth } = use(SmoothMarkdownContext);
+    const { resolvedTheme, diffThemeName, isStreaming, smoothComplete, onRunShellCommand } = use(
       ChatMarkdownRendererContext,
     );
     const codeBlock = extractCodeBlock(children);
@@ -3383,7 +3635,7 @@ const CHAT_MARKDOWN_COMPONENTS = {
         fenceTitle={fenceTitle}
         theme={resolvedTheme}
         onRunShellCommand={
-          onRunShellCommand && !isStreaming && isClosedCodeFence(node, text)
+          onRunShellCommand && !isStreaming && node?.properties.dataClosedCodeFence === true
             ? onRunShellCommand
             : undefined
         }
@@ -3393,11 +3645,15 @@ const CHAT_MARKDOWN_COMPONENTS = {
           resetKeys={[codeBlock.code, language, diffThemeName, isStreaming]}
           fallback={<pre {...props}>{children}</pre>}
         >
-          {/* Reserve the block's height but stay hidden until Shiki has colored
-              it, so plain text never flashes before the highlighted version. */}
+          {/* Resource loading cannot withhold a smooth stream's code FIFO. */}
           <Suspense
             fallback={
-              <pre {...props} className="invisible" aria-hidden data-markdown-code-pending="">
+              <pre
+                {...props}
+                className={smooth || smoothComplete ? undefined : "invisible"}
+                aria-hidden={smooth || smoothComplete ? undefined : true}
+                data-markdown-code-pending={smooth || smoothComplete ? undefined : ""}
+              >
                 {children}
               </pre>
             }
@@ -3415,16 +3671,222 @@ const CHAT_MARKDOWN_COMPONENTS = {
   },
 } satisfies Components;
 
+type HastElement = NonNullable<ReactMarkdownExtraProps["node"]>;
+type HastRoot = Parameters<ReturnType<typeof rehypeRaw>>[0];
+
+interface MarkdownBlockCacheEntry {
+  signature: string;
+  child: ReactNode;
+  children?: ReactNode[];
+}
+
+/** Build a new cache without mutating the last committed render's snapshot. */
+function retainMarkdownChildren(
+  children: ReactNode,
+  previousBlocks: ReadonlyMap<string, MarkdownBlockCacheEntry>,
+  reusedNodes: WeakMap<HastElement, MarkdownBlockCacheEntry>,
+) {
+  const nextBlocks = new Map<string, MarkdownBlockCacheEntry>();
+  const stableKey = (child: ReactNode) =>
+    React.isValidElement<ReactMarkdownExtraProps>(child) &&
+    child.props.node?.properties.dataFootnotes !== undefined
+      ? React.cloneElement(child, { key: "stream-footnotes" })
+      : child;
+  // A later authored section changes ReactMarkdown's section-N key. Keep the
+  // generated footnotes' owner alive while surrounding block types evolve.
+  const groupChildren = (children: ReactNode[], path: string): ReactNode[] => {
+    const result: ReactNode[] = [];
+    let pending: ReactNode[] = [];
+    let index = 0;
+    const flush = () => {
+      if (pending.length === 0) return;
+      const key = `$group/${path}/${index++}`;
+      const previous = previousBlocks.get(key);
+      const group =
+        previous?.children?.length === pending.length &&
+        pending.every((child, index) => child === previous.children![index])
+          ? previous
+          : {
+              signature: "",
+              children: pending,
+              child: <React.Fragment key={key}>{pending}</React.Fragment>,
+            };
+      nextBlocks.set(key, group);
+      result.push(group.child);
+      pending = [];
+    };
+    for (const child of children) {
+      // Generated footnotes must stay outside the growing body groups. A new
+      // paragraph can cross a group boundary without remounting their queue.
+      if (React.isValidElement(child) && child.key === "stream-footnotes") {
+        flush();
+        result.push(child);
+      } else {
+        pending.push(child);
+        if (pending.length === 32) flush();
+      }
+    }
+    flush();
+    return result;
+  };
+  const preserveBlock = (child: ReactNode, path = ""): ReactNode => {
+    const keyed = stableKey(child);
+    if (!React.isValidElement<ReactMarkdownExtraProps>(keyed) || !keyed.props.node) return keyed;
+    const key = path + String(keyed.key);
+    const previous = previousBlocks.get(key);
+    const reused = reusedNodes.get(keyed.props.node);
+    if (reused && React.isValidElement(reused.child)) {
+      const retained =
+        reused.child.key === keyed.key
+          ? reused.child
+          : React.cloneElement(reused.child, { key: keyed.key });
+      nextBlocks.set(key, { ...reused, child: retained });
+      return retained;
+    }
+    if (["ul", "ol", "li", "table", "thead", "tbody", "tr"].includes(keyed.props.node.tagName)) {
+      // A growing list/table is one top-level block. Retain completed rows as
+      // well, so appending its last cell does not render every earlier row.
+      const parent = keyed as React.ReactElement<
+        ReactMarkdownExtraProps & { children?: ReactNode }
+      >;
+      const children = React.Children.toArray(parent.props.children).map((nested) =>
+        preserveBlock(nested, `${key}/`),
+      );
+      const grouped = groupChildren(children, key);
+      // Compare each subtree once. Serializing whole lists at every nesting
+      // level repeats the same history and discards descendant caches on reuse.
+      const signature = JSON.stringify({ ...keyed.props.node, children: undefined });
+      const retained =
+        previous?.signature === signature &&
+        previous.children?.length === children.length &&
+        children.every((child, index) => child === previous.children![index])
+          ? previous.child
+          : React.cloneElement(parent, { children: grouped });
+      nextBlocks.set(key, { signature, child: retained, children });
+      return retained;
+    }
+    const signature = JSON.stringify(keyed.props.node);
+    const retained = previous?.signature === signature ? previous.child : keyed;
+    nextBlocks.set(key, { signature, child: retained });
+    return retained;
+  };
+  const retainedChildren = Array.isArray(children)
+    ? children.map((child) => preserveBlock(child))
+    : preserveBlock(children);
+  // Equal blocks keep their children, and unchanged groups let reconciliation
+  // skip whole stretches of history. Fragments add no DOM wrappers. References
+  // still update changed blocks; context subscriptions retain live controls.
+  return {
+    blocks: nextBlocks,
+    children: groupChildren(
+      Array.isArray(retainedChildren) ? retainedChildren : [retainedChildren],
+      "root",
+    ),
+  };
+}
+
+/** Resolve and sanitize the whole document before reusing unchanged JSX. */
+function renderRetainedMarkdown(
+  props: ReactMarkdownOptions,
+  previousBlocks: ReadonlyMap<string, MarkdownBlockCacheEntry>,
+) {
+  const reusedNodes = new WeakMap<HastElement, MarkdownBlockCacheEntry>();
+  const previousByOffset = new Map<number, MarkdownBlockCacheEntry>();
+  for (const [key, entry] of previousBlocks) {
+    if (
+      key.includes("/") ||
+      entry.children ||
+      !React.isValidElement<ReactMarkdownExtraProps>(entry.child)
+    )
+      continue;
+    const offset = entry.child.props.node?.position?.start.offset;
+    if (offset !== undefined) previousByOffset.set(offset, entry);
+  }
+  const reuseHistory: Plugin<[], HastRoot> = () => (tree) => {
+    tree.children = tree.children.map((node) => {
+      if (node.type !== "element" || node.properties.dataFootnotes !== undefined) return node;
+      const offset = node.position?.start.offset;
+      const previous = offset === undefined ? undefined : previousByOffset.get(offset);
+      if (!previous || previous.signature !== JSON.stringify(node)) return node;
+      // The temporary tree skips allocating JSX for known descendants. Restore
+      // the original element below, preserving its component and DOM identity.
+      const stub = { ...node, children: [] };
+      reusedNodes.set(stub, previous);
+      return stub;
+    });
+  };
+  const markdown = ReactMarkdown({
+    ...props,
+    rehypePlugins: [...(props.rehypePlugins ?? []), reuseHistory],
+  });
+  const retained = React.isValidElement<{ children?: ReactNode }>(markdown)
+    ? retainMarkdownChildren(markdown.props.children, previousBlocks, reusedNodes)
+    : null;
+  return { markdown, retained };
+}
+
+const MemoizedReactMarkdown = memo(function StableFootnoteMarkdown(props: ReactMarkdownOptions) {
+  const blocks = useRef(new Map<string, MarkdownBlockCacheEntry>());
+  const { markdown, retained } = renderRetainedMarkdown(props, blocks.current);
+  useLayoutEffect(() => {
+    if (retained) blocks.current = retained.blocks;
+  });
+  return retained && React.isValidElement<{ children?: ReactNode }>(markdown)
+    ? React.cloneElement(markdown, { children: retained.children })
+    : markdown;
+});
+
 function ChatMarkdown({
   text,
   smoothStreaming = false,
-  onSmoothSettled,
+  smoothOutputMode = "character",
+  smoothOutputLineMode = "adaptive",
+  smoothMarkdownPreload = true,
+  smoothTextFadeDurationMs = 180,
+  footnotesAutoCollapse = false,
+  smoothComplete = false,
+  claimInitialSmoothText,
   className,
   lineBreaks = false,
   parseRawHtml = true,
   extraRemarkPlugins = EMPTY_REMARK_PLUGINS,
   ...props
 }: ChatMarkdownProps) {
+  const timelineFootnoteHost = use(StreamingFootnoteHostContext);
+  const footnoteScope = useId();
+  const [localFootnoteHost, setLocalFootnoteHost] = useState<HTMLDivElement | null>(null);
+  const activePlayback = props.isStreaming === true && !smoothComplete;
+  const [remoteIconsReady, setRemoteIconsReady] = useState(!activePlayback);
+  if (activePlayback && remoteIconsReady) setRemoteIconsReady(false);
+  const smoothContext = useMemo(
+    () => ({
+      host: timelineFootnoteHost ?? localFootnoteHost,
+      inlineHost: localFootnoteHost,
+      detached: activePlayback,
+      streaming: activePlayback,
+      smooth: smoothStreaming,
+      mode: smoothOutputMode,
+      lineMode: smoothOutputLineMode,
+      scope: footnoteScope,
+      autoCollapse: footnotesAutoCollapse,
+      fadeDurationMs: smoothTextFadeDurationMs,
+    }),
+    [
+      timelineFootnoteHost,
+      localFootnoteHost,
+      activePlayback,
+      smoothStreaming,
+      smoothOutputMode,
+      smoothOutputLineMode,
+      footnoteScope,
+      footnotesAutoCollapse,
+      smoothTextFadeDurationMs,
+    ],
+  );
+  const renderedText = useStreamingMarkdownText(
+    text,
+    smoothStreaming && props.isStreaming === true && !smoothComplete,
+  );
   const {
     componentState,
     handleCopy,
@@ -3432,59 +3894,107 @@ function ChatMarkdown({
     markdownUrlTransform,
     localMediaPreview,
     setLocalMediaPreview,
-  } = useChatMarkdownState({ text, ...props });
+  } = useChatMarkdownState({ text: renderedText, smoothComplete, ...props });
   useSmoothText(markdownRef, {
     enabled: smoothStreaming,
+    mode: smoothOutputMode,
+    lineMode: smoothOutputLineMode,
     streaming: props.isStreaming === true,
-    onSettled: onSmoothSettled,
+    complete: smoothComplete,
+    claimInitialText: claimInitialSmoothText,
+    sourceText: text,
+    // Match the FIFO's steady buffer horizon. A full second here creates
+    // thousands of queued glyphs before a fast response can begin playing.
+    initialBufferMs: SMOOTH_TEXT_BUFFER_MS,
+    fadeDurationMs: smoothTextFadeDurationMs,
+    onPlaybackComplete: () => setRemoteIconsReady(true),
+  });
+  const incrementalParser = useMemo(() => createIncrementalMarkdownPlugin(), []);
+  const holdingInline =
+    smoothStreaming && smoothMarkdownPreload && props.isStreaming === true && !smoothComplete;
+  const inlineBuffer = useMemo(() => createInlineBufferPlugin(), []);
+  const inlineBufferPlugin = inlineBuffer.configure(holdingInline);
+  useLayoutEffect(() => {
+    inlineBuffer.commit();
   });
   const incrementalParsing =
-    props.isStreaming === true &&
     extraRemarkPlugins.length === 0 &&
-    /(?:^|\n) {0,3}(?:`{3}|~{3})/.test(text);
+    (smoothStreaming ||
+      (props.isStreaming === true && /(?:^|\n) {0,3}(?:`{3}|~{3})/.test(renderedText)));
   const remarkPlugins = useMemo(
     () => [
+      ...(smoothStreaming && inlineBufferPlugin ? [inlineBufferPlugin] : []),
       ...(lineBreaks ? CHAT_MARKDOWN_REMARK_PLUGINS_WITH_BREAKS : CHAT_MARKDOWN_REMARK_PLUGINS),
+      ...(smoothStreaming ? [remarkStableTaskCheckboxes] : []),
       ...extraRemarkPlugins,
-      ...(incrementalParsing ? [createIncrementalMarkdownPlugin()] : []),
+      ...(incrementalParsing ? [incrementalParser] : []),
     ],
-    [extraRemarkPlugins, incrementalParsing, lineBreaks],
+    [
+      extraRemarkPlugins,
+      incrementalParsing,
+      incrementalParser,
+      lineBreaks,
+      smoothStreaming,
+      inlineBufferPlugin,
+    ],
   );
 
   // react-markdown converts unparsed HTML nodes to text when skipHtml is false.
   // Keep that behavior explicit because literal mode depends on escaping the
   // complete source token instead of dropping it from the rendered message.
   return (
-    <div data-smooth-text-frame={smoothStreaming ? "" : undefined}>
-      <div
-        ref={markdownRef}
-        className={cn(
-          "chat-markdown w-full min-w-0 text-sm leading-relaxed text-foreground/[calc(80%+var(--appearance-contrast-boost)/5)] [overflow-wrap:anywhere] [word-break:break-word]",
-          className,
-        )}
-        // Gates the fade-in for blocks that arrive while the response streams.
-        data-streaming={componentState.isStreaming ? "" : undefined}
-        onCopy={handleCopy}
-      >
-        <ChatMarkdownRendererContext value={componentState}>
-          <ReactMarkdown
-            remarkPlugins={remarkPlugins}
-            rehypePlugins={parseRawHtml ? CHAT_MARKDOWN_REHYPE_PLUGINS : undefined}
-            skipHtml={false}
-            components={CHAT_MARKDOWN_COMPONENTS}
-            urlTransform={markdownUrlTransform}
-          >
-            {text}
-          </ReactMarkdown>
-        </ChatMarkdownRendererContext>
-        {localMediaPreview ? (
-          <ExpandedImageDialog
-            preview={localMediaPreview}
-            onClose={() => setLocalMediaPreview(null)}
-          />
-        ) : null}
+    <>
+      <div data-smooth-text-frame={smoothStreaming ? "" : undefined}>
+        <div
+          ref={markdownRef}
+          className={cn(
+            "chat-markdown w-full min-w-0 text-sm leading-relaxed text-foreground/[calc(80%+var(--appearance-contrast-boost)/5)] [overflow-wrap:anywhere] [word-break:break-word]",
+            className,
+          )}
+          // The FIFO owns smooth glyph fades. Only ordinary streaming needs
+          // this ancestor selector, which invalidates every block when removed.
+          data-streaming={componentState.isStreaming && !smoothStreaming ? "" : undefined}
+          data-smooth-streaming={smoothStreaming ? "" : undefined}
+          data-markdown-footnote-scope={footnoteScope}
+          onCopy={handleCopy}
+        >
+          <ChatMarkdownRendererContext value={componentState}>
+            <ChatMarkdownSkillsContext value={props.skills ?? EMPTY_MARKDOWN_SKILLS}>
+              <ChatMarkdownSourceContext value={renderedText}>
+                <MarkdownRemoteIconsContext
+                  value={!smoothStreaming || (!activePlayback && remoteIconsReady)}
+                >
+                  <SmoothMarkdownContext value={smoothContext}>
+                    <MemoizedReactMarkdown
+                      remarkPlugins={remarkPlugins}
+                      rehypePlugins={
+                        parseRawHtml
+                          ? smoothStreaming && extraRemarkPlugins.length === 0
+                            ? SMOOTH_MARKDOWN_REHYPE_PLUGINS
+                            : CHAT_MARKDOWN_REHYPE_PLUGINS
+                          : LITERAL_MARKDOWN_REHYPE_PLUGINS
+                      }
+                      skipHtml={false}
+                      components={CHAT_MARKDOWN_COMPONENTS}
+                      urlTransform={markdownUrlTransform}
+                    >
+                      {renderedText}
+                    </MemoizedReactMarkdown>
+                  </SmoothMarkdownContext>
+                </MarkdownRemoteIconsContext>
+              </ChatMarkdownSourceContext>
+            </ChatMarkdownSkillsContext>
+          </ChatMarkdownRendererContext>
+          {localMediaPreview ? (
+            <ExpandedImageDialog
+              preview={localMediaPreview}
+              onClose={() => setLocalMediaPreview(null)}
+            />
+          ) : null}
+        </div>
       </div>
-    </div>
+      <div ref={setLocalFootnoteHost} data-stream-footnote-local-host="" />
+    </>
   );
 }
 

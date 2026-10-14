@@ -3,6 +3,45 @@ import type {
   OrchestrationV2ShellSnapshot,
   OrchestrationV2ShellStreamItem,
 } from "@t3tools/contracts";
+import * as Equal from "effect/Equal";
+
+/** Socket decoding recreates unchanged metadata on every streaming update.
+ * Share equal plain fields so model/provider selectors do not invalidate the
+ * whole composer. Effect values such as DateTime keep their own equivalence.
+ * This only visits the small shell, never the conversation's message bodies.
+ */
+function retainShellReferences<T>(previous: unknown, next: T): T {
+  if (Equal.equals(previous, next)) return previous as T;
+  if (
+    previous === null ||
+    next === null ||
+    typeof previous !== "object" ||
+    typeof next !== "object"
+  )
+    return next;
+  const array = Array.isArray(next);
+  if (array !== Array.isArray(previous)) return next;
+  if (
+    !array &&
+    (Object.getPrototypeOf(previous) !== Object.prototype ||
+      Object.getPrototypeOf(next) !== Object.prototype)
+  )
+    return next;
+  const before = previous as Record<string, unknown>;
+  const after = next as Record<string, unknown>;
+  const keys = Object.keys(after);
+  let equal = Object.keys(before).length === keys.length;
+  let shared = false;
+  const fields = keys.map((key) => {
+    const value = retainShellReferences(before[key], after[key]);
+    equal &&= Object.hasOwn(before, key) && value === before[key];
+    shared ||= value !== after[key];
+    return [key, value] as const;
+  });
+  if (equal) return previous as T;
+  if (!shared) return next;
+  return (array ? fields.map(([, value]) => value) : Object.fromEntries(fields)) as T;
+}
 
 function upsertById<T extends { readonly id: unknown }>(
   items: ReadonlyArray<T>,
@@ -123,13 +162,15 @@ export function applyShellStreamEvent(
         snapshotSequence: event.sequence,
       };
     case "thread.updated": {
+      const previous = snapshot.threads.find((thread) => thread.id === event.thread.id);
+      const thread = retainShellReferences(previous, event.thread);
       const withoutThread = (threads: OrchestrationV2ShellSnapshot["threads"]) =>
         threads.filter((thread) => thread.id !== event.thread.id);
       return {
         ...snapshot,
         threads:
           event.location === "active"
-            ? upsertById(snapshot.threads, event.thread)
+            ? upsertById(snapshot.threads, thread)
             : withoutThread(snapshot.threads),
         // The archive has its own bounded query/subscription. Older servers may
         // still send archive-located deltas here; remove them from the normal

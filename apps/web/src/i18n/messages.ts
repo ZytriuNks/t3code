@@ -1,6 +1,7 @@
 import type { AppLanguage } from "./locale";
 
 export const EN_MESSAGES = {
+  "chat.footnotes": "Footnotes",
   "settings.language.title": "Language",
   "settings.language.description": "Choose the language used by the interface on this device.",
   "settings.language.system": "Follow system",
@@ -169,6 +170,26 @@ export const EN_MESSAGES = {
   "settings.general.streaming.realtimeDescription":
     "Text appears as it is generated, with more frequent message updates.",
   "settings.general.streaming.smooth": "Smooth output",
+  "settings.general.streaming.unit.title": "Smooth output granularity",
+  "settings.general.streaming.unit.description":
+    "Reveal characters individually or reveal each received token batch together. Automatic switches between them based on buffered text. All modes adapt their speed to the amount of buffered text and its arrival speed.",
+  "settings.general.streaming.unit.character": "Character by character",
+  "settings.general.streaming.unit.token": "Token by token",
+  "settings.general.streaming.unit.auto": "Automatic (character / token)",
+  "settings.general.footnotesAutoCollapse.title": "Automatically collapse footnotes",
+  "settings.general.footnotesAutoCollapse.description":
+    "Keep footnotes collapsed. While generating, show only the current footnote and collapse it after it appears. Following a reference opens all footnotes.",
+  "settings.general.streaming.fade.title": "Text fade duration (ms)",
+  "settings.general.streaming.fade.description":
+    "How long each character or token takes to fade in. Default: 180 ms. Set to 0 to disable text fading; output speed and line movement stay independent.",
+  "settings.general.streaming.preload.title": "Preload Markdown formatting",
+  "settings.general.streaming.preload.description":
+    "Prepare formatting while text is buffered. Incomplete syntax and image references wait for a stable form while surrounding text continues to appear.",
+  "settings.general.streaming.lines.title": "Line animation",
+  "settings.general.streaming.lines.description":
+    "Make room for each line before revealing it. Adaptive blends individual movements into a steady glide as output speeds up; parallel overlaps adjacent line fades.",
+  "settings.general.streaming.lines.adaptive": "Adaptive handoff",
+  "settings.general.streaming.lines.parallel": "Parallel line fades",
   "settings.general.streaming.smoothDescription":
     "New text appears gradually as it arrives for a smoother reading experience.",
   "settings.general.streaming.token": "Token by token (legacy)",
@@ -924,11 +945,16 @@ export const EN_MESSAGES = {
   "settings.general.conversation.structure.default": "Current layout",
   "settings.general.conversation.structure.restructured": "Restructured",
   "settings.general.conversation.structure.resetLabel": "conversation structure",
-  "settings.general.conversation.idleLabel.title": "Live activity label",
+  "settings.general.conversation.thinkingLabel.title": "Thinking label",
+  "settings.general.conversation.thinkingLabel.description":
+    "Shown while the agent is thinking or continuing to write a response.",
+  "settings.general.conversation.thinkingLabel.resetLabel": "thinking label",
+  "settings.general.conversation.thinkingLabel.ariaLabel": "Thinking label",
+  "settings.general.conversation.idleLabel.title": "After-tool waiting label",
   "settings.general.conversation.idleLabel.description":
     "Shown between a tool finishing and the response starting.",
-  "settings.general.conversation.idleLabel.resetLabel": "live activity label",
-  "settings.general.conversation.idleLabel.ariaLabel": "Live activity label",
+  "settings.general.conversation.idleLabel.resetLabel": "after-tool waiting label",
+  "settings.general.conversation.idleLabel.ariaLabel": "After-tool waiting label",
   "settings.general.streaming.requiresRestructured":
     "Smooth output is only available with the restructured conversation layout.",
   "settings.search.item.hide-whitespace-changes.title": "Hide whitespace changes",
@@ -2636,6 +2662,7 @@ export type MessageKey = keyof typeof EN_MESSAGES;
 export type MessageValues = Readonly<Record<string, string | number>>;
 
 export const ZH_CN_MESSAGES = {
+  "chat.footnotes": "脚注",
   "settings.language.title": "语言",
   "settings.language.description": "选择此设备上的界面语言。",
   "settings.language.system": "跟随系统",
@@ -2795,6 +2822,26 @@ export const ZH_CN_MESSAGES = {
   "settings.general.streaming.realtime": "实时输出",
   "settings.general.streaming.realtimeDescription": "文字生成时逐步显示，消息会更频繁地更新。",
   "settings.general.streaming.smooth": "平滑输出",
+  "settings.general.streaming.unit.title": "平滑输出粒度",
+  "settings.general.streaming.unit.description":
+    "逐字符显示，或将收到的每个 token 增量块整体显示。自动模式根据积压量在两者之间切换，所有模式均根据缓存量和上游输出速度自动调速。",
+  "settings.general.streaming.unit.character": "逐字符",
+  "settings.general.streaming.unit.token": "逐 token",
+  "settings.general.streaming.unit.auto": "自动（逐字符 / 逐 token）",
+  "settings.general.footnotesAutoCollapse.title": "脚注自动折叠",
+  "settings.general.footnotesAutoCollapse.description":
+    "默认收起脚注。生成时仅展开当前脚注，绘制完成后自动收起；点击正文引用会展开全部脚注。",
+  "settings.general.streaming.fade.title": "文字淡入时长（毫秒）",
+  "settings.general.streaming.fade.description":
+    "每个字符或 token 的淡入时长，默认 180 毫秒。设为 0 可关闭文字淡入；输出速度和让位动画独立调节。",
+  "settings.general.streaming.preload.title": "预加载md格式",
+  "settings.general.streaming.preload.description":
+    "在缓存中提前准备格式。未完成的语法和图片引用等待格式稳定，周围正文继续显示，减少原文与格式之间的跳变。",
+  "settings.general.streaming.lines.title": "行输出动画",
+  "settings.general.streaming.lines.description":
+    "每行让位后开始显示。动态衔接随输出加速，从逐行缓动过渡到连续平移；多行并行动画允许相邻行的渐入重叠。",
+  "settings.general.streaming.lines.adaptive": "动态衔接",
+  "settings.general.streaming.lines.parallel": "多行并行动画",
   "settings.general.streaming.smoothDescription": "新文字会逐步平滑呈现，阅读起来更连贯。",
   "settings.general.streaming.token": "逐 Token 显示（旧版）",
   "settings.general.streaming.tokenDescription":
@@ -3474,10 +3521,14 @@ export const ZH_CN_MESSAGES = {
   "settings.general.conversation.structure.default": "现有布局",
   "settings.general.conversation.structure.restructured": "重制",
   "settings.general.conversation.structure.resetLabel": "对话结构",
-  "settings.general.conversation.idleLabel.title": "活动标签",
+  "settings.general.conversation.thinkingLabel.title": "Thinking 文案",
+  "settings.general.conversation.thinkingLabel.description": "代理思考或继续输出正文时显示的文案。",
+  "settings.general.conversation.thinkingLabel.resetLabel": "Thinking 文案",
+  "settings.general.conversation.thinkingLabel.ariaLabel": "Thinking 文案",
+  "settings.general.conversation.idleLabel.title": "工具后等待文案",
   "settings.general.conversation.idleLabel.description": "工具结束、正文开始之前显示的文案。",
-  "settings.general.conversation.idleLabel.resetLabel": "活动标签",
-  "settings.general.conversation.idleLabel.ariaLabel": "活动标签",
+  "settings.general.conversation.idleLabel.resetLabel": "工具后等待文案",
+  "settings.general.conversation.idleLabel.ariaLabel": "工具后等待文案",
   "settings.general.streaming.requiresRestructured": "平滑输出仅在重制对话结构下可用。",
   "settings.search.item.hide-whitespace-changes.title": "隐藏空白字符更改",
   "settings.search.item.hide-whitespace-changes.keywords": "差异 忽略 空格 编辑 默认",
