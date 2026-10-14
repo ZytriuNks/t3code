@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { act, Fragment, StrictMode, useRef, type ReactNode } from "react";
+import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -1202,6 +1203,89 @@ describe("useSmoothText", () => {
     }
     await flushFrames();
     expect(hiddenHighlight()).toBeUndefined();
+  });
+
+  it("keeps a row's opening space when appends to that row rewrite its block break", async () => {
+    // A live paragraph ends in its block's break, so each provider append to
+    // it is a rewrite rather than an append. The row whose space is opening
+    // must keep that curve instead of restarting it on every fragment. The
+    // control receives the same fragments as a following paragraph, which is
+    // a plain append, so both runs measure the same source rate.
+    const firstGlyphShownAt = async (rewriteOpeningRow: boolean) => {
+      let now = 0;
+      vi.spyOn(performance, "now").mockImplementation(() => now);
+      mockWrappedRows(40, true);
+      const first = "A".repeat(12);
+      let second = "B".repeat(12);
+      let third = "";
+      const view = () => (
+        <Probe
+          id={rewriteOpeningRow ? "rewriting" : "appending"}
+          text={`${first}\n${second}${third ? `\n${third}` : ""}`}
+          frame
+          markdownParagraph
+          claimInitialText={() => true}
+        />
+      );
+      await render(view());
+      const frame = container.querySelector<HTMLElement>("[data-smooth-text-frame]")!;
+      const shown = second;
+      for (let step = 0; step < 240; step++) {
+        now += 1_000 / 60;
+        const callbacks = [...frames.values()];
+        frames.clear();
+        await act(() => callbacks.forEach((callback) => callback(now)));
+        const hidden = [...(hiddenHighlight() ?? [])].map(rangeText).join("");
+        if (!hidden.includes(shown)) return now;
+        if (Number.parseFloat(frame.style.height) > 20 && step % 3 === 0) {
+          if (rewriteOpeningRow) second += "C";
+          else third += "C";
+          await render(view());
+        }
+      }
+      return Number.POSITIVE_INFINITY;
+    };
+    const appending = await firstGlyphShownAt(false);
+    await act(async () => root?.unmount());
+    frames.clear();
+    highlights.clear();
+    root = createRoot(container);
+    vi.restoreAllMocks();
+    const rewriting = await firstGlyphShownAt(true);
+    expect(appending).toBeLessThan(Number.POSITIVE_INFINITY);
+    expect(rewriting - appending).toBeLessThan(1_000 / 20);
+  });
+
+  it("opens the next row early enough that a slow row hands off without a pause", async () => {
+    let now = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => now);
+    mockWrappedRows(40, true);
+    const rows = Array.from({ length: 4 }, (_, row) => String.fromCharCode(65 + row).repeat(30));
+    await render(
+      <Probe text={rows.join("\n")} frame markdownParagraph claimInitialText={() => true} />,
+    );
+    // Visible text length per 60 Hz frame. The second and later rows have
+    // their own space curve; their first glyph must follow the previous
+    // row's last glyph on the character clock rather than wait for it.
+    let previousVisible = 0;
+    let longestPause = 0;
+    let pauseStartedAt: number | null = null;
+    for (let step = 0; step < 600 && frames.size > 0; step++) {
+      now += 1_000 / 60;
+      const callbacks = [...frames.values()];
+      frames.clear();
+      await act(() => callbacks.forEach((callback) => callback(now)));
+      const hidden = [...(hiddenHighlight() ?? [])].map(rangeText).join("").replace(/\s/gu, "");
+      const visible = rows.join("").length - hidden.length;
+      if (visible > 0 && hidden.length > 0 && visible === previousVisible) pauseStartedAt ??= now;
+      else if (pauseStartedAt !== null) {
+        longestPause = Math.max(longestPause, now - pauseStartedAt);
+        pauseStartedAt = null;
+      }
+      previousVisible = visible;
+    }
+    expect(hiddenHighlight()).toBeUndefined();
+    expect(longestPause).toBeLessThan(1_000 / 15);
   });
 
   it.each([30, 60, 240])(
@@ -6590,6 +6674,9 @@ describe("useSmoothText", () => {
         richText={
           <>
             {history}
+            <span aria-hidden="true">
+              <span data-decoration="" />
+            </span>
             <p>{text}</p>
           </>
         }
@@ -6597,8 +6684,15 @@ describe("useSmoothText", () => {
     );
     await render(view("tail"));
     const first = container.querySelector("p")!;
+    const decoration = container.querySelector("[data-decoration]")!;
     const classify = vi.spyOn(first, "closest");
-    for (let index = 1; index <= 20; index++) await render(view("tail" + " new".repeat(index)));
+    for (let index = 1; index <= 20; index++) {
+      await act(() => {
+        decoration.classList.toggle("opacity-100");
+        flushSync(() => root?.render(view("tail" + " new".repeat(index))));
+      });
+      await flushMutations();
+    }
     expect(classify).not.toHaveBeenCalled();
     expect([...(hiddenHighlight() ?? [])].map(rangeText).join("")).toBe(" new".repeat(20));
   });

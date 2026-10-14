@@ -433,6 +433,8 @@ function observeSmoothText(
   let previousSpaceVelocity = 0;
   let previousSpaceContinuous = 0;
   let previousSpaceEndAt = Number.NEGATIVE_INFINITY;
+  /** How long the latest row's space took to admit its glyphs. */
+  let lineLeadMs = 0;
   let highRateUntil = Number.NEGATIVE_INFINITY;
   let largeDomBurst = false;
   let largeDomBurstUntil = Number.NEGATIVE_INFINITY;
@@ -1817,11 +1819,21 @@ function observeSmoothText(
         // Begin moving the next line while only the last fraction of the
         // admitted row remains. Its text still waits for the FIFO and its own
         // complete paint space; only one next row may obtain that space.
+        // "Last fraction" is measured in time as well as characters: a row
+        // whose final fifth plays faster than the next row's space can open
+        // would otherwise pause at every line break. Never start before the
+        // row is half shown; only one row's space moves at a time, so the
+        // handoff still reads as one row after another.
         const remaining = admittedOffset - (model.nextStart ?? admittedOffset);
+        const admittedLength = admittedOffset - admittedStart;
+        const leadCharacters = Math.min(
+          Math.floor(admittedLength / 2),
+          Math.ceil(lineLeadMs / Math.max(1, model.characterInterval(now))),
+        );
         const nearEnd =
           hasLayout &&
           admittedOffset < modelText.length &&
-          remaining <= Math.max(1, Math.floor((admittedOffset - admittedStart) * 0.2)) &&
+          remaining <= Math.max(1, Math.floor(admittedLength * 0.2), leadCharacters) &&
           (nextLine()?.end ?? 0) > admittedOffset;
         const handoffWait =
           hasLayout &&
@@ -1983,8 +1995,10 @@ function observeSmoothText(
               displacement,
               enterVisible: smoothLineEnterVisible(duration),
             });
+            const opened = reservations.at(-1)!;
+            lineLeadMs = Math.max(0, opened.readyAt - opened.startedAt);
             nextLineCache = null;
-            if (!candidate && reservations.at(-1)!.readyAt <= now) continue;
+            if (!candidate && opened.readyAt <= now) continue;
           }
         }
         if (!candidate || (candidate.at > now && !onlySeparatorsRemain)) break;
@@ -2451,9 +2465,22 @@ function observeSmoothText(
     geometryGeneration++;
     nextLineCache = null;
     if (!isAppend) {
-      reservations = reservations.filter(
-        (open) => previousText.slice(0, open.end) === text.slice(0, open.end),
+      // A live row ends in its block's structural break, so every append to
+      // it rewrites that trailing character. Keep a reservation whose first
+      // glyph and prefix survived, trimmed to the unchanged text; dropping it
+      // restarted the row's space curve on each provider fragment and stalled
+      // every new line. syncGeometry still retargets or clears the row below.
+      let unchanged = 0;
+      while (
+        unchanged < previousText.length &&
+        unchanged < text.length &&
+        previousText[unchanged] === text[unchanged]
+      )
+        unchanged++;
+      reservations = reservations.filter((open) =>
+        open.reflow ? open.start <= unchanged : open.start < unchanged,
       );
+      for (const open of reservations) open.end = Math.min(open.end, unchanged);
     }
     // Appending to a word or inline code can move its already visible prefix
     // onto a wrapped line. Accommodate that reflow in this commit, before paint.
