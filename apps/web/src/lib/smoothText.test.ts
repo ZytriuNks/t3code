@@ -951,6 +951,30 @@ describe("createSmoothText", () => {
     expect(split.advance(1_000)).toBe("🙂".length);
   });
 
+  it.each([
+    ["a combining mark extending the cluster before the change", "ab\n", "ab́c\n"],
+    ["an emoji suffix after an emoji", "x🙂\n", "x🙂👍y\n"],
+    ["a flag completing a regional indicator pair", "🇺🇸🇬\n", "🇺🇸🇬🇧\n"],
+    ["a zero-width joiner sequence", "a👨\n", "a👨‍👩‍👧z\n"],
+  ])("keeps whole graphemes when a block-break rewrite meets %s", (_label, before, after) => {
+    // Streaming appends to a live block rewrite its trailing break; every
+    // exposed offset must still be a grapheme boundary of the new text.
+    const controller = createSmoothText("");
+    controller.update(before, true, 0);
+    controller.update(after, true, 10);
+    const boundaries = Array.from(
+      new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(after),
+      ({ index, segment }) => index + segment.length,
+    );
+    const exposed: number[] = [];
+    for (let now = 1_000; controller.pending && now < 5_000; now += 5) {
+      const offset = controller.advance(now);
+      if (offset !== exposed.at(-1)) exposed.push(offset);
+    }
+    expect(controller.pending).toBe(false);
+    expect(exposed).toEqual(boundaries);
+  });
+
   it("extends an already visible grapheme when a combining suffix arrives", () => {
     const controller = createSmoothText("");
     controller.update("e", true, 0);

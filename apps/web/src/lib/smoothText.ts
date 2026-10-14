@@ -422,9 +422,13 @@ export function createSmoothText(
         // A later Markdown rewrite must not merge untouched queued batches.
         chunkEnds = chunkEnds.filter((end) => end <= Math.max(commonPrefix, retainedOffset));
         chunkCursor = 0;
+        // A live block ends in its structural break, so ordinary streaming
+        // reaches this branch on every append. Keep the unchanged prefix's
+        // segmentation and resume one grapheme before the change, as the
+        // append path does, instead of segmenting the whole message again.
+        graphemeEnds.length = Math.max(0, boundaryCountThrough(commonPrefix) - 1);
         text = nextText;
-        graphemeEnds = [];
-        appendBoundaries(0);
+        appendBoundaries(graphemeEnds.at(-1) ?? 0);
         if (!nextStreaming && safeEnd < text.length) {
           graphemeEnds.push(text.length);
           safeEnd = text.length;
@@ -434,13 +438,8 @@ export function createSmoothText(
         if (keepBuffering) {
           // Markdown can replace rendered text when a delimiter closes. Keep
           // its stable visible prefix and continue playing the remaining FIFO.
-          while (
-            boundaryCursor < graphemeEnds.length &&
-            graphemeEnds[boundaryCursor]! <= stablePrefix
-          ) {
-            visibleOffset = graphemeEnds[boundaryCursor]!;
-            boundaryCursor += 1;
-          }
+          boundaryCursor = boundaryCountThrough(stablePrefix);
+          visibleOffset = graphemeEnds[boundaryCursor - 1] ?? 0;
           if (wasEmpty) {
             revealCredit = 0;
             layoutIntervalFloor = null;

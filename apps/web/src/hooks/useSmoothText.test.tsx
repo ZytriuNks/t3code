@@ -1205,18 +1205,17 @@ describe("useSmoothText", () => {
     expect(hiddenHighlight()).toBeUndefined();
   });
 
-  it("keeps a row's opening space when appends to that row rewrite its block break", async () => {
-    // A live paragraph ends in its block's break, so each provider append to
-    // it is a rewrite rather than an append. The row whose space is opening
-    // must keep that curve instead of restarting it on every fragment. The
-    // control receives the same fragments as a following paragraph, which is
-    // a plain append, so both runs measure the same source rate.
+  it("keeps a row's opening space when a rewrite changes that row's tail", async () => {
+    // Markdown can rewrite the end of the row whose space is opening, e.g. when
+    // a delimiter resolves. The row must keep its curve instead of restarting
+    // it on every such commit. The control receives the same fragments as a
+    // following paragraph, a plain append, so both runs measure one source rate.
     const firstGlyphShownAt = async (rewriteOpeningRow: boolean) => {
       let now = 0;
       vi.spyOn(performance, "now").mockImplementation(() => now);
       mockWrappedRows(40, true);
       const first = "A".repeat(12);
-      let second = "B".repeat(12);
+      let second = `${"B".repeat(12)}x`;
       let third = "";
       const view = () => (
         <Probe
@@ -1229,7 +1228,7 @@ describe("useSmoothText", () => {
       );
       await render(view());
       const frame = container.querySelector<HTMLElement>("[data-smooth-text-frame]")!;
-      const shown = second;
+      const shown = "B".repeat(12);
       for (let step = 0; step < 240; step++) {
         now += 1_000 / 60;
         const callbacks = [...frames.values()];
@@ -1238,7 +1237,7 @@ describe("useSmoothText", () => {
         const hidden = [...(hiddenHighlight() ?? [])].map(rangeText).join("");
         if (!hidden.includes(shown)) return now;
         if (Number.parseFloat(frame.style.height) > 20 && step % 3 === 0) {
-          if (rewriteOpeningRow) second += "C";
+          if (rewriteOpeningRow) second = `${second.slice(0, -1)}Cx`;
           else third += "C";
           await render(view());
         }

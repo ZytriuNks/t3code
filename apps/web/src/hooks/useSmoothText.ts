@@ -273,6 +273,19 @@ function readText(element: HTMLElement, cache: ReturnType<typeof createTextReadC
     chunks.push(value);
     length += nodeLength;
   }
+  // Markdown renderers separate blocks with whitespace-only text nodes, so a
+  // streaming message ends in one. Leave it out: it has no paint, and keeping
+  // it made every append to the live block a rewrite of that break, which
+  // costs the retained-text mapping on each provider fragment. Once a later
+  // block follows it, the separator is read in place and the update appends.
+  while (nodes.length > 0 && nodes.at(-1)!.end === length && !/\S/u.test(chunks.at(-1)!)) {
+    length = nodes.pop()!.start;
+    chunks.pop();
+  }
+  while ((lineStarts.at(-1) ?? 0) > length) lineStarts.pop();
+  while (inactiveRanges.length > 0 && inactiveRanges.at(-1)!.start >= length) inactiveRanges.pop();
+  if (inactiveRanges.length > 0)
+    inactiveRanges.at(-1)!.end = Math.min(inactiveRanges.at(-1)!.end, length);
   return { text: chunks.join(""), nodes, objects, lineStarts, inactiveRanges };
 }
 
