@@ -78,7 +78,7 @@ function codeButton(renderer: ReactTestRenderer, label: string) {
 }
 
 describe("streamed Markdown media", () => {
-  it("keeps remote favicon requests out of the entire smooth playback", async () => {
+  it("requests a link's favicon during smooth playback without replacing its label", async () => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     let renderer: ReactTestRenderer | undefined;
     const source = "See [reference][ref].\n\n[ref]: https://example.com\n";
@@ -91,11 +91,14 @@ describe("streamed Markdown media", () => {
       });
       const label = renderer!.root.findByType("a");
       expect(label.props.href).toBe("https://example.com");
-      expect(renderer!.root.findAllByType("img")).toHaveLength(0);
+      // Playback ignores the fixed, aria-hidden icon box, so its request need
+      // not wait for the whole response to finish.
+      const icon = renderer!.root.findByType("img");
+      expect(icon.props.src).toContain("example.com");
       await act(() => renderer!.update(view(source + "\nFollowing text")));
-      expect(renderer!.root.findAllByType("img")).toHaveLength(0);
+      expect(renderer!.root.findByType("img")).toBe(icon);
       await act(() => renderer!.update(view(source + "\nFollowing text", false)));
-      expect(renderer!.root.findAllByType("img")).toHaveLength(1);
+      expect(renderer!.root.findByType("img")).toBe(icon);
       expect(renderer!.root.findByType("a")).toBe(label);
     } finally {
       await act(() => renderer?.unmount());

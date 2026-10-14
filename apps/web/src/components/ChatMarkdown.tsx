@@ -1384,7 +1384,6 @@ const MARKDOWN_LINK_FAVICON_CLASS_NAME = "block size-full shrink-0 select-none";
 
 /** Hosts whose favicon request already failed this session — skip straight to the globe. */
 const failedFaviconHosts = new Set<string>();
-const MarkdownRemoteIconsContext = React.createContext(true);
 
 /** Sites whose brand mark (drawn in `currentColor`) replaces the fetched favicon so it follows the theme. */
 function brandLinkIcon(host: string): typeof GitHubIcon | null {
@@ -1394,12 +1393,14 @@ function brandLinkIcon(host: string): typeof GitHubIcon | null {
 }
 
 const MarkdownLinkFavicon = memo(function MarkdownLinkFavicon({ host }: { host: string | null }) {
-  const remoteIconsReady = use(MarkdownRemoteIconsContext);
   const [failedHost, setFailedHost] = useState<string | null>(null);
   const [loadedHost, setLoadedHost] = useState<string | null>(null);
   const BrandIcon = host ? brandLinkIcon(host) : null;
-  const faviconUrl =
-    !remoteIconsReady || !host || BrandIcon ? null : faviconUrlForOrigin(`https://${host}`);
+  // The icon box has a fixed, strictly contained footprint and sits in an
+  // aria-hidden shell, which smooth playback ignores. Loading, failing and the
+  // globe swap therefore never touch the text queue or its geometry, so the
+  // request can start as soon as the link renders.
+  const faviconUrl = !host || BrandIcon ? null : faviconUrlForOrigin(`https://${host}`);
   return (
     <span
       className="relative ms-[0.25em] me-[0.2em] inline-block size-[14px] align-[-0.125em] [contain:strict]"
@@ -3856,8 +3857,6 @@ function ChatMarkdown({
   const footnoteScope = useId();
   const [localFootnoteHost, setLocalFootnoteHost] = useState<HTMLDivElement | null>(null);
   const activePlayback = props.isStreaming === true && !smoothComplete;
-  const [remoteIconsReady, setRemoteIconsReady] = useState(!activePlayback);
-  if (activePlayback && remoteIconsReady) setRemoteIconsReady(false);
   const smoothContext = useMemo(
     () => ({
       host: timelineFootnoteHost ?? localFootnoteHost,
@@ -3907,7 +3906,6 @@ function ChatMarkdown({
     // thousands of queued glyphs before a fast response can begin playing.
     initialBufferMs: SMOOTH_TEXT_BUFFER_MS,
     fadeDurationMs: smoothTextFadeDurationMs,
-    onPlaybackComplete: () => setRemoteIconsReady(true),
   });
   const incrementalParser = useMemo(() => createIncrementalMarkdownPlugin(), []);
   const holdingInline =
@@ -3961,27 +3959,23 @@ function ChatMarkdown({
           <ChatMarkdownRendererContext value={componentState}>
             <ChatMarkdownSkillsContext value={props.skills ?? EMPTY_MARKDOWN_SKILLS}>
               <ChatMarkdownSourceContext value={renderedText}>
-                <MarkdownRemoteIconsContext
-                  value={!smoothStreaming || (!activePlayback && remoteIconsReady)}
-                >
-                  <SmoothMarkdownContext value={smoothContext}>
-                    <MemoizedReactMarkdown
-                      remarkPlugins={remarkPlugins}
-                      rehypePlugins={
-                        parseRawHtml
-                          ? smoothStreaming && extraRemarkPlugins.length === 0
-                            ? SMOOTH_MARKDOWN_REHYPE_PLUGINS
-                            : CHAT_MARKDOWN_REHYPE_PLUGINS
-                          : LITERAL_MARKDOWN_REHYPE_PLUGINS
-                      }
-                      skipHtml={false}
-                      components={CHAT_MARKDOWN_COMPONENTS}
-                      urlTransform={markdownUrlTransform}
-                    >
-                      {renderedText}
-                    </MemoizedReactMarkdown>
-                  </SmoothMarkdownContext>
-                </MarkdownRemoteIconsContext>
+                <SmoothMarkdownContext value={smoothContext}>
+                  <MemoizedReactMarkdown
+                    remarkPlugins={remarkPlugins}
+                    rehypePlugins={
+                      parseRawHtml
+                        ? smoothStreaming && extraRemarkPlugins.length === 0
+                          ? SMOOTH_MARKDOWN_REHYPE_PLUGINS
+                          : CHAT_MARKDOWN_REHYPE_PLUGINS
+                        : LITERAL_MARKDOWN_REHYPE_PLUGINS
+                    }
+                    skipHtml={false}
+                    components={CHAT_MARKDOWN_COMPONENTS}
+                    urlTransform={markdownUrlTransform}
+                  >
+                    {renderedText}
+                  </MemoizedReactMarkdown>
+                </SmoothMarkdownContext>
               </ChatMarkdownSourceContext>
             </ChatMarkdownSkillsContext>
           </ChatMarkdownRendererContext>

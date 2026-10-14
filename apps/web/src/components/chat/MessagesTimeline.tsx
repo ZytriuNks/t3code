@@ -3287,6 +3287,13 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
   const ctx = use(TimelineRowCtx);
   const activity = use(TimelineRowActivityCtx);
   const messageText = row.message.text || (row.message.streaming ? "" : "(empty response)");
+  // Every streamed fragment re-renders the mounted rows through the shared
+  // context. A fresh closure here would also re-render each row's Markdown.
+  const { claimInitialSmoothText: claimSmoothText } = ctx;
+  const claimInitialSmoothText = useCallback(
+    () => claimSmoothText(row.id, row.message.createdAt),
+    [claimSmoothText, row.id, row.message.createdAt],
+  );
 
   return (
     <>
@@ -3317,7 +3324,7 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
                   activity.latestRunId !== null &&
                   row.message.runId !== activity.latestRunId))
             }
-            claimInitialSmoothText={() => ctx.claimInitialSmoothText(row.id, row.message.createdAt)}
+            claimInitialSmoothText={claimInitialSmoothText}
             lineBreaks={shouldPreserveAssistantLineBreaks(messageText)}
             skills={ctx.skills}
             headingLevelOffset={MESSAGE_HEADING_LEVEL}
@@ -5887,40 +5894,51 @@ function remarkThoughtPreview(fallback: string) {
 }
 
 function ReasoningTraceContent({ entries }: { entries: ReadonlyArray<TimelineWorkEntry> }) {
-  const ctx = use(TimelineRowCtx);
-  const { isWorking, latestRunId } = use(TimelineRowActivityCtx);
   return (
     <WorkLogDetails>
       {entries.map((entry) => (
-        <ChatMarkdown
-          key={entry.id}
-          className="text-foreground"
-          text={entry.detail ?? ""}
-          cwd={ctx.markdownCwd}
-          threadRef={ctx.threadRef ?? undefined}
-          skills={ctx.skills}
-          isStreaming={
-            isWorking && entry.runId === latestRunId && entry.toolLifecycleStatus === "inProgress"
-          }
-          smoothStreaming={ctx.smoothStreaming}
-          smoothOutputMode={ctx.smoothOutputMode}
-          smoothOutputLineMode={ctx.smoothOutputLineMode}
-          smoothMarkdownPreload={ctx.smoothMarkdownPreload}
-          smoothTextFadeDurationMs={ctx.smoothTextFadeDurationMs}
-          footnotesAutoCollapse={ctx.footnotesAutoCollapse}
-          smoothComplete={
-            ctx.smoothStreaming &&
-            (!isWorking ||
-              (entry.runId != null && latestRunId !== null && entry.runId !== latestRunId))
-          }
-          claimInitialSmoothText={() => ctx.claimInitialSmoothText(entry.id, entry.createdAt)}
-          headingLevelOffset={MESSAGE_HEADING_LEVEL}
-          onUseArtifactTemplate={ctx.onUseArtifactTemplate}
-          onImageExpand={ctx.onImageExpand}
-          lineBreaks
-        />
+        <ReasoningTraceEntryMarkdown key={entry.id} entry={entry} />
       ))}
     </WorkLogDetails>
+  );
+}
+
+function ReasoningTraceEntryMarkdown({ entry }: { entry: TimelineWorkEntry }) {
+  const ctx = use(TimelineRowCtx);
+  const { isWorking, latestRunId } = use(TimelineRowActivityCtx);
+  // A fresh closure per render would defeat ChatMarkdown's memo on every
+  // streamed fragment of any other row.
+  const { claimInitialSmoothText: claimSmoothText } = ctx;
+  const claimInitialSmoothText = useCallback(
+    () => claimSmoothText(entry.id, entry.createdAt),
+    [claimSmoothText, entry.id, entry.createdAt],
+  );
+  return (
+    <ChatMarkdown
+      className="text-foreground"
+      text={entry.detail ?? ""}
+      cwd={ctx.markdownCwd}
+      threadRef={ctx.threadRef ?? undefined}
+      skills={ctx.skills}
+      isStreaming={
+        isWorking && entry.runId === latestRunId && entry.toolLifecycleStatus === "inProgress"
+      }
+      smoothStreaming={ctx.smoothStreaming}
+      smoothOutputMode={ctx.smoothOutputMode}
+      smoothOutputLineMode={ctx.smoothOutputLineMode}
+      smoothMarkdownPreload={ctx.smoothMarkdownPreload}
+      smoothTextFadeDurationMs={ctx.smoothTextFadeDurationMs}
+      footnotesAutoCollapse={ctx.footnotesAutoCollapse}
+      smoothComplete={
+        ctx.smoothStreaming &&
+        (!isWorking || (entry.runId != null && latestRunId !== null && entry.runId !== latestRunId))
+      }
+      claimInitialSmoothText={claimInitialSmoothText}
+      headingLevelOffset={MESSAGE_HEADING_LEVEL}
+      onUseArtifactTemplate={ctx.onUseArtifactTemplate}
+      onImageExpand={ctx.onImageExpand}
+      lineBreaks
+    />
   );
 }
 
