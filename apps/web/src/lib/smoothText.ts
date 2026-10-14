@@ -3,6 +3,7 @@ import type { SmoothOutputMode } from "@t3tools/contracts";
 const START_BUFFER_WINDOW_MS = 1_000;
 const BASE_GRAPHEMES_PER_SECOND = 48;
 const ARRIVAL_WINDOW_MS = 1_000;
+const MIN_ARRIVAL_SPAN_MS = 100;
 export const SMOOTH_TEXT_BUFFER_MS = 80;
 const TARGET_BUFFER_GRAPHEMES = 32;
 const MAX_CATCH_UP_RATE = 2;
@@ -215,7 +216,12 @@ export function createSmoothText(
     const first = arrivalSamples[0];
     const latest = arrivalSamples.at(-1);
     if (first && latest && latest.at > first.at) {
-      lastArrivalRate = ((latest.total - first.total) * 1_000) / (latest.at - first.at);
+      // Two fragments committed a few milliseconds apart say nothing about
+      // the provider's pace. Measuring them over their own gap read a short
+      // opening burst as thousands of glyphs per second and showed it at once.
+      lastArrivalRate =
+        ((latest.total - first.total) * 1_000) /
+        Math.max(MIN_ARRIVAL_SPAN_MS, latest.at - first.at);
     }
     return lastArrivalRate;
   };

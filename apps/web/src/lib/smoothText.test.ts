@@ -806,6 +806,40 @@ describe("createSmoothText", () => {
     expect(controller.advance(14)).toBe(9);
   });
 
+  it("does not read two fragments committed milliseconds apart as a fast source", () => {
+    // React can commit a provider's first two fragments in consecutive
+    // frames. Their few-millisecond gap is not the provider's pace.
+    const controller = createSmoothTextLines("", 80);
+    let text = "";
+    const arrivals: Array<[number, number]> = [
+      [0, 50],
+      [10, 50],
+      ...Array.from({ length: 10 }, (_, index) => [210 + index * 200, 30] as [number, number]),
+    ];
+    let next = 0;
+    let previousShown = 0;
+    let largestFrame = 0;
+    for (let now = 0; now <= 4_000; now += 1_000 / 60) {
+      while (next < arrivals.length && arrivals[next]![0] <= now) {
+        const [at, count] = arrivals[next++]!;
+        text += "字".repeat(count);
+        controller.recordArrival(count, at);
+        controller.update(text, true, at);
+      }
+      let due = controller.peek(now);
+      while (due && due.at <= now) {
+        controller.advance(now, due.end, Math.max(now - 1_000 / 60, due.at));
+        due = controller.peek(now);
+      }
+      const shown = text.length - controller.pendingGraphemeCount;
+      largestFrame = Math.max(largestFrame, shown - previousShown);
+      previousShown = shown;
+    }
+    expect(controller.pending).toBe(false);
+    // Twice a 100ms estimate of the opening burst, at 60 Hz.
+    expect(largestFrame).toBeLessThanOrEqual(17);
+  });
+
   it("keeps the last measured source rate while no new source samples arrive", () => {
     const controller = createSmoothText("history");
     controller.recordArrival(1, 0);
