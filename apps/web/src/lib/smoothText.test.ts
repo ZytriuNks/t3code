@@ -840,6 +840,38 @@ describe("createSmoothText", () => {
     expect(largestFrame).toBeLessThanOrEqual(17);
   });
 
+  it("bridges a chunky provider's gaps instead of stopping between chunks", () => {
+    // 16 glyphs about every 133ms is only 120 glyphs/s, but an 80ms reserve
+    // empties before a late chunk arrives and playback follows the chunks.
+    const gaps = [100, 166, 133, 200, 66, 133];
+    const controller = createSmoothTextLines("", 80);
+    let text = "";
+    let arrivalAt = 0;
+    let chunk = 0;
+    let lastRevealAt = 0;
+    let longestStall = 0;
+    for (let frame = 0; frame <= 600; frame++) {
+      const now = (frame * 1_000) / 60;
+      while (arrivalAt <= now && arrivalAt < 9_000) {
+        text += "字".repeat(16);
+        controller.recordArrival(16, arrivalAt);
+        controller.update(text, true, arrivalAt);
+        arrivalAt += gaps[chunk++ % gaps.length]!;
+      }
+      const before = controller.offset;
+      let due = controller.peek(now);
+      while (due && due.at <= now) {
+        controller.advance(now, due.end, Math.max(now - 1_000 / 60, due.at));
+        due = controller.peek(now);
+      }
+      if (controller.offset > before) {
+        if (now >= 2_000 && now <= 8_000) longestStall = Math.max(longestStall, now - lastRevealAt);
+        lastRevealAt = now;
+      }
+    }
+    expect(longestStall).toBeLessThanOrEqual((1_000 / 60) * 2 + 0.001);
+  });
+
   it("keeps the last measured source rate while no new source samples arrive", () => {
     const controller = createSmoothText("history");
     controller.recordArrival(1, 0);

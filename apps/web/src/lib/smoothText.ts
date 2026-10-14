@@ -6,6 +6,7 @@ const ARRIVAL_WINDOW_MS = 1_000;
 const MIN_ARRIVAL_SPAN_MS = 100;
 export const SMOOTH_TEXT_BUFFER_MS = 80;
 const TARGET_BUFFER_GRAPHEMES = 32;
+const MAX_POOL_GAP_MS = 400;
 const MAX_CATCH_UP_RATE = 2;
 const POOL_FEEDBACK_GAIN = 0.8;
 const REFILL_HEADROOM = 0.35;
@@ -225,13 +226,29 @@ export function createSmoothText(
     }
     return lastArrivalRate;
   };
+  /** Mean time between provider fragments in the current rate window. */
+  const arrivalGap = () => {
+    const first = arrivalSamples[0];
+    const latest = arrivalSamples.at(-1);
+    return first && latest && arrivalSamples.length > 1
+      ? (latest.at - first.at) / (arrivalSamples.length - 1)
+      : 0;
+  };
   const characterInterval = (now: number, backlog = pendingCount()) => {
     const rate =
       arrivalRate(now) ||
       Math.max(BASE_GRAPHEMES_PER_SECOND, Number.isFinite(backlog) ? backlog : pendingCount());
+    // Hold enough text to bridge one provider gap. A fixed 80ms reserve
+    // emptied between the fragments of a slow, chunky provider, so playback
+    // stopped and restarted with every chunk. Longer silences are pauses, not
+    // jitter, and the glyph cap still bounds what a fast stream can leave
+    // queued when it ends.
     const target = Math.max(
       1,
-      Math.min(TARGET_BUFFER_GRAPHEMES, (rate * SMOOTH_TEXT_BUFFER_MS) / 1_000),
+      Math.min(
+        TARGET_BUFFER_GRAPHEMES,
+        (rate * Math.max(SMOOTH_TEXT_BUFFER_MS, Math.min(MAX_POOL_GAP_MS, arrivalGap()))) / 1_000,
+      ),
     );
     // The pool is the smoothing reserve, so hold it at the target instead of
     // only following the source. Merely matching the arrival rate is neutral:
