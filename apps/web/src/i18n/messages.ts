@@ -178,7 +178,7 @@ export const EN_MESSAGES = {
   "settings.general.streaming.unit.auto": "Automatic (character / token)",
   "settings.general.footnotesAutoCollapse.title": "Automatically collapse footnotes",
   "settings.general.footnotesAutoCollapse.description":
-    "Keep footnotes collapsed. While generating, show only the current footnote and collapse it after it appears. Following a reference opens all footnotes.",
+    "Keep footnotes collapsed. While generating, show the footnotes being written and collapse them once they finish; footnotes written back to back stay open until the last one is done. Following a reference opens all footnotes.",
   "settings.general.streaming.fade.title": "Text fade duration",
   "settings.general.streaming.fade.description":
     "How long each character or token takes to fade in. Default: 200 ms. Set to 0 to disable text fading; output speed and line movement stay independent.",
@@ -2834,7 +2834,7 @@ export const ZH_CN_MESSAGES = {
   "settings.general.streaming.unit.auto": "自动（逐字符 / 逐 token）",
   "settings.general.footnotesAutoCollapse.title": "脚注自动折叠",
   "settings.general.footnotesAutoCollapse.description":
-    "默认收起脚注。生成时仅展开当前脚注，绘制完成后自动收起；点击正文引用会展开全部脚注。",
+    "默认收起脚注。生成时展开正在绘制的脚注，绘制完成后自动收起；连续输出的几条脚注会全部显示完再一起收起。点击正文引用会展开全部脚注。",
   "settings.general.streaming.fade.title": "文字淡入时长",
   "settings.general.streaming.fade.description":
     "每个字符或 token 的淡入时长，默认 200 毫秒。设为 0 可关闭文字淡入；输出速度和让位动画独立调节。",

@@ -2710,6 +2710,15 @@ function GeneralSettingsRows() {
   // already animates the same growing body, and two clocks would compete.
   const smoothOutputAvailable =
     !mixedConversationStructure && settings.conversationStructure === "restructured";
+  // Leaving the restructured layout turns smooth output off, so it falls back
+  // to realtime instead of showing a mode that no longer applies.
+  const selectConversationStructure = (value: ConversationStructure) =>
+    updateSettings({
+      conversationStructure: value,
+      ...(value === "default" && settings.responseStreamingMode === "smooth"
+        ? { responseStreamingMode: "realtime" as const }
+        : {}),
+    });
   const mixedConversationStructureIdleLabel = useScopedSettingsMixed([
     "conversationStructureIdleLabel",
   ]);
@@ -3850,9 +3859,7 @@ function GeneralSettingsRows() {
               <SettingResetButton
                 label={t("settings.general.conversation.structure.resetLabel")}
                 onClick={() =>
-                  updateSettings({
-                    conversationStructure: DEFAULT_UNIFIED_SETTINGS.conversationStructure,
-                  })
+                  selectConversationStructure(DEFAULT_UNIFIED_SETTINGS.conversationStructure)
                 }
               />
             ) : null
@@ -3862,7 +3869,7 @@ function GeneralSettingsRows() {
               value={mixedConversationStructure ? null : settings.conversationStructure}
               onValueChange={(value) => {
                 if (value === "default" || value === "restructured") {
-                  updateSettings({ conversationStructure: value });
+                  selectConversationStructure(value);
                 }
               }}
             >
