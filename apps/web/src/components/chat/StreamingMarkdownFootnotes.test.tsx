@@ -242,6 +242,75 @@ describe("streaming footnote ownership", () => {
     expect(widget.querySelectorAll("li")[0]).toBe(first);
     expect(widget.querySelectorAll("li")[1]).toBe(second);
   });
+
+  describe("a run of notes written back to back", () => {
+    const run = ({ second, finished }: { second: boolean; finished: boolean }) => (
+      <StreamingMarkdownFootnotes
+        host={host}
+        detached
+        streaming
+        smooth={false}
+        mode="character"
+        lineMode="adaptive"
+        autoCollapse
+        items={[
+          { id: "footnote-one", text: "first", complete: second || finished },
+          ...(second
+            ? [{ id: "footnote-two", text: "second", complete: finished, follows: "footnote-one" }]
+            : []),
+        ]}
+      >
+        <ol>
+          <StreamingMarkdownFootnoteItem id="footnote-one">first</StreamingMarkdownFootnoteItem>
+          {second ? (
+            <StreamingMarkdownFootnoteItem id="footnote-two">second</StreamingMarkdownFootnoteItem>
+          ) : null}
+        </ol>
+      </StreamingMarkdownFootnotes>
+    );
+    const completeTransition = (widget: HTMLElement) => {
+      const event = new Event("transitionend", { bubbles: true });
+      Object.defineProperty(event, "propertyName", { value: "height" });
+      widget.querySelector('[data-slot="collapsible-panel"]')!.dispatchEvent(event);
+    };
+
+    it("plays every note of the run, then collapses them together", async () => {
+      await act(() => root.render(run({ second: false, finished: false })));
+      const widget = host.querySelector<HTMLElement>("[data-stream-footnotes]")!;
+      const first = widget.querySelector("li")!;
+      await act(() => root.render(run({ second: true, finished: false })));
+      const second = widget.querySelectorAll("li")[1]!;
+      // The first note is finished, but the next one continues the run.
+      expect(widget.dataset.markdownDetailsOpen).toBe("true");
+      expect(first.hidden).toBe(false);
+      expect(second.hidden).toBe(false);
+      await act(() => vi.advanceTimersByTime(1_000));
+      expect(widget.dataset.markdownDetailsOpen).toBe("true");
+      await act(() => root.render(run({ second: true, finished: true })));
+      await act(() => vi.advanceTimersByTime(650));
+      expect(widget.dataset.markdownDetailsOpen).toBe("false");
+      // Both stay measurable until the shared collapse reaches zero height.
+      expect(first.hidden).toBe(false);
+      expect(second.hidden).toBe(false);
+      await act(() => completeTransition(widget));
+      expect(first.hidden).toBe(true);
+      expect(second.hidden).toBe(true);
+      expect(widget.dataset.markdownDetailsOpen).toBe("false");
+    });
+
+    it("keeps the run open when its next note arrives during the reading pause", async () => {
+      await act(() => root.render(run({ second: false, finished: true })));
+      const widget = host.querySelector<HTMLElement>("[data-stream-footnotes]")!;
+      const first = widget.querySelector("li")!;
+      await act(() => vi.advanceTimersByTime(300));
+      await act(() => root.render(run({ second: true, finished: false })));
+      await act(() => vi.advanceTimersByTime(1_000));
+      const second = widget.querySelectorAll("li")[1]!;
+      expect(widget.dataset.markdownDetailsOpen).toBe("true");
+      expect(first.hidden).toBe(false);
+      expect(second.hidden).toBe(false);
+    });
+  });
   it("moves the same default-open widget into the body and preserves a user collapse and footnote nodes", async () => {
     await act(() => root.render(<Body />));
     const widget = host.querySelector<HTMLElement>("[data-stream-footnotes]")!;

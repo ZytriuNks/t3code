@@ -68,6 +68,7 @@ import ChatMarkdown, {
   hasMarkdownFilePrimaryAction,
   shouldUseMarkdownFileBrowserPrimaryAction,
 } from "./ChatMarkdown";
+import { StreamingMarkdownFootnotes } from "./chat/StreamingMarkdownFootnotes";
 
 function codeButton(renderer: ReactTestRenderer, label: string) {
   const button = renderer.root
@@ -78,6 +79,30 @@ function codeButton(renderer: ReactTestRenderer, label: string) {
 }
 
 describe("streamed Markdown media", () => {
+  it.each([
+    ["written back to back", "\n", true],
+    ["separated by body text", "\n\nA paragraph between them.\n\n", false],
+  ] as const)("groups footnote definitions %s into one run", async (_label, between, grouped) => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    let renderer: ReactTestRenderer | undefined;
+    const text = `One[^a] and two[^b].\n\n[^a]: First note.${between}[^b]: Second note.\n`;
+    try {
+      await act(() => {
+        renderer = create(<ChatMarkdown cwd={undefined} text={text} smoothStreaming isStreaming />);
+      });
+      const items = renderer!.root.findByType(StreamingMarkdownFootnotes).props.items as Array<{
+        id: string;
+        follows?: string | null;
+      }>;
+      expect(items).toHaveLength(2);
+      expect(items[0]!.follows).toBeNull();
+      expect(items[1]!.follows).toBe(grouped ? items[0]!.id : null);
+    } finally {
+      await act(() => renderer?.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("requests a link's favicon during smooth playback without replacing its label", async () => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     let renderer: ReactTestRenderer | undefined;

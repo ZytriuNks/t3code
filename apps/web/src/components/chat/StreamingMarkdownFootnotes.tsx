@@ -22,6 +22,8 @@ export const StreamingFootnoteItemVisibilityContext = createContext<{
   activeId: string | null;
   open: boolean;
   closingIds: readonly string[];
+  /** Earlier notes of the run the active note continues; they stay shown with it. */
+  batchIds: readonly string[];
   items: FootnoteItem[];
   streaming: boolean;
   smooth: boolean;
@@ -34,6 +36,8 @@ interface FootnoteItem {
   id: string;
   text: string;
   complete: boolean;
+  /** The note written directly before this one, with nothing but whitespace between. */
+  follows?: string | null;
 }
 const EMPTY_ITEMS: FootnoteItem[] = [];
 
@@ -45,7 +49,7 @@ export function StreamingMarkdownFootnoteItem({ children, ...props }: React.Comp
     state.open ||
     (state.closingIds.length > 0
       ? state.closingIds.includes(props.id!)
-      : state.activeId === props.id);
+      : state.activeId === props.id || state.batchIds.includes(props.id!));
   const content = useRef<HTMLDivElement>(null);
   const played = useRef(false);
   useSmoothText(content, {
@@ -165,22 +169,41 @@ export function StreamingMarkdownFootnotes({
     queue: streaming && autoCollapse ? items.map((item) => item.id) : [],
     closing: false,
     closingIds: [] as string[],
+    batchIds: [] as string[],
   }));
+  const [finishedItem, setFinishedItem] = useState<{ id: string; text: string; at: number } | null>(
+    null,
+  );
   const changed = items.filter((item) => playback.seen.get(item.id) !== item.text);
   const preferenceChanged = playback.autoCollapse !== autoCollapse;
   const removed = playback.seen.size !== items.length;
   if (changed.length > 0 || preferenceChanged || removed) {
     if (preferenceChanged) setOpen(!autoCollapse);
+    const queue =
+      preferenceChanged || open
+        ? []
+        : [...new Set([...playback.queue, ...changed.map((item) => item.id)])].filter((id) =>
+            items.some((item) => item.id === id),
+          );
+    const head = items.find((item) => item.id === queue[0]);
+    // The next note of a run can arrive during the finished note's reading
+    // pause. It continues the run instead of letting the pause collapse it.
+    const continuesRun =
+      !preferenceChanged &&
+      !playback.closing &&
+      head?.complete === true &&
+      finishedItem?.id === head.id &&
+      finishedItem.text === head.text &&
+      items.find((item) => item.id === queue[1])?.follows === head.id;
+    const batchIds =
+      preferenceChanged || open
+        ? []
+        : playback.batchIds.filter((id) => items.some((item) => item.id === id));
     setPlayback({
       ...playback,
       autoCollapse,
       seen: new Map(items.map((item) => [item.id, item.text])),
-      queue:
-        preferenceChanged || open
-          ? []
-          : [...new Set([...playback.queue, ...changed.map((item) => item.id)])].filter((id) =>
-              items.some((item) => item.id === id),
-            ),
+      queue: continuesRun ? queue.slice(1) : queue,
       closing: preferenceChanged
         ? autoCollapse && open
         : (playback.queue.length > 0 && !items.some((item) => item.id === playback.queue[0])) ||
@@ -192,6 +215,7 @@ export function StreamingMarkdownFootnotes({
           ? items.map((item) => item.id)
           : []
         : playback.closingIds,
+      batchIds: continuesRun ? [...batchIds, head.id] : batchIds,
     });
   }
   const activeId = playback.queue[0] ?? null;
@@ -214,46 +238,67 @@ export function StreamingMarkdownFootnotes({
                 : previous.queue,
             closing: false,
             closingIds: [],
+            batchIds: [],
           }
         : previous,
     );
   }, []);
-  const [finishedItem, setFinishedItem] = useState<{ id: string; text: string; at: number } | null>(
-    null,
-  );
   const activeComplete = active?.complete;
   const activeText = active?.text;
+  const nextFollowsActive =
+    activeId !== null && items.find((item) => item.id === playback.queue[1])?.follows === activeId;
   const finishItem = useCallback(
     (id: string) => {
       if (
-        !open &&
-        id === activeId &&
-        activeComplete &&
-        activeText !== undefined &&
-        !playback.closing
+        open ||
+        id !== activeId ||
+        !activeComplete ||
+        activeText === undefined ||
+        playback.closing
       )
-        setFinishedItem((previous) =>
-          previous?.id === id && previous.text === activeText
-            ? previous
-            : { id, text: activeText, at: performance.now() },
+        return;
+      // Notes written back to back form one run. Keep the finished note shown
+      // and play the next one, so the run collapses once instead of note by note.
+      if (nextFollowsActive) {
+        setPlayback((previous) =>
+          previous.queue[0] === id
+            ? {
+                ...previous,
+                queue: previous.queue.slice(1),
+                batchIds: [...previous.batchIds, id],
+              }
+            : previous,
         );
+        return;
+      }
+      setFinishedItem((previous) =>
+        previous?.id === id && previous.text === activeText
+          ? previous
+          : { id, text: activeText, at: performance.now() },
+      );
     },
-    [open, activeId, activeComplete, activeText, playback.closing],
+    [open, activeId, activeComplete, activeText, playback.closing, nextFollowsActive],
   );
   useLayoutEffect(() => {
     if (
       open ||
       playback.closing ||
+      nextFollowsActive ||
       !active?.complete ||
       finishedItem?.id !== active.id ||
       finishedItem.text !== active.text
     )
       return;
     // Start the reading pause after the last glyph fade, not after its source
-    // arrives. Queued notes use a shorter pause so they cannot accumulate.
+    // arrives. Queued notes use a shorter pause so they cannot accumulate. The
+    // whole run collapses together; its next note arriving first cancels this.
     const timer = setTimeout(
       () => {
-        setPlayback((previous) => ({ ...previous, closing: true, closingIds: [active.id] }));
+        setPlayback((previous) => ({
+          ...previous,
+          closing: true,
+          closingIds: [...previous.batchIds, active.id],
+        }));
       },
       Math.max(0, finishedItem.at + (playback.queue.length > 1 ? 250 : 650) - performance.now()),
     );
@@ -262,6 +307,7 @@ export function StreamingMarkdownFootnotes({
     open,
     playback.closing,
     playback.queue.length,
+    nextFollowsActive,
     active?.id,
     active?.text,
     active?.complete,
@@ -290,7 +336,13 @@ export function StreamingMarkdownFootnotes({
     const widget = widgetRef.current;
     const expand = () => {
       setOpen(true);
-      setPlayback((previous) => ({ ...previous, queue: [], closing: false, closingIds: [] }));
+      setPlayback((previous) => ({
+        ...previous,
+        queue: [],
+        closing: false,
+        closingIds: [],
+        batchIds: [],
+      }));
     };
     widget?.addEventListener("t3-expand-footnotes", expand);
     return () => widget?.removeEventListener("t3-expand-footnotes", expand);
@@ -345,6 +397,7 @@ export function StreamingMarkdownFootnotes({
       activeId,
       open,
       closingIds: playback.closingIds,
+      batchIds: playback.batchIds,
       items,
       streaming,
       smooth,
@@ -357,6 +410,7 @@ export function StreamingMarkdownFootnotes({
       activeId,
       open,
       playback.closingIds,
+      playback.batchIds,
       items,
       streaming,
       smooth,
@@ -389,8 +443,9 @@ export function StreamingMarkdownFootnotes({
               : open
                 ? items.map((item) => item.id)
                 : activeId
-                  ? [activeId]
+                  ? [...previous.batchIds, activeId]
                   : [],
+            ...(next ? { batchIds: [] } : {}),
           }));
         }}
       >

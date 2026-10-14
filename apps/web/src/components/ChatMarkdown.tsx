@@ -3588,27 +3588,36 @@ const CHAT_MARKDOWN_COMPONENTS = {
         ),
       });
     });
+    const definitions = node.children.flatMap((list) =>
+      list.type === "element" && list.tagName === "ol"
+        ? list.children.flatMap((item) =>
+            item.type === "element" && item.tagName === "li" ? [item] : [],
+          )
+        : [],
+    );
+    // Notes are numbered by first reference, but a run is about where they
+    // were written: definitions with only whitespace between them in the source.
+    const follows = new Map<HastElement, string>();
+    const bySource = definitions
+      .filter((item) => item.position?.start.offset !== undefined)
+      .toSorted((a, b) => a.position!.start.offset! - b.position!.start.offset!);
+    for (let index = 1; index < bySource.length; index++) {
+      const previous = bySource[index - 1]!;
+      const item = bySource[index]!;
+      if (!/\S/u.test(text.slice(previous.position!.end.offset, item.position!.start.offset)))
+        follows.set(item, String(previous.properties.id));
+    }
     return (
       <StreamingMarkdownFootnotes
         {...props}
         {...smooth}
-        items={node.children.flatMap((list) =>
-          list.type === "element" && list.tagName === "ol"
-            ? list.children.flatMap((item) =>
-                item.type === "element" && item.tagName === "li"
-                  ? [
-                      {
-                        id: String(item.properties.id),
-                        text: hastPlainTextDeep(item).trimEnd(),
-                        complete:
-                          !smooth.streaming ||
-                          !!text.slice(item.position?.end.offset ?? text.length).trim(),
-                      },
-                    ]
-                  : [],
-              )
-            : [],
-        )}
+        items={definitions.map((item) => ({
+          id: String(item.properties.id),
+          text: hastPlainTextDeep(item).trimEnd(),
+          complete:
+            !smooth.streaming || !!text.slice(item.position?.end.offset ?? text.length).trim(),
+          follows: follows.get(item) ?? null,
+        }))}
       >
         {stableChildren}
       </StreamingMarkdownFootnotes>
