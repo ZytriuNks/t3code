@@ -441,6 +441,8 @@ function observeSmoothText(
     endSlope: number;
     wholeLine: boolean;
     visualClockAt?: number;
+    /** A media box whose curve also opens the text row that follows it. */
+    foldedRow?: boolean;
   }
   let reservations: Reservation[] = [];
   let previousSpaceVelocity = 0;
@@ -860,8 +862,8 @@ function observeSmoothText(
     const parent = tail && ("node" in tail ? tail.node.parentElement : tail.surface);
     return !!parent?.closest("table");
   };
-  const measureNextLine = () => {
-    let start = Math.max(admittedOffset, model.nextStart ?? admittedOffset);
+  const measureNextLine = (from?: number) => {
+    let start = from ?? Math.max(admittedOffset, model.nextStart ?? admittedOffset);
     while (start < modelText.length && /\s/u.test(modelText[start]!)) start++;
     if (start === modelText.length) return null;
     const bounds = glyphBounds(start, start + 1);
@@ -879,7 +881,7 @@ function observeSmoothText(
       : Math.max(bounds.bottom, Math.min(naturalHeight, bounds.bottom + leading));
     const end = atomic
       ? (surfaces.get(entry.surface!)?.end ?? entry.end)
-      : lineLimit(bottom + (retainedTail?.height ?? 0), admittedOffset);
+      : lineLimit(bottom + (retainedTail?.height ?? 0), from ?? admittedOffset);
     return {
       start,
       end,
@@ -971,6 +973,7 @@ function observeSmoothText(
     if (
       !open ||
       open.reflow ||
+      open.foldedRow ||
       lineMode !== "adaptive" ||
       admittedOffset >= open.end ||
       paintedAt < open.startedAt ||
@@ -1023,6 +1026,64 @@ function observeSmoothText(
       );
     open.wholeLine = plan.wholeLine && open.duration < cadence.frameMs * 0.9;
   };
+  /**
+   * A media box has no glyphs to play while it opens, so the following row's
+   * space could only start once the box was complete, leaving a pause after
+   * every image. Once that row's first glyph has arrived, continue the box's
+   * curve over the row at the box's own pace. When the box retires the row
+   * already fits, and its glyphs continue on the shared character clock.
+   */
+  const foldFollowingRow = (paintedAt: number) => {
+    const open = reservations[0];
+    if (!open || open.reflow || open.foldedRow || lineMode !== "adaptive") return;
+    if (paintedAt < open.startedAt || paintedAt >= open.startedAt + open.duration) return;
+    const entry = geometryEntries[geometryEntryIndex(open.start)];
+    if (!entry || "node" in entry || !entry.surface.matches(MEDIA_CONTENT)) return;
+    let start = open.end;
+    while (start < modelText.length && /\s/u.test(modelText[start]!)) start++;
+    // Another atomic row keeps its own plan; only a text row joins the box.
+    const following = geometryEntries[geometryEntryIndex(start)];
+    if (start >= modelText.length || !following || !("node" in following)) return;
+    const row = measureNextLine(open.end);
+    if (!row || row.bottom <= open.target + 0.5) return;
+    const progress = smoothLineCurveProgress(
+      paintedAt - open.startedAt,
+      open.duration,
+      open.startSlope,
+      open.endSlope,
+    );
+    const from = open.from + (open.target - open.from) * progress;
+    const velocity =
+      (open.target - open.from) *
+      smoothLineCurveVelocity(
+        paintedAt - open.startedAt,
+        open.duration,
+        open.startSlope,
+        open.endSlope,
+      );
+    const pace = Math.max(0.1, open.distance) / Math.max(1, open.nominalDuration);
+    const duration = Math.max(
+      1,
+      open.startedAt + open.duration - paintedAt + (row.bottom - open.target) / pace,
+    );
+    const remaining = row.bottom - from;
+    open.from = from;
+    open.target = row.bottom;
+    open.startedAt = paintedAt;
+    open.duration = duration;
+    open.startSlope = Math.min(3, (velocity * duration) / remaining);
+    open.readyAt =
+      open.readyHeight <= from + 0.1
+        ? paintedAt
+        : paintedAt +
+          smoothLineCurveTime(
+            (open.readyHeight - from) / remaining,
+            duration,
+            open.startSlope,
+            open.endSlope,
+          );
+    open.foldedRow = true;
+  };
   const syncGeometry = () => {
     geometryRootRect = element.getBoundingClientRect();
     const scanVisibleHistory =
@@ -1067,7 +1128,9 @@ function observeSmoothText(
       open !== undefined &&
       (open.reflow ||
         (reservedBounds !== null &&
-          open.start >= (model.nextStart ?? modelText.length) &&
+          // A folded media box keeps opening the following row after its own
+          // unit was shown; a size change there still belongs to this curve.
+          (open.foldedRow || open.start >= (model.nextStart ?? modelText.length)) &&
           open.start < modelText.length));
     if (keepOpenReservation && reservedBounds) {
       const delta = reservedBottom! - open.glyphBottom;
@@ -1104,17 +1167,24 @@ function observeSmoothText(
       if (!open.reflow) open.end = Math.min(open.end, lineLimit(open.target, open.start));
     }
     let paintedBottom = 0;
+    // Visible text alone, so a box that grew above that text can be told
+    // apart from a box that is itself the visible edge.
+    let paintedTextBottom = 0;
     if (scanVisibleHistory) {
       for (const entry of geometryEntries) {
         const end = model.visibleEnd(entry.start, entry.end);
         if (end <= entry.start) continue;
-        paintedBottom = Math.max(paintedBottom, glyphBounds(entry.start, end)?.bottom ?? 0);
+        const bottom = glyphBounds(entry.start, end)?.bottom ?? 0;
+        paintedBottom = Math.max(paintedBottom, bottom);
+        if ("node" in entry && /\S/u.test(entry.node.data))
+          paintedTextBottom = Math.max(paintedTextBottom, bottom);
       }
     } else if (selectTextEnd(glyphRange, model.nextStart ?? model.offset)) {
       paintedBottom =
         glyphRange.getBoundingClientRect().bottom -
         (geometryRootRect.top ?? 0) -
         lineEnterOffset(glyphRange.startContainer);
+      if (glyphRange.startContainer.nodeType === Node.TEXT_NODE) paintedTextBottom = paintedBottom;
     }
     if (retainedTail) {
       // Resize scans include retained islands. Their translated position is
@@ -1128,7 +1198,30 @@ function observeSmoothText(
     }
     const naturalHeight = geometryRootRect.height;
     lastNaturalHeight = naturalHeight;
+    // A box above visible text that grew during the stream (an image adopting
+    // its loaded size) has already moved that text down; the box itself
+    // changed size at once. Keep the moved text inside the frame immediately.
+    // Animating the edge instead clipped text the reader had already seen and
+    // held every following row behind the reflow.
+    if (
+      streaming &&
+      !retainedTail &&
+      !open?.reflow &&
+      paintedTextBottom > lastFrameHeight + 0.5 &&
+      paintedTextBottom <= naturalHeight + 0.5
+    )
+      lastFrameHeight = paintedTextBottom;
     const visibleReflow = paintedBottom > lastFrameHeight + 0.5;
+    // An open row whose first glyph moved with the growth was retargeted above
+    // and now covers it. Its own curve reveals the grown box, so replacing it
+    // with a reflow would only restart the row and pause the text after it.
+    const absorbedByOpenRow =
+      streaming &&
+      keepOpenReservation &&
+      !!open &&
+      !open.reflow &&
+      open.target >= paintedBottom - 0.5 &&
+      naturalHeight >= lastFrameHeight - 0.5;
     // The frame grows only through reservations. `naturalHeight` also counts
     // what a block owns below its last glyph — a table's toolbar, a block's
     // bottom margin — and adopting it here raised the frame by that whole
@@ -1138,8 +1231,10 @@ function observeSmoothText(
       (visibleReflow || naturalHeight < lastFrameHeight - 0.5) &&
       publishedOffset >= 0 &&
       hasStructuralContent() &&
-      !open?.reflow;
-    if (!animateReflow && !open?.reflow) {
+      !open?.reflow &&
+      !absorbedByOpenRow;
+    if (absorbedByOpenRow) lastFrameHeight = Math.min(naturalHeight, lastFrameHeight);
+    else if (!animateReflow && !open?.reflow) {
       lastFrameHeight = Math.max(paintedBottom, Math.min(naturalHeight, lastFrameHeight));
     }
     // Even an unchanged pending line cannot reuse a shorter reservation once
@@ -1698,6 +1793,7 @@ function observeSmoothText(
       updateMode(now);
       advanceMediaClock(now);
       retimeSpace(now, Math.max(frameStart, lastPaintAt));
+      foldFollowingRow(Math.max(frameStart, lastPaintAt));
       let layoutAt = frameStart;
       let layoutFlushes = 0;
       let releasedLines = 0;
@@ -1857,13 +1953,24 @@ function observeSmoothText(
             releasedLines > 0 ||
             (admittedOffset > (model.nextStart ?? modelText.length) &&
               now - lastGlyphRevealAt < cadence.frameMs * 1.5));
-        if ((!candidate || onlySeparatorsRemain || nearEnd) && !handoffWait && !reserving()) {
+        // A box above the edge that shrank (an image adopting its loaded size)
+        // settles the frame downward. A row that fits under that final edge
+        // needs no space of its own, so it must not wait for the settling.
+        const shrinkingReflow =
+          reservations.length === 1 &&
+          reservations[0]!.reflow === true &&
+          reservations[0]!.target < reservations[0]!.from - 0.5;
+        if (
+          (!candidate || onlySeparatorsRemain || nearEnd) &&
+          !handoffWait &&
+          (!reserving() || shrinkingReflow)
+        ) {
           if (!hasLayout) break;
           // A newly opened line gets its own frame before another reservation
           // starts. This keeps the visible sequence "make room -> show row ->
           // make room" even when several short rows are already due.
           if (releasedLines >= lineTransitionBudget) break;
-          if (reservations.length >= SMOOTH_LINE_PIPELINE) break;
+          if (reservations.length >= SMOOTH_LINE_PIPELINE && !shrinkingReflow) break;
           const pending = model.peek(now);
           const opening = model.nextStart === 0 && admittedOffset === 0 && lastFrameHeight <= 0.5;
           if (!pending) break;
@@ -1880,6 +1987,7 @@ function observeSmoothText(
           if (opening && !atomic && pending.at > now) break;
           const from = lastFrameHeight;
           const target = line.bottom;
+          if (shrinkingReflow && (target > reservations[0]!.target + 0.5 || target > from)) break;
           // A live suffix is only the part received so far, not a short row.
           const plan = linePlan(now, line.start, line.end, Math.max(0, target - from));
           const minimumDuration = atomic ? Math.min(80, cadence.frameMs) : 1;

@@ -1075,6 +1075,109 @@ describe("useSmoothText", () => {
     expect(Number.parseFloat(frame.style.height)).toBe(80);
   });
 
+  /**
+   * Streams "H", then an image and a following text row arriving at 25
+   * glyphs per second. Returns when the image box completed, when the first
+   * following glyph appeared, and the longest pause between following glyphs.
+   */
+  async function streamTextAfterImage({
+    loadAt,
+    loadedHeight = 180,
+  }: {
+    loadAt?: number;
+    loadedHeight?: number;
+  }) {
+    let now = 0;
+    let imageHeight = loadAt === undefined ? loadedHeight : 100;
+    vi.spyOn(performance, "now").mockImplementation(() => now);
+    mockMediaRows(() => imageHeight);
+    const tail = "T".repeat(30);
+    const view = (shown: number) => (
+      <Probe
+        text={shown > 0 ? `H image ${tail.slice(0, shown)}` : "H image"}
+        frame
+        claimInitialText={() => true}
+        richText={
+          <>
+            <p>H</p>
+            <p>
+              <img data-media-object="" alt="fixture" />
+            </p>
+            {shown > 0 ? <p data-media-tail="">{tail.slice(0, shown)}</p> : null}
+          </>
+        }
+      />
+    );
+    await render(<Probe text="H" frame claimInitialText={() => true} richText={<p>H</p>} />);
+    const step = async () => {
+      now += 1_000 / 60;
+      const callbacks = [...frames.values()];
+      frames.clear();
+      await act(() => callbacks.forEach((callback) => callback(now)));
+    };
+    // 90 frames at 60 Hz: past the first window, with "H" fully shown.
+    for (let index = 0; index < 90; index++) await step();
+    const imageAt = now;
+    await render(view(0));
+    const frame = container.querySelector<HTMLElement>("[data-smooth-text-frame]")!;
+    let arrived = 0;
+    let loaded = false;
+    let boxDoneAt: number | null = null;
+    let firstTailAt: number | null = null;
+    let previousVisible = 0;
+    let lastRevealAt = 0;
+    let longestTailGap = 0;
+    for (let index = 0; index < 180; index++) {
+      const elapsed = now - imageAt;
+      const due = Math.min(tail.length, Math.floor(elapsed / 40));
+      if (due > arrived) {
+        arrived = due;
+        await render(view(arrived));
+      }
+      if (loadAt !== undefined && !loaded && elapsed >= loadAt) {
+        loaded = true;
+        imageHeight = loadedHeight;
+        await act(() => container.querySelector("img")!.dispatchEvent(new Event("load")));
+      }
+      await step();
+      if (boxDoneAt === null && Number.parseFloat(frame.style.height) >= 20 + imageHeight - 0.5)
+        boxDoneAt = now - imageAt;
+      const hidden = [...(hiddenHighlight() ?? [])].map(rangeText).join("");
+      const visible = arrived - (hidden.match(/T/gu)?.length ?? 0);
+      if (visible > previousVisible) {
+        if (previousVisible === 0) firstTailAt = now - imageAt;
+        else if (arrived < tail.length)
+          longestTailGap = Math.max(longestTailGap, now - lastRevealAt);
+        lastRevealAt = now;
+        previousVisible = visible;
+      }
+    }
+    expect(hiddenHighlight()).toBeUndefined();
+    return { boxDoneAt: boxDoneAt!, firstTailAt: firstTailAt!, longestTailGap };
+  }
+
+  it("opens the row after an image within the image's own space curve", async () => {
+    // A media box has no glyphs to play while it opens. Waiting for it to
+    // complete before opening the following row paused the text after every
+    // image by a whole row's space curve.
+    const { boxDoneAt, firstTailAt } = await streamTextAfterImage({});
+    expect(firstTailAt - boxDoneAt).toBeLessThanOrEqual((1_000 / 60) * 4 + 0.001);
+  });
+
+  it.each([
+    ["grows while the following text plays", 900, 180],
+    ["shrinks while the following text plays", 900, 40],
+    ["grows while the following row opens", 170, 180],
+  ] as const)(
+    "keeps the following text playing when a loaded image %s",
+    async (_label, loadAt, loadedHeight) => {
+      const { firstTailAt, longestTailGap } = await streamTextAfterImage({ loadAt, loadedHeight });
+      expect(firstTailAt).toBeLessThanOrEqual(250);
+      // 25 glyphs per second arrive one every 40ms: about three 60 Hz frames.
+      expect(longestTailGap).toBeLessThanOrEqual((1_000 / 60) * 5 + 0.001);
+    },
+  );
+
   it("keeps geometry observation until an image loading after completion has settled", async () => {
     let now = 0;
     let imageHeight = 40;
