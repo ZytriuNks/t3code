@@ -2047,10 +2047,10 @@ function observeSmoothText(
           lineMotion && !lineMotion.layoutWaitCharged
             ? Math.max(0, lineMotion.startedAt - candidate.at)
             : 0,
-          // Repay a space wait no faster than twice the source pace, the same
-          // ceiling as the pool catch-up, so the two never compound. A per-frame
-          // floor released the whole wait within one or two paints, so slow
-          // text resumed every row as a block.
+          // Repay a space wait at twice the current glyph pace, so it spreads
+          // over about as long as it lasted. A per-frame floor released the
+          // whole wait within one or two paints, so slow text resumed every
+          // row as a block.
           model.characterInterval(now) / LAYOUT_CATCH_UP_RATE,
         );
         if (advanced <= releasedFrom) break;
@@ -2482,11 +2482,11 @@ function observeSmoothText(
     geometryGeneration++;
     nextLineCache = null;
     if (!isAppend) {
-      // A live row ends in its block's structural break, so every append to
-      // it rewrites that trailing character. Keep a reservation whose first
+      // A rewrite can change the tail of the row whose space is opening, e.g.
+      // when a Markdown delimiter resolves. Keep a reservation whose first
       // glyph and prefix survived, trimmed to the unchanged text; dropping it
-      // restarted the row's space curve on each provider fragment and stalled
-      // every new line. syncGeometry still retargets or clears the row below.
+      // restarted the row's space curve on every such commit and stalled the
+      // next line. syncGeometry still retargets or clears the row below.
       let unchanged = 0;
       while (
         unchanged < previousText.length &&

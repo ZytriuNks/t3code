@@ -254,10 +254,10 @@ export function createSmoothText(
     // only following the source. Merely matching the arrival rate is neutral:
     // once a burst drains the pool nothing rebuilds it, and every later batch
     // then plays at full speed, which is what makes streamed text look chunky.
-    // The surplus term repays real debt quickly; the deficit term is capped
-    // twice over, because a pool too small to absorb an arrival gap has nothing
-    // worth holding back and stretching for it only delays text that is
-    // already on screen.
+    // The surplus term repays real debt quickly. The deficit term is capped
+    // twice over: it never slows playback by more than about a quarter, and a
+    // pool of only a few glyphs is not held back at all, since stretching it
+    // only delays text that is already due.
     const ratio =
       backlog > target
         ? (backlog - target) / target

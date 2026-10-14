@@ -485,7 +485,7 @@ const TimelineListFooter = memo(
 const EMPTY_TIMELINE_SKILLS: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">> = [];
 /** Stable empty so the default path never allocates a new overlay array. */
 const EMPTY_LIVE_ACTIVITY_ROWS: ReadonlyArray<TimelineLiveActivityRow> = [];
-const END_RECONCILE_TIMEOUT_MS = 500;
+const END_RECONCILE_TIMEOUT_MS = 1_000;
 // Keep the footer on the visible edge while LegendList catches up with a
 // smooth text frame's height. Its normal flow resumes as soon as follow ends.
 const TIMELINE_LIVE_FOOTER_STYLE = { position: "sticky", bottom: 0 } as const;
