@@ -295,11 +295,8 @@ export function createSmoothText(
   };
   const nextUnitAt = (now: number) => {
     const interval = revealInterval(now);
-    // Bounding this by the current backlog keeps the cap at the source's own
-    // pace. An unbounded backlog saturated the catch-up term, pinning every
-    // reveal at the catch-up ceiling and draining the pool at twice the rate
-    // the provider delivers.
-    const minimumGlyphInterval = drainingInterval(now) ?? characterInterval(now);
+    const minimumGlyphInterval =
+      drainingInterval(now) ?? characterInterval(now, Number.POSITIVE_INFINITY);
     const minimumInterval = Math.max(
       minimumGlyphInterval,
       minimumGlyphInterval * lastRevealSize - (lastRevealSize > 1 ? lastUnitLayoutMs : 0),
@@ -445,8 +442,8 @@ export function createSmoothText(
         // A later Markdown rewrite must not merge untouched queued batches.
         chunkEnds = chunkEnds.filter((end) => end <= Math.max(commonPrefix, retainedOffset));
         chunkCursor = 0;
-        // A live block ends in its structural break, so ordinary streaming
-        // reaches this branch on every append. Keep the unchanged prefix's
+        // Markdown rewrites (a resolved delimiter, a late definition) usually
+        // change only the tail of a long message. Keep the unchanged prefix's
         // segmentation and resume one grapheme before the change, as the
         // append path does, instead of segmenting the whole message again.
         graphemeEnds.length = Math.max(0, boundaryCountThrough(commonPrefix) - 1);
