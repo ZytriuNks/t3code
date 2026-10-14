@@ -1269,6 +1269,7 @@ describe("useSmoothText", () => {
     // row's last glyph on the character clock rather than wait for it.
     let previousVisible = 0;
     let longestPause = 0;
+    let largestFrameReveal = 0;
     let pauseStartedAt: number | null = null;
     for (let step = 0; step < 600 && frames.size > 0; step++) {
       now += 1_000 / 60;
@@ -1282,10 +1283,16 @@ describe("useSmoothText", () => {
         longestPause = Math.max(longestPause, now - pauseStartedAt);
         pauseStartedAt = null;
       }
+      if (previousVisible > 0)
+        largestFrameReveal = Math.max(largestFrameReveal, visible - previousVisible);
       previousVisible = visible;
     }
     expect(hiddenHighlight()).toBeUndefined();
     expect(longestPause).toBeLessThan(1_000 / 15);
+    // The queue arrives at once, so the pool already plays four glyphs per
+    // 60 Hz frame. Repaying the remaining wait must not release the next row
+    // as a block on top of that.
+    expect(largestFrameReveal).toBeLessThanOrEqual(5);
   });
 
   it.each([30, 60, 240])(

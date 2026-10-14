@@ -41,7 +41,7 @@ const REVEAL_MODE_FALLBACK_BACKLOG = 120;
 const REVEAL_MODE_RETURN_BACKLOG = 40;
 const REVEAL_MODE_SWITCH_COOLDOWN_MS = 500;
 const REVEAL_MODE_FRAME_GLYPHS = 8;
-const LAYOUT_CATCH_UP_FRAME_GLYPHS = 16;
+const LAYOUT_CATCH_UP_RATE = 2;
 const REVEAL_MODE_PRESSURE_MS = 200;
 const TOKEN_FRAME_GRAPHEME_BUDGET = 128;
 const TOKEN_FRAGMENT_GRAPHEME_BUDGET = 32;
@@ -2034,7 +2034,11 @@ function observeSmoothText(
           lineMotion && !lineMotion.layoutWaitCharged
             ? Math.max(0, lineMotion.startedAt - candidate.at)
             : 0,
-          cadence.frameMs / LAYOUT_CATCH_UP_FRAME_GLYPHS,
+          // Repay a space wait no faster than twice the source pace, the same
+          // ceiling as the pool catch-up, so the two never compound. A per-frame
+          // floor released the whole wait within one or two paints, so slow
+          // text resumed every row as a block.
+          model.characterInterval(now) / LAYOUT_CATCH_UP_RATE,
         );
         if (advanced <= releasedFrom) break;
         releasedUnits +=
