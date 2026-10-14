@@ -349,7 +349,7 @@ function SmoothTextFadeDurationSlider({
         max={1000}
         step={50}
         aria-label={ariaLabel}
-        onValueChange={setDraft}
+        onValueChange={(next) => setDraft(next)}
         onValueCommitted={(next) => {
           setDraft(null);
           if (next !== value) onCommit(next);
