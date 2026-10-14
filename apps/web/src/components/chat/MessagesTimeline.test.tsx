@@ -1119,6 +1119,72 @@ describe("MessagesTimeline", () => {
     }
   });
 
+  it("reveals the live edge even when its end row never reports a size", async () => {
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextFrame = 0;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frames.set(++nextFrame, callback);
+      return nextFrame;
+    });
+    vi.stubGlobal("cancelAnimationFrame", (frame: number) => frames.delete(frame));
+    let clock = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => clock);
+    const props = buildProps();
+    props.routeThreadKey = "environment-local:restore-unmeasured-live-edge";
+    rememberTimelinePosition(props.routeThreadKey, {
+      rowId: "old-row",
+      offsetWithinRow: 0,
+      scrollOffset: 300,
+      atEnd: true,
+    });
+    const viewport = {
+      scrollTop: 300,
+      scrollHeight: 1600,
+      clientHeight: 300,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      ownerDocument: { addEventListener: () => {}, removeEventListener: () => {} },
+    };
+    props.listRef.current = {
+      getScrollableNode: () => viewport,
+      scrollToEnd: vi.fn(async () => {
+        viewport.scrollTop = 1300;
+      }),
+      getState: () => ({
+        indexByKey: () => 0,
+        elementAtIndex: () => undefined,
+        sizeAtIndex: () => undefined,
+      }),
+    } as unknown as LegendListRef;
+    let renderer: ReactTestRenderer | null = null;
+    const visibility = () =>
+      renderer!.root.findByProps({ "data-assistant-citation-viewport": "true" }).props.style
+        ?.visibility;
+    try {
+      await act(() => {
+        renderer = create(
+          <MessagesTimeline
+            {...props}
+            timelineEntries={[buildAssistantTimelineEntry("Saved response")]}
+          />,
+        );
+      });
+      expect(visibility()).toBe("hidden");
+      for (let frame = 0; frame < 120 && frames.size > 0; frame++) {
+        clock += 1_000 / 60;
+        await act(() => {
+          const callbacks = [...frames.values()];
+          frames.clear();
+          callbacks.forEach((callback) => callback(clock));
+        });
+      }
+      expect(visibility()).not.toBe("hidden");
+      expect(frames.size).toBe(0);
+    } finally {
+      await act(() => renderer?.unmount());
+    }
+  });
+
   it.each(["before", "after"] as const)(
     "waits for the saved scroll position to settle when the list loads %s restoration",
     async (loadOrder) => {

@@ -436,46 +436,56 @@ function TimelineLoadEarlierHeader({
  * same line the body ends on without any per-tick positioning, and the composer
  * gap below it is part of the same flow.
  */
-function TimelineListFooter({
-  composerInset,
-  liveActivityRows,
-  footerRef,
-}: {
-  readonly composerInset: number;
-  readonly liveActivityRows: ReadonlyArray<TimelineLiveActivityRow>;
-  readonly footerRef: React.RefObject<HTMLDivElement | null>;
-}) {
-  return (
-    <div ref={footerRef}>
-      <div className="mx-auto w-full min-w-0 max-w-(--chat-max-width)">
-        <StreamingFootnoteHost fallback />
-      </div>
-      {liveActivityRows.length > 0 ? (
-        <div
-          data-testid="timeline-live-activity-layer"
-          className="mx-auto w-full min-w-0 max-w-(--chat-max-width) pb-2"
-        >
-          {liveActivityRows.map((row) => (
-            <div key={row.id} data-timeline-live-row-kind={row.kind}>
-              {row.kind === "work-live" ? (
-                <LiveWorkEntryTimelineRow row={row} />
-              ) : row.kind === "work" ? (
-                <TimelineRowContent row={row} />
-              ) : (
-                <ThinkingTimelineRow row={row} />
-              )}
-            </div>
-          ))}
+const TimelineListFooter = memo(
+  function TimelineListFooter({
+    composerInset,
+    liveActivityRows,
+    footerRef,
+  }: {
+    readonly composerInset: number;
+    readonly liveActivityRows: ReadonlyArray<TimelineLiveActivityRow>;
+    readonly footerRef: React.RefObject<HTMLDivElement | null>;
+  }) {
+    return (
+      <div ref={footerRef}>
+        <div className="mx-auto w-full min-w-0 max-w-(--chat-max-width)">
+          <StreamingFootnoteHost fallback />
         </div>
-      ) : null}
-      <div style={{ height: composerInset }} />
-      <div className="h-3 sm:h-4" />
-    </div>
-  );
-}
+        {liveActivityRows.length > 0 ? (
+          <div
+            data-testid="timeline-live-activity-layer"
+            className="mx-auto w-full min-w-0 max-w-(--chat-max-width) pb-2"
+          >
+            {liveActivityRows.map((row) => (
+              <div key={row.id} data-timeline-live-row-kind={row.kind}>
+                {row.kind === "work-live" ? (
+                  <LiveWorkEntryTimelineRow row={row} />
+                ) : row.kind === "work" ? (
+                  <TimelineRowContent row={row} />
+                ) : (
+                  <ThinkingTimelineRow row={row} />
+                )}
+              </div>
+            ))}
+          </div>
+        ) : null}
+        <div style={{ height: composerInset }} />
+        <div className="h-3 sm:h-4" />
+      </div>
+    );
+  },
+  // Streaming text rebuilds the live row array on every fragment while its
+  // stable rows stay the same objects. Compare them so the footer skips that.
+  (previous, next) =>
+    previous.composerInset === next.composerInset &&
+    previous.footerRef === next.footerRef &&
+    previous.liveActivityRows.length === next.liveActivityRows.length &&
+    previous.liveActivityRows.every((row, index) => row === next.liveActivityRows[index]),
+);
 const EMPTY_TIMELINE_SKILLS: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">> = [];
 /** Stable empty so the default path never allocates a new overlay array. */
 const EMPTY_LIVE_ACTIVITY_ROWS: ReadonlyArray<TimelineLiveActivityRow> = [];
+const END_RECONCILE_TIMEOUT_MS = 500;
 // Keep the footer on the visible edge while LegendList catches up with a
 // smooth text frame's height. Its normal flow resumes as soon as follow ends.
 const TIMELINE_LIVE_FOOTER_STYLE = { position: "sticky", bottom: 0 } as const;
@@ -1108,7 +1118,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
           // Estimated-index scrolling can resolve before the rows load. Keep
           // the timeline unpainted until its measured edge holds across layout
           // frames, then let the smooth controller take over from that edge.
+          // A row that never reports its size must not keep the timeline
+          // hidden, or keep this loop running, for the rest of the visit.
           let stableFrames = 0;
+          const reconcileDeadline = performance.now() + END_RECONCILE_TIMEOUT_MS;
           const reconcileEnd = () => {
             if (cancelled) return;
             const element = list.getScrollableNode();
@@ -1137,7 +1150,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
             } else {
               stableFrames = 0;
             }
-            if (stableFrames >= 2) {
+            if (stableFrames >= 2 || performance.now() >= reconcileDeadline) {
               // A child can grow between this measured pin and the commit
               // enabling smooth follow. Hand over the saved end destination
               // explicitly so the new controller cannot mistake that gap for
@@ -4458,7 +4471,6 @@ function LiveActivityRow({
   return (
     <div
       ref={animated ? observeVisibleAnimation : undefined}
-      data-timeline-live-label={animated ? "" : undefined}
       className="relative min-h-6 w-fit max-w-full min-w-0 overflow-hidden rounded-md text-sm leading-relaxed"
     >
       <LiveActivityContent

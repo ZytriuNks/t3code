@@ -2216,16 +2216,6 @@ code {
   }
 }
 
-/* The live activity label rides above the growing stream. When the timeline
-   follows the bottom edge, compensating the viewport shifts it down and back.
-   This offset cancels that shift so the label holds still; the scroll
-   controller sets it only while following and clears it when the reader
-   leaves, letting the label move down to make room for a new line again. */
-[data-timeline-live-label] {
-  transform: translateY(var(--t3-live-label-offset, 0px));
-  will-change: transform;
-}
-
 /* Keep the original text and layout for copying and citations. Only newly
    received glyphs are masked; the registry is empty whenever reveal is idle. */
 @media (prefers-reduced-motion: no-preference) and (forced-colors: none) {
