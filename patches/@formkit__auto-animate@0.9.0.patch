@@ -1,0 +1,43 @@
+diff --git a/index.mjs b/index.mjs
+index 7ad811ceb4015ab48c02b7f22894afdd823cedb1..435e738a48472bbabe7a887a3fa16e8c4b9ca08f 100644
+--- a/index.mjs
++++ b/index.mjs
+@@ -27,6 +27,7 @@ const mutationObservers = new WeakMap();
+  * Intervals for automatically checking the position of elements occasionally.
+  */
+ const intervals = new WeakMap();
++const pollGenerations = new WeakMap();
+ /**
+  * The configuration options for each group of elements.
+  */
+@@ -172,8 +173,13 @@ function updateAllPos() {
+  * @param el - Element
+  */
+ function poll(el) {
++    const generation = Symbol();
++    pollGenerations.set(el, generation);
+     setTimeout(() => {
+-        intervals.set(el, setInterval(() => lowPriority(updatePos.bind(null, el)), 2000));
++        if (pollGenerations.get(el) !== generation) return;
++        intervals.set(el, setInterval(() => lowPriority(() => {
++            if (pollGenerations.get(el) === generation) updatePos(el);
++        }), 2000));
+     }, Math.round(2000 * Math.random()));
+ }
+ /**
+@@ -766,6 +772,7 @@ function autoAnimate(el, config = {}) {
+                 if (i)
+                     clearInterval(i);
+                 intervals.delete(node);
++                pollGenerations.delete(node);
+             });
+         },
+         isEnabled: () => enabled.has(el),
+@@ -795,6 +802,7 @@ function autoAnimate(el, config = {}) {
+                 if (i)
+                     clearInterval(i);
+                 intervals.delete(node);
++                pollGenerations.delete(node);
+                 const d = debounces.get(node);
+                 if (d)
+                     clearTimeout(d);
