@@ -10,25 +10,42 @@ const SKILL_TOKEN_REGEX =
 
 type InlineSkill = Pick<ServerProviderSkill, "name" | "displayName">;
 
-export function SkillInlineText(props: { text: string; skills: ReadonlyArray<InlineSkill> }) {
-  const nodes: ReactNode[] = [];
-  let cursor = 0;
-
-  for (const match of props.text.matchAll(SKILL_TOKEN_REGEX)) {
+/** Shared token/label decisions for live rendering and inert inline layout. */
+export function skillInlineMatches(text: string, skills: ReadonlyArray<InlineSkill>) {
+  const matches: { start: number; end: number; rawText: string; label: string }[] = [];
+  for (const match of text.matchAll(SKILL_TOKEN_REGEX)) {
     const prefix = match[1] ?? "";
     const name = match[2] ?? "";
     const start = (match.index ?? 0) + prefix.length;
     const rawText = `$${name}`;
-    const skill = props.skills.find((candidate) => candidate.name === name);
+    const skill = skills.find((candidate) => candidate.name === name);
     if (!skill) {
       continue;
     }
 
-    if (start > cursor) {
-      nodes.push(props.text.slice(cursor, start));
-    }
-    nodes.push(<SkillChip key={`${start}:${name}`} skill={skill} rawText={rawText} />);
-    cursor = (match.index ?? 0) + match[0].length;
+    matches.push({
+      start,
+      end: (match.index ?? 0) + match[0].length,
+      rawText,
+      label: formatProviderSkillDisplayName(skill),
+    });
+  }
+  return matches;
+}
+
+export function SkillInlineText(props: { text: string; skills: ReadonlyArray<InlineSkill> }) {
+  const nodes: ReactNode[] = [];
+  let cursor = 0;
+  for (const match of skillInlineMatches(props.text, props.skills)) {
+    if (match.start > cursor) nodes.push(props.text.slice(cursor, match.start));
+    nodes.push(
+      <SkillChip
+        key={`${match.start}:${match.rawText.slice(1)}`}
+        label={match.label}
+        rawText={match.rawText}
+      />,
+    );
+    cursor = match.end;
   }
 
   if (cursor === 0) {
@@ -68,11 +85,11 @@ export function renderSkillInlineMarkdownChildren(
   });
 }
 
-function SkillChip(props: { skill: InlineSkill; rawText: string }) {
+function SkillChip(props: { label: string; rawText: string }) {
   return (
     <ContextChip kind="skill" data-markdown-copy={props.rawText}>
       <SkillChipIcon />
-      <ContextChipLabel>{formatProviderSkillDisplayName(props.skill)}</ContextChipLabel>
+      <ContextChipLabel>{props.label}</ContextChipLabel>
     </ContextChip>
   );
 }

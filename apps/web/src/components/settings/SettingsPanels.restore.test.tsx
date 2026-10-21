@@ -1,7 +1,19 @@
-import { DEFAULT_UNIFIED_SETTINGS, type UnifiedSettings } from "@t3tools/contracts";
+import {
+  DEFAULT_SERVER_SETTINGS,
+  DEFAULT_UNIFIED_SETTINGS,
+  EnvironmentId,
+  ProjectId,
+  type ServerSettings,
+  type UnifiedSettings,
+} from "@t3tools/contracts";
+import { applyServerSettingsPatch } from "@t3tools/shared/serverSettings";
+import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { reactHookHarness as hooks } from "../../test/reactHookHarness";
+import { translate } from "../../i18n/messages";
+import { planScopedSettingsPatch } from "./scopedSettings";
+import type { ResolvedSettingsScope } from "./settingsScope";
 
 const state = vi.hoisted(() => ({
   settings: null as UnifiedSettings | null,
@@ -66,11 +78,107 @@ import { useSettingsRestore } from "./SettingsPanels";
 beforeEach(() => {
   hooks.reset();
   vi.clearAllMocks();
+  state.update.mockReset();
   state.settings = { ...DEFAULT_UNIFIED_SETTINGS };
   state.confirm.mockResolvedValue(true);
 });
 
 describe("restoring V2 settings", () => {
+  it.each([
+    ["conversationStructure", "restructured", "settings.search.item.conversation-structure.title"],
+    [
+      "conversationStructureThinkingLabel",
+      "Custom thinking",
+      "settings.general.conversation.thinkingLabel.title",
+    ],
+    [
+      "conversationStructureIdleLabel",
+      "Custom waiting",
+      "settings.general.conversation.idleLabel.title",
+    ],
+    ["language", "zh-CN", "settings.restore.label.language"],
+  ] as const)("detects and restores %s as the only change", async (key, value, labelKey) => {
+    hooks.beginRender();
+    expect(useSettingsRestore().changedSettingLabels).toEqual([]);
+    state.settings = { ...DEFAULT_UNIFIED_SETTINGS, [key]: value };
+    hooks.beginRender();
+    const restore = useSettingsRestore();
+    const label = translate("en", labelKey);
+    expect(restore.changedSettingLabels).toEqual([label]);
+    await restore.restoreDefaults();
+    expect(state.confirm.mock.calls[0]?.[0]).toContain(label);
+    expect(state.update.mock.calls[0]?.[0][key]).toBe(DEFAULT_UNIFIED_SETTINGS[key]);
+  });
+
+  it.each(["project", "checkout", "environment"] as const)(
+    "persists applicable defaults at %s scope without touching another scope",
+    async (kind) => {
+      const environmentId = EnvironmentId.make("selected");
+      const projectId = ProjectId.make("selected-project");
+      const otherProject = ProjectId.make("other-project");
+      let saved: ServerSettings = {
+        ...DEFAULT_SERVER_SETTINGS,
+        responseStreamingMode: "paragraph" as const,
+        enableProviderUpdateChecks: false,
+        projectSettingsOverrides: {
+          [projectId]: { responseStreamingMode: "turn" as const },
+          [otherProject]: { responseStreamingMode: "smooth" as const },
+        },
+      };
+      const scope = {
+        kind,
+        label: "Selected",
+        environmentIds: [environmentId],
+        members: [{ id: projectId, environmentId }],
+      } as unknown as ResolvedSettingsScope;
+      state.settings = {
+        ...DEFAULT_UNIFIED_SETTINGS,
+        ...resolveProjectSettings(saved, kind === "environment" ? null : projectId).settings,
+      };
+      state.update.mockImplementation((patch) => {
+        const plan = planScopedSettingsPatch(
+          scope,
+          [
+            {
+              environmentId,
+              label: "Selected",
+              connection: { phase: "connected" },
+              serverConfig: {
+                settings: saved,
+                environment: { capabilities: { projectSettingsOverrides: true } },
+              },
+            },
+          ],
+          patch,
+        );
+        expect(plan.unavailableReason).toBeNull();
+        expect(plan.serverWrites).toHaveLength(1);
+        saved = applyServerSettingsPatch(saved, plan.serverWrites[0]!.patch);
+      });
+      hooks.beginRender();
+      await useSettingsRestore().restoreDefaults();
+      expect(state.update).toHaveBeenCalledOnce();
+      expect(
+        resolveProjectSettings(saved, kind === "environment" ? null : projectId).settings
+          .responseStreamingMode,
+      ).toBe(DEFAULT_SERVER_SETTINGS.responseStreamingMode);
+      expect(saved.projectSettingsOverrides[otherProject]).toEqual({
+        responseStreamingMode: "smooth",
+      });
+      if (kind === "environment") {
+        expect(saved.enableProviderUpdateChecks).toBe(
+          DEFAULT_SERVER_SETTINGS.enableProviderUpdateChecks,
+        );
+        expect(saved.projectSettingsOverrides[projectId]).toEqual({
+          responseStreamingMode: "turn",
+        });
+      } else {
+        expect(saved.enableProviderUpdateChecks).toBe(false);
+        expect(saved.responseStreamingMode).toBe("paragraph");
+      }
+    },
+  );
+
   it("detects and restores a changed text fade duration", async () => {
     state.settings = { ...DEFAULT_UNIFIED_SETTINGS, smoothTextFadeDurationMs: 420 };
     hooks.beginRender();
@@ -78,6 +186,15 @@ describe("restoring V2 settings", () => {
     expect(restore.changedSettingLabels).toEqual(["Text fade duration"]);
     await restore.restoreDefaults();
     expect(state.update.mock.calls[0]?.[0].smoothTextFadeDurationMs).toBe(200);
+  });
+
+  it("detects and restores a changed yield animation duration", async () => {
+    state.settings = { ...DEFAULT_UNIFIED_SETTINGS, smoothTextYieldDurationMs: 420 };
+    hooks.beginRender();
+    const restore = useSettingsRestore();
+    expect(restore.changedSettingLabels).toEqual(["Yield animation duration"]);
+    await restore.restoreDefaults();
+    expect(state.update.mock.calls[0]?.[0].smoothTextYieldDurationMs).toBe(200);
   });
 
   it.each([

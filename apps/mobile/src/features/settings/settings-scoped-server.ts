@@ -8,6 +8,10 @@ import {
   type ServerSettingsPatch,
 } from "@t3tools/contracts";
 import {
+  resolveConversationOverridesClear,
+  resolveConversationSettingsPatch,
+} from "@t3tools/shared/conversationSettings";
+import {
   clearProjectSettingsOverrides,
   resolveProjectSettings,
 } from "@t3tools/shared/projectSettings";
@@ -52,7 +56,10 @@ export function planMobileScopedSettingsPatch(
   patch: ServerSettingsPatch,
 ) {
   if (!projectSelected) {
-    return targets.map((target) => ({ environmentId: target.environment.environmentId, patch }));
+    return targets.map((target) => ({
+      environmentId: target.environment.environmentId,
+      patch: resolveConversationSettingsPatch(target.settings, patch),
+    }));
   }
   const keys = Object.keys(patch);
   if (
@@ -71,7 +78,9 @@ export function planMobileScopedSettingsPatch(
     const current =
       target.environment.serverConfig.settings.projectSettingsOverrides[target.projectId] ?? {};
     const next: Record<string, unknown> = { ...current };
-    for (const [key, value] of Object.entries(patch)) {
+    for (const [key, value] of Object.entries(
+      resolveConversationSettingsPatch(target.settings, patch),
+    )) {
       // A picker's "Inherit" sends null; for keys whose override cannot
       // store null that means remove the override.
       if (
@@ -116,10 +125,11 @@ export function planMobileScopedSettingsClear(
     )
       continue;
     const overrides = writes.get(target.environment.environmentId) ?? {};
+    const settings = target.environment.serverConfig.settings;
     overrides[target.projectId] = clearProjectSettingsOverrides(
-      target.environment.serverConfig.settings,
+      settings,
       target.projectId,
-      keys,
+      resolveConversationOverridesClear(settings, target.projectId, keys),
     );
     writes.set(target.environment.environmentId, overrides);
   }

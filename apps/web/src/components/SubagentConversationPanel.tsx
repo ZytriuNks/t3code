@@ -3,7 +3,10 @@ import {
   scopeThreadRef,
   scopedThreadKey,
 } from "@t3tools/client-runtime/environment";
-import { deriveThreadActivityRun } from "@t3tools/client-runtime/state/thread-execution";
+import {
+  deriveActiveNativeProviderTurn,
+  deriveThreadActivityRun,
+} from "@t3tools/client-runtime/state/thread-execution";
 import {
   type MessageId,
   type RunId,
@@ -13,6 +16,7 @@ import {
 import { ArrowLeft, Maximize2, X } from "lucide-react";
 import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import * as Option from "effect/Option";
+import * as DateTime from "effect/DateTime";
 import { useTheme } from "~/hooks/useTheme";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { useEnvironmentSettings } from "~/hooks/useSettings";
@@ -175,6 +179,17 @@ export function SubagentConversationPanel({
     () => (projection === null ? null : deriveThreadActivityRun(projection)),
     [projection],
   );
+  const nativeActivityTurn = useMemo(
+    () => (projection === null ? null : deriveActiveNativeProviderTurn(projection)),
+    [projection],
+  );
+  const isWorking = isActiveRun(activityRun?.status) || nativeActivityTurn !== null;
+  const activeTurnStartedAt =
+    nativeActivityTurn !== null
+      ? nativeActivityTurn.startedAt === null
+        ? null
+        : DateTime.formatIso(nativeActivityTurn.startedAt)
+      : (activityRun?.startedAt ?? null);
   const providerStatuses =
     environments.find((environment) => environment.environmentId === threadRef.environmentId)
       ?.serverConfig?.providers ?? EMPTY_PROVIDER_STATUSES;
@@ -192,6 +207,36 @@ export function SubagentConversationPanel({
   const [readyThreadKey, setReadyThreadKey] = useState<string | null>(null);
   const [layoutThreadKey, setLayoutThreadKey] = useState<string | null>(null);
   const onTimelineInitialLayout = useCallback(() => setLayoutThreadKey(routeKey), [routeKey]);
+  // Reader navigation leaves live follow; reaching the end again after a
+  // downward move re-arms it, like the main chat (keyed so a new thread follows).
+  const [detachedFollowKey, setDetachedFollowKey] = useState<string | null>(null);
+  const movedTowardEndRef = useRef(false);
+  const onTimelineManualNavigation = useCallback(() => {
+    movedTowardEndRef.current = false;
+    setDetachedFollowKey(routeKey);
+  }, [routeKey]);
+  const onTimelineIsAtEndChange = useCallback((isAtEnd: boolean) => {
+    // The virtualizer can report an estimated end while the reader is above
+    // it; only a real downward move to the edge re-arms follow.
+    if (!isAtEnd || !movedTowardEndRef.current) return;
+    movedTowardEndRef.current = false;
+    setDetachedFollowKey(null);
+  }, []);
+  const detached = detachedFollowKey === routeKey;
+  useLayoutEffect(() => {
+    const scroller = listRef.current?.getScrollableNode();
+    if (!detached || !scroller) return;
+    let lastTop = scroller.scrollTop;
+    const onScroll = (event: Event) => {
+      if (event.target !== scroller) return;
+      if (scroller.scrollTop > lastTop) movedTowardEndRef.current = true;
+      else if (scroller.scrollTop < lastTop) movedTowardEndRef.current = false;
+      lastTop = scroller.scrollTop;
+    };
+    // Capture before the list publishes its end state, excluding nested scrollers.
+    scroller.addEventListener("scroll", onScroll, { capture: true, passive: true });
+    return () => scroller.removeEventListener("scroll", onScroll, true);
+  }, [detached]);
   const loadError = Option.getOrNull(threadState.error);
   const unavailableMessage =
     loadError ??
@@ -334,21 +379,27 @@ export function SubagentConversationPanel({
             <MessagesTimeline
               key={routeKey}
               onInitialLayout={onTimelineInitialLayout}
-              isWorking={isActiveRun(activityRun?.status)}
-              activeTurnInProgress={isActiveRun(activityRun?.status)}
-              activeTurnStartedAt={activityRun?.startedAt ?? null}
+              isWorking={isWorking}
+              activeTurnInProgress={isWorking}
+              activeTurnStartedAt={activeTurnStartedAt}
               conversationStructure={settings.conversationStructure}
+              smoothStreaming={
+                settings.responseStreamingMode === "smooth" &&
+                settings.conversationStructure === "restructured"
+              }
               smoothOutputMode={settings.smoothOutputMode}
               smoothOutputLineMode={settings.smoothOutputLineMode}
               smoothMarkdownPreload={settings.smoothMarkdownPreload}
               smoothTextFadeDurationMs={settings.smoothTextFadeDurationMs}
+              smoothTextYieldDurationMs={settings.smoothTextYieldDurationMs}
               footnotesAutoCollapse={settings.footnotesAutoCollapse}
               conversationStructureIdleLabel={settings.conversationStructureIdleLabel}
               conversationStructureThinkingLabel={settings.conversationStructureThinkingLabel}
               listRef={listRef}
               timelineEntries={timelineProjection.entries}
-              latestRun={activityRun}
+              latestRun={nativeActivityTurn === null ? activityRun : null}
               runningRunId={isActiveRun(activityRun?.status) ? (activityRun?.runId ?? null) : null}
+              activeProviderTurnId={nativeActivityTurn?.id ?? null}
               turnDiffSummaries={EMPTY_TURN_DIFF_SUMMARIES}
               routeThreadKey={routeKey}
               displayThreadKey={routeKey}
@@ -373,9 +424,9 @@ export function SubagentConversationPanel({
               onAnchorReady={NOOP}
               onAnchorSizeChanged={NOOP}
               contentInsetEndAdjustment={0}
-              onIsAtEndChange={NOOP}
-              liveFollowEnabled
-              onManualNavigation={NOOP}
+              onIsAtEndChange={onTimelineIsAtEndChange}
+              liveFollowEnabled={!detached}
+              onManualNavigation={onTimelineManualNavigation}
               hideEmptyPlaceholder={false}
               topFadeEnabled={false}
             />

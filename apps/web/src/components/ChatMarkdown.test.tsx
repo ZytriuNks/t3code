@@ -3,7 +3,7 @@ import { act, type ComponentProps, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { create, type ReactTestInstance, type ReactTestRenderer } from "react-test-renderer";
 import { describe, expect, it, vi } from "vite-plus/test";
-import type { Root } from "mdast";
+import type { Root, RootContent } from "mdast";
 import type { Plugin } from "unified";
 
 import { getSyntaxHighlighterPromise } from "../lib/syntaxHighlighting";
@@ -97,6 +97,40 @@ describe("streamed Markdown media", () => {
       expect(items).toHaveLength(2);
       expect(items[0]!.follows).toBeNull();
       expect(items[1]!.follows).toBe(grouped ? items[0]!.id : null);
+    } finally {
+      await act(() => renderer?.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps marker-after footnotes in the live FIFO while treating prior definitions as history", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    let renderer: ReactTestRenderer | undefined;
+    const text =
+      "Earlier[^old].\n\n[^old]: Historical note.\n\nLater[^live].\n\n[^live]: Live note.\n";
+    const boundary = text.indexOf("Later");
+    try {
+      await act(() => {
+        renderer = create(
+          <ChatMarkdown
+            cwd={undefined}
+            text={text}
+            smoothStreaming
+            isStreaming
+            smoothTextResume={{
+              key: "environment/thread/run/item/body",
+              baselineText: text.slice(0, boundary),
+              mountText: text.slice(0, boundary),
+              synchronized: true,
+            }}
+          />,
+        );
+      });
+      const items = renderer!.root.findByType(StreamingMarkdownFootnotes).props.items as Array<{
+        id: string;
+        synchronized?: boolean;
+      }>;
+      expect(items.map((item) => item.synchronized)).toEqual([true, false]);
     } finally {
       await act(() => renderer?.unmount());
       vi.unstubAllGlobals();
@@ -743,6 +777,144 @@ describe("ChatMarkdown streaming", () => {
       }
     },
   );
+
+  it.each(["```typescript\n", "```\n", "  ```typescript\n"])(
+    "holds the open fence %j until it closes, including code that has arrived",
+    async (opening) => {
+      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+      let renderer: ReactTestRenderer | undefined;
+      const view = (text: string) => (
+        <ChatMarkdown cwd={undefined} text={text} smoothStreaming isStreaming />
+      );
+      try {
+        await act(async () => {
+          renderer = create(view("History\n\n" + opening));
+        });
+        expect(renderer!.root.findAllByProps({ "data-markdown-code-pending": "" })).toHaveLength(1);
+        await act(async () => {
+          renderer!.update(view("History\n\n```typescript\nconst a = 1;"));
+          vi.advanceTimersByTime(100);
+        });
+        await act(async () => vi.advanceTimersByTime(100));
+        expect(renderer!.root.findAllByProps({ "data-markdown-code-pending": "" })).toHaveLength(1);
+        for (const source of [
+          "History\n\n```typescript\nconst a = 1;\n```",
+          "History\n\n```typescript\n```",
+          "History\n\n<pre><code></code></pre>",
+        ]) {
+          await act(async () => {
+            renderer!.update(view(source));
+            vi.advanceTimersByTime(100);
+          });
+          await act(async () => vi.advanceTimersByTime(100));
+          expect(renderer!.root.findAllByProps({ "data-markdown-code-pending": "" })).toHaveLength(
+            0,
+          );
+        }
+      } finally {
+        await act(() => renderer?.unmount());
+        vi.useRealTimers();
+        vi.unstubAllGlobals();
+      }
+    },
+  );
+
+  it("releases and re-holds a short code suffix when Markdown preload toggles", async () => {
+    await getSyntaxHighlighterPromise("text");
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    let renderer: ReactTestRenderer | undefined;
+    const parsedCodeValues: string[] = [];
+    const captureCodeValues: Plugin<[], Root> = () => (tree) => {
+      const visit = (node: Root | RootContent) => {
+        if (node.type === "code") parsedCodeValues.push(node.value);
+        else if ("children" in node) node.children.forEach(visit);
+      };
+      visit(tree);
+    };
+    const extraRemarkPlugins = [captureCodeValues];
+    const fence = String.fromCharCode(96).repeat(3);
+    const partial = "> " + fence + "text\n> KEEP\n> " + fence.slice(0, 2);
+    const view = (preload: boolean) => (
+      <ChatMarkdown
+        cwd={undefined}
+        text={partial}
+        smoothStreaming
+        isStreaming
+        smoothMarkdownPreload={preload}
+        extraRemarkPlugins={extraRemarkPlugins}
+      />
+    );
+    try {
+      await act(async () => {
+        renderer = create(view(true));
+      });
+      expect(parsedCodeValues.at(-1)).toBe("KEEP");
+
+      await act(async () => {
+        renderer!.update(view(false));
+      });
+      expect(parsedCodeValues.at(-1)).toBe("KEEP\n" + fence.slice(0, 2));
+
+      await act(async () => {
+        renderer!.update(view(true));
+      });
+      expect(parsedCodeValues.at(-1)).toBe("KEEP");
+    } finally {
+      await act(async () => renderer?.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("does not load a syntax grammar for an open live fence before it closes", async () => {
+    const highlighter = await getSyntaxHighlighterPromise("typescript");
+    const promise = Promise.resolve(highlighter);
+    const syntax = vi
+      .spyOn(syntaxHighlighting, "getSyntaxHighlighterPromise")
+      .mockReturnValue(promise);
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+    let renderer: ReactTestRenderer | undefined;
+    try {
+      await act(async () => {
+        renderer = create(
+          <ChatMarkdown cwd={undefined} text="```type" smoothStreaming isStreaming />,
+        );
+      });
+      expect(syntax).not.toHaveBeenCalled();
+      await act(async () => {
+        renderer!.update(
+          <ChatMarkdown
+            cwd={undefined}
+            text={"```typescript\nconst a = 1;"}
+            smoothStreaming
+            isStreaming
+          />,
+        );
+        vi.advanceTimersByTime(100);
+      });
+      await act(async () => vi.advanceTimersByTime(100));
+      expect(syntax).not.toHaveBeenCalled();
+      await act(async () => {
+        renderer!.update(
+          <ChatMarkdown
+            cwd={undefined}
+            text={"```typescript\nconst a = 1;\n```"}
+            smoothStreaming
+            isStreaming
+          />,
+        );
+        vi.advanceTimersByTime(100);
+      });
+      await act(async () => vi.advanceTimersByTime(100));
+      expect(syntax).toHaveBeenCalledWith("typescript");
+    } finally {
+      await act(() => renderer?.unmount());
+      vi.restoreAllMocks();
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
 
   it("marks pending code until the highlighter renders its text", async () => {
     const highlighter = await getSyntaxHighlighterPromise("text");

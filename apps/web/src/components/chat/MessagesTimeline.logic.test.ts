@@ -32,6 +32,7 @@ import {
   liveWorkEntryLabel,
   normalizeCompactToolLabel,
   resolveAssistantMessageCopyState,
+  resolveSmoothComplete,
   resolveTimelineDomIsAtEnd,
   resolveTimelineIsAtEnd,
   resolveTimelineMinimapCurrentIndex,
@@ -1567,6 +1568,76 @@ describe("deriveMessagesTimelineRows", () => {
     expect(assistantRows[0]?.assistantCopyStreaming).toBe(false);
     expect(assistantRows[1]?.assistantCopyStreaming).toBe(true);
   });
+
+  it.each(["default", "restructured"] as const)(
+    "shows %s changed-file controls by the associated run lifecycle while preserving historical controls",
+    (conversationStructure) => {
+      const at = "2026-10-18T10:00:00Z";
+      const makeEntry = (id: string) => ({
+        kind: "message" as const,
+        id,
+        createdAt: at,
+        message: {
+          id: MessageId.make(id),
+          runId: RunId.make(id),
+          role: "assistant" as const,
+          text: "Answer",
+          streaming: false,
+          createdAt: at,
+          updatedAt: at,
+        },
+      });
+      const historical = makeEntry("historical");
+      const current = makeEntry("current");
+      const summary = (id: string): TurnDiffSummary => ({
+        runId: RunId.make(id),
+        assistantMessageId: MessageId.make(id),
+        completedAt: at,
+        checkpointTurnCount: 1,
+        checkpointRef: CheckpointRef.make(id),
+        status: "ready",
+        files: [{ path: `${id}.ts`, kind: "modified", additions: 1, deletions: 0 }],
+      });
+      const summaries = [summary("historical"), summary("current")];
+      for (const state of [
+        { isWorking: true, status: "running", visible: false },
+        { isWorking: false, status: "running", visible: false },
+        { isWorking: false, status: "completed", visible: true },
+        { isWorking: false, status: "interrupted", visible: true },
+        // Sending the next prompt must leave the previous answer's controls usable.
+        { isWorking: true, status: "completed", visible: true },
+      ] as const) {
+        const rows = deriveMessagesTimelineRows({
+          timelineEntries: [
+            historical,
+            {
+              ...makeEntry("current-prompt"),
+              message: { ...current.message, id: MessageId.make("current-prompt"), role: "user" },
+            },
+            current,
+          ],
+          conversationStructure,
+          isWorking: state.isWorking,
+          supportsConversationRollback: false,
+          turnDiffSummaries: summaries,
+          latestRun: {
+            runId: current.message.runId,
+            status: state.status,
+            startedAt: at,
+            completedAt: state.status === "running" ? null : at,
+          },
+        });
+        const messages = rows.filter((row) => row.kind === "message");
+        expect(messages.find((row) => row.id === historical.id)?.assistantTurnDiffSummary).toBe(
+          summaries[0],
+        );
+        expect(messages.find((row) => row.id === current.id)?.assistantTurnDiffSummary).toBe(
+          state.visible ? summaries[1] : undefined,
+        );
+        expect(rows.some((row) => row.kind === "thinking")).toBe(state.isWorking);
+      }
+    },
+  );
 
   it("projects assistant diff summaries and user revert counts onto the affected rows", () => {
     const assistantTurnDiffSummary = {
@@ -3441,6 +3512,41 @@ describe("deriveMessagesTimelineRows", () => {
         entry: { id: "running-command" },
         active: true,
       });
+    });
+
+    it("scopes a native subagent's live label by its provider turn when no run exists", () => {
+      const nativeTools = streamingTools.map((entry) => ({
+        ...entry,
+        entry: {
+          ...entry.entry,
+          runId: null,
+          structuredPayload: { providerTurnId: "native-turn" } as never,
+        },
+      }));
+      const derive = (activeProviderTurnId: string | null) =>
+        deriveMessagesTimelineRows({
+          timelineEntries: nativeTools,
+          latestRun: null,
+          runningRunId: null,
+          activeProviderTurnId: activeProviderTurnId as never,
+          isWorking: true,
+          activeTurnStartedAt: "2026-01-01T00:00:00Z",
+          turnDiffSummaries: [],
+          supportsConversationRollback: false,
+          conversationStructure: "restructured",
+        });
+      const rows = derive("native-turn");
+      expect(rows.find((row) => row.kind === "work-live")).toMatchObject({
+        entry: { id: "running-command" },
+        active: true,
+      });
+      expect(bodyWorkEntryIds(rows)).not.toContain("running-command");
+      expect(rows.find((row) => row.id === "work-toggle:finished-command-entry")).toMatchObject({
+        kind: "work-toggle",
+        hiddenCount: 1,
+      });
+      // A different (older or switched) provider turn does not own these tools.
+      expect(derive("other-turn").some((row) => row.kind === "work-live")).toBe(false);
     });
 
     it("keeps the whole turn live under the default structure", () => {
@@ -5649,4 +5755,73 @@ describe("failed turn transcript", () => {
       });
     },
   );
+});
+
+describe("resolveSmoothComplete", () => {
+  const currentRun = RunId.make("run-current");
+  const base = {
+    smoothStreaming: true,
+    messageRunId: currentRun,
+    messageStreaming: true,
+    itemType: "assistant_message" as const,
+    itemStatus: "running" as const,
+    latestRunId: currentRun,
+    isWorking: true,
+  };
+
+  it("waits for the active run's final assistant chunk", () => {
+    expect(resolveSmoothComplete(base)).toBe(false);
+  });
+
+  it.each(["completed", "failed", "cancelled", "interrupted", "rolled_back"] as const)(
+    "closes the source clock for a %s run even if transport and streaming flags lag",
+    (latestRunStatus) => {
+      expect(resolveSmoothComplete({ ...base, latestRunStatus })).toBe(true);
+    },
+  );
+
+  it.each(["preparing", "queued", "starting", "running", "waiting"] as const)(
+    "keeps the source clock open for a %s run",
+    (latestRunStatus) => {
+      expect(resolveSmoothComplete({ ...base, latestRunStatus })).toBe(false);
+    },
+  );
+
+  it.each(["cancelled", "failed", "interrupted"] as const)(
+    "completes a terminal %s item that kept its streaming bit",
+    (itemStatus) => {
+      expect(resolveSmoothComplete({ ...base, itemStatus })).toBe(true);
+    },
+  );
+
+  it("completes a stale run even when it kept streaming", () => {
+    expect(
+      resolveSmoothComplete({
+        ...base,
+        messageRunId: RunId.make("run-previous"),
+      }),
+    ).toBe(true);
+  });
+
+  it("completes the active run once it stopped streaming and the transport settled", () => {
+    expect(resolveSmoothComplete({ ...base, messageStreaming: false, isWorking: false })).toBe(
+      true,
+    );
+  });
+
+  it("keeps waiting while the transport is still working after the last chunk", () => {
+    expect(resolveSmoothComplete({ ...base, messageStreaming: false, isWorking: true })).toBe(
+      false,
+    );
+  });
+
+  it("does not complete when smooth streaming is off", () => {
+    expect(resolveSmoothComplete({ ...base, smoothStreaming: false })).toBe(false);
+  });
+
+  it("does not treat a non-assistant item's status as a terminal message", () => {
+    expect(resolveSmoothComplete({ ...base, itemType: "reasoning", itemStatus: "cancelled" })).toBe(
+      false,
+    );
+  });
 });

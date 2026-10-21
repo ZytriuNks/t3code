@@ -180,6 +180,10 @@ export const EN_MESSAGES = {
   "settings.general.footnotesAutoCollapse.description":
     "Keep footnotes collapsed. While generating, show the footnotes being written and collapse them once they finish; footnotes written back to back stay open until the last one is done. Following a reference opens all footnotes.",
   "settings.general.streaming.fade.title": "Text fade duration",
+  "settings.general.streaming.yield.title": "Yield animation duration",
+  "settings.general.streaming.yield.description":
+    "Duration of a standalone layout movement. Fast continuous output keeps movements connected. Default: 200 ms.",
+  "settings.general.streaming.yield.value": "{value} ms",
   "settings.general.streaming.fade.description":
     "How long each character or token takes to fade in. Default: 200 ms. Set to 0 to disable text fading; output speed and line movement stay independent.",
   "settings.general.streaming.fade.off": "Off",
@@ -935,9 +939,17 @@ export const EN_MESSAGES = {
   "settings.search.item.time-format.title": "Time format",
   "settings.search.item.time-format.keywords":
     "timestamp clock locale system browser os 12 hour 24 hour",
+  "settings.search.item.footnotes-auto-collapse.title": "Automatically collapse footnotes",
+  "settings.search.item.footnotes-auto-collapse.keywords":
+    "markdown footnote references collapse expand",
+  "settings.search.item.conversation-thinking-label.title": "Thinking label",
+  "settings.search.item.conversation-thinking-label.keywords": "thinking activity label text",
+  "settings.search.item.conversation-idle-label.title": "After-tool waiting label",
+  "settings.search.item.conversation-idle-label.keywords":
+    "after tool waiting idle planning label text",
   "settings.search.item.response-streaming.title": "Response streaming",
   "settings.search.item.response-streaming.keywords":
-    "output smooth realtime real-time incremental token paragraph buffered wait turn",
+    "output smooth realtime real-time incremental token paragraph buffered wait turn line handoff markdown preload fade yield animation duration ms",
   "settings.search.item.conversation-structure.title": "Conversation structure",
   "settings.search.item.conversation-structure.keywords":
     "conversation structure chat timeline live activity label tools archive restructured idle planning 对话 结构 活动 标签",
@@ -2836,6 +2848,10 @@ export const ZH_CN_MESSAGES = {
   "settings.general.footnotesAutoCollapse.description":
     "默认收起脚注。生成时展开正在绘制的脚注，绘制完成后自动收起；连续输出的几条脚注会全部显示完再一起收起。点击正文引用会展开全部脚注。",
   "settings.general.streaming.fade.title": "文字淡入时长",
+  "settings.general.streaming.yield.title": "让位动画时长",
+  "settings.general.streaming.yield.description":
+    "单次独立让位的时长。高速连续输出时衔接运动，默认 200 毫秒。",
+  "settings.general.streaming.yield.value": "{value} 毫秒",
   "settings.general.streaming.fade.description":
     "每个字符或 token 的淡入时长，默认 200 毫秒。设为 0 可关闭文字淡入；输出速度和让位动画独立调节。",
   "settings.general.streaming.fade.off": "关闭",
@@ -3515,9 +3531,15 @@ export const ZH_CN_MESSAGES = {
   "settings.search.item.language.keywords": "区域 系统 English 简体中文 中文 语言",
   "settings.search.item.time-format.title": "时间格式",
   "settings.search.item.time-format.keywords": "时间戳 时钟 区域 系统 浏览器 12 小时 24 小时",
+  "settings.search.item.footnotes-auto-collapse.title": "自动折叠脚注",
+  "settings.search.item.footnotes-auto-collapse.keywords": "Markdown 脚注 引用 自动 折叠 展开",
+  "settings.search.item.conversation-thinking-label.title": "Thinking 文案",
+  "settings.search.item.conversation-thinking-label.keywords": "思考中 活动 标签 文案",
+  "settings.search.item.conversation-idle-label.title": "工具后等待文案",
+  "settings.search.item.conversation-idle-label.keywords": "工具 等待 空闲 规划 标签 文案",
   "settings.search.item.response-streaming.title": "响应流式传输",
   "settings.search.item.response-streaming.keywords":
-    "平滑输出 实时输出 逐步 增量 token 段落 缓冲 等待 轮次",
+    "平滑输出 实时输出 逐步 增量 token 段落 缓冲 等待 轮次 行 让位 动画 时长 毫秒",
   "settings.search.item.conversation-structure.title": "对话结构",
   "settings.search.item.conversation-structure.keywords":
     "对话 结构 聊天 消息 时间线 活动 标签 工具 归档 重制 空闲 规划",

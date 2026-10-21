@@ -9,6 +9,12 @@ import {
 
 import { SMOOTH_TEXT_LAYOUT_EVENT, type SmoothTextLayoutDetail } from "../lib/smoothTextLayout";
 
+export interface SmoothScrollTailLayout {
+  element: HTMLElement;
+  /** Natural-minus-published height of the owning virtual row and all following rows. */
+  fraction: number;
+}
+
 export interface SmoothScrollHandle {
   request(): boolean;
   jumpToEnd(): void;
@@ -22,7 +28,9 @@ export interface SmoothScrollHandle {
    * even after follow was cancelled.
    */
   isAtEdge(): boolean;
-  beginLayout(): (() => void) | null;
+  beginLayout(): ((follow?: boolean) => void) | null;
+  /** Called only after the Timeline's list DOM has committed. */
+  commitLayout(rowFraction?: number, tails?: readonly SmoothScrollTailLayout[]): boolean;
 }
 
 /** Capture ownership before React can shrink and regrow the scrollable layout. */
@@ -57,6 +65,7 @@ export function useSmoothScroll({
   endRequest = 0,
   onDetach,
   onFollowingChange,
+  onLayoutRequest,
 }: {
   element: HTMLElement | null;
   enabled: boolean;
@@ -67,6 +76,7 @@ export function useSmoothScroll({
   endRequest?: number;
   onDetach?: (() => void) | undefined;
   onFollowingChange?: ((following: boolean) => void) | undefined;
+  onLayoutRequest?: (() => void) | undefined;
 }) {
   const controllerRef = useRef<SmoothScrollHandle | null>(null);
   const handledEndRequestRef = useRef({ identity, value: endRequest });
@@ -82,7 +92,13 @@ export function useSmoothScroll({
     let following = false;
     let layoutDepth = 0;
     let viewportHeight = 0;
+    let trackedWidth = element.clientWidth;
+    let trackedHeight = element.clientHeight;
+    let viewportResized = false;
+    let lastPinnedEnd: number | null = null;
     let rowFraction: number | null = null;
+    let tailLayouts: readonly SmoothScrollTailLayout[] = [];
+    const previousTailTranslates = new Map<HTMLElement, string>();
     let fractionalScrollInset = 0;
     let nativeEnd = 0;
     const readEnd = () => {
@@ -109,6 +125,9 @@ export function useSmoothScroll({
       const footer = footerRef?.current;
       if (footer && footer.style.translate !== previousFooterTranslate)
         footer.style.translate = previousFooterTranslate;
+      for (const [tail, previous] of previousTailTranslates) tail.style.translate = previous;
+      previousTailTranslates.clear();
+      tailLayouts = [];
     };
     const pinFraction = () => {
       if (!content || previousTranslate) return;
@@ -120,11 +139,12 @@ export function useSmoothScroll({
       // a high-refresh page. Keep that native edge pinned and move only its
       // fractional remainder on the compositor, so slow growth does not
       // hold several frames and then step upward by one pixel.
-      const exactEnd =
-        rowFraction === null
-          ? Math.max(0, content.getBoundingClientRect().height - viewportHeight)
-          : 0;
+      const contentHeight =
+        rowFraction === null || tailLayouts.length > 0 ? content.getBoundingClientRect().height : 0;
+      const exactEnd = rowFraction === null ? Math.max(0, contentHeight - viewportHeight) : 0;
       const remainder = rowFraction ?? exactEnd - nativeEnd;
+      const naturalFraction = contentHeight - viewportHeight - nativeEnd;
+      const containerFraction = Math.abs(naturalFraction) < 1 ? naturalFraction : 0;
       // A positive content translation creates extra native overflow. Instead
       // move the owned scroll offset back one pixel and use only an upward
       // translation. Together they preserve the exact edge without a feedback
@@ -148,6 +168,28 @@ export function useSmoothScroll({
           footer.style.translate = counter;
         }
       }
+      const activeTails = new Set<HTMLElement>();
+      const scrollCompensation = fraction - (nativeEnd - element.scrollTop);
+      for (const tail of tailLayouts) {
+        if (
+          !element.contains(tail.element) ||
+          Math.abs(remainder) >= 1 ||
+          (footer?.contains(tail.element) && footer.parentElement?.style.position === "sticky")
+        )
+          continue;
+        if (!previousTailTranslates.has(tail.element))
+          previousTailTranslates.set(tail.element, tail.element.style.translate);
+        activeTails.add(tail.element);
+        // A tail's own animation still moves naturally. Only the difference
+        // between virtual/native rounding and that suffix belongs to follow.
+        const counter = `0 ${scrollCompensation - tail.fraction - containerFraction}px`;
+        if (tail.element.style.translate !== counter) tail.element.style.translate = counter;
+      }
+      for (const [tail, previous] of previousTailTranslates) {
+        if (activeTails.has(tail)) continue;
+        tail.style.translate = previous;
+        previousTailTranslates.delete(tail);
+      }
       lastPinnedTop = element.scrollTop;
     };
     const reportFollowing = (next: boolean) => {
@@ -162,9 +204,30 @@ export function useSmoothScroll({
       !cancelled &&
       lastPinnedTop !== null &&
       (layoutDepth > 0 || element.scrollTop === lastPinnedTop || element.scrollTop >= readEnd());
+    /**
+     * A panel resize reflows the whole list while the virtualizer keeps its
+     * old offset. That movement is layout, not navigation: follow must adopt
+     * the new edge instead of detaching and letting the stream walk away from
+     * the bottom. Every other off-edge movement remains the reader's.
+     */
+    const layoutResized = () => viewportResized;
+    /**
+     * A collapsing disclosure shrinks the end under a viewport that was pinned
+     * to the old edge. The virtualizer's correction and the browser's clamp can
+     * leave the owned offset short of the new edge, which looks like a reader
+     * walking up the page. Shrinking content never moves the reader down, so
+     * adopt the new edge instead of detaching.
+     */
+    const layoutShrank = (end: number) =>
+      lastPinnedEnd !== null &&
+      end < lastPinnedEnd - 0.5 &&
+      lastPinnedTop !== null &&
+      element.scrollTop <= lastPinnedTop;
     const writeEnd = (end = readEnd()) => {
       // A full re-pin supersedes anything the growth path had accumulated.
       pendingGrowth = 0;
+      viewportResized = false;
+      lastPinnedEnd = end;
       if (element.scrollTop !== end) element.scrollTop = end;
       // Read back the browser's clamped value, including fractional geometry.
       lastPinnedTop = element.scrollTop;
@@ -202,6 +265,16 @@ export function useSmoothScroll({
       if (layoutDepth === 0 && element.scrollTop !== lastPinnedTop) {
         // Only a viewport still sitting on our own pinned offset is ours to
         // move; anything else is the reader's.
+        if (layoutResized() || layoutShrank(readEnd())) {
+          // Adopt the reflowed edge in one pass. The settling pass checks
+          // ownership again and would otherwise detach once the flag cleared.
+          writeEnd(readEnd());
+          // A delayed spacer or disclosure can still grow after this adopt;
+          // keep the same bounded chase a settled growth would have started.
+          chaseIdleFrames = 0;
+          scheduleChase();
+          return;
+        }
         pendingGrowth = 0;
         if (element.scrollTop < readEnd()) {
           cancelled = true;
@@ -217,7 +290,13 @@ export function useSmoothScroll({
       const max = readEnd();
       // A reader can move after the first write and before the batched settling
       // pass. Ownership must be checked there too, before we touch scrollTop.
-      if (layoutDepth === 0 && element.scrollTop !== lastPinnedTop && element.scrollTop < max) {
+      if (
+        layoutDepth === 0 &&
+        element.scrollTop !== lastPinnedTop &&
+        element.scrollTop < max &&
+        !layoutResized() &&
+        !layoutShrank(max)
+      ) {
         pendingGrowth = 0;
         cancelled = true;
         reportFollowing(false);
@@ -233,6 +312,8 @@ export function useSmoothScroll({
       readThisFrame = true;
       if (element.scrollTop !== end) element.scrollTop = end;
       lastPinnedTop = element.scrollTop;
+      lastPinnedEnd = end;
+      viewportResized = false;
       pinFraction();
       reportFollowing(true);
       chaseIdleFrames = 0;
@@ -247,6 +328,7 @@ export function useSmoothScroll({
     const CHASE_IDLE_FRAMES = 3;
     let chaseIdleFrames = 0;
     const scheduleChase = () => {
+      if (onLayoutRequest) return;
       if (cancelled || chaseFrame !== null) return;
       chaseFrame = requestAnimationFrame(() => {
         chaseFrame = null;
@@ -255,14 +337,17 @@ export function useSmoothScroll({
         // Only a viewport still sitting on our own pinned offset is ours to
         // move; anything else is the reader's.
         if (layoutDepth === 0 && element.scrollTop !== lastPinnedTop) {
-          if (element.scrollTop < end) {
-            cancelled = true;
-            reportFollowing(false);
-            onDetach?.();
-            return;
+          if (!layoutResized() && !layoutShrank(end)) {
+            if (element.scrollTop < end) {
+              cancelled = true;
+              reportFollowing(false);
+              onDetach?.();
+              return;
+            }
           }
-          // A shrinking layout clamps the viewport to its new edge. Adopt
-          // that edge before later growth can look like reader navigation.
+          // A shrinking layout clamps the viewport to its new edge, or a
+          // panel resize reflows it. Adopt that edge before later growth can
+          // look like reader navigation.
           writeEnd(end);
         }
         if (element.scrollTop !== end) {
@@ -282,12 +367,14 @@ export function useSmoothScroll({
         // Layout may grow the end while leaving our last pinned offset intact.
         // Any other off-end position belongs to the reader, even before the
         // browser dispatches scroll and even if it differs by less than 1px.
-        if (lastPinnedTop !== null) {
-          cancelled = true;
-          reportFollowing(false);
-          onDetach?.();
+        if (!layoutResized() && !layoutShrank(end)) {
+          if (lastPinnedTop !== null) {
+            cancelled = true;
+            reportFollowing(false);
+            onDetach?.();
+          }
+          return false;
         }
-        return false;
       }
       writeEnd(end);
       chaseIdleFrames = 0;
@@ -295,7 +382,16 @@ export function useSmoothScroll({
       return true;
     };
     const handle: SmoothScrollHandle = {
-      request: pin,
+      request: () => {
+        if (!onLayoutRequest) return pin();
+        onLayoutRequest();
+        return isFollowing();
+      },
+      commitLayout(fraction, tails = []) {
+        rowFraction = fraction ?? null;
+        tailLayouts = tails;
+        return pin();
+      },
       jumpToEnd() {
         cancelled = false;
         writeEnd();
@@ -309,9 +405,15 @@ export function useSmoothScroll({
       beginLayout() {
         if (!isFollowing()) return null;
         layoutDepth++;
-        return () => {
+        return (follow = true) => {
           try {
-            if (!cancelled) pin();
+            if (!cancelled) {
+              if (!follow) lastPinnedTop = element.scrollTop;
+              else if (onLayoutRequest) {
+                lastPinnedTop = element.scrollTop;
+                onLayoutRequest();
+              } else pin();
+            }
           } finally {
             layoutDepth--;
           }
@@ -320,6 +422,7 @@ export function useSmoothScroll({
     };
     const frameLayouts: boolean[] = [];
     const followLayout = (event: Event) => {
+      if ((event as CustomEvent<SmoothTextLayoutDetail>).detail?.managed) return;
       const phase = (event as CustomEvent<SmoothTextLayoutDetail>).detail?.phase;
       if (phase === "before") {
         const owned = isFollowing();
@@ -341,7 +444,16 @@ export function useSmoothScroll({
     controllerRef.current = handle;
     controlRef.current = handle;
     element.addEventListener(SMOOTH_TEXT_LAYOUT_EVENT, followLayout);
-    const resize = new ResizeObserver(pin);
+    const resize = new ResizeObserver(() => {
+      const width = element.clientWidth;
+      const height = element.clientHeight;
+      if (width !== trackedWidth || height !== trackedHeight) {
+        trackedWidth = width;
+        trackedHeight = height;
+        viewportResized = true;
+      }
+      (onLayoutRequest ?? pin)();
+    });
     resize.observe(element);
     if (element.firstElementChild) resize.observe(element.firstElementChild);
     pin();
@@ -355,8 +467,16 @@ export function useSmoothScroll({
       if (controlRef.current === handle) controlRef.current = null;
     };
     // A thread switch must discard the previous thread's controller even if the DOM is reused.
-    // oxlint-disable-next-line react/exhaustive-effect-dependencies
-  }, [controlRef, element, enabled, footerRef, identity, onDetach, onFollowingChange]);
+  }, [
+    controlRef,
+    element,
+    enabled,
+    footerRef,
+    identity,
+    onDetach,
+    onFollowingChange,
+    onLayoutRequest,
+  ]);
 
   useLayoutEffect(() => {
     const handled = handledEndRequestRef.current;

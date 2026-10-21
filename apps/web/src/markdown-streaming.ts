@@ -2,6 +2,84 @@ import type { Root, RootContent } from "mdast";
 import type { Plugin } from "unified";
 import rehypeRaw from "rehype-raw";
 
+interface TextSourcePart {
+  from: number;
+  to: number;
+  valueStart: number;
+  valueEnd: number;
+}
+
+declare module "mdast" {
+  interface Data {
+    streamTextOffsets?: TextSourcePart[];
+    streamTextBase?: number;
+  }
+}
+
+// The compiler is provided transitively by react-markdown. Describe only the
+// extension surface used here instead of adding a direct package dependency.
+type TokenPoint = NonNullable<RootContent["position"]>["start"] & { offset: number };
+type MarkdownHandle = (
+  this: {
+    stack: Array<Root | RootContent>;
+    config: { enter: Record<string, MarkdownHandle>; exit: Record<string, MarkdownHandle> };
+  },
+  token: { start: TokenPoint; end: TokenPoint },
+) => void;
+interface MarkdownExtension {
+  enter?: Record<string, MarkdownHandle>;
+  exit?: Record<string, MarkdownHandle>;
+  transforms?: Array<(tree: Root) => void>;
+}
+
+function recordTextPart(
+  node: Extract<RootContent, { type: "text" }>,
+  from: number,
+  to: number,
+  valueStart: number,
+) {
+  const base = node.position?.start.offset;
+  if (base === undefined) return;
+  const data = (node.data ??= {});
+  data.streamTextBase ??= base;
+  const parts = (data.streamTextOffsets ??= []);
+  parts.push({ from: from - base, to: to - base, valueStart, valueEnd: node.value.length });
+}
+
+function finalizeTextOffsets(node: Root | RootContent) {
+  const parts = node.data?.streamTextOffsets;
+  const base = node.data?.streamTextBase;
+  if (parts && base !== undefined && node.position?.start.offset !== undefined) {
+    // GFM trims a task paragraph's leading whitespace after recording data.
+    // Rebase source and value independently using the compiler's token map;
+    // a new source start can fall inside an omitted container prefix.
+    const sourceShift = node.position.start.offset - base;
+    if (sourceShift !== 0) {
+      const first = parts.find((part) => part.to >= sourceShift) ?? parts.at(-1)!;
+      const valueShift =
+        first.valueStart +
+        Math.max(0, Math.min(sourceShift - first.from, first.valueEnd - first.valueStart));
+      for (const part of parts) {
+        part.from = Math.max(0, part.from - sourceShift);
+        part.to = Math.max(0, part.to - sourceShift);
+        part.valueStart = Math.max(0, part.valueStart - valueShift);
+        part.valueEnd = Math.max(0, part.valueEnd - valueShift);
+      }
+    }
+    delete node.data!.streamTextBase;
+  }
+  if ("children" in node) node.children.forEach(finalizeTextOffsets);
+}
+
+function takeTextParts(node: RootContent) {
+  const parts = node.data?.streamTextOffsets;
+  if (parts) {
+    delete node.data!.streamTextOffsets;
+    if (Object.keys(node.data!).length === 0) delete node.data;
+  }
+  return parts;
+}
+
 /** Ordinary streamed Markdown needs no second pass through the HTML parser. */
 export function rehypeRawIfPresent(): ReturnType<typeof rehypeRaw> {
   const parseRaw = rehypeRaw();
@@ -85,12 +163,58 @@ export const remarkStableTaskCheckboxes: Plugin<[], Root> = () => (tree, file) =
   visit(tree);
 };
 
+function scanCodeSpan(text: string, start: number) {
+  let end = start;
+  while (text[end + 1] === "`") end += 1;
+  const delimiter = text.slice(start, end + 1);
+  let close = text.indexOf(delimiter, end + 1);
+  while (close !== -1 && (text[close - 1] === "`" || text[close + delimiter.length] === "`")) {
+    close = text.indexOf(delimiter, close + delimiter.length);
+  }
+  return { end: close === -1 ? end + 1 : close + delimiter.length, closed: close !== -1 };
+}
+
+function isEscaped(text: string, index: number): boolean {
+  let escapes = 0;
+  while (index > 0 && text[--index] === "\\") escapes++;
+  return escapes % 2 !== 0;
+}
+
+function isImageLabel(text: string, index: number): boolean {
+  return text[index - 1] === "!" && !isEscaped(text, index - 1);
+}
+
+function scanBracketLabel(text: string, start: number) {
+  let depth = 1;
+  let hasImage = false;
+  for (let end = start + 1; end < text.length; end += 1) {
+    if (text[end] === "\\") end += 1;
+    else if (text[end] === "`") end = scanCodeSpan(text, end).end - 1;
+    else if (text[end] === "!" && text[end + 1] === "[") hasImage = true;
+    else if (text[end] === "[") depth += 1;
+    else if (text[end] === "]") {
+      depth -= 1;
+      if (depth === 0) return { end: end + 1, depth, hasImage };
+    }
+  }
+  return { end: text.length, depth, hasImage };
+}
+
 /** Hold a trailing inline construct until its rendered shape is known. */
 function pendingInlineStart(
   text: string,
   resolved: ReadonlyMap<number, number>,
-  literalRanges: ReadonlyArray<{ start: number; end: number }>,
+  couldCompleteHtml: (text: string) => boolean,
+  inLabel = false,
 ): number | null {
+  const settledDelimiters = new Map<string, number>();
+  for (const from of resolved.keys()) {
+    if (!"*_~".includes(text[from] ?? " ")) continue;
+    let end = from + 1;
+    while (text[end] === text[from]) end++;
+    const delimiter = text.slice(from, end);
+    settledDelimiters.set(delimiter, Math.max(from, settledDelimiters.get(delimiter) ?? -1));
+  }
   for (let index = 0; index < text.length; index += 1) {
     const resolvedEnd = resolved.get(index);
     if (resolvedEnd !== undefined) {
@@ -103,7 +227,11 @@ function pendingInlineStart(
     }
     // A partial autolink is still literal text in the AST. Keep its brackets
     // out of the character queue until the parser can resolve the link.
-    if (text[index] === "<" && couldCompleteAutolink(text.slice(index + 1))) return index;
+    if (
+      text[index] === "<" &&
+      (couldCompleteAutolink(text.slice(index + 1)) || couldCompleteHtml(text.slice(index)))
+    )
+      return index;
     if (text[index] === "*" || text[index] === "_" || text[index] === "~") {
       const start = index;
       const marker = text[index];
@@ -117,72 +245,33 @@ function pendingInlineStart(
         !/\s/u.test(after) &&
         (!afterPunctuation || beforeSpace || beforePunctuation) &&
         (marker !== "_" || beforeSpace || beforePunctuation);
-      if (canOpen) {
-        // A sentence-ending delimiter can remain literal beside following
-        // prose. Do not let that pair hold the rest of a streamed paragraph.
-        // This is a narrow streaming heuristic: later syntax can still turn
-        // these runs into nested emphasis, so leave the parser's AST intact.
-        const delimiter = text.slice(start, index + 1);
-        const literalEnd =
-          literalRanges.find((range) => range.start <= start && range.end > index)?.end ??
-          index + 1;
-        let pairedEnd: number | null = null;
-        for (let cursor = index + 1; cursor < literalEnd; cursor += 1) {
-          if (text[cursor] !== marker) {
-            if (/[\n\\`[*_~]/u.test(text[cursor]!)) break;
-            continue;
-          }
-          const runStart = cursor;
-          while (text[cursor + 1] === marker) cursor += 1;
-          const following = text[cursor + 1];
-          if (
-            text.slice(runStart, cursor + 1) === delimiter &&
-            /[。！？.!?]/u.test(text[runStart - 1]!) &&
-            following !== undefined &&
-            !/[\s\p{P}\p{S}]/u.test(following)
-          ) {
-            pairedEnd = cursor;
-          }
-          break;
-        }
-        if (pairedEnd !== null) {
-          index = pairedEnd;
-          continue;
-        }
-      }
+      // A later parsed pair of the same width has already claimed this run's
+      // possible closer. Preserve the parser's literal prefix in that case.
+      const delimiter = text.slice(start, index + 1);
+      if (canOpen && (settledDelimiters.get(delimiter) ?? -1) > index) continue;
       // Complete emphasis nodes were skipped above. Do not paint a possible
       // opener (or a split delimiter at the tail) as literal punctuation.
       if (canOpen || (index === text.length - 1 && (marker !== "_" || beforeSpace))) return start;
       continue;
     }
     if (text[index] === "`") {
-      const start = index;
-      while (text[index + 1] === "`") index += 1;
-      const delimiter = text.slice(start, index + 1);
-      let close = text.indexOf(delimiter, index + 1);
-      while (close !== -1 && (text[close - 1] === "`" || text[close + delimiter.length] === "`")) {
-        close = text.indexOf(delimiter, close + delimiter.length);
-      }
-      if (close === -1) return start;
-      index = close + delimiter.length - 1;
+      const code = scanCodeSpan(text, index);
+      if (!code.closed) return index;
+      index = code.end - 1;
       continue;
     }
-    if (text[index] !== "[" || text[index + 1] === "^") continue;
-    const start = text[index - 1] === "!" ? index - 1 : index;
-    let depth = 1;
-    while (++index < text.length && depth > 0) {
-      if (text[index] === "\\") index += 1;
-      else if (text[index] === "[") depth += 1;
-      else if (text[index] === "]") depth -= 1;
-    }
-    if (depth > 0 || index === text.length) return start;
+    if (inLabel || text[index] !== "[" || text[index + 1] === "^") continue;
+    const start = isImageLabel(text, index) ? index - 1 : index;
+    const label = scanBracketLabel(text, index);
+    index = label.end;
+    if (label.depth > 0 || index === text.length) return start;
     const opening = text[index];
     if (opening !== "(" && opening !== "[") {
       index -= 1;
       continue;
     }
     const closing = opening === "(" ? ")" : "]";
-    depth = 1;
+    let depth = 1;
     let quote: string | null = null;
     while (++index < text.length && depth > 0) {
       const char = text[index];
@@ -236,6 +325,7 @@ export function createInlineBufferPlugin() {
         plugin = createPlugin();
       }
       enabled = active;
+      if (!active) options.referenceCache?.clear();
       if (active) release = false;
       else if (committedEnabled) release = committedPending;
       return release ? undefined : plugin;
@@ -250,13 +340,170 @@ export function createInlineBufferPlugin() {
 /** A stable transform can stay attached after playback. Its owner only needs
  * to reparse on completion when this transform actually withheld a suffix. */
 export const remarkHoldIncompleteInline: Plugin<[InlineBufferOptions?], Root> = function (options) {
+  // Let the existing compiler decode entities/escapes and omit container
+  // prefixes. Keep its token-to-value coordinates through incremental clones.
+  const referenceStarts = new WeakMap<object, number>();
+  const recordData: MarkdownHandle = function (token) {
+    const node = this.stack.at(-1);
+    const before = node?.type === "text" ? node.value.length : 0;
+    this.config.exit.codeTextData!.call(this, token);
+    if (node?.type === "text" && options?.isEnabled?.() !== false)
+      recordTextPart(node, token.start.offset, token.end.offset, before);
+  };
+  const data = this.data() as { fromMarkdownExtensions?: MarkdownExtension[] };
+  const extensions = (data.fromMarkdownExtensions ??= []);
+  extensions.push({
+    transforms: [finalizeTextOffsets],
+    enter: {
+      characterReference(token) {
+        this.config.enter.codeTextData!.call(this, token);
+        const node = this.stack.at(-1);
+        if (node?.type === "text") referenceStarts.set(token, node.value.length);
+      },
+    },
+    exit: {
+      data: recordData,
+      characterEscapeValue: recordData,
+      characterReference(token) {
+        const node = this.stack.pop();
+        if (node?.type !== "text") return;
+        node.position!.end = {
+          line: token.end.line,
+          column: token.end.column,
+          offset: token.end.offset,
+        };
+        if (options?.isEnabled?.() !== false)
+          recordTextPart(
+            node,
+            token.start.offset,
+            token.end.offset,
+            referenceStarts.get(token) ?? 0,
+          );
+      },
+    },
+  });
   return (tree, file) => {
     if (options?.isEnabled?.() === false) {
+      options.referenceCache?.clear();
+      const clearOffsets = (node: Root | RootContent) => {
+        if (node.type !== "root") takeTextParts(node);
+        if ("children" in node) node.children.forEach(clearOffsets);
+      };
+      clearOffsets(tree);
       options.onPending?.(false);
       return;
     }
     let held = false;
     const source = String(file);
+    const suppressed: Array<{ from: number; to: number }> = [];
+    const maskSuppressed = (raw: string, base: number) => {
+      if (suppressed.length === 0) return raw;
+      const characters = raw.split("");
+      for (const range of suppressed)
+        for (
+          let index = Math.max(base, range.from);
+          index < Math.min(base + raw.length, range.to);
+          index++
+        )
+          characters[index - base] = " ";
+      return characters.join("");
+    };
+    const parsePreviewInContext = (text: string, inline: boolean, context = "") => {
+      // Preserve authored quote/list continuation prefixes while parsing only
+      // this inline block, without bringing completed history back into play.
+      const prefix = context + (inline ? "\uFFFC" : "");
+      const parsed = this.parse(prefix + text) as Root;
+      if (!prefix) return parsed;
+      const findBlock = (node: Root | RootContent): RootContent | undefined => {
+        if (node.type === "paragraph" || node.type === "heading") return node;
+        if ("children" in node)
+          for (const child of node.children) {
+            const found = findBlock(child);
+            if (found) return found;
+          }
+        return undefined;
+      };
+      const paragraph = findBlock(parsed);
+      if (paragraph) parsed.children = [paragraph];
+      const first = paragraph && "children" in paragraph ? paragraph.children[0] : undefined;
+      if (inline && first?.type === "text" && first.value.startsWith("\uFFFC")) {
+        first.value = first.value.slice(1);
+        for (const part of first.data?.streamTextOffsets ?? []) {
+          part.from = Math.max(0, part.from - 1);
+          part.to = Math.max(0, part.to - 1);
+          part.valueStart = Math.max(0, part.valueStart - 1);
+          part.valueEnd = Math.max(0, part.valueEnd - 1);
+        }
+        if (!first.value && paragraph && "children" in paragraph) paragraph.children.shift();
+      }
+      const unshift = (node: Root | RootContent) => {
+        if (node.position)
+          for (const point of [node.position.start, node.position.end]) {
+            if (point.offset !== undefined)
+              point.offset = Math.max(0, point.offset - prefix.length);
+            if (point.line === 1) point.column = Math.max(1, point.column - prefix.length);
+          }
+        if ("children" in node) node.children.forEach(unshift);
+      };
+      unshift(parsed);
+      return parsed;
+    };
+    const contextAt = (offset: number) =>
+      source.slice(source.lastIndexOf("\n", offset - 1) + 1, offset).replace(/#{1,6}[ \t]+$/u, "");
+    const couldCompleteHtml = (text: string): boolean => {
+      if (["<!--", "<![CDATA[", "<?"].some((opening) => opening.startsWith(text))) return true;
+      if (!/^<(?:\/?[A-Za-z]|[!?])/u.test(text)) return false;
+      const tag = /^<\/?[A-Za-z][A-Za-z0-9-]*/u.exec(text);
+      if (tag) {
+        let index = tag[0].length;
+        if (text[1] === "/") {
+          if (!/^[ \t\r\n]*$/u.test(text.slice(index))) return false;
+        } else {
+          // Reject impossible tag syntax before probing the parser. Otherwise
+          // every literal '<' could reparse the rest of a long paragraph.
+          while (index < text.length) {
+            const attribute = /^[ \t\r\n]+[A-Za-z_:][A-Za-z0-9_.:-]*/u.exec(text.slice(index));
+            if (!attribute) {
+              if (!/^[ \t\r\n]*\/?$/u.test(text.slice(index))) return false;
+              break;
+            }
+            index += attribute[0].length;
+            const equals = /^[ \t\r\n]*=[ \t\r\n]*/u.exec(text.slice(index));
+            if (!equals) continue;
+            index += equals[0].length;
+            const quote = text[index];
+            if (quote === '"' || quote === "'") {
+              const close = text.indexOf(quote, index + 1);
+              if (close === -1) break;
+              index = close + 1;
+            } else {
+              const value = /^[^ \t\r\n"'=<>`]+/u.exec(text.slice(index));
+              if (!value && index < text.length) return false;
+              index += value?.[0].length ?? 0;
+            }
+          }
+        }
+      } else if (
+        !text.startsWith("<?") &&
+        !text.startsWith("<!--") &&
+        !text.startsWith("<![CDATA[") &&
+        !/^<![A-Z]/u.test(text)
+      )
+        return false;
+      return [">", '">', "'>", "-->", "?>", "]]>"].some((closing) => {
+        const candidate = "\uFFFC" + text + closing;
+        const block = (this.parse(candidate) as Root).children[0];
+        return (
+          block?.type === "paragraph" &&
+          block.children.some(
+            (child) =>
+              child.type === "html" &&
+              child.position?.start.offset === 1 &&
+              child.position?.end.offset === candidate.length,
+          )
+        );
+      });
+    };
     const lastLineStart = source.lastIndexOf("\n") + 1;
     const pendingDefinitions = new Set<string>();
     const seenDefinitions = new Set<string>();
@@ -295,6 +542,7 @@ export const remarkHoldIncompleteInline: Plugin<[InlineBufferOptions?], Root> = 
     };
     collectDefinitions(tree);
     const definitionVersion = JSON.stringify(definitionShapes);
+    const usedReferencePreviews = new Set<number>();
     const preloadReferences = (node: Root | RootContent) => {
       if (!("children" in node)) return;
       let referenceSource: string | undefined;
@@ -318,6 +566,7 @@ export const remarkHoldIncompleteInline: Plugin<[InlineBufferOptions?], Root> = 
           cached.column === start.column &&
           cached.definitions === definitionVersion
         ) {
+          usedReferencePreviews.add(start.offset);
           node.children = structuredClone(cached.children) as typeof node.children;
           held = true;
           return;
@@ -329,6 +578,7 @@ export const remarkHoldIncompleteInline: Plugin<[InlineBufferOptions?], Root> = 
               "link",
               "image",
               "inlineCode",
+              "html",
               "linkReference",
               "imageReference",
               "footnoteReference",
@@ -342,27 +592,43 @@ export const remarkHoldIncompleteInline: Plugin<[InlineBufferOptions?], Root> = 
         };
         node.children.forEach(collectResolved);
         const labels: string[] = [];
-        for (const match of raw.matchAll(
-          /\[((?:\\.|[^\]\\\n])*)\](?:\[((?:\\.|[^\]\\\n])*)\])?/gu,
-        )) {
-          const index = match.index;
-          if (match[2] === undefined && raw[index - 1] !== "!") continue;
-          if (
-            resolved.some(({ from, to }) => index >= from && index < to) ||
-            !(match[2] || match[1]) ||
-            (raw[index - 1] !== "!" && (match[1]!.startsWith("^") || /^[ xX]$/u.test(match[1]!)))
-          )
+        let resolvedIndex = 0;
+        for (let index = 0; index < raw.length; index += 1) {
+          if (raw[index] === "\\") {
+            index += 1;
             continue;
-          let escapes = 0;
-          const markerStart = raw[index - 1] === "!" ? index - 1 : index;
-          for (let i = markerStart - 1; i >= 0 && raw[i] === "\\"; i--) escapes++;
-          if (escapes % 2 !== 0 || raw[index + match[0].length] === "(") continue;
-          labels.push(match[2] || match[1]!);
+          }
+          if (raw[index] !== "[") continue;
+          while (resolvedIndex < resolved.length && resolved[resolvedIndex]!.to <= index)
+            resolvedIndex++;
+          const settled = resolved[resolvedIndex];
+          if (settled && settled.from <= index) {
+            index = settled.to - 1;
+            continue;
+          }
+          const labelStart = index;
+          const label = scanBracketLabel(raw, index);
+          if (label.depth > 0) break;
+          const body = raw.slice(index + 1, label.end - 1);
+          index = label.end - 1;
+          const reference = raw[label.end] === "[" ? scanBracketLabel(raw, label.end) : undefined;
+          if (reference?.depth) break;
+          const identifier = reference ? raw.slice(label.end + 1, reference.end - 1) || body : body;
+          if (reference) index = reference.end - 1;
+          const image = isImageLabel(raw, labelStart);
+          if (!reference && !image) continue;
+          if (reference && raw[labelStart - 1] === "!" && !image) continue;
+          if (!identifier || (!image && (body.startsWith("^") || /^[ xX]$/u.test(body)))) continue;
+          const markerStart = image ? labelStart - 1 : labelStart;
+          if (isEscaped(raw, markerStart) || raw[index + 1] === "(") continue;
+          labels.push(identifier);
         }
         if (labels.length > 0) {
-          const prefix = this.parse(
+          const prefix = parsePreviewInContext(
             `${raw}\n\n${definitions.join("\n\n")}\n\n${labels.map((label) => `[${label}]: https://t3.invalid/stream-reference`).join("\n")}`,
-          ) as Root;
+            false,
+            node.type === "tableCell" ? "" : contextAt(start.offset),
+          );
           const first = prefix.children[0];
           if (first && (first.type === "paragraph" || first.type === "heading")) {
             const shift = (child: RootContent) => {
@@ -400,7 +666,8 @@ export const remarkHoldIncompleteInline: Plugin<[InlineBufferOptions?], Root> = 
         return child;
       }) as typeof node.children;
       node.children.forEach(preloadReferences);
-      if (referenceSource !== undefined && start?.offset !== undefined)
+      if (referenceSource !== undefined && start?.offset !== undefined) {
+        usedReferencePreviews.add(start.offset);
         options?.referenceCache?.set(start.offset, {
           source: referenceSource,
           line: start.line,
@@ -408,16 +675,65 @@ export const remarkHoldIncompleteInline: Plugin<[InlineBufferOptions?], Root> = 
           definitions: definitionVersion,
           children: structuredClone(node.children),
         });
+      }
     };
     preloadReferences(tree);
+    for (const offset of options?.referenceCache?.keys() ?? []) {
+      if (!usedReferencePreviews.has(offset)) options?.referenceCache?.delete(offset);
+    }
     const pendingBlocks = new Set<RootContent>();
-    const visit = (node: Root | RootContent) => {
+    const holdPartialCodeFence = (node: Root | RootContent) => {
+      if (node.type !== "code") return;
+      const start = node.position?.start.offset;
+      const end = node.position?.end.offset;
+      if (
+        start === undefined ||
+        end !== source.length ||
+        source.endsWith("\n") ||
+        source.endsWith("\r")
+      )
+        return;
+      const openingEnd = source.indexOf("\n", start);
+      const openingLine = source.slice(start, openingEnd === -1 ? end : openingEnd);
+      const opening = /^ {0,3}(`{3,}|~{3,})/.exec(openingLine)?.[1];
+      if (!opening) return;
+      const tailStart = source.lastIndexOf("\n", end - 1) + 1;
+      const sourceTail = source.slice(tailStart, end);
+      // The code AST has already removed blockquote/list continuation prefixes.
+      // Compare its final content line with the source line after those prefixes,
+      // so only a real short closer is held in its authored container.
+      const valueLineStart = node.value.lastIndexOf("\n") + 1;
+      const valueTail = node.value.slice(valueLineStart);
+      const valueCandidate = /^ {0,3}([`~]+)[ \t\r]*$/.exec(valueTail)?.[1];
+      const sourceCandidate = /^[ \t>]*([`~]+)[ \t\r]*$/.exec(sourceTail)?.[1];
+      if (
+        !valueCandidate ||
+        sourceCandidate !== valueCandidate ||
+        !valueCandidate.split("").every((character) => character === opening[0]) ||
+        valueCandidate.length >= opening.length
+      )
+        return;
+      node.value = node.value.slice(0, Math.max(0, valueLineStart - 1));
+      held = true;
+    };
+    const visit = (
+      node: Root | RootContent,
+      inLabel = false,
+      nested = false,
+      blockContext = "",
+    ) => {
+      holdPartialCodeFence(node);
       if (!("children" in node)) return;
       // GFM requires a following space/body. A closed marker can already paint
       // as a checkbox; this normalization does not withhold an unfinished tail.
       promoteBodylessTaskMarker(node, source);
       const start = node.position?.start;
       const end = node.position?.end.offset;
+      const context = nested
+        ? blockContext
+        : start?.offset !== undefined && node.type !== "tableCell"
+          ? contextAt(start.offset)
+          : "";
       if (
         node.type === "listItem" &&
         start?.offset !== undefined &&
@@ -433,12 +749,14 @@ export const remarkHoldIncompleteInline: Plugin<[InlineBufferOptions?], Root> = 
         (node.type === "paragraph" || node.type === "heading" || node.type === "tableCell") &&
         start?.offset !== undefined &&
         end !== undefined &&
-        /^[\s|]*$/.test(source.slice(end))
+        (nested || (context.includes(">") ? /^[\s|>]*$/ : /^[\s|]*$/).test(source.slice(end)))
       ) {
-        const raw = source.slice(start.offset, end);
+        const parsePreview = (text: string, inline: boolean) =>
+          parsePreviewInContext(text, inline, context);
+        let raw = maskSuppressed(source.slice(start.offset, end), start.offset);
         // An unclosed reference title makes CommonMark temporarily return its
         // whole definition as prose. Keep it out of layout until it resolves.
-        if (node.type === "paragraph" && /^ {0,3}\[(?:\\.|[^\]\\\n])+\]:/u.test(raw)) {
+        if (!nested && node.type === "paragraph" && /^ {0,3}\[(?:\\.|[^\]\\\n])+\]:/u.test(raw)) {
           const couldResolve = ["", '"', "'", ")", ">"].some((closing) => {
             const candidate = (this.parse(`${raw}${closing}\n`) as Root).children[0];
             return (
@@ -454,7 +772,11 @@ export const remarkHoldIncompleteInline: Plugin<[InlineBufferOptions?], Root> = 
         }
         // A partial thematic break is a temporary paragraph. Do not reserve
         // that paragraph's line/margins before it becomes a one-pixel rule.
-        if (node.type === "paragraph" && /^ {0,3}([-*_])(?:[ \t]*\1)?[ \t]*$/u.test(raw)) {
+        if (
+          !nested &&
+          node.type === "paragraph" &&
+          /^ {0,3}([-*_])(?:[ \t]*\1)?[ \t]*$/u.test(raw)
+        ) {
           pendingBlocks.add(node);
           held = true;
           return;
@@ -469,12 +791,12 @@ export const remarkHoldIncompleteInline: Plugin<[InlineBufferOptions?], Root> = 
         // Trust parsed inline constructs. Their valid destinations, code runs
         // and resolved references must not be mistaken for pending syntax.
         const resolved = new Map<number, number>();
-        const literalRanges: Array<{ start: number; end: number }> = [];
         const collectResolved = (entry: RootContent) => {
           if (
             entry.type === "link" ||
             entry.type === "image" ||
             entry.type === "inlineCode" ||
+            entry.type === "html" ||
             entry.type === "strong" ||
             entry.type === "emphasis" ||
             entry.type === "delete" ||
@@ -487,19 +809,15 @@ export const remarkHoldIncompleteInline: Plugin<[InlineBufferOptions?], Root> = 
             if (from !== undefined && to !== undefined) {
               resolved.set(from - start.offset!, to - start.offset!);
             }
-          } else if (entry.type === "text") {
-            const from = entry.position?.start.offset;
-            const to = entry.position?.end.offset;
-            if (from !== undefined && to !== undefined) {
-              literalRanges.push({ start: from - start.offset!, end: to - start.offset! });
-            }
           } else if ("children" in entry) entry.children.forEach(collectResolved);
         };
         node.children.forEach(collectResolved);
         const lines = raw.split("\n");
         let tableCandidate = false;
         if (
-          node.type !== "tableCell" &&
+          !nested &&
+          node.type === "paragraph" &&
+          /^[ \t]*\|/u.test(lines[0]!) &&
           lines.length <= 2 &&
           (lines.length === 1 || /^[\s|:-]*$/.test(lines[1]!)) &&
           !/\n\s*\n/.test(source.slice(end))
@@ -524,9 +842,12 @@ export const remarkHoldIncompleteInline: Plugin<[InlineBufferOptions?], Root> = 
             }
           }
         }
-        // A table header is still a paragraph until its delimiter row arrives.
-        // Keep it buffered so pipes and dashes never become painted prose first.
-        const pending = tableCandidate ? 0 : pendingInlineStart(raw, resolved, literalRanges);
+        // Only an explicit leading pipe opts into table buffering. A bare
+        // header remains prose until GFM recognizes its delimiter row, so a
+        // later pipe cannot revoke text that has already been displayed.
+        const pending = tableCandidate
+          ? 0
+          : pendingInlineStart(raw, resolved, couldCompleteHtml, inLabel);
         if (pending === null) return;
         held = true;
         // The image URL is complete before a wrapping link's destination.
@@ -595,6 +916,11 @@ export const remarkHoldIncompleteInline: Plugin<[InlineBufferOptions?], Root> = 
         const delimiter =
           codeDelimiter ?? /^(\*{1,3}|_{1,3}|~{1,2})(?=\S)/u.exec(raw.slice(pending))?.[1];
         let progressiveRaw = raw;
+        if (codeDelimiter) {
+          const trailing = /`+$/u.exec(raw)?.[0] ?? "";
+          if (trailing.length < codeDelimiter.length)
+            progressiveRaw = raw.slice(0, raw.length - trailing.length);
+        }
         if (delimiter && !codeDelimiter) {
           const trailing = /([*_~]+)$/u.exec(raw)?.[1] ?? "";
           const tailStart = raw.length - trailing.length;
@@ -604,39 +930,142 @@ export const remarkHoldIncompleteInline: Plugin<[InlineBufferOptions?], Root> = 
           );
           if (
             trailing &&
-            [...trailing].every((marker) => marker === delimiter[0]) &&
-            raw[tailStart - 1] !== "\\" &&
+            trailing.split("").every((marker) => marker === delimiter[0]) &&
+            !isEscaped(raw, tailStart) &&
             !resolvedTail
           ) {
             progressiveRaw = raw.slice(0, tailStart);
           }
         }
-        const progressive = delimiter
-          ? (this.parse(
+        let progressive = delimiter
+          ? (parsePreview(
               `${progressiveRaw}\uFFFC${delimiter}\n\n${definitions.join("\n\n")}`,
+              nested,
             ) as Root)
           : undefined;
-        const candidate = progressive?.children[0];
-        const format = candidate && "children" in candidate ? candidate.children.at(-1) : undefined;
-        const hasFormat =
+        let candidate = progressive?.children[0];
+        let format = candidate && "children" in candidate ? candidate.children.at(-1) : undefined;
+        let hasFormat =
           format &&
           ["emphasis", "strong", "delete", "inlineCode"].includes(format.type) &&
           format.position?.start.offset === pending &&
           format.position?.end.offset === progressiveRaw.length + 1 + delimiter!.length;
+        if (delimiter && !codeDelimiter && !hasFormat) {
+          // Batch competing literal openers of this width. Re-parsing every
+          // remaining suffix builds a quadratic chain for repeated **甲。 runs.
+          const count = suppressed.length;
+          for (let index = pending + delimiter.length; index < progressiveRaw.length; index++) {
+            const settled = resolved.get(index);
+            if (settled !== undefined) {
+              index = settled - 1;
+              continue;
+            }
+            if (raw[index] === "\\") {
+              index++;
+              continue;
+            }
+            if (raw[index] === "`") {
+              const code = scanCodeSpan(raw, index);
+              if (!code.closed) break;
+              index = code.end - 1;
+              continue;
+            }
+            if (!raw.startsWith(delimiter, index) || raw[index - 1] === delimiter[0]) continue;
+            let to = index + delimiter.length;
+            while (raw[to] === delimiter[0]) to++;
+            const before = raw[index - 1] ?? " ";
+            const after = raw[to] ?? " ";
+            const canOpen =
+              !/\s/u.test(after) &&
+              (!/[\p{P}\p{S}]/u.test(after) || /[\s\p{P}\p{S}]/u.test(before)) &&
+              (delimiter[0] !== "_" || /[\s\p{P}\p{S}]/u.test(before));
+            if (to - index === delimiter.length && canOpen)
+              suppressed.push({ from: start.offset! + index, to: start.offset! + to });
+            index = to - 1;
+          }
+          if (suppressed.length > count) {
+            raw = maskSuppressed(raw, start.offset!);
+            progressiveRaw = maskSuppressed(progressiveRaw, start.offset!);
+            progressive = parsePreview(
+              `${progressiveRaw}\uFFFC${delimiter}\n\n${definitions.join("\n\n")}`,
+              nested,
+            );
+            candidate = progressive.children[0];
+            format = candidate && "children" in candidate ? candidate.children.at(-1) : undefined;
+            hasFormat =
+              !!format &&
+              ["emphasis", "strong", "delete"].includes(format.type) &&
+              format.position?.start.offset === pending &&
+              format.position?.end.offset === progressiveRaw.length + 1 + delimiter.length;
+          }
+        }
+        // An interior run can claim the synthetic closer (e.g. **甲。**乙).
+        // Keep the pending outer shape and preview its authored body below.
+        if (delimiter && !codeDelimiter && !hasFormat) {
+          progressive = parsePreview(
+            `${raw.slice(0, pending)}${delimiter}\uFFFC${delimiter}\n\n${definitions.join("\n\n")}`,
+            nested,
+          ) as Root;
+          candidate = progressive.children[0];
+          format = candidate && "children" in candidate ? candidate.children.at(-1) : undefined;
+          hasFormat = !!format && "children" in format && format.position?.start.offset === pending;
+          if (hasFormat && format && "children" in format) {
+            const bodyStart = pending + delimiter.length;
+            const body = (
+              parsePreview(
+                `${progressiveRaw.slice(bodyStart)}\uFFFC\n\n${definitions.join("\n\n")}`,
+                true,
+              ) as Root
+            ).children[0];
+            const before = raw.slice(0, bodyStart).split("\n");
+            const shiftBody = (child: RootContent) => {
+              if (child.position) {
+                for (const point of [child.position.start, child.position.end]) {
+                  if (point.offset !== undefined) point.offset += bodyStart;
+                  if (point.line === 1) point.column += before.at(-1)!.length;
+                  point.line += before.length - 1;
+                }
+              }
+              if ("children" in child) child.children.forEach(shiftBody);
+            };
+            if (body?.type === "paragraph") {
+              body.children.forEach(shiftBody);
+              format.children = body.children;
+            }
+            format.position!.end = {
+              line: lines.length,
+              column: lines.at(-1)!.length + 1,
+              offset: raw.length,
+            };
+          }
+        }
         // A closed label can already keep its final anchor shape while only
         // the destination is missing. Angle autolinks expose their received
         // URL text too, but neither preview is navigable before completion.
-        const linkLabel = /^\[((?:\\.|[^\]\\])*)\]\(/u.exec(raw.slice(pending));
-        // Labels may span many provider packets. Keep their received glyphs
-        // in the display queue before the bracket and destination arrive.
-        const openLabel = /^\[((?:\\.|[^\]\\])+)\]?$/u.exec(raw.slice(pending));
+        const label =
+          raw[pending] === "[" && !linkedImage && !pendingImage
+            ? scanBracketLabel(raw, pending)
+            : undefined;
+        // Nested media stays buffered until the existing image path can own it.
+        let previewLabel =
+          label && !label.hasImage
+            ? raw.slice(pending + 1, label.end - (label.depth === 0 ? 1 : 0))
+            : undefined;
+        const recoveryClosers = Math.max(0, (label?.depth ?? 0) - 1);
+        if (label && previewLabel !== undefined && label.depth > 0) {
+          const trailingEscapes = /\\+$/u.exec(previewLabel)?.[0].length ?? 0;
+          if (trailingEscapes % 2 !== 0) previewLabel = previewLabel.slice(0, -1);
+          // Close nested brackets after the received text so authored child
+          // offsets stay intact. Remove only these recovery glyphs from the AST.
+          previewLabel += "]".repeat(recoveryClosers);
+        }
         const autolink = /^<(https?:\/\/[^<>\s]*)$/u.exec(raw.slice(pending));
-        const previewLabel =
-          linkLabel?.[1] ?? openLabel?.[1] ?? autolink?.[1]?.replace(/[\\[\]]/gu, "\\$&");
+        previewLabel ??= autolink?.[1]?.replace(/[\\[\]]/gu, "\\$&");
         const linkPreview =
           previewLabel !== undefined
-            ? (this.parse(
+            ? (parsePreview(
                 `${raw.slice(0, pending)}[${previewLabel}](https://t3.invalid/stream-link)\n\n${definitions.join("\n\n")}`,
+                nested,
               ) as Root)
             : undefined;
         const linkBlock = linkPreview?.children[0];
@@ -645,6 +1074,16 @@ export const remarkHoldIncompleteInline: Plugin<[InlineBufferOptions?], Root> = 
         const hasLink =
           previewAnchor?.type === "link" && previewAnchor.position?.start.offset === pending;
         if (hasLink) {
+          const last = previewAnchor.children.at(-1);
+          if (recoveryClosers > 0 && last?.type === "text") {
+            last.value = last.value.slice(0, -recoveryClosers);
+            if (!last.value) previewAnchor.children.pop();
+            else if (last.position) {
+              if (last.position.end.offset !== undefined)
+                last.position.end.offset -= recoveryClosers;
+              last.position.end.column -= recoveryClosers;
+            }
+          }
           previewAnchor.url = "";
           previewAnchor.position!.end = {
             line: lines.length,
@@ -656,7 +1095,7 @@ export const remarkHoldIncompleteInline: Plugin<[InlineBufferOptions?], Root> = 
           ? progressive!
           : hasLink
             ? linkPreview!
-            : (this.parse(`${raw.slice(0, pending)}\uFFFC\n\n${definitions.join("\n\n")}`) as Root);
+            : parsePreview(`${raw.slice(0, pending)}\uFFFC\n\n${definitions.join("\n\n")}`, nested);
         const first = prefix.children[0];
         const shift = (child: RootContent) => {
           if (child.position) {
@@ -681,6 +1120,12 @@ export const remarkHoldIncompleteInline: Plugin<[InlineBufferOptions?], Root> = 
               else if (last.position) {
                 if (last.position.end.offset !== undefined) last.position.end.offset -= 1;
                 last.position.end.column -= 1;
+                if ((last.position.end.offset ?? 0) > raw.length)
+                  last.position.end = {
+                    line: lines.length,
+                    column: lines.at(-1)!.length + 1,
+                    offset: raw.length,
+                  };
               }
             } else if (last && "children" in last) {
               removeSentinel(last);
@@ -695,6 +1140,37 @@ export const remarkHoldIncompleteInline: Plugin<[InlineBufferOptions?], Root> = 
           };
           if (!hasLink) removeSentinel(first);
           first.children.forEach(shift);
+          // Preview only the received body again, so unfinished child syntax
+          // cannot leak through a synthetic outer link or emphasis node.
+          const preview =
+            hasFormat &&
+            format &&
+            (format.type === "strong" || format.type === "emphasis" || format.type === "delete")
+              ? format
+              : hasLink && label && previewAnchor?.type === "link"
+                ? previewAnchor
+                : undefined;
+          if (preview) {
+            const bodyStart = pending + (hasLink ? 1 : delimiter!.length);
+            const bodyEnd = hasLink
+              ? label!.end - (label!.depth === 0 ? 1 : 0)
+              : progressiveRaw.length;
+            const point = (offset: number) => {
+              const before = raw.slice(0, offset).split("\n");
+              return {
+                offset: start.offset! + offset,
+                line: start.line + before.length - 1,
+                column: before.at(-1)!.length + (before.length === 1 ? start.column : 1),
+              };
+            };
+            const body: Extract<RootContent, { type: "paragraph" }> = {
+              type: "paragraph",
+              position: { start: point(bodyStart), end: point(bodyEnd) },
+              children: preview.children,
+            };
+            visit(body, inLabel || !!hasLink, true, context);
+            preview.children = body.children;
+          }
           const image = linkedImage ?? pendingImage;
           if (image && (linkedImage || linkedImageOpening))
             first.children.push({
@@ -715,7 +1191,7 @@ export const remarkHoldIncompleteInline: Plugin<[InlineBufferOptions?], Root> = 
         } else node.children = [];
         return;
       }
-      node.children.forEach(visit);
+      node.children.forEach((child) => visit(child));
       node.children = node.children.filter(
         (child) => !pendingBlocks.has(child),
       ) as typeof node.children;
@@ -728,21 +1204,45 @@ export const remarkHoldIncompleteInline: Plugin<[InlineBufferOptions?], Root> = 
     const hideUnresolvedReferences = (node: Root | RootContent) => {
       if (!("children" in node)) return;
       for (const child of node.children) {
-        if (child.type !== "text" || !child.value.includes("[")) continue;
+        const parts = takeTextParts(child);
+        if (child.type !== "text" || !parts) continue;
+        const base = child.position?.start.offset;
+        if (base === undefined) continue;
         const authored = source.slice(child.position?.start.offset, child.position?.end.offset);
         const pattern =
           /\[\^[^\]\s]*(?:\]|$)|!\[(?:\\.|[^\]\\])*\](?:\[(?:\\.|[^\]\\])*\]|(?![([]))/gu;
-        const markers = [...authored.matchAll(pattern)];
-        let markerIndex = 0;
-        const filtered = child.value.replace(pattern, (marker) => {
-          const match = markers[markerIndex];
-          if (!match || match[0] !== marker) return marker;
-          markerIndex++;
-          let escapes = 0;
-          for (let index = match.index - 1; index >= 0 && authored[index] === "\\"; index--)
-            escapes++;
-          return escapes % 2 === 0 ? "" : marker;
-        });
+        const markers = [...authored.matchAll(pattern)]
+          .filter((match) => !isEscaped(authored, match.index))
+          .map((match) => ({ from: match.index, to: match.index + match[0].length }));
+        for (const range of suppressed) {
+          if (range.from >= base && range.to <= base + authored.length)
+            markers.push({ from: range.from - base, to: range.to - base });
+        }
+        if (markers.length === 0) continue;
+        markers.sort((a, b) => a.from - b.from);
+        let partIndex = 0;
+        const valueAt = (offset: number) => {
+          while (partIndex + 1 < parts.length && parts[partIndex]!.to < offset) partIndex++;
+          const part = parts[partIndex]!;
+          return (
+            part.valueStart +
+            Math.max(0, Math.min(offset - part.from, part.valueEnd - part.valueStart))
+          );
+        };
+        let valueOffset = 0;
+        let sourceOffset = 0;
+        let filtered = "";
+        for (const match of markers) {
+          // A suppressed opener can lie inside a hidden footnote identifier.
+          // Consume their union without revisiting already removed source.
+          if (match.to <= sourceOffset) continue;
+          const from = valueAt(Math.max(sourceOffset, match.from));
+          const to = valueAt(match.to);
+          filtered += child.value.slice(valueOffset, from);
+          valueOffset = to;
+          sourceOffset = match.to;
+        }
+        filtered += child.value.slice(valueOffset);
         if (filtered !== child.value) {
           child.value = filtered;
           held = true;

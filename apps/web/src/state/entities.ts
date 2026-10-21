@@ -8,6 +8,7 @@ import {
   EMPTY_THREAD_HISTORY_META,
   mergeEnvironmentThread,
   type EnvironmentThreadStatus,
+  type ThreadTextPlaybackState,
   type ThreadHistoryMeta,
 } from "@t3tools/client-runtime/state/threads";
 import type { ScopedProjectRef, ScopedThreadRef, ServerConfig } from "@t3tools/contracts";
@@ -46,6 +47,9 @@ const EMPTY_VISIBLE_TURN_ITEMS_ATOM = Atom.make(EMPTY_VISIBLE_TURN_ITEMS).pipe(
 );
 const EMPTY_THREAD_HISTORY_ATOM = Atom.make<ThreadHistoryMeta>(EMPTY_THREAD_HISTORY_META).pipe(
   Atom.withLabel("web-thread-history:empty"),
+);
+const EMPTY_THREAD_TEXT_PLAYBACK_ATOM = Atom.make<ThreadTextPlaybackState | null>(null).pipe(
+  Atom.withLabel("web-thread-text-playback:empty"),
 );
 
 const activeEnvironmentIdAtom = Atom.make<EnvironmentId | null>(null).pipe(
@@ -133,6 +137,12 @@ export function useThread(
 export function useThreadStatus(ref: ScopedThreadRef | null): EnvironmentThreadStatus {
   return useAtomValue(
     ref === null ? EMPTY_THREAD_STATUS_ATOM : environmentThreadDetails.statusAtom(ref),
+  );
+}
+
+export function useThreadTextPlayback(ref: ScopedThreadRef | null): ThreadTextPlaybackState | null {
+  return useAtomValue(
+    ref === null ? EMPTY_THREAD_TEXT_PLAYBACK_ATOM : environmentThreadDetails.textPlaybackAtom(ref),
   );
 }
 

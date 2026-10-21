@@ -2,6 +2,7 @@
 import { act, createRef, useLayoutEffect, type RefObject } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import BezierEasing from "bezier-easing";
 
 import {
   setSmoothTextEnd,
@@ -168,6 +169,68 @@ afterEach(() => {
 });
 
 describe("useSmoothScroll", () => {
+  it.each(
+    ([80, 200, 1000] as const).flatMap((duration) =>
+      ([false, true] as const).map((navigate) => [duration, navigate] as const),
+    ),
+  )(
+    "follows simultaneous %sms eased height changes until the reader navigates: %s",
+    async (duration, navigate) => {
+      const element = makeScrollElement(1600, 2000, 400);
+      scrollElements.push(element);
+      const content = element.firstElementChild as HTMLElement;
+      const body = document.createElement("div");
+      const footnote = document.createElement("div");
+      body.style.height = footnote.style.height = "20px";
+      content.append(body, footnote);
+      let top = 1600;
+      Object.defineProperties(element, {
+        scrollHeight: {
+          configurable: true,
+          get: () =>
+            1960 + Number.parseFloat(body.style.height) + Number.parseFloat(footnote.style.height),
+        },
+        scrollTop: {
+          configurable: true,
+          get: () => (top = Math.min(top, element.scrollHeight - element.clientHeight)),
+          set: (next: number) => {
+            top = Math.max(0, Math.min(next, element.scrollHeight - element.clientHeight));
+          },
+        },
+      });
+      render(element);
+      const easing = BezierEasing(0.42, 0, 0.58, 1);
+      let detachedAt: number | null = null;
+      const steps = Math.ceil(duration / 16);
+      for (let index = 1; index <= steps; index++) {
+        if (navigate && index === 3) {
+          element.scrollTop -= 32;
+          detachedAt = element.scrollTop;
+        }
+        const progress = easing(Math.min(1, (index * 16) / duration));
+        await act(async () => {
+          setSmoothTextFrameHeight(body, 20 + 80 * progress);
+          setSmoothTextFrameHeight(footnote, 20 + 40 * progress);
+          await Promise.resolve();
+        });
+        expect(element.scrollTop).toBeCloseTo(detachedAt ?? 1600 + 120 * progress, 6);
+        expect(controlRef.current?.isFollowing()).toBe(detachedAt === null);
+        expect(element.style.scrollBehavior).toBe("");
+      }
+      if (navigate) {
+        expect(controlRef.current?.request()).toBe(false);
+        expect(element.scrollTop).toBe(detachedAt);
+      } else {
+        await act(async () => {
+          setSmoothTextFrameHeight(footnote, 0);
+          await Promise.resolve();
+        });
+        expect(element.scrollTop).toBe(1660);
+        expect(controlRef.current?.isFollowing()).toBe(true);
+      }
+    },
+  );
+
   it("keeps fractional row growth monotonic across rounding boundaries without transform overflow", () => {
     const element = makeScrollElement(1600, 2000, 400);
     scrollElements.push(element);
@@ -208,6 +271,81 @@ describe("useSmoothScroll", () => {
       expect(controlRef.current?.isFollowing()).toBe(true);
       expect(controlRef.current?.isAtEdge()).toBe(true);
     }
+  });
+
+  it("re-pins the end after a panel resize reflows the list instead of detaching", () => {
+    const element = makeScrollElement(1600, 2000, 400);
+    scrollElements.push(element);
+    render(element);
+    expect(controlRef.current?.isFollowing()).toBe(true);
+
+    // A narrower panel reflows the content and the virtualizer keeps an old
+    // anchor, so the owned offset no longer equals its last write. That is a
+    // layout change, not reader navigation: follow must adopt the new edge.
+    Object.defineProperty(element, "clientWidth", { configurable: true, get: () => 480 });
+    element.setHeight(3000);
+    element.scrollTop = 1601;
+    act(() => MockResizeObserver.instances.at(-1)?.trigger());
+
+    expect(controlRef.current?.isFollowing()).toBe(true);
+    expect(element.scrollTop).toBe(2600);
+  });
+
+  it("adopts the collapsed edge when a shrinking footnote panel moves the owned offset", () => {
+    const element = makeScrollElement(1600, 2000, 400);
+    scrollElements.push(element);
+    render(element);
+    expect(controlRef.current?.isFollowing()).toBe(true);
+
+    // The disclosure collapses 120px and the virtualizer leaves the owned
+    // offset one step above the new edge. Shrinking content is layout, not a
+    // reader walking away from the bottom.
+    element.setHeight(1880);
+    element.scrollTop = 1479;
+    act(() => MockResizeObserver.instances.at(-1)?.trigger());
+
+    expect(controlRef.current?.isFollowing()).toBe(true);
+    expect(element.scrollTop).toBe(1480);
+  });
+
+  it("keeps a reader detached after they leave a followed shrinking edge", () => {
+    const element = makeScrollElement(1600, 2000, 400);
+    scrollElements.push(element);
+    render(element);
+    // The panel collapses and follow adopts the new edge through the height
+    // event path (settleGrowth), which must record this edge as the last pin.
+    element.setHeight(1880);
+    act(() => element.notifyGrowth());
+    expect(element.scrollTop).toBe(1480);
+
+    // The reader then scrolls up. A later one-pixel growth is the provider's,
+    // not permission to pull them back to the bottom.
+    element.scrollTop = 1400;
+    element.setHeight(1881);
+    act(() => element.notifyGrowth());
+
+    expect(controlRef.current?.isFollowing()).toBe(false);
+    expect(element.scrollTop).toBe(1400);
+  });
+
+  it("adopts a shrink after a followed growth instead of detaching", () => {
+    const element = makeScrollElement(1600, 2000, 400);
+    scrollElements.push(element);
+    render(element);
+    // Follow a grown edge through the height event path.
+    element.setHeight(2200);
+    act(() => element.notifyGrowth());
+    expect(element.scrollTop).toBe(1800);
+
+    // A disclosure collapses 100px and the measured offset lands one step
+    // above the new edge. The followed edge must be remembered as 1800, not
+    // the original 1600, or this looks like reader navigation.
+    element.setHeight(2100);
+    element.scrollTop = 1699;
+    act(() => element.notifyGrowth());
+
+    expect(controlRef.current?.isFollowing()).toBe(true);
+    expect(element.scrollTop).toBe(1700);
   });
 
   it("retains follow when a direct frame height write clamps its owned viewport", () => {
@@ -343,6 +481,52 @@ describe("useSmoothScroll", () => {
     act(() => controlRef.current?.cancel());
     expect(content.style.translate).toBe("");
     expect(footer.style.translate).toBe("");
+  });
+
+  it("keeps a virtual Thinking row fixed across streamed row rounding boundaries", () => {
+    const element = makeScrollElement(1600, 2000, 400);
+    scrollElements.push(element);
+    const content = element.firstElementChild as HTMLElement;
+    const thinking = document.createElement("div");
+    content.append(thinking);
+    let roundedGrowth = 0;
+    thinking.getBoundingClientRect = () =>
+      new DOMRect(
+        0,
+        1760 +
+          roundedGrowth -
+          element.scrollTop +
+          Number.parseFloat(content.style.translate.split(" ")[1] ?? "0") +
+          Number.parseFloat(thinking.style.translate.split(" ")[1] ?? "0"),
+        100,
+        28,
+      );
+    act(() => root.render(<Probe element={element} />));
+
+    for (const growth of [0.1, 0.4, 0.5, 0.6, 0.9, 1, 1.2, 1.5, 1.9, 2]) {
+      roundedGrowth = Math.round(growth);
+      element.setHeight(2000 + roundedGrowth);
+      act(() =>
+        controlRef.current?.commitLayout(growth - roundedGrowth, [
+          { element: thinking, fraction: 0 },
+        ]),
+      );
+      expect(thinking.getBoundingClientRect().top).toBeCloseTo(160, 6);
+      const bodyY = Number.parseFloat(content.style.translate.split(" ")[1] ?? "0");
+      expect(element.scrollTop - bodyY).toBeCloseTo(1600 + growth, 6);
+      expect(controlRef.current?.isFollowing()).toBe(true);
+    }
+
+    element.scrollTop -= 32;
+    act(() => controlRef.current?.cancel());
+    expect(thinking.style.translate).toBe("");
+    expect(content.style.translate).toBe("");
+    const detachedTop = element.scrollTop;
+    roundedGrowth = 3;
+    element.setHeight(2003);
+    act(() => controlRef.current?.commitLayout(0));
+    expect(element.scrollTop).toBe(detachedTop);
+    expect(thinking.getBoundingClientRect().top).toBe(193);
   });
 
   it("leaves a non-scrollable body in normal flow as the first rows obtain space", () => {

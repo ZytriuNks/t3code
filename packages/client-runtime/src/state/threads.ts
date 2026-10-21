@@ -32,6 +32,7 @@ import { subscribeDynamic } from "../rpc/client.ts";
 import { parseThreadKey, threadKey } from "./entities.ts";
 import { applyOrchestrationV2ProjectionEvent } from "./orchestrationV2Projection.ts";
 import { THREAD_SNAPSHOT_IDLE_TTL_MS } from "./threadRetention.ts";
+import { captureThreadTextPlayback, withHistoryPageBaseline } from "./threadTextPlayback.ts";
 import { followStreamInEnvironment } from "./runtime.ts";
 import {
   ThreadHistoryController,
@@ -162,6 +163,15 @@ function cachedThreadState(value: EnvironmentThreadState): EnvironmentThreadStat
         : statusWithoutLiveData(value.data),
     error: Option.none(),
     history: { ...value.history, loading: false, error: null },
+    ...(value.textPlayback === undefined
+      ? {}
+      : {
+          textPlayback: captureThreadTextPlayback(
+            Option.getOrNull(value.data),
+            value.textPlayback.generation,
+            "pending",
+          ),
+        }),
   };
 }
 
@@ -382,6 +392,12 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
             : ("live" as const),
         error: previous.error,
         history,
+        textPlayback: captureThreadTextPlayback(
+          thread,
+          previous.textPlayback?.generation ?? 0,
+          previous.textPlayback?.phase ?? "pending",
+          previous.textPlayback?.legacyRunIds,
+        ),
       };
     });
     // Active projections can update many times per second and retain large tool
@@ -546,10 +562,24 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
     item: OrchestrationV2ThreadStreamItem,
   ) {
     if (item.kind === "synchronized") {
+      const waiting = yield* Ref.get(awaitingCompletion);
       yield* Ref.set(awaitingCompletion, false);
       yield* SubscriptionRef.update(state, (current) =>
         Option.isSome(current.data) && current.status !== "deleted" && Option.isNone(current.error)
-          ? { ...current, status: "live" as const, error: Option.none() }
+          ? {
+              ...current,
+              status: "live" as const,
+              error: Option.none(),
+              ...(waiting
+                ? {
+                    textPlayback: captureThreadTextPlayback(
+                      current.data.value,
+                      current.textPlayback?.generation ?? 0,
+                      "synchronized",
+                    ),
+                  }
+                : {}),
+            }
           : current,
       );
       return;
@@ -726,6 +756,15 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
                     ? ("live" as const)
                     : latest.status,
                 history,
+                ...(latest.textPlayback === undefined
+                  ? {}
+                  : {
+                      textPlayback: withHistoryPageBaseline(
+                        latest.textPlayback,
+                        latest.data.value,
+                        merged,
+                      ),
+                    }),
               },
             ];
           },
@@ -806,6 +845,16 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
           Effect.orElseSucceed(() => false),
         );
         yield* Ref.set(awaitingCompletion, supportsCompletionMarker);
+        yield* applyLock.withPermits(1)(
+          SubscriptionRef.update(state, (value) => ({
+            ...value,
+            textPlayback: captureThreadTextPlayback(
+              Option.getOrNull(value.data),
+              (value.textPlayback?.generation ?? 0) + 1,
+              supportsCompletionMarker ? "pending" : "legacy",
+            ),
+          })).pipe(Effect.andThen(remember)),
+        );
         yield* markSynchronizing;
         yield* Ref.set(resumingLive, false);
 

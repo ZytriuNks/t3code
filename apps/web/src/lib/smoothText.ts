@@ -56,7 +56,10 @@ interface SmoothTextController {
   readonly lastRevealAt: number | null;
   readonly pendingGraphemeCount: number;
   readonly graphemeCount: number;
+  graphemeCountBetween(start: number, end: number): number;
   readonly partial: boolean;
+  /** Multiple source arrivals have shared a consumable text publication. */
+  readonly deferredSupply: boolean;
   arrivalInterval(now: number): number;
   characterInterval(now: number, pendingCount?: number): number;
 }
@@ -107,9 +110,14 @@ export function createSmoothText(
   let resumedEmptyBuffer = false;
   let finished = initialText.length > 0;
   let usesSourceArrivals = false;
+  let sourceArrivalsSinceSupply = 0;
+  let deferredSupply = false;
   let receivedGraphemes = 0;
   let arrivalSamples: Array<{ at: number; total: number }> = [];
   let lastArrivalRate = 0;
+  // Learn only real space waits. The reserve must cover both source jitter
+  // and admission latency, while keeping the existing glyph and time caps.
+  let layoutReserveMs = 0;
 
   for (const { segment } of graphemeSegmenter.segment(initialText)) {
     graphemeEnds.push((graphemeEnds.at(-1) ?? 0) + segment.length);
@@ -247,7 +255,12 @@ export function createSmoothText(
       1,
       Math.min(
         TARGET_BUFFER_GRAPHEMES,
-        (rate * Math.max(SMOOTH_TEXT_BUFFER_MS, Math.min(MAX_POOL_GAP_MS, arrivalGap()))) / 1_000,
+        (rate *
+          Math.min(
+            MAX_POOL_GAP_MS,
+            Math.max(arrivalGap(), SMOOTH_TEXT_BUFFER_MS + layoutReserveMs),
+          )) /
+          1_000,
       ),
     );
     // The pool is the smoothing reserve, so hold it at the target instead of
@@ -307,6 +320,19 @@ export function createSmoothText(
         : Math.min(minimumInterval, layoutIntervalFloor);
     return lastRevealAt! + Math.max(Math.min(interval, floor), interval - revealCredit);
   };
+  const normalizeAtomicRanges = (ranges: NonNullable<SmoothTextPresentation["atomicRanges"]>) => {
+    const normalized: Array<{ start: number; end: number }> = [];
+    for (const range of ranges.toSorted((a, b) => a.start - b.start)) {
+      const previous = normalized.at(-1);
+      if (previous && range.start < previous.end) {
+        normalized[normalized.length - 1] = {
+          start: previous.start,
+          end: Math.max(previous.end, range.end),
+        };
+      } else normalized.push(range);
+    }
+    return normalized;
+  };
   const nextUnitEnd = () => {
     if (partialUnitEnd !== null) {
       let low = boundaryCursor;
@@ -325,10 +351,15 @@ export function createSmoothText(
       // Merge that boundary into the complete grapheme before exposing it.
       end = graphemeEnds[boundaryCountThrough(end - 1)] ?? safeEnd;
     }
-    for (const surface of atomicRanges ?? []) {
-      if (surface.start >= end) break;
-      if (surface.end > end) end = Math.min(safeEnd, surface.end);
+    let low = 0;
+    let high = atomicRanges?.length ?? 0;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (atomicRanges![middle]!.start < end) low = middle + 1;
+      else high = middle;
     }
+    const surface = atomicRanges?.[low - 1];
+    if (surface && surface.end > end) end = Math.min(safeEnd, surface.end);
     // Provider commits and framed link labels may span many physical rows.
     // Bound their display weight so the next batch never pays for a whole
     // paragraph that was already painted over several frames.
@@ -379,6 +410,7 @@ export function createSmoothText(
         lastArrivalRate = 0;
       }
       recordArrivals(graphemeCount, now);
+      if (graphemeCount > 0) sourceArrivalsSinceSupply = Math.min(2, sourceArrivalsSinceSupply + 1);
     },
 
     canAdvance(now) {
@@ -413,7 +445,7 @@ export function createSmoothText(
 
     update(nextText, nextStreaming, now, presentation = {}) {
       const { retainedOffset = 0, mode: nextMode = "character" } = presentation;
-      atomicRanges = presentation.atomicRanges ?? [];
+      atomicRanges = normalizeAtomicRanges(presentation.atomicRanges ?? []);
       maxTokenGraphemes = presentation.maxTokenGraphemes ?? maxTokenGraphemes;
       const modeChanged = mode !== nextMode;
       if (modeChanged) {
@@ -424,6 +456,12 @@ export function createSmoothText(
         clearPartialUnit(true);
       }
       const changed = nextText !== text;
+      if (changed && usesSourceArrivals) {
+        // A rewrite or highlight refresh can publish without a new source
+        // arrival. Keep the observed pipeline until this playback ends.
+        deferredSupply ||= sourceArrivalsSinceSupply > 1;
+        sourceArrivalsSinceSupply = 0;
+      }
       if (nextText !== text && !nextText.startsWith(text)) {
         clearPartialUnit(true);
         const wasEmpty = visibleOffset >= safeEnd;
@@ -478,6 +516,9 @@ export function createSmoothText(
           arrivalSamples = [];
           receivedGraphemes = 0;
           lastArrivalRate = 0;
+          layoutReserveMs = 0;
+          deferredSupply = false;
+          sourceArrivalsSinceSupply = 0;
         }
       }
 
@@ -631,16 +672,21 @@ export function createSmoothText(
       // this line spent waiting for geometry, on separate bounded glyph clocks.
       // Ordinary late/suspended frames still cannot create catch-up debt.
       if (mode !== "token" && layoutWaitMs > 0 && layoutIntervalFloorMs !== undefined) {
+        if (deferredSupply)
+          layoutReserveMs = Math.min(MAX_POOL_GAP_MS, Math.max(layoutReserveMs, layoutWaitMs));
         revealCredit = Math.max(revealCredit, layoutWaitMs);
         layoutIntervalFloor = layoutIntervalFloorMs;
       }
       if (revealCredit <= 0) layoutIntervalFloor = null;
       if (lastRevealAt !== null && streaming && !resumedEmptyBuffer) {
-        // Weight token-sized units by their character count, so a large
-        // provider batch does not make subsequent batches run at glyph speed.
-        // Waiting for later rows of this same unit is layout time, not cadence.
-        recentIntervals.push(((partialUnitAt ?? revealedAt) - lastRevealAt) / lastRevealSize);
-        if (recentIntervals.length > RECENT_INTERVAL_COUNT) recentIntervals.shift();
+        // Weight token-sized units by their character count. Both the first
+        // line's space and later rows of a partial unit are layout, not pace.
+        const layoutWait = partialUnitAt === null ? Math.max(0, layoutWaitMs) : partialLayoutWaitMs;
+        const elapsed = (partialUnitAt ?? revealedAt) - lastRevealAt - layoutWait;
+        if (elapsed > 0) {
+          recentIntervals.push(elapsed / lastRevealSize);
+          if (recentIntervals.length > RECENT_INTERVAL_COUNT) recentIntervals.shift();
+        }
       }
       lastRevealInterval = Math.min(
         partialUnitInterval,
@@ -698,6 +744,9 @@ export function createSmoothText(
       arrivalSamples = [];
       receivedGraphemes = 0;
       lastArrivalRate = 0;
+      layoutReserveMs = 0;
+      deferredSupply = false;
+      sourceArrivalsSinceSupply = 0;
       return visibleOffset;
     },
 
@@ -722,8 +771,14 @@ export function createSmoothText(
     get graphemeCount() {
       return graphemeEnds.length;
     },
+    graphemeCountBetween(start, end) {
+      return Math.max(0, boundaryCountThrough(end) - boundaryCountThrough(start));
+    },
     get partial() {
       return partialUnitAt !== null;
+    },
+    get deferredSupply() {
+      return deferredSupply;
     },
     arrivalInterval(now) {
       const initialRate =
@@ -869,8 +924,14 @@ export function createSmoothTextLines(
     get graphemeCount() {
       return model.graphemeCount;
     },
+    graphemeCountBetween(start, end) {
+      return model.graphemeCountBetween(start, end);
+    },
     get partial() {
       return model.partial;
+    },
+    get deferredSupply() {
+      return model.deferredSupply;
     },
     arrivalInterval(now) {
       return model.arrivalInterval(now);

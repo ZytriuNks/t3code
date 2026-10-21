@@ -275,6 +275,59 @@ describe("createSmoothText", () => {
     expect(controller.advance(partial.at)).toBe(7);
   });
 
+  it("binary-searches historical atomic ranges and preserves overlapping partial units", () => {
+    const controller = createSmoothText("");
+    const history = "x".repeat(4_096);
+    controller.update(history, true, 0);
+    let now = 10_000;
+    while (controller.offset < history.length) {
+      now = controller.nextRevealAt(now);
+      controller.advance(now);
+    }
+
+    let rangeReads = 0;
+    const countRangeReads = (start: number, end: number) =>
+      new Proxy(
+        { start, end },
+        {
+          get(target, property, receiver) {
+            if (property === "start" || property === "end") rangeReads += 1;
+            return Reflect.get(target, property, receiver);
+          },
+        },
+      );
+    const ranges = Array.from({ length: 2_048 }, (_, index) =>
+      countRangeReads(index * 2, index * 2 + 1),
+    );
+    ranges.push(countRangeReads(4_098, 4_104), countRangeReads(4_096, 4_100));
+    const originalRanges = ranges.map(({ start, end }) => ({ start, end }));
+    controller.update(history + "ABCDEFGHIJ", true, 10_001, { atomicRanges: ranges });
+    rangeReads = 0;
+
+    for (let index = 0; index < 20; index += 1)
+      controller.nextOffsetWithin(Number.POSITIVE_INFINITY);
+    expect(rangeReads).toBeLessThan(600);
+    expect(controller.nextOffsetWithin(Number.POSITIVE_INFINITY)).toBe(4_104);
+    expect(controller.nextOffsetWithin(4_100)).toBe(4_100);
+    let revealAt = controller.nextRevealAt(10_001);
+    expect(controller.advance(revealAt, 4_100)).toBe(4_100);
+    expect(controller.nextOffsetWithin(Number.POSITIVE_INFINITY)).toBe(4_104);
+    revealAt = controller.nextRevealAt(revealAt);
+    expect(controller.advance(revealAt)).toBe(4_104);
+    expect(ranges.map(({ start, end }) => ({ start, end }))).toEqual(originalRanges);
+
+    controller.update(history + "ABxyEFGHIJ", true, 10_002, {
+      atomicRanges: [
+        { start: 4_096, end: 4_100 },
+        { start: 4_098, end: 4_104 },
+      ],
+      retainedRanges: [{ start: 4_100, end: 4_102 }],
+    });
+    revealAt = controller.nextRevealAt(revealAt);
+    controller.advance(revealAt);
+    expect(controller.offset).toBeGreaterThanOrEqual(4_102);
+  });
+
   it("charges neither the backlog nor the following interval for already shown token characters", () => {
     const plain = createSmoothText("");
     const retained = createSmoothText("");
@@ -648,6 +701,26 @@ describe("createSmoothText", () => {
     }
     expect(controller.pending).toBe(false);
   });
+
+  it.each(["character", "token"] as const)(
+    "does not learn a line's geometry wait as the completed %s cadence",
+    (mode) => {
+      const controller = createSmoothText("", 0);
+      controller.update("\n", true, 0, { mode });
+      controller.update("\nA", true, 0, { mode });
+      expect(controller.advance(0, 1)).toBe(1);
+      controller.update("\nAAAAAAA", true, 20, { mode });
+      const text = "\nAAAAAAABBBBBBBB";
+      controller.update(text, true, 80, { mode });
+      const firstEnd = 2;
+      // Twenty milliseconds belongs to the text clock; the other 260 ms was
+      // spent making space for its first visible row.
+      expect(controller.advance(280, firstEnd, 280, 260, 10)).toBe(firstEnd);
+      controller.update(text, false, 281, { mode });
+      expect(controller.advance(299)).toBe(firstEnd);
+      expect(controller.advance(300)).toBeGreaterThan(firstEnd);
+    },
+  );
 
   it("consumes a burst at a bounded rate and does not jump to the latest snapshot", () => {
     const controller = createSmoothText("");
@@ -1051,6 +1124,19 @@ describe("createSmoothText", () => {
 });
 
 describe("createSmoothTextLines", () => {
+  it("counts FIFO graphemes across code ranges after Unicode appends and rewrites", () => {
+    const model = createSmoothTextLines("", 0);
+    const first = "e\u0301👩‍💻\n";
+    model.update(first, true, 0);
+    expect(model.graphemeCountBetween(0, first.length)).toBe(3);
+    expect(model.graphemeCountBetween(2, first.length - 1)).toBe(1);
+    model.update(first + "🇨🇳x", true, 10);
+    expect(model.graphemeCountBetween(first.length, first.length + 5)).toBe(2);
+    expect(model.graphemeCountBetween(first.length, first.length)).toBe(0);
+    model.update("👩‍💻\nx", true, 20);
+    expect(model.graphemeCountBetween(0, 5)).toBe(1);
+    expect(model.graphemeCountBetween(5, 7)).toBe(2);
+  });
   it("continues one character clock through explicit breaks and changed row boundaries", () => {
     const controller = createSmoothTextLines("");
     const reference = createSmoothText("");

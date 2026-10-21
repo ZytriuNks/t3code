@@ -9,6 +9,7 @@ import {
   DEFAULT_CONVERSATION_STRUCTURE,
   DEFAULT_SERVER_SETTINGS,
   ProjectSettingsOverrides,
+  PROJECT_SCOPED_SERVER_SETTING_KEYS,
   resolveProviderInstanceEnabled,
   ServerSettings,
   ServerSettingsPatch,
@@ -24,6 +25,36 @@ const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
 const decodeProjectSettingsOverrides = Schema.decodeSync(ProjectSettingsOverrides);
 
 describe("conversationStructure", () => {
+  it("validates and preserves smooth text yield duration in defaults, overrides and patches", () => {
+    expect(decodeServerSettings({}).smoothTextYieldDurationMs).toBe(200);
+    expect(decodeProjectSettingsOverrides({}).smoothTextYieldDurationMs).toBeUndefined();
+    for (const duration of [80, 200, 1000]) {
+      expect(
+        decodeServerSettingsPatch({ smoothTextYieldDurationMs: duration })
+          .smoothTextYieldDurationMs,
+      ).toBe(duration);
+      expect(
+        decodeProjectSettingsOverrides({ smoothTextYieldDurationMs: duration })
+          .smoothTextYieldDurationMs,
+      ).toBe(duration);
+    }
+    for (const duration of [79, 1001, 80.5, "200", null]) {
+      expect(() => decodeServerSettingsPatch({ smoothTextYieldDurationMs: duration })).toThrow();
+      expect(() =>
+        decodeProjectSettingsOverrides({ smoothTextYieldDurationMs: duration }),
+      ).toThrow();
+    }
+  });
+  it("includes the yield duration in the project-scoped setting set", () => {
+    expect(PROJECT_SCOPED_SERVER_SETTING_KEYS).toContain("smoothTextYieldDurationMs");
+  });
+  it("round-trips yield duration through server settings encoding and patches", () => {
+    const input = { smoothTextYieldDurationMs: 870 };
+    expect(encodeServerSettings(decodeServerSettings(input))).toMatchObject(input);
+    expect(decodeServerSettingsPatch(input)).toEqual(input);
+    expect(decodeProjectSettingsOverrides(input)).toEqual(input);
+  });
+
   it("validates and preserves text fade duration in defaults, overrides and patches", () => {
     expect(decodeServerSettings({}).smoothTextFadeDurationMs).toBe(200);
     expect(decodeProjectSettingsOverrides({}).smoothTextFadeDurationMs).toBeUndefined();

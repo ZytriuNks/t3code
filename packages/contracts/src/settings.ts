@@ -1113,6 +1113,9 @@ export type SmoothOutputLineMode = typeof SmoothOutputLineMode.Type;
 export const SmoothTextFadeDurationMs = Schema.Int.check(
   Schema.isBetween({ minimum: 0, maximum: 1000 }),
 );
+export const SmoothTextYieldDurationMs = Schema.Int.check(
+  Schema.isBetween({ minimum: 80, maximum: 1000 }),
+);
 
 /** 0: current timeline shape. 1: live label shows one operation, tools archive as they finish. */
 export const ConversationStructure = Schema.Literals(["default", "restructured"]);
@@ -1169,6 +1172,7 @@ export const PROJECT_SCOPED_SERVER_SETTING_KEYS = [
   "smoothOutputLineMode",
   "smoothMarkdownPreload",
   "smoothTextFadeDurationMs",
+  "smoothTextYieldDurationMs",
   "footnotesAutoCollapse",
   "conversationStructure",
   "conversationStructureThinkingLabel",
@@ -1204,6 +1208,7 @@ export const ProjectSettingsOverrides = Schema.Struct({
   smoothOutputLineMode: Schema.optionalKey(SmoothOutputLineMode),
   smoothMarkdownPreload: Schema.optionalKey(Schema.Boolean),
   smoothTextFadeDurationMs: Schema.optionalKey(SmoothTextFadeDurationMs),
+  smoothTextYieldDurationMs: Schema.optionalKey(SmoothTextYieldDurationMs),
   footnotesAutoCollapse: Schema.optionalKey(Schema.Boolean),
   conversationStructure: Schema.optionalKey(ConversationStructure),
   conversationStructureThinkingLabel: Schema.optionalKey(Schema.String),
@@ -1259,6 +1264,9 @@ export const ServerSettings = Schema.Struct({
   ),
   smoothMarkdownPreload: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   smoothTextFadeDurationMs: SmoothTextFadeDurationMs.pipe(
+    Schema.withDecodingDefault(Effect.succeed(200)),
+  ),
+  smoothTextYieldDurationMs: SmoothTextYieldDurationMs.pipe(
     Schema.withDecodingDefault(Effect.succeed(200)),
   ),
   footnotesAutoCollapse: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
@@ -1666,6 +1674,7 @@ export const ServerSettingsPatch = Schema.Struct({
   smoothOutputLineMode: Schema.optionalKey(SmoothOutputLineMode),
   smoothMarkdownPreload: Schema.optionalKey(Schema.Boolean),
   smoothTextFadeDurationMs: Schema.optionalKey(SmoothTextFadeDurationMs),
+  smoothTextYieldDurationMs: Schema.optionalKey(SmoothTextYieldDurationMs),
   footnotesAutoCollapse: Schema.optionalKey(Schema.Boolean),
   conversationStructure: Schema.optionalKey(ConversationStructure),
   conversationStructureThinkingLabel: Schema.optionalKey(Schema.String),

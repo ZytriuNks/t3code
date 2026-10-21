@@ -412,6 +412,20 @@ const SETTINGS_SEARCH_ITEM_DEFINITIONS = [
     ],
   },
   {
+    id: "conversation-thinking-label",
+    title: "Thinking label",
+    to: "/settings/general",
+    scope: "project-defaults",
+    searchTerms: ["thinking label activity text 文案 思考 标签"],
+  },
+  {
+    id: "conversation-idle-label",
+    title: "After-tool waiting label",
+    to: "/settings/general",
+    scope: "project-defaults",
+    searchTerms: ["after tool waiting idle planning label text 工具 等待 空闲 文案"],
+  },
+  {
     id: "conversation-structure",
     title: "Conversation structure",
     to: "/settings/general",

@@ -9,6 +9,9 @@ import {
   smoothLineCurveProgress,
   smoothLineCurveVelocity,
   smoothLineCurveTime,
+  smoothLineCurveDuration,
+  createSmoothLinePulse,
+  type SmoothLinePulse,
   SMOOTH_LINE_DISPLACEMENT_PX,
   SMOOTH_LINE_ENTER_ATTRIBUTE,
   SMOOTH_LINE_ENTER_MS,
@@ -16,13 +19,32 @@ import {
   SMOOTH_TEXT_FADE_BUCKETS,
   SMOOTH_TEXT_FADE_ATTRIBUTE,
   SMOOTH_TEXT_FADE_NAMES,
+  SMOOTH_TEXT_YIELD_DURATION_MS,
 } from "../lib/smoothLineMotion";
 import { createSmoothLineCadence, estimatePendingLines } from "../lib/smoothLineCadence";
 import {
+  afterSmoothTextLayoutCommit,
   clearSmoothTextEnd,
+  getSmoothTextLayoutScope,
+  hasSmoothTextFrameHeight,
+  requestSmoothTextLayoutFrame,
   setSmoothTextEnd,
   setSmoothTextFrameHeight,
+  SMOOTH_TEXT_LAYOUT_COMMIT_EVENT,
+  type SmoothTextLayoutCommitDetail,
+  type SmoothTextLayoutPublication,
 } from "../lib/smoothTextLayout";
+import {
+  resolveSmoothTextResume,
+  smoothTextPlaybackStore,
+  type SmoothTextResumeInput,
+} from "../lib/smoothTextPlayback";
+
+import type { SmoothTextCandidate } from "../lib/smoothTextCommit";
+import {
+  createSmoothTextDecorations,
+  type SmoothTextDecoration,
+} from "../lib/smoothTextDecorations";
 
 const HIGHLIGHT_NAME = "t3-smooth-hidden";
 const FADE_BUCKET_COUNT = SMOOTH_TEXT_FADE_BUCKETS;
@@ -50,10 +72,49 @@ const FADE_HIGHLIGHT_NAMES = SMOOTH_TEXT_FADE_NAMES;
 const COMPLETED_SNAPSHOT_IMMEDIATE_TAIL = 128;
 const LARGE_DOM_SETTLE_MS = 100;
 let sharedHighlight: Highlight | undefined;
+let activeSmoothTextObservers = 0;
 const sharedFadeHighlights: Array<Highlight | undefined> = [];
 const pendingHighlightRanges = new Map<Highlight, Map<AbstractRange, boolean>>();
 const pendingHighlightNames = new Map<string, Highlight>();
 let highlightFlushQueued = false;
+const LINE_ENTER_TOKEN_ATTRIBUTE = "data-smooth-line-enter-token";
+// A module reload (HMR) restarts module state. Allocate the instance id from a
+// counter shared through globalThis so old and new module instances can never
+// produce the same token for the same element.
+const LINE_ENTER_SEQUENCE_KEY = "__t3SmoothLineEnterSequence";
+const lineEnterGlobals = globalThis as unknown as Record<string, number | undefined>;
+const LINE_ENTER_INSTANCE = (lineEnterGlobals[LINE_ENTER_SEQUENCE_KEY] ?? 0) + 1;
+lineEnterGlobals[LINE_ENTER_SEQUENCE_KEY] = LINE_ENTER_INSTANCE;
+let lineEnterToken = 0;
+// Entrances can outlive the observer that wrote them (disable, resume,
+// remount). Ownership lives on the element, so an older observer's deferred
+// clear cannot strip an entrance written by a newer one.
+const lineEnterClearTimers = new WeakMap<HTMLElement, { timer: number; token: string }>();
+const cancelLineEnterClear = (target: HTMLElement) => {
+  const pending = lineEnterClearTimers.get(target);
+  if (!pending) return;
+  window.clearTimeout(pending.timer);
+  lineEnterClearTimers.delete(target);
+};
+const clearLineEnter = (target: HTMLElement) => {
+  cancelLineEnterClear(target);
+  target.removeAttribute(SMOOTH_LINE_ENTER_ATTRIBUTE);
+  target.style.removeProperty("--t3-smooth-line-offset");
+  target.removeAttribute(LINE_ENTER_TOKEN_ATTRIBUTE);
+};
+const scheduleLineEnterClear = (target: HTMLElement, delay: number) => {
+  cancelLineEnterClear(target);
+  const token = `${LINE_ENTER_INSTANCE}-${++lineEnterToken}`;
+  target.setAttribute(LINE_ENTER_TOKEN_ATTRIBUTE, String(token));
+  const timer = window.setTimeout(() => {
+    if (target.getAttribute(LINE_ENTER_TOKEN_ATTRIBUTE) !== String(token)) return;
+    lineEnterClearTimers.delete(target);
+    target.removeAttribute(SMOOTH_LINE_ENTER_ATTRIBUTE);
+    target.style.removeProperty("--t3-smooth-line-offset");
+    target.removeAttribute(LINE_ENTER_TOKEN_ATTRIBUTE);
+  }, delay);
+  lineEnterClearTimers.set(target, { timer, token });
+};
 
 function updateHighlightRange(highlight: Highlight, range: AbstractRange, present: boolean) {
   let changes = pendingHighlightRanges.get(highlight);
@@ -70,9 +131,26 @@ function flushHighlightUpdates(document: Document) {
   }
   pendingHighlightRanges.clear();
   for (const [key, region] of pendingHighlightNames) {
-    if (region.size > 0) {
+    if (FADE_HIGHLIGHT_NAMES.includes(key)) continue;
+    if (region.size > 0 || activeSmoothTextObservers > 0) {
       if (CSS.highlights.get(key) !== region) CSS.highlights.set(key, region);
     } else if (CSS.highlights.get(key) === region) CSS.highlights.delete(key);
+  }
+  {
+    // Register once before playback starts. Replacing registry membership or
+    // the alpha stylesheet between source arrivals invalidates whole-document
+    // highlight styles; empty ranges paint nothing and need no animation loop.
+    const active =
+      activeSmoothTextObservers > 0 ||
+      sharedFadeHighlights.some((region) => region && region.size > 0);
+    for (const [index, name] of FADE_HIGHLIGHT_NAMES.entries()) {
+      const region = sharedFadeHighlights[index] ?? (active ? new Highlight() : undefined);
+      if (!region) continue;
+      sharedFadeHighlights[index] = region;
+      if (active) {
+        if (CSS.highlights.get(name) !== region) CSS.highlights.set(name, region);
+      } else if (CSS.highlights.get(name) === region) CSS.highlights.delete(name);
+    }
   }
   pendingHighlightNames.clear();
   refreshSmoothTextMotionStyles(document);
@@ -94,7 +172,7 @@ function publishHighlight(document: Document, name: string, highlight: Highlight
 }
 const EXCLUDED_TEXT =
   "[role=toolbar], [aria-hidden=true], .sr-only, .chat-markdown-codeblock-header, [data-markdown-code-pending], [data-smooth-footnotes-inline], [data-footnote-backref], svg";
-const ATOMIC_CONTENT = "[data-smooth-atomic], [data-markdown-copy], kbd, input[type=checkbox]";
+const ATOMIC_CONTENT = "[data-smooth-atomic], [data-markdown-copy], kbd, input[type=checkbox], hr";
 const MEDIA_CONTENT = "img, video, audio, canvas, iframe, [data-smooth-media]";
 // Markdown blocks that establish their own vertical rhythm.  Keeping these
 // boundaries in the geometry index matters when a parser changes a paragraph
@@ -123,13 +201,17 @@ function createTextReadCache() {
         lineBreaks: boolean;
         paragraphBreaks: boolean;
         closed: boolean;
+        historical: boolean;
+        decorations: HTMLElement[];
       }
     >(),
   };
 }
 
 function readText(element: HTMLElement, cache: ReturnType<typeof createTextReadCache>) {
+  const decorations = new Map<HTMLElement, SmoothTextDecoration>();
   const objectRoots = new Set<HTMLElement>();
+  const suspendedHistory = new Map<HTMLElement, { text: string; offset: number }>();
   for (const candidate of element.querySelectorAll<HTMLElement>(
     `${MEDIA_CONTENT}, ${ATOMIC_CONTENT}`,
   )) {
@@ -159,6 +241,14 @@ function readText(element: HTMLElement, cache: ReturnType<typeof createTextReadC
         if (objectOwner(node)) return NodeFilter.FILTER_REJECT;
         if (node.nodeType === Node.ELEMENT_NODE) {
           const candidate = node as HTMLElement;
+          // Suspense keeps its previous primary tree mounted with display:none
+          // beside the live fallback. It is not a second copy of the stream.
+          if (candidate.hasAttribute("style") && candidate.style.display === "none") {
+            const owner = candidate.closest<HTMLElement>(".chat-markdown-codeblock");
+            if (owner && candidate.matches("pre[data-smooth-history]"))
+              suspendedHistory.set(owner, { text: candidate.textContent ?? "", offset: 0 });
+            return NodeFilter.FILTER_REJECT;
+          }
           // Reject a toolbar/icon subtree once instead of repeating the full
           // ancestor selector for every text node in a growing Markdown tree.
           let filter = cache.filters.get(candidate);
@@ -172,8 +262,14 @@ function readText(element: HTMLElement, cache: ReturnType<typeof createTextReadC
                   : NodeFilter.FILTER_SKIP;
             cache.filters.set(candidate, filter);
           }
-          if (filter !== NodeFilter.FILTER_REJECT && objectRoots.has(candidate))
-            return NodeFilter.FILTER_ACCEPT;
+          if (filter !== NodeFilter.FILTER_REJECT) {
+            if (
+              candidate.matches("blockquote, [role=note], tr, li") &&
+              !candidate.closest("[data-smooth-history], [hidden]")
+            )
+              decorations.set(candidate, { element: candidate, start: length, end: length });
+            if (objectRoots.has(candidate)) return NodeFilter.FILTER_ACCEPT;
+          }
           return filter;
         }
         return NodeFilter.FILTER_ACCEPT;
@@ -191,13 +287,25 @@ function readText(element: HTMLElement, cache: ReturnType<typeof createTextReadC
   const objects: Array<{ surface: HTMLElement; start: number; end: number }> = [];
   const chunks: string[] = [];
   const lineStarts = [0];
+  const codeLines = new Map<
+    Element,
+    { characters: number; breaks: number; trailingBreak: boolean }
+  >();
   const inactiveRanges: Array<{ start: number; end: number }> = [];
+  const historicalRanges: Array<{ start: number; end: number }> = [];
   const contextFor = (parent: HTMLElement) => {
     let context = cache.contexts.get(parent);
     if (!context) {
       const atomic = parent.closest<HTMLElement>(ATOMIC_CONTENT);
       const pre = parent.closest("pre");
       const code = parent.closest("code");
+      const decorationParents: HTMLElement[] = [];
+      for (
+        let owner: HTMLElement | null = parent;
+        owner && owner !== element;
+        owner = owner.parentElement
+      )
+        if (owner.matches("blockquote, [role=note], tr, li")) decorationParents.push(owner);
       context = {
         atomic,
         surface: atomic ?? (pre ? null : code),
@@ -205,12 +313,15 @@ function readText(element: HTMLElement, cache: ReturnType<typeof createTextReadC
         lineBreaks: !atomic && (!code || !!pre),
         paragraphBreaks: !!parent.closest("p, li, h1, h2, h3, h4, h5, h6, dt, dd"),
         closed: inClosedMarkdownPanel(parent),
+        historical: parent.closest("[data-smooth-history]") !== null,
+        decorations: decorationParents,
       };
       cache.contexts.set(parent, context);
     }
     return context;
   };
   const retainClosedPanel = (parent: HTMLElement, start: number, end: number) => {
+    if (contextFor(parent).historical) historicalRanges.push({ start, end });
     if (!contextFor(parent).closed) return;
     const previous = inactiveRanges.at(-1);
     if (previous?.end === start) previous.end = end;
@@ -219,6 +330,12 @@ function readText(element: HTMLElement, cache: ReturnType<typeof createTextReadC
   let length = 0;
   let previousBlock: Element | null = null;
   let breakBefore = false;
+  const extendDecorations = (parent: HTMLElement, end: number) => {
+    for (const owner of contextFor(parent).decorations) {
+      const record = decorations.get(owner);
+      if (record) record.end = end;
+    }
+  };
   while (walker.nextNode()) {
     if (walker.currentNode.nodeType === Node.ELEMENT_NODE) {
       const surface = walker.currentNode as HTMLElement;
@@ -227,6 +344,7 @@ function readText(element: HTMLElement, cache: ReturnType<typeof createTextReadC
         if ((previousBlock && block !== previousBlock) || breakBefore)
           if (lineStarts.at(-1) !== length) lineStarts.push(length);
         objects.push({ surface, start: length, end: length + 1 });
+        extendDecorations(surface, length + 1);
         retainClosedPanel(surface, length, length + 1);
         chunks.push(OBJECT_CHARACTER);
         length++;
@@ -248,6 +366,20 @@ function readText(element: HTMLElement, cache: ReturnType<typeof createTextReadC
     const surface = context?.surface ?? null;
     // Markdown boundaries inform layout; every line shares the same FIFO clock.
     const block = context?.block ?? element;
+    let codeLine = block.tagName === "PRE" ? codeLines.get(block) : undefined;
+    if (block.tagName === "PRE") {
+      if (!codeLine) {
+        codeLine = { characters: 0, breaks: 0, trailingBreak: false };
+        codeLines.set(block, codeLine);
+      }
+      // Syntax highlighting splits punctuation and newlines into separate nodes.
+      // Use the code block's density so a closing brace cannot teach the next
+      // row (or following prose) an entire line of travel per source character.
+      codeLine.characters += nodeLength;
+      for (let index = value.indexOf("\n"); index !== -1; index = value.indexOf("\n", index + 1))
+        codeLine.breaks++;
+      codeLine.trailingBreak = value.endsWith("\n");
+    }
     if (hasVisibleText) {
       if ((previousBlock && block !== previousBlock) || breakBefore) {
         if (lineStarts.at(-1) !== length) lineStarts.push(length);
@@ -269,7 +401,24 @@ function readText(element: HTMLElement, cache: ReturnType<typeof createTextReadC
       block,
       inlineCode: !atomic && surface?.tagName === "CODE",
     });
-    if (parent) retainClosedPanel(parent, length, length + nodeLength);
+    if (parent) {
+      extendDecorations(parent, length + nodeLength);
+      retainClosedPanel(parent, length, length + nodeLength);
+      // A partial historical fence can suspend only after a live suffix
+      // arrives. Transfer its old prefix to the visible fallback once, without
+      // adding the hidden primary's duplicate glyphs to the queue.
+      if (suspendedHistory.size > 0) {
+        const owner = parent.closest<HTMLElement>(".chat-markdown-codeblock");
+        const history = owner ? suspendedHistory.get(owner) : undefined;
+        if (history) {
+          let count = 0;
+          while (count < nodeLength && history.text[history.offset + count] === value[count])
+            count++;
+          if (count > 0) historicalRanges.push({ start: length, end: length + count });
+          history.offset += nodeLength;
+        }
+      }
+    }
     chunks.push(value);
     length += nodeLength;
   }
@@ -286,35 +435,108 @@ function readText(element: HTMLElement, cache: ReturnType<typeof createTextReadC
   while (inactiveRanges.length > 0 && inactiveRanges.at(-1)!.start >= length) inactiveRanges.pop();
   if (inactiveRanges.length > 0)
     inactiveRanges.at(-1)!.end = Math.min(inactiveRanges.at(-1)!.end, length);
-  return { text: chunks.join(""), nodes, objects, lineStarts, inactiveRanges };
+  return {
+    text: chunks.join(""),
+    nodes,
+    objects,
+    lineStarts,
+    inactiveRanges,
+    historicalRanges,
+    decorations: [...decorations.values()].map((entry) => ({
+      ...entry,
+      start: Math.min(entry.start, length),
+      end: Math.min(entry.end, length),
+    })),
+    codeLineCharacters: new Map(
+      [...codeLines].map(([block, line]) => [
+        block,
+        line.characters / Math.max(1, line.breaks + (line.trailingBreak ? 0 : 1)),
+      ]),
+    ),
+  };
+}
+
+interface SmoothTextPlaybackSnapshot {
+  text: string;
+  sourceText: string | undefined;
+  height: number;
+  visibleText: string | null;
+  intervalMs: number | null;
+  pending: boolean;
 }
 
 function observeSmoothText(
   element: HTMLElement,
-  onDispose: (settled: boolean) => void,
+  onDispose: (settled: boolean, snapshot: SmoothTextPlaybackSnapshot | null) => void,
   onSettled: (() => void) | undefined,
   onPlaybackComplete: (() => void) | undefined,
   bufferInitialText: boolean,
   initialSourceText: string | undefined,
+  initialArrivalSourceText: string | undefined,
   requestedMode: SmoothOutputMode | undefined,
   requestedLineMode: SmoothOutputLineMode | undefined,
   initialBufferMs: number | undefined,
   initiallyPaused: boolean,
   initialFadeDurationMs: number,
+  initialYieldDurationMs: number,
   drainOnComplete: boolean,
+  retainOnComplete: boolean,
+  previousPlayback: SmoothTextPlaybackSnapshot | null,
+  resumedVisibleText: string | null | undefined,
 ) {
+  activeSmoothTextObservers++;
   const motion = window.matchMedia("(prefers-reduced-motion: reduce)");
   const contrast = window.matchMedia("(forced-colors: active)");
   let textReadCache = createTextReadCache();
   const initialText = readText(element, textReadCache);
-  let structuralContent = element.querySelector(STRUCTURAL_CONTENT) !== null;
+  let currentText = initialText;
+  const safeResumeText =
+    resumedVisibleText !== null &&
+    resumedVisibleText !== undefined &&
+    initialSourceText === initialText.text &&
+    initialText.text.startsWith(resumedVisibleText)
+      ? resumedVisibleText
+      : resumedVisibleText === undefined
+        ? undefined
+        : null;
+  const hasPlaybackStructure = () =>
+    [...element.querySelectorAll(STRUCTURAL_CONTENT)].some(
+      (candidate) => !candidate.closest(EXCLUDED_TEXT),
+    );
+  let structuralContent = hasPlaybackStructure();
   let pendingCode = element.querySelector("[data-markdown-code-pending]") !== null;
-  const model = createSmoothTextLines(bufferInitialText ? "" : initialText.text, initialBufferMs);
-  if (!bufferInitialText && initialSourceText) model.finish();
+  const previousPrefix = previousPlayback?.text.trimEnd();
+  const resumed =
+    !bufferInitialText &&
+    previousPlayback &&
+    previousPrefix !== undefined &&
+    initialText.text.startsWith(previousPrefix)
+      ? { ...previousPlayback, text: previousPrefix }
+      : null;
+  const initialVisibleText =
+    safeResumeText === null
+      ? initialText.text
+      : bufferInitialText
+        ? ""
+        : (safeResumeText ?? resumed?.text ?? initialText.text);
+  const model = createSmoothTextLines(initialVisibleText, initialBufferMs);
+  if (!bufferInitialText && initialSourceText && safeResumeText === undefined) model.finish();
+  // Keep ownership after the first DOM commit: Shiki and media can resolve
+  // without a provider delta. Their history must never acquire a new clock.
+  const historicalSourceText =
+    safeResumeText === null || safeResumeText === initialSourceText ? initialSourceText : undefined;
   let previousSourceText = initialSourceText;
+  let previousArrivalSourceText = initialArrivalSourceText ?? initialSourceText;
+  let sourceArrivalCount = 0;
   let sourceChunkEnds = initialSourceText && !bufferInitialText ? [initialSourceText.length] : [];
   let sourceInitialized = false;
+  let sourceAppendOnly = true;
+  let sourceArrivals = [{ end: initialSourceText?.length ?? 0, at: performance.now() }];
+  let textArrivals = [{ end: initialText.text.length, at: performance.now() }];
+  let measuredArrivalEnd = 0;
+  let demandGlyph: number | null = null;
   let fadeDurationMs = initialFadeDurationMs;
+  let yieldDurationMs = initialYieldDurationMs;
   let fadeBucketDurationMs = fadeDurationMs / (FADE_BUCKET_COUNT - 1);
   let streaming = true;
   let paused = initiallyPaused;
@@ -374,7 +596,7 @@ function observeSmoothText(
     });
   };
   let intersecting = true;
-  let frame: number | null = null;
+  let frame: (() => void) | null = null;
   let previousFrameAt: number | null = null;
   let ranges: Array<{ range: StaticRange; start: number; end: number }> = [];
   let fadeRanges: Array<{
@@ -392,29 +614,47 @@ function observeSmoothText(
     { value: string; priority: string; marker: string | null }
   >();
   const pendingFadeColors = new Set<HTMLElement>();
-  let surfaces = new Map<
-    HTMLElement,
-    {
-      start: number;
-      end: number;
-      startedAt: number | null;
-      finished: boolean;
-      inlineCode: boolean;
-      clipEnd: number | null;
-      clipGeneration: number;
-      object: boolean;
-    }
-  >();
+  type Surface = {
+    start: number;
+    end: number;
+    startedAt: number | null;
+    finished: boolean;
+    inlineCode: boolean;
+    clipEnd: number | null;
+    clipGeneration: number;
+    object: boolean;
+  };
+  let surfaces = new Map<HTMLElement, Surface>();
   let activeSurfaces: typeof surfaces = new Map();
+  let queuedSurfaces: Array<[HTMLElement, Surface]> = [];
+  let queuedSurfaceIndex = 0;
+  const activateSurfaces = (through: number) => {
+    while (queuedSurfaceIndex < queuedSurfaces.length) {
+      const next = queuedSurfaces[queuedSurfaceIndex]!;
+      if (next[1].start > through) break;
+      activeSurfaces.set(...next);
+      queuedSurfaceIndex++;
+    }
+    if (queuedSurfaceIndex === queuedSurfaces.length) {
+      queuedSurfaces = [];
+      queuedSurfaceIndex = 0;
+    }
+  };
   let textNodes = initialText.nodes;
+  let codeLineCharacters = initialText.codeLineCharacters;
   let objects = initialText.objects;
   let geometryEntries = [...textNodes, ...objects].toSorted((a, b) => a.start - b.start);
-  let modelText = initialText.text;
+  const decorations = createSmoothTextDecorations();
+  decorations.index(initialText.decorations);
+  let modelText = safeResumeText != null ? initialVisibleText : initialText.text;
   let hasClosedPanels = initialText.inactiveRanges.length > 0;
   const revealedEnd = document.createRange();
   const glyphRange = document.createRange();
   const fullEnd = document.createRange();
   let publishedOffset = -1;
+  // Ordinary FIFO reserve fluctuations must not retime physical travel. Only
+  // an observed geometric wait earns catch-up, until its added backlog clears.
+  let permitBacklog: number | null = null;
   const frameElement = element.parentElement?.matches("[data-smooth-text-frame]")
     ? element.parentElement
     : null;
@@ -422,16 +662,22 @@ function observeSmoothText(
   // remaining line-box padding settles, once their complete paint bounds fit.
   interface Reservation {
     reflow?: boolean;
+    /** A hidden-to-visible settle owns its distance-scaled duration. */
+    hiddenSettle?: boolean;
     from: number;
     target: number;
     readyHeight: number;
     glyphBottom: number;
+    /** Prose may use existing space before its layout reservation is complete. */
+    paintAhead?: boolean;
     startedAt: number;
     readyAt: number;
     duration: number;
     nominalDuration: number;
+    yieldDurationMs: number;
     distance: number;
     minimumDuration: number;
+    lineHeight?: number;
     start: number;
     end: number;
     direction: number;
@@ -440,11 +686,202 @@ function observeSmoothText(
     startSlope: number;
     endSlope: number;
     wholeLine: boolean;
+    continuous?: number;
+    pulse?: SmoothLinePulse;
+    plannedEndVelocity?: number;
+    retimeDemand?: {
+      generation: number;
+      following: ReturnType<typeof measureNextLine>;
+      arrival: (typeof sourceArrivals)[number] | undefined;
+      fifoReady: boolean;
+      overlaps: boolean;
+      continuationSpace: boolean;
+    };
+    geometryChangedAt?: number;
+    geometryVelocity?: number;
     visualClockAt?: number;
     /** A media box whose curve also opens the text row that follows it. */
     foldedRow?: boolean;
   }
   let reservations: Reservation[] = [];
+  let admissionCommit: {
+    reservation: Reservation;
+    cancel: () => void;
+    publication: SmoothTextLayoutPublication | null;
+  } | null = null;
+  let admittedPublication: SmoothTextLayoutPublication | null = null;
+  // A new glyph/candidate receipt clears admission, but an existing decoration
+  // can finish inside its actual space. Retain the owner's live view so real
+  // shrinkage and owner invalidation still revoke those pixels.
+  let decorationPublication: SmoothTextLayoutPublication | null = null;
+  let hadManagedPublication = false;
+  let layoutScope = getSmoothTextLayoutScope(element);
+  let scopeCommit: { cancel: () => void } | null = null;
+  const publicationSpace = (publication: SmoothTextLayoutPublication, top: number) => {
+    if (
+      !publication.container.isConnected ||
+      !publication.container.contains(element) ||
+      (publication.rowId !== undefined &&
+        publication.container.dataset.timelineRowId !== publication.rowId)
+    )
+      return -Infinity;
+    const rect = publication.container.getBoundingClientRect();
+    // Footer/frame CSS can shrink independently of a React receipt. Reuse the
+    // coordinate read for its live limit; virtual rows retain committed spacers.
+    const height =
+      publication.rowId === undefined
+        ? Math.min(publication.containerHeight, rect.height)
+        : publication.containerHeight;
+    return rect.top + height - top;
+  };
+  const cancelAdmissionCommit = (clearPublication = true) => {
+    admissionCommit?.cancel();
+    admissionCommit = null;
+    if (clearPublication) admittedPublication = null;
+  };
+  const requestAdmissionCommit = (reservation: Reservation) => {
+    // One row publication confirms the combined producer height. Keep its
+    // receipt in flight while neighboring reservations share that frame.
+    if (admissionCommit && admissionCommit.reservation !== reservation) return true;
+    const receipt = {
+      reservation,
+      cancel: () => {},
+      publication: null as SmoothTextLayoutPublication | null,
+    };
+    const scope = layoutScope;
+    const cancel = afterSmoothTextLayoutCommit(
+      element,
+      (publication) => {
+        if (disposed || admissionCommit !== receipt) return;
+        if (getSmoothTextLayoutScope(element) !== scope) {
+          cancelAdmissionCommit();
+          syncLayoutScope();
+          return;
+        }
+        // The owner updates this view only on actual commits, including shrinkage
+        // by another producer. Queued local heights cannot authorize glyphs.
+        receipt.publication = publication ?? null;
+        if (publication) {
+          admittedPublication = publication;
+          decorationPublication = publication;
+          hadManagedPublication = true;
+          if (syncLayoutScope()) return;
+          // This glyph's own actual also confirms the current decoration
+          // container; a redundant cosmetic receipt need not outlive it.
+          scopeCommit?.cancel();
+          scopeCommit = null;
+        }
+        if (!paused && frame === null) frame = requestSmoothTextLayoutFrame(element, tick);
+      },
+      true,
+    );
+    if (!cancel) return false;
+    cancelAdmissionCommit(false);
+    receipt.cancel = cancel;
+    admissionCommit = receipt;
+    return true;
+  };
+  let candidate: {
+    request: SmoothTextCandidate;
+    reservation: Reservation | null;
+    from: number;
+    height: number;
+    target: number;
+    elapsed: number;
+    lastAt: number;
+    width: number;
+    font: string;
+    invalid: boolean;
+    delivered: boolean;
+    cancelCommit: (() => void) | null;
+  } | null = null;
+  const candidateFont = () => {
+    const style = getComputedStyle(element);
+    return [
+      style.font,
+      style.letterSpacing,
+      style.wordSpacing,
+      style.lineHeight,
+      style.getPropertyValue("--font-mono"),
+      style.getPropertyValue("--font-size-code"),
+    ].join(";");
+  };
+  const measureCandidate = () => {
+    if (!candidate) return;
+    const reusable = !candidate.invalid && !geometryDirty && !resizeDirty;
+    candidate.cancelCommit?.();
+    candidate.cancelCommit = null;
+    candidate.delivered = false;
+    candidate.invalid = false;
+    candidate.width = element.getBoundingClientRect().width;
+    candidate.font = candidateFont();
+    const target = candidate.request.measure(
+      textNodes.map((entry) => ({
+        node: entry.node,
+        end: Math.max(0, model.visibleEnd(entry.start, entry.end) - entry.start),
+      })),
+    );
+    if (target === null) {
+      // Unsupported presentation keeps its existing post-commit lifecycle;
+      // it must not receive a permit based on approximate inline geometry.
+      candidate.delivered = true;
+      candidate.request.commit();
+      return;
+    }
+    candidate.target = Math.max(candidate.height, target);
+    candidate.from = candidate.height;
+    candidate.elapsed = 0;
+    candidate.lastAt = performance.now();
+    const open = reservations[0];
+    // Only the currently painted, growing action can supply this candidate.
+    // Future/retired plans and invalidated geometry still need their own action.
+    candidate.reservation =
+      reusable &&
+      open &&
+      candidate.width === lastWidth &&
+      open.target > open.from &&
+      candidate.height > open.from &&
+      lastPaintAt > open.startedAt &&
+      candidate.lastAt < open.startedAt + open.duration &&
+      candidate.target <= open.target
+        ? open
+        : null;
+  };
+  const deliverCandidate = () => {
+    const pending = candidate;
+    if (!pending || pending.delivered || pending.cancelCommit) return;
+    let cancelled = false;
+    const commit = () => {
+      if (disposed || cancelled || candidate !== pending || pending.delivered) return;
+      // Consume only this continuation before handing off. A stale callback
+      // must neither occupy C forever nor cancel its replacement receipt.
+      pending.cancelCommit?.();
+      pending.cancelCommit = null;
+      if (syncLayoutScope()) return;
+      if (
+        pending.invalid ||
+        pending.width !== element.getBoundingClientRect().width ||
+        pending.font !== candidateFont()
+      ) {
+        pending.invalid = true;
+        if (frame === null) frame = requestSmoothTextLayoutFrame(element, tick);
+        return;
+      }
+      pending.delivered = true;
+      pending.request.commit();
+    };
+    const cancel = afterSmoothTextLayoutCommit(element, commit);
+    pending.cancelCommit = () => {
+      cancelled = true;
+      cancel?.();
+    };
+    if (!cancel) {
+      // Standalone surfaces have no virtual row publication to wait for.
+      queueMicrotask(() => {
+        if (!cancelled) commit();
+      });
+    }
+  };
   let previousSpaceVelocity = 0;
   let previousSpaceContinuous = 0;
   let previousSpaceEndAt = Number.NEGATIVE_INFINITY;
@@ -460,20 +897,82 @@ function observeSmoothText(
     start: number;
     end: number;
     startedAt: number;
+    /** Wall time the entrance attribute was written; the CSS animation starts here. */
+    enterStartedAt?: number;
     direction: number;
     displacement: number;
     enter: HTMLElement | null;
     wholeLine: boolean;
     layoutWaitCharged: boolean;
   }> = [];
-  let admittedOffset = bufferInitialText ? 0 : initialText.text.length;
+  const lineEnterRemaining = (line: (typeof lineMotions)[number], now = performance.now()) =>
+    SMOOTH_LINE_ENTER_MS - (now - (line.enterStartedAt ?? line.startedAt));
+  const retireLineEntrances = (now = performance.now()) => {
+    for (const motion of lineMotions) {
+      if (!motion.enter || lineEnterRemaining(motion, now) > 0) continue;
+      clearLineEnter(motion.enter);
+      motion.enter = null;
+    }
+    lineMotions = lineMotions.filter((line) => lineEnterRemaining(line, now) > 0);
+  };
+  const clearAllLineEntrances = () => {
+    for (const motion of lineMotions) {
+      if (!motion.enter) continue;
+      clearLineEnter(motion.enter);
+      motion.enter = null;
+    }
+    lineMotions = [];
+  };
+  // Waiting for a commit can consume the last frame; give the entrance its own
+  // expiry so a stalled commit cannot leave the attribute behind.
+  const scheduleLiveLineEnterClears = () => {
+    for (const motion of lineMotions) {
+      if (!motion.enter) continue;
+      const remaining = lineEnterRemaining(motion);
+      if (remaining > 0) scheduleLineEnterClear(motion.enter, remaining);
+      else {
+        clearLineEnter(motion.enter);
+        motion.enter = null;
+      }
+    }
+  };
+  const hasLiveLineEnter = (now = performance.now()) =>
+    lineMotions.some((line) => line.enter !== null && lineEnterRemaining(line, now) > 0);
+  let admittedOffset = initialVisibleText.length;
   let admittedStart = 0;
+  // 退役只结束空间曲线；尚未露字的行仍占领先额度，直到 FIFO 开始播放它。
+  let unstartedSpaceLines: number[] = [];
+  const pendingSpaceLines = (before = Number.POSITIVE_INFINITY) => {
+    const next = model.nextStart ?? modelText.length;
+    let pending = 0;
+    for (let index = unstartedSpaceLines.length - 1; index >= 0; index--) {
+      const start = unstartedSpaceLines[index]!;
+      if (start < next || model.visibleEnd(start, start + 1) > start)
+        unstartedSpaceLines.splice(index, 1);
+      else if (start < before) pending++;
+    }
+    return pending;
+  };
+  const hasContinuationSpace = (start: number) =>
+    pendingSpaceLines(start) === 0 ||
+    // 少量尾字可以在一个 glyph 工作预算内交接；超过容量时，先为仅剩的空间制动。
+    start - (model.nextStart ?? modelText.length) <
+      (mode === "token" ? TOKEN_FRAME_GRAPHEME_BUDGET : 64);
   let geometryDirty = true;
   let waitingForGeometry = false;
   let geometryGeneration = 0;
   let resizeDirty = false;
   let appendedGeometry = false;
-  let nextLineCache: { offset: number; line: ReturnType<typeof measureNextLine> } | null = null;
+  let nextLineCache: {
+    offset: number;
+    start: number;
+    line: ReturnType<typeof measureNextLine>;
+  } | null = null;
+  let followingLineCache: {
+    generation: number;
+    from: number;
+    line: ReturnType<typeof measureNextLine>;
+  } | null = null;
   let lastWidth = element.getBoundingClientRect().width;
   let lastNaturalHeight = element.getBoundingClientRect().height;
   // A rendered footnote/footer can survive an insertion before it. Keep that
@@ -513,8 +1012,17 @@ function observeSmoothText(
   };
   let settled = false;
   let playbackFinished = false;
-  let lastFrameHeight = bufferInitialText ? 0 : (frameElement?.getBoundingClientRect().height ?? 0);
+  let lastFrameHeight = bufferInitialText
+    ? 0
+    : (resumed?.height ?? frameElement?.getBoundingClientRect().height ?? 0);
   let lastPaintAt = performance.now();
+  // Geometry can shift the current curve before tick retimes it. Keep every
+  // shift since the last delivered paint so all samples use that same clock.
+  let spaceClockShiftMs = 0;
+  // Commits and resize callbacks refine an active frame without advancing its
+  // space clock twice; a real interruption still rebases on the current time.
+  const withinPaintWindow = (now: number) =>
+    frame !== null && now - lastPaintAt <= Math.max(80, cadence.frameMs * 2);
   let reflowDeadline: { offset: number; at: number } | null = null;
   const hasLineStart = (offset: number) => {
     let low = 0;
@@ -687,10 +1195,68 @@ function observeSmoothText(
     delete element.dataset.smoothRevealing;
   };
   const cancelFrame = () => {
-    if (frame !== null) cancelAnimationFrame(frame);
+    if (frame !== null) frame();
     frame = null;
+    previousFrameAt = null;
   };
-  const bypass = () => document.hidden || motion.matches || contrast.matches;
+  const hasPendingCommit = () =>
+    scopeCommit !== null || (admissionCommit !== null && admissionCommit.publication === null);
+  const needsAdmissionPublication = () =>
+    layoutScope !== undefined && hadManagedPublication && admittedPublication === null;
+  const syncLayoutScope = () => {
+    const next = getSmoothTextLayoutScope(element);
+    // A live actual view can shrink without losing ownership. Only a truly
+    // invalid container/state needs one new receipt, even within the same scope.
+    const invalidPublication =
+      decorationPublication !== null && publicationSpace(decorationPublication, 0) === -Infinity;
+    if (layoutScope === next && (!next || !invalidPublication || scopeCommit)) return false;
+    layoutScope = next;
+    // The old owner may already have cancelled its RAF/receipts. Drop those
+    // tokens once on handoff, preserving the local space and drawing clocks.
+    cancelFrame();
+    cancelAdmissionCommit();
+    decorationPublication = null;
+    scopeCommit?.cancel();
+    scopeCommit = null;
+    candidate?.cancelCommit?.();
+    if (candidate) candidate.cancelCommit = null;
+    if (next && hadManagedPublication && element.isConnected) {
+      // Retiring an old admission cannot let unread glyphs borrow the
+      // decoration-only reconfirmation. Their original reservation retries.
+      admittedOffset = Math.min(admittedOffset, model.nextStart ?? modelText.length);
+      unstartedSpaceLines = unstartedSpaceLines.filter((start) => start < admittedOffset);
+      // Local space from a previous owner cannot authorize the new owner's
+      // glyphs or decorations. Obtain its real actual view even without new text.
+      const receipt = { cancel: () => {} };
+      scopeCommit = receipt;
+      receipt.cancel = afterSmoothTextLayoutCommit(
+        element,
+        (publication) => {
+          if (disposed || scopeCommit !== receipt) return;
+          if (getSmoothTextLayoutScope(element) !== next) {
+            scopeCommit = null;
+            receipt.cancel();
+            syncLayoutScope();
+            return;
+          }
+          if (!publication) return;
+          scopeCommit = null;
+          receipt.cancel();
+          decorationPublication = publication;
+          if (syncLayoutScope()) return;
+          if (!paused && frame === null) frame = requestSmoothTextLayoutFrame(element, tick);
+        },
+        true,
+      )!;
+      prepareDecorations(lastFrameHeight, bypass())();
+    }
+    if (!disposed && !paused) frame = requestSmoothTextLayoutFrame(element, tick);
+    return true;
+  };
+  const showingHistory = () =>
+    historicalSourceText !== undefined && previousSourceText === historicalSourceText;
+  const bypass = () =>
+    document.hidden || motion.matches || contrast.matches || (!candidate && showingHistory());
   const selectTextEnd = (range: Range, offset: number) => {
     // Preparsed Markdown can have a long unread suffix. Start at the FIFO
     // edge instead of traversing every queued node on each character paint.
@@ -762,7 +1328,7 @@ function observeSmoothText(
     }
     return low;
   };
-  const glyphBounds = (start: number, end: number) => {
+  const glyphBounds = (start: number, end: number): { top: number; bottom: number } | null => {
     if (!frameElement) return null;
     const key = `${start}:${end}`;
     if (boundsCache.has(key)) return boundsCache.get(key)!;
@@ -776,6 +1342,31 @@ function observeSmoothText(
     // Framed link labels still wrap into physical text rows. Only objects
     // without text (images, controls) obtain their whole box in one reservation.
     const atomic = entry && !("node" in entry);
+    if (
+      !atomic &&
+      glyphRange.startContainer !== glyphRange.endContainer &&
+      glyphRange.startContainer.parentElement?.closest("table")
+    ) {
+      // Cross-cell DOM Ranges include fully selected TD border boxes. Space
+      // was planned from text glyphs; requiring those taller boxes to fit can
+      // permanently block a row whose own reservation has already finished.
+      let top = Infinity;
+      let bottom = Number.NEGATIVE_INFINITY;
+      for (let index = geometryEntryIndex(start); index < geometryEntries.length; index++) {
+        const part = geometryEntries[index]!;
+        if (part.start >= end) break;
+        const from = Math.max(start, part.start);
+        const to = Math.min(end, part.end);
+        if ("node" in part && !/\S/u.test(modelText.slice(from, to))) continue;
+        const bounds = glyphBounds(from, to);
+        if (!bounds) continue;
+        top = Math.min(top, bounds.top);
+        bottom = Math.max(bottom, bounds.bottom);
+      }
+      const bounds = Number.isFinite(bottom) ? { top, bottom } : null;
+      boundsCache.set(key, bounds);
+      return bounds;
+    }
     const nextRect = atomic
       ? entry.surface!.getBoundingClientRect()
       : glyphRange.getBoundingClientRect();
@@ -792,6 +1383,11 @@ function observeSmoothText(
       lineEnterOffset(atomic ? entry.surface! : glyphRange.startContainer);
     if (!Number.isFinite(nextBottom) || nextRect.height <= 0) return null;
     let nextTop = nextBottom - nextRect.height;
+    if (atomic && entry.surface.tagName === "HR") {
+      const style = getComputedStyle(entry.surface);
+      nextTop -= Number.parseFloat(style.marginTop) || 0;
+      nextBottom += Number.parseFloat(style.marginBottom) || 0;
+    }
     const script = entry && "node" in entry ? entry.node.parentElement?.closest("sup, sub") : null;
     const block = script?.closest<HTMLElement>(MARKDOWN_BLOCK_CONTENT);
     const checkbox = entry?.surface?.matches("input[type=checkbox]") ? entry.surface : null;
@@ -860,11 +1456,19 @@ function observeSmoothText(
       (entry) => !("node" in entry) || /\S/u.test(entry.node.data),
     );
     const parent = tail && ("node" in tail ? tail.node.parentElement : tail.surface);
-    return !!parent?.closest("table");
+    return !!parent?.closest("table, .chat-markdown-table-container");
   };
   const measureNextLine = (from?: number) => {
     let start = from ?? Math.max(admittedOffset, model.nextStart ?? admittedOffset);
-    while (start < modelText.length && /\s/u.test(modelText[start]!)) start++;
+    // A reference rewrite can leave already painted islands beyond admission.
+    // Only unread glyphs need space; measuring a retained footer adds its own
+    // footprint again while the preceding row's last new glyph is still due.
+    while (start < modelText.length) {
+      const visibleEnd = model.visibleEnd(start, modelText.length);
+      if (visibleEnd > start) start = visibleEnd;
+      else if (/\s/u.test(modelText[start]!)) start++;
+      else break;
+    }
     if (start === modelText.length) return null;
     const bounds = glyphBounds(start, start + 1);
     if (!bounds) return null;
@@ -881,7 +1485,7 @@ function observeSmoothText(
       : Math.max(bounds.bottom, Math.min(naturalHeight, bounds.bottom + leading));
     const end = atomic
       ? (surfaces.get(entry.surface!)?.end ?? entry.end)
-      : lineLimit(bottom + (retainedTail?.height ?? 0), from ?? admittedOffset);
+      : lineLimit(bottom + (retainedTail?.height ?? 0), start);
     return {
       start,
       end,
@@ -898,10 +1502,20 @@ function observeSmoothText(
     };
   };
   const nextLine = () => {
-    if (nextLineCache?.offset !== admittedOffset) {
-      nextLineCache = { offset: admittedOffset, line: measureNextLine() };
+    const start = Math.max(admittedOffset, model.nextStart ?? admittedOffset);
+    if (nextLineCache?.offset !== admittedOffset || nextLineCache.start !== start) {
+      nextLineCache = {
+        offset: admittedOffset,
+        start,
+        line: measureNextLine(),
+      };
     }
     return nextLineCache.line;
+  };
+  const followingLine = (from: number) => {
+    if (followingLineCache?.generation !== geometryGeneration || followingLineCache.from !== from)
+      followingLineCache = { generation: geometryGeneration, from, line: measureNextLine(from) };
+    return followingLineCache.line;
   };
   const forecastLineCharacters = (start: number, end: number) =>
     streaming && end === modelText.length && !hasLineStart(end)
@@ -918,17 +1532,35 @@ function observeSmoothText(
         ),
       ),
     );
-  const linePlan = (now: number, start: number, end: number, distance: number) => {
+  const lineReadyAt = (start: number) => {
+    const arrivals = previousSourceText?.startsWith(modelText) ? sourceArrivals : textArrivals;
+    let low = 0;
+    let high = arrivals.length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (arrivals[middle]!.end <= start) low = middle + 1;
+      else high = middle;
+    }
+    return arrivals[low]?.at ?? performance.now();
+  };
+  const linePlan = (
+    now: number,
+    start: number,
+    end: number,
+    distance: number,
+    lineHeight = distance,
+    overlap = false,
+    actionDurationMs = yieldDurationMs,
+  ) => {
     const entry = geometryEntries[geometryEntryIndex(start)];
-    // A media box is not a one-character text row. Its own size determines
-    // its space animation, without teaching the text cadence a huge velocity.
+    // Media shares the configured action time without teaching the text
+    // cadence a huge velocity from its one-character FIFO unit.
     if (entry && !("node" in entry) && entry.surface.matches(MEDIA_CONTENT)) {
       const pressure = Math.min(
         1,
         Math.max(0, (model.pendingGraphemeCount - cadence.columns * 2) / (cadence.columns * 8)),
       );
-      const duration = Math.max(160, Math.min(800, distance / 1.2));
-      const mediaDuration = duration + (160 - duration) * pressure;
+      const mediaDuration = actionDurationMs * (1 - 0.2 * pressure);
       return {
         duration: mediaDuration,
         exponent: 2,
@@ -936,6 +1568,8 @@ function observeSmoothText(
         // The middle accelerates to admit the image, then returns smoothly.
         continuous: Math.min(1, (previousSpaceVelocity * mediaDuration) / Math.max(1, distance)),
         wholeLine: false,
+        peakVelocity: null,
+        endVelocity: 0,
       };
     }
     const pendingLines = estimatePendingLines(
@@ -944,28 +1578,76 @@ function observeSmoothText(
       modelLineStarts,
       cadence.columns,
     );
-    const plan = cadence.plan(now, {
-      interval: model.characterInterval(now),
+    const interval = model.characterInterval(now);
+    let plan = cadence.plan(now, {
+      interval,
+      sourceInterval: permitBacklog === null ? interval : model.arrivalInterval(now),
       pendingCharacters: model.pendingGraphemeCount,
       pendingLines,
       lineCharacters:
         entry && !("node" in entry)
           ? Math.max(cadence.columns, end - start)
-          : forecastLineCharacters(start, end),
+          : Math.max(
+              forecastLineCharacters(start, end),
+              entry && "node" in entry
+                ? Math.min(cadence.columns, codeLineCharacters.get(entry.block) ?? 0)
+                : 0,
+            ),
       distance,
-      parallel: lineMode === "parallel",
+      lineHeight,
+      parallel: false,
+      physical: lineMode === "adaptive",
+      overlap,
+      yieldDurationMs: actionDurationMs,
     });
-    if (drainLayoutDeadline === null || streaming || !drainOnComplete) return plan;
-    // The final snapshot already bounds glyph playback. Bound its sequential
-    // space too, or pace filtering can consume the entire remaining window.
-    const duration = Math.min(
-      plan.duration,
-      Math.max(1, (drainLayoutDeadline - now) / Math.max(1, pendingLines)),
+    if (!overlap) plan = { ...plan, duration: actionDurationMs, continuous: 0, endVelocity: 0 };
+    if (
+      overlap &&
+      lineMode === "adaptive" &&
+      entry &&
+      "node" in entry &&
+      entry.block.matches("pre, .chat-markdown-codeblock")
+    ) {
+      // Space for a short code row can outrun the preceding long row's FIFO.
+      // Carry that wait inside the moving curve, and approach the rate at
+      // which this row can hand its space lead to the following one.
+      const wait = codeSpaceWait(now, start);
+      const rowTime = Math.max(1, model.graphemeCountBetween(start, end)) * interval;
+      plan = {
+        ...plan,
+        duration: Math.max(plan.duration, wait),
+        endVelocity: Math.min(
+          plan.endVelocity,
+          Math.max(1, lineHeight) / Math.max(1, wait, rowTime),
+        ),
+      };
+    }
+    // Completion drains glyph clocks, but cannot turn unopened physical space
+    // into a one-frame jump. Moving rows already use the source-rate bridge.
+    return plan;
+  };
+  const codeSpaceWait = (now: number, start: number) => {
+    const next = model.peek(now, start);
+    if (!next || next.start >= start) return 0;
+    const entry = geometryEntries[geometryEntryIndex(start)];
+    const preceding = geometryEntries[geometryEntryIndex(next.start)];
+    if (
+      !entry ||
+      !("node" in entry) ||
+      !entry.block.matches("pre, .chat-markdown-codeblock") ||
+      !preceding ||
+      !("node" in preceding) ||
+      preceding.block !== entry.block
+    )
+      return 0;
+    return (
+      Math.max(0, next.at - now) +
+      model.graphemeCountBetween(next.end, start) * model.characterInterval(now) +
+      cadence.frameMs
     );
-    return { ...plan, duration, wholeLine: plan.wholeLine || duration < cadence.frameMs };
   };
   // Controls need one delivered paint, not a fixed delay on every fast row.
-  // Media keeps its size-based duration from linePlan.
+  // Media and controls share the configured independent action duration.
   const visibleLineDuration = (plan: ReturnType<typeof linePlan>, minimumDuration: number) =>
     Math.max(minimumDuration, plan.duration);
   const retimeSpace = (now: number, paintedAt: number) => {
@@ -974,48 +1656,110 @@ function observeSmoothText(
       !open ||
       open.reflow ||
       open.foldedRow ||
-      lineMode !== "adaptive" ||
-      admittedOffset >= open.end ||
+      open.geometryChangedAt !== undefined ||
       paintedAt < open.startedAt ||
       now >= open.startedAt + open.duration
     )
       return;
-    const end = lineLimit(open.target, open.start);
-    const plan = linePlan(now, open.start, end, open.distance);
-    // Small arrival-rate noise must not restart a curve. A newly received
-    // authored break or a sustained speed change can retime its remaining
-    // distance while keeping both its painted position and velocity.
-    const nominalDuration = visibleLineDuration(plan, open.minimumDuration);
-    if (Math.abs(nominalDuration - open.nominalDuration) <= open.nominalDuration * 0.12) return;
-    const progress = smoothLineCurveProgress(
-      paintedAt - open.startedAt,
-      open.duration,
-      open.startSlope,
-      open.endSlope,
+    const following = followingLine(open.end);
+    const followingEntry = following && geometryEntries[geometryEntryIndex(following.start)];
+    const overlaps =
+      !!following &&
+      !!followingEntry &&
+      ("node" in followingEntry || followingEntry.surface.matches("input[type=checkbox]")) &&
+      lineReadyAt(following.start) <= now;
+    const arrival = sourceArrivals.at(-1);
+    const fifoReady = (model.nextStart ?? modelText.length) >= open.start;
+    const continuationSpace = hasContinuationSpace(open.start);
+    const demand = open.retimeDemand;
+    // Filter convergence alone is not new demand. Revisit this geometry/row
+    // only when its source arrival or FIFO readiness actually changes.
+    if (
+      demand &&
+      demand.generation === geometryGeneration &&
+      demand.following === following &&
+      demand.arrival === arrival &&
+      demand.fifoReady === fifoReady &&
+      demand.overlaps === overlaps &&
+      demand.continuationSpace === continuationSpace
+    )
+      return;
+    open.retimeDemand = {
+      generation: geometryGeneration,
+      following,
+      arrival,
+      fifoReady,
+      overlaps,
+      continuationSpace,
+    };
+    const plan = linePlan(
+      now,
+      open.start,
+      open.end,
+      open.distance,
+      open.lineHeight,
+      overlaps,
+      open.yieldDurationMs,
     );
-    const from = open.from + (open.target - open.from) * progress;
-    const remaining = open.target - from;
-    if (remaining <= 0.1) return;
+    const nominalDuration = visibleLineDuration(plan, open.minimumDuration);
+    const requestedEndVelocity = overlaps && continuationSpace ? plan.endVelocity : 0;
+    if (
+      Math.abs(nominalDuration - open.nominalDuration) <= open.nominalDuration * 0.12 &&
+      Math.abs(requestedEndVelocity - (open.plannedEndVelocity ?? open.pulse?.endVelocity ?? 0)) <
+        1e-9
+    )
+      return;
+    // A redirect starts from the last delivered paint, never from an unpainted
+    // extrapolation or the old segment's origin. The same sample carries x and v.
+    const elapsed = paintedAt - open.startedAt;
+    const from =
+      open.from +
+      (open.target - open.from) *
+        smoothLineCurveProgress(elapsed, open.duration, open.startSlope, open.endSlope, open.pulse);
     const velocity =
       (open.target - open.from) *
-      smoothLineCurveVelocity(
-        paintedAt - open.startedAt,
-        open.duration,
-        open.startSlope,
-        open.endSlope,
-      );
-    open.from = from;
-    open.duration = Math.max(
-      1,
-      Math.min(
-        (nominalDuration * remaining) / open.distance,
-        velocity > 0 ? (3 * remaining) / velocity : Infinity,
-      ),
+      smoothLineCurveVelocity(elapsed, open.duration, open.startSlope, open.endSlope, open.pulse);
+    const remaining = open.target - from;
+    if (remaining <= 0.001) return;
+    let duration = Math.max(
+      Math.min(open.startedAt + open.duration - paintedAt, nominalDuration),
+      overlaps && lineMode === "adaptive" ? codeSpaceWait(now, open.start) + now - paintedAt : 0,
     );
-    open.nominalDuration = nominalDuration;
+    // A late upshift must not squeeze the remaining tail into a tiny new
+    // acceleration peak. The next FIFO segment can approach the new rate.
+    const endVelocity = Math.min(
+      requestedEndVelocity,
+      Math.max(velocity, remaining / Math.max(1, duration)),
+    );
+    if (
+      velocity > endVelocity &&
+      requestedEndVelocity < (open.plannedEndVelocity ?? open.pulse?.endVelocity ?? 0)
+    ) {
+      // A continuous action that loses its continuation needs room to brake.
+      // Keeping its old short deadline creates a second speed peak before
+      // rest. Match a Hermite tail with no initial acceleration, bounded by
+      // the configured independent action time when the incoming speed is tiny.
+      duration = Math.max(
+        duration,
+        Math.min(open.yieldDurationMs, (3 * remaining) / (2 * velocity + endVelocity)),
+      );
+    }
+    open.pulse = createSmoothLinePulse(
+      remaining,
+      velocity,
+      endVelocity,
+      Math.max(1, duration),
+      lineMode === "adaptive" && overlaps ? (plan.peakVelocity ?? undefined) : undefined,
+    );
+    open.plannedEndVelocity = requestedEndVelocity;
+    open.from = from;
     open.startedAt = paintedAt;
-    open.startSlope = Math.min(3, (velocity * open.duration) / remaining);
-    open.endSlope = plan.continuous;
+    open.visualClockAt = paintedAt;
+    open.duration = open.pulse.duration;
+    open.nominalDuration = nominalDuration;
+    open.startSlope = (velocity * open.duration) / remaining;
+    open.endSlope = (endVelocity * open.duration) / remaining;
+    open.continuous = plan.continuous;
     open.readyAt =
       paintedAt +
       smoothLineCurveTime(
@@ -1023,11 +1767,12 @@ function observeSmoothText(
         open.duration,
         open.startSlope,
         open.endSlope,
+        open.pulse,
       );
     open.wholeLine = plan.wholeLine && open.duration < cadence.frameMs * 0.9;
   };
   /**
-   * A media box has no glyphs to play while it opens, so the following row's
+   * Media and horizontal rules have no glyphs to play while they open, so the following row's
    * space could only start once the box was complete, leaving a pause after
    * every image. Once that row's first glyph has arrived, continue the box's
    * curve over the row at the box's own pace. When the box retires the row
@@ -1035,15 +1780,22 @@ function observeSmoothText(
    */
   const foldFollowingRow = (paintedAt: number) => {
     const open = reservations[0];
-    if (!open || open.reflow || open.foldedRow || lineMode !== "adaptive") return;
+    if (!open || open.reflow || open.foldedRow) return;
     if (paintedAt < open.startedAt || paintedAt >= open.startedAt + open.duration) return;
     const entry = geometryEntries[geometryEntryIndex(open.start)];
-    if (!entry || "node" in entry || !entry.surface.matches(MEDIA_CONTENT)) return;
+    if (!entry || "node" in entry) return;
+    const rule = entry.surface.tagName === "HR";
+    if (!rule && !entry.surface.matches(MEDIA_CONTENT)) return;
     let start = open.end;
     while (start < modelText.length && /\s/u.test(modelText[start]!)) start++;
     // Another atomic row keeps its own plan; only a text row joins the box.
     const following = geometryEntries[geometryEntryIndex(start)];
-    if (start >= modelText.length || !following || !("node" in following)) return;
+    if (
+      start >= modelText.length ||
+      !following ||
+      (!("node" in following) && !following.surface.matches("input[type=checkbox]"))
+    )
+      return;
     const row = measureNextLine(open.end);
     if (!row || row.bottom <= open.target + 0.5) return;
     const progress = smoothLineCurveProgress(
@@ -1051,6 +1803,7 @@ function observeSmoothText(
       open.duration,
       open.startSlope,
       open.endSlope,
+      open.pulse,
     );
     const from = open.from + (open.target - open.from) * progress;
     const velocity =
@@ -1060,17 +1813,22 @@ function observeSmoothText(
         open.duration,
         open.startSlope,
         open.endSlope,
+        open.pulse,
       );
-    const pace = Math.max(0.1, open.distance) / Math.max(1, open.nominalDuration);
-    const duration = Math.max(
-      1,
-      open.startedAt + open.duration - paintedAt + (row.bottom - open.target) / pace,
-    );
+    let duration = Math.max(1, open.startedAt + open.duration - paintedAt);
     const remaining = row.bottom - from;
+    if (rule) {
+      // A thin rule and its next text row share one space action. Keep the
+      // rule's FIFO/paint gate, but do not squeeze the row into its tiny clock.
+      duration = Math.max(duration, open.yieldDurationMs);
+      open.enterVisible = false;
+      open.displacement = 0;
+    }
     open.from = from;
     open.target = row.bottom;
     open.startedAt = paintedAt;
     open.duration = duration;
+    delete open.pulse;
     open.startSlope = Math.min(3, (velocity * duration) / remaining);
     open.readyAt =
       open.readyHeight <= from + 0.1
@@ -1081,15 +1839,52 @@ function observeSmoothText(
             duration,
             open.startSlope,
             open.endSlope,
+            open.pulse,
           );
     open.foldedRow = true;
   };
-  const syncGeometry = () => {
+  const syncGeometry = (at = performance.now()) => {
+    if (candidate) return;
+    const clock = Math.max(lastPaintAt, at);
+    advanceSpaceClock(clock);
+    const paintedAt = lastPaintAt + spaceClockShiftMs;
     geometryRootRect = element.getBoundingClientRect();
     const scanVisibleHistory =
       resizeDirty && (!appendedGeometry || geometryRootRect.width !== lastWidth);
     boundsCache.clear();
     lineEnterOffsets.clear();
+    // The previous source tail may have moved after wrapping, font loading or
+    // an existing media resize. Measure both tails in this same geometry.
+    const demandBounds = demandGlyph === null ? null : glyphBounds(demandGlyph, demandGlyph + 1);
+    if (demandBounds) cadence.rebaseDemand(demandBounds.bottom);
+    const arrivals = previousSourceText?.startsWith(modelText) ? sourceArrivals : textArrivals;
+    let arrivalLow = 0;
+    let arrivalHigh = arrivals.length;
+    while (arrivalLow < arrivalHigh) {
+      const middle = (arrivalLow + arrivalHigh) >>> 1;
+      if (arrivals[middle]!.end <= measuredArrivalEnd) arrivalLow = middle + 1;
+      else arrivalHigh = middle;
+    }
+    for (let index = arrivalLow; index < arrivals.length; index++) {
+      const arrival = arrivals[index]!;
+      if (arrival.end > modelText.length) break;
+      let end = arrival.end;
+      while (end > measuredArrivalEnd && /\s/u.test(modelText[end - 1]!)) end--;
+      const entry = geometryEntries[geometryEntryIndex(Math.max(0, end - 1))];
+      const bounds =
+        end > measuredArrivalEnd && entry && "node" in entry ? glyphBounds(end - 1, end) : null;
+      const crossedMedia = objects.some(
+        (object) =>
+          object.start >= measuredArrivalEnd &&
+          object.start < end &&
+          object.surface.matches(MEDIA_CONTENT),
+      );
+      if (bounds) {
+        cadence.observeDemand(arrival.at, bounds.bottom, crossedMedia || demandGlyph === null);
+        demandGlyph = end - 1;
+      }
+      measuredArrivalEnd = arrival.end;
+    }
     if (retainedTail) {
       // Wrapping or a loaded font can resize the retained footer while the
       // inserted FIFO prefix is still moving. Reserve its current footprint,
@@ -1119,6 +1914,7 @@ function observeSmoothText(
       reservedBounds !== null &&
       Math.abs(reservedBottom! - open.glyphBottom) <= 0.5 &&
       lineLimit(open.target, open.start) >= open.end;
+    const paintingAhead = open?.paintAhead && admittedOffset >= open.end && reservationUnchanged;
     // Markdown reconciliation can replace every Text node in a list or a
     // details panel while the same logical row is moving.  Keep that row's
     // clock and retarget its height from the first glyph instead of throwing
@@ -1130,30 +1926,109 @@ function observeSmoothText(
         (reservedBounds !== null &&
           // A folded media box keeps opening the following row after its own
           // unit was shown; a size change there still belongs to this curve.
-          (open.foldedRow || open.start >= (model.nextStart ?? modelText.length)) &&
+          (paintingAhead ||
+            open.foldedRow ||
+            open.start >= (model.nextStart ?? modelText.length)) &&
           open.start < modelText.length));
     if (keepOpenReservation && reservedBounds) {
       const delta = reservedBottom! - open.glyphBottom;
       if (!open.reflow && delta > 0.5) {
-        const now = Math.max(lastPaintAt, performance.now());
+        const now = clock;
         const deadline = open.startedAt + open.duration;
-        const velocity =
+        // A suspended curve has no current travel velocity. Resume its last
+        // painted position, rather than extrapolating a stale fast handoff.
+        const interrupted = !open.pulse && now - lastPaintAt > Math.max(80, cadence.frameMs * 2);
+        const sampledAt = paintedAt;
+        const from =
+          open.from +
           (open.target - open.from) *
-          smoothLineCurveVelocity(
-            lastPaintAt - open.startedAt,
-            open.duration,
-            open.startSlope,
-            open.endSlope,
-          );
+            smoothLineCurveProgress(
+              sampledAt - open.startedAt,
+              open.duration,
+              open.startSlope,
+              open.endSlope,
+              open.pulse,
+            );
+        const velocity = interrupted
+          ? 0
+          : (open.target - open.from) *
+            smoothLineCurveVelocity(
+              sampledAt - open.startedAt,
+              open.duration,
+              open.startSlope,
+              open.endSlope,
+              open.pulse,
+            );
+        const endVelocity = interrupted
+          ? 0
+          : ((open.target - open.from) * open.endSlope) / open.duration;
         open.target += delta;
         open.readyHeight += delta;
-        open.from = lastFrameHeight;
-        open.distance = Math.max(0.1, open.target - lastFrameHeight);
-        // A moving pending glyph still owns the same reservation. Repeated
-        // table/list appends must not buy a fresh size-based wait each time.
-        open.duration = Math.max(1, deadline - now);
-        open.startedAt = Math.min(now, deadline - open.duration);
+        open.from = Math.max(lastFrameHeight, from);
+        open.distance = Math.max(0.1, open.target - open.from);
+        const media =
+          geometryEntries[geometryEntryIndex(open.start)]?.surface?.matches(MEDIA_CONTENT);
+        const layoutVelocity =
+          delta / Math.max(cadence.frameMs, now - (open.geometryChangedAt ?? lastPaintAt));
+        const followsSteadyGeometry =
+          open.geometryChangedAt !== undefined &&
+          now - open.geometryChangedAt <= cadence.frameMs * 2 &&
+          deadline <= now &&
+          delta <= (open.geometryVelocity ?? 0) * (now - open.geometryChangedAt) * 1.5;
+        // Once this row has opened, ongoing layout travel is not a new row
+        // entrance. Re-easing each small step would keep its glyphs hidden.
+        if (followsSteadyGeometry) {
+          open.from = open.target;
+          open.distance = 0.1;
+        }
+        // A one-off resize gets real travel time. Sustained movement above
+        // this row contributes its own velocity, without starving the FIFO.
+        // A one-off growth near the old deadline must not squeeze its added
+        // travel into a frame: bound that curve's peak by the painted speed or
+        // the configured yield pace. Layout that keeps moving every frame is
+        // sustained travel and keeps its deadline (the FIFO must not starve).
+        const isolatedGrowth =
+          open.geometryChangedAt === undefined ||
+          now - open.geometryChangedAt > cadence.frameMs * 2;
+        const geometryPeak = isolatedGrowth
+          ? Math.max(
+              velocity,
+              endVelocity,
+              (open.distance * (1 / 0.58)) / Math.max(1, open.yieldDurationMs),
+            )
+          : undefined;
+        open.duration =
+          media || followsSteadyGeometry
+            ? Math.max(1, deadline - now)
+            : smoothLineCurveDuration(
+                open.distance,
+                Math.max(1, deadline - now),
+                velocity,
+                endVelocity,
+                geometryPeak,
+              );
+        open.startedAt =
+          media || followsSteadyGeometry ? Math.min(now, deadline - open.duration) : now;
+        open.geometryChangedAt = now;
+        open.geometryVelocity = layoutVelocity;
         open.startSlope = Math.min(3, (velocity * open.duration) / open.distance);
+        if (!media && !followsSteadyGeometry)
+          open.endSlope = (endVelocity * open.duration) / open.distance;
+        if (open.pulse) {
+          if (followsSteadyGeometry) delete open.pulse;
+          else {
+            open.pulse = createSmoothLinePulse(
+              open.distance,
+              velocity,
+              endVelocity,
+              open.duration,
+              geometryPeak,
+            );
+            open.duration = open.pulse.duration;
+            open.startSlope = (velocity * open.duration) / open.distance;
+            open.endSlope = (endVelocity * open.duration) / open.distance;
+          }
+        }
         open.readyAt =
           open.startedAt +
           smoothLineCurveTime(
@@ -1161,6 +2036,7 @@ function observeSmoothText(
             open.duration,
             open.startSlope,
             open.endSlope,
+            open.pulse,
           );
       }
       open.glyphBottom = Math.max(open.glyphBottom, reservedBottom!);
@@ -1207,11 +2083,14 @@ function observeSmoothText(
       streaming &&
       !retainedTail &&
       !open?.reflow &&
+      !paintingAhead &&
       paintedTextBottom > lastFrameHeight + 0.5 &&
       paintedTextBottom <= naturalHeight + 0.5
     )
       lastFrameHeight = paintedTextBottom;
-    const visibleReflow = paintedBottom > lastFrameHeight + 0.5;
+    // A permitted line can paint beyond the layout curve. A source append
+    // does not turn that intentional paint area into already yielded height.
+    const visibleReflow = !paintingAhead && paintedBottom > lastFrameHeight + 0.5;
     // An open row whose first glyph moved with the growth was retargeted above
     // and now covers it. Its own curve reveals the grown box, so replacing it
     // with a reflow would only restart the row and pause the text after it.
@@ -1227,8 +2106,20 @@ function observeSmoothText(
     // bottom margin — and adopting it here raised the frame by that whole
     // amount in one frame, which threw the trailing buttons down instead of
     // letting them be pushed aside a line at a time. It stays a ceiling.
+    const tail = geometryEntries.at(-1);
+    const pendingStart = model.nextStart;
+    // Shiki separates trailing newlines from glyph nodes. They can grow a
+    // code box after its last glyph is played, but still need moving space.
+    const codeTailGrowth =
+      !retainedTail &&
+      !hasPendingCode() &&
+      naturalHeight > lastFrameHeight + 0.5 &&
+      ((tail !== undefined && "node" in tail && !!tail.node.parentElement?.closest("pre")) ||
+        element.lastElementChild?.matches("pre, .chat-markdown-codeblock") === true) &&
+      (pendingStart === null || !/\S/u.test(modelText.slice(pendingStart)));
+    if (codeTailGrowth) admittedOffset = modelText.length;
     const animateReflow =
-      (visibleReflow || naturalHeight < lastFrameHeight - 0.5) &&
+      (visibleReflow || naturalHeight < lastFrameHeight - 0.5 || codeTailGrowth) &&
       publishedOffset >= 0 &&
       hasStructuralContent() &&
       !open?.reflow &&
@@ -1249,24 +2140,73 @@ function observeSmoothText(
         lastFrameHeight,
         scanVisibleHistory ? 0 : Math.min(admittedOffset, model.nextStart ?? modelText.length),
       );
+      unstartedSpaceLines = unstartedSpaceLines.filter((start) => start < admittedOffset);
       reservations = [];
     }
-    if (animateReflow || open?.reflow) {
+    if (open?.hiddenSettle && model.pending) {
+      // A new FIFO row owns the remaining tail space as well as its own row.
+      // Keep the delivered position and velocity instead of serializing a
+      // small padding settle ahead of another full yield action.
+      previousSpaceVelocity =
+        (open.target - open.from) *
+        smoothLineCurveVelocity(
+          paintedAt - open.startedAt,
+          open.duration,
+          open.startSlope,
+          open.endSlope,
+          open.pulse,
+        );
+      previousSpaceEndAt = clock;
+      previousSpaceContinuous = 0;
+      reservations = [];
+      reflowDeadline = null;
+    } else if (open?.hiddenSettle) {
+      // Keep the restored settle's distance-scaled clock, but retarget a real
+      // geometry change from the currently painted height. Replaying the old
+      // target would otherwise snap the last frame to the new natural height.
+      if (Math.abs(naturalHeight - open.target) > 0.5) {
+        const paintedAt =
+          open.from +
+          (open.target - open.from) *
+            smoothLineCurveProgress(
+              clock - open.startedAt,
+              open.duration,
+              open.startSlope,
+              open.endSlope,
+              open.pulse,
+            );
+        const remaining = naturalHeight - paintedAt;
+        const duration = Math.min(600, Math.max(yieldDurationMs, Math.abs(remaining) * 5));
+        open.from = paintedAt;
+        open.target = naturalHeight;
+        open.readyHeight = naturalHeight;
+        open.glyphBottom = naturalHeight;
+        open.startedAt = clock;
+        open.readyAt = clock + duration;
+        open.duration = duration;
+        open.nominalDuration = duration;
+        open.distance = remaining;
+        open.minimumDuration = duration;
+        open.startSlope = 0;
+        open.endSlope = 0;
+        delete open.pulse;
+      }
+    } else if (animateReflow || open?.reflow) {
       // A shrinking Markdown/media box invalidates only the space it lost.
       // Keep already reserved FIFO space up to the new natural height; using
       // just the painted edge retracts every pending row and stalls its handoff.
-      const target = model.pending
-        ? Math.max(paintedBottom, Math.min(naturalHeight, lastFrameHeight))
-        : naturalHeight;
-      const now = performance.now();
+      const target =
+        model.pending && !codeTailGrowth
+          ? Math.max(paintedBottom, Math.min(naturalHeight, lastFrameHeight))
+          : naturalHeight;
+      const now = clock;
       const distance = target - lastFrameHeight;
-      // A one-line metric correction at completion must not hold the whole
-      // FIFO for the same 160ms minimum used for a live structural expansion.
-      // Large media retain their distance-based duration.
-      const nominalReflowDuration = Math.max(
-        streaming ? 160 : cadence.frameMs,
-        Math.min(800, Math.abs(distance) / 1.2),
-      );
+      // A tiny metric correction at completion must not hold the whole FIFO
+      // for a new independent action; retain its existing one-paint drain.
+      const nominalReflowDuration =
+        !streaming && Math.abs(distance) <= 20
+          ? Math.min(yieldDurationMs, cadence.frameMs)
+          : yieldDurationMs;
       // A growing table can reflow its painted cells on every source commit.
       // Keep the first reflow's deadline so repeated retargets cannot hold its
       // FIFO indefinitely. Earlier media/checkboxes do not change the deadline
@@ -1296,10 +2236,11 @@ function observeSmoothText(
         const velocity = open?.reflow
           ? (open.target - open.from) *
             smoothLineCurveVelocity(
-              lastPaintAt - open.startedAt,
+              paintedAt - open.startedAt,
               open.duration,
               open.startSlope,
               open.endSlope,
+              open.pulse,
             )
           : 0;
         reservations = [
@@ -1313,6 +2254,7 @@ function observeSmoothText(
             readyAt: startedAt + duration,
             duration,
             nominalDuration: duration,
+            yieldDurationMs,
             distance,
             minimumDuration: duration,
             startSlope: Math.max(0, Math.min(3, (velocity * duration) / distance)),
@@ -1332,14 +2274,50 @@ function observeSmoothText(
     appendedGeometry = false;
     nextLineCache = null;
   };
-  /**
-   * Link the three motions that share one line: the displacement that made room,
-   * the line's own rise in that direction, and the glyph fade that follows it.
-   * All three start from the same instant and the same direction, so the line
-   * reads as arriving rather than as three independent effects. The rise is a
-   * transform on one element, so the compositor moves it instead of repainting
-   * the glyph run.
-   */
+  const lineEnterTarget = (start: number) => {
+    const entryIndex = geometryEntryIndex(start);
+    const entry = geometryEntries[entryIndex];
+    const target =
+      entry && !("node" in entry)
+        ? entry.surface.matches("input[type=checkbox]")
+          ? (entry.surface.closest<HTMLElement>("li") ?? entry.surface)
+          : entry.surface
+        : (entry?.node?.parentElement?.closest<HTMLElement>(MARKDOWN_BLOCK_CONTENT) ?? null);
+    let containsVisibleText = false;
+    if (target) {
+      // Descendants occupy one contiguous span in document order. Inspect
+      // outward from this row and stop at the first painted node or block
+      // boundary. A retained suffix also prevents replaying the entrance.
+      for (const direction of [-1, 1]) {
+        if (containsVisibleText) break;
+        for (
+          let index = entryIndex + (direction === 1 ? 1 : 0);
+          index >= 0 && index < geometryEntries.length;
+          index += direction
+        ) {
+          const item = geometryEntries[index]!;
+          if (!target.contains("node" in item ? item.node : item.surface)) break;
+          if (model.visibleEnd(item.start, item.end) > item.start) {
+            containsVisibleText = true;
+            break;
+          }
+        }
+      }
+    }
+    // Fenced code deliberately keeps its authored opacity; only its block
+    // space participates in the line motion. Glyph fades are already
+    // excluded from <pre>, and applying the generic entrance here would
+    // accidentally fade the entire code surface as well.
+    const isCodeSurface = target?.closest("pre, .chat-markdown-codeblock") !== null;
+    return target &&
+      !containsVisibleText &&
+      !isCodeSurface &&
+      !target.matches(MEDIA_CONTENT) &&
+      !target.closest(EXCLUDED_TEXT)
+      ? target
+      : null;
+  };
+  /** Start a line's glyph clock only when its complete paint bounds are permitted. */
   const revealLine = (
     now: number,
     line: {
@@ -1365,66 +2343,204 @@ function observeSmoothText(
       wholeLine: line.wholeLine ?? false,
       layoutWaitCharged: line.duration === undefined,
     };
-    // Linkage: the line only gets its own rise when the displacement lasted
-    // long enough to be seen. Under a dense stream the height itself grows
-    // every frame, and a second per-line motion on top would fight it.
-    if (line.enterVisible && line.displacement > 0 && !bypass()) {
-      const entryIndex = geometryEntryIndex(line.start);
-      const entry = geometryEntries[entryIndex];
-      const target =
-        entry && !("node" in entry)
-          ? entry.surface
-          : (entry?.node?.parentElement?.closest<HTMLElement>(MARKDOWN_BLOCK_CONTENT) ?? null);
-      let containsVisibleText = false;
-      if (target) {
-        // Descendants occupy one contiguous span in document order. Inspect
-        // outward from this row and stop at the first painted node or block
-        // boundary. A retained suffix also prevents replaying the entrance.
-        for (const direction of [-1, 1]) {
-          if (containsVisibleText) break;
-          for (
-            let index = entryIndex + (direction === 1 ? 1 : 0);
-            index >= 0 && index < geometryEntries.length;
-            index += direction
-          ) {
-            const item = geometryEntries[index]!;
-            if (!target.contains("node" in item ? item.node : item.surface)) break;
-            if (model.visibleEnd(item.start, item.end) > item.start) {
-              containsVisibleText = true;
-              break;
-            }
-          }
-        }
-      }
-      // Fenced code deliberately keeps its authored opacity; only its block
-      // space participates in the line motion. Glyph fades are already
-      // excluded from <pre>, and applying the generic entrance here would
-      // accidentally fade the entire code surface as well.
-      const isCodeSurface = target?.closest("pre, .chat-markdown-codeblock") !== null;
-      if (
-        target &&
-        !containsVisibleText &&
-        !isCodeSurface &&
-        !target.matches(MEDIA_CONTENT) &&
-        !target.closest(EXCLUDED_TEXT)
-      ) {
-        target.style.setProperty("--t3-smooth-line-offset", `${line.displacement}px`);
-        target.setAttribute(SMOOTH_LINE_ENTER_ATTRIBUTE, line.direction > 0 ? "up" : "down");
-        motion.enter = target;
-      }
+    // Dense streams already move with the layout curve. Historical text in
+    // the same paragraph/list must never inherit a new row's transform.
+    const target =
+      line.enterVisible && line.displacement > 0 && !bypass() ? lineEnterTarget(line.start) : null;
+    if (target) {
+      cancelLineEnterClear(target);
+      target.removeAttribute(LINE_ENTER_TOKEN_ATTRIBUTE);
+      target.style.setProperty("--t3-smooth-line-offset", `${line.displacement}px`);
+      target.setAttribute(SMOOTH_LINE_ENTER_ATTRIBUTE, line.direction > 0 ? "up" : "down");
+      motion.enter = target;
+      // The reservation clock may predate this write (it can start at the
+      // previous frame). The CSS animation starts when the attribute lands.
+      motion.enterStartedAt = performance.now();
     }
     lineMotions.push(motion);
   };
   const releaseLineEnter = () => {
     for (const motion of lineMotions) {
       if (!motion.enter) continue;
-      motion.enter.removeAttribute(SMOOTH_LINE_ENTER_ATTRIBUTE);
-      motion.enter.style.removeProperty("--t3-smooth-line-offset");
+      const target = motion.enter;
+      const remaining = lineEnterRemaining(motion);
+      // Disposal can run because the source ended, not because the row is
+      // leaving. Let an entrance that is already playing finish instead of
+      // cancelling it in the same commit.
+      if (remaining > 1) scheduleLineEnterClear(target, remaining);
+      else clearLineEnter(target);
       motion.enter = null;
     }
   };
   let scrollParent: HTMLElement | null = null;
-  let pinnedActivity: HTMLElement | null = null;
+  const boundaryRoot = element.closest("main");
+  let paintBoundaries: HTMLElement[] | null = null;
+  let legacyActivity: HTMLElement | null = null;
+  const paintBoundarySelector =
+    '[data-timeline-status-height$=":thinking"], .streaming-markdown-footnotes-heading, [data-timeline-tail-anchor="meta"]';
+  // A tick may check the same permit repeatedly. Share only its read phase;
+  // height writes and committed scroll/layout publication need fresh geometry.
+  let boundaryGeometry: {
+    rects: Map<HTMLElement, DOMRect>;
+    edges: Map<boolean, number>;
+  } | null = null;
+  let commitGeometry: Map<HTMLElement, DOMRect> | null = null;
+  const invalidatePaintBoundary = () => {
+    boundaryGeometry?.rects.clear();
+    boundaryGeometry?.edges.clear();
+  };
+  const boundaryRect = (target: HTMLElement) => {
+    let rect = boundaryGeometry?.rects.get(target);
+    if (!rect) {
+      rect = commitGeometry?.get(target);
+      if (!rect) {
+        rect = target.getBoundingClientRect();
+        commitGeometry?.set(target, rect);
+      }
+      boundaryGeometry?.rects.set(target, rect);
+    }
+    return rect;
+  };
+  // Both layouts expose the actual Thinking frame. A detached footnote's
+  // border can be closer than Thinking; neither may bound its own descendants.
+  const measurePaintBoundary = (includeLegacyActivity: boolean) => {
+    if (!boundaryRoot) return Infinity;
+    let bottom = Infinity;
+    paintBoundaries ??= [
+      ...(boundaryRoot?.querySelectorAll<HTMLElement>(paintBoundarySelector) ?? []),
+    ];
+    // Only preceding controls and unscoped footnotes need the body's origin.
+    let top: number | undefined;
+    for (const boundary of paintBoundaries) {
+      if (
+        !boundary.isConnected ||
+        !boundary.matches(paintBoundarySelector) ||
+        boundary.contains(element) ||
+        element.contains(boundary) ||
+        boundary.closest("[data-stream-footnotes]")?.contains(element) ||
+        boundary.closest("[hidden]")
+      )
+        continue;
+      const rect = boundaryRect(boundary);
+      if (rect.height <= 0) continue;
+      // Message actions precede a detached footer; that footer must not wait
+      // for its own earlier copy controls to move out of the way.
+      if (
+        boundary.matches('[data-timeline-tail-anchor="meta"]') &&
+        element.closest("[data-stream-footnotes]") &&
+        rect.bottom <= (top ??= boundaryRect(element).top) + 0.5
+      )
+        continue;
+      // A detached current footer can move above the producer during scroll.
+      // It must close the clip, rather than disappearing as a paint boundary.
+      // Only unrelated older footnotes are ignored.
+      if (boundary.matches(".streaming-markdown-footnotes-heading")) {
+        const scope = element
+          .closest("[data-markdown-footnote-scope]")
+          ?.getAttribute("data-markdown-footnote-scope");
+        const footerScope = boundary
+          .closest("[data-markdown-footnote-scope]")
+          ?.getAttribute("data-markdown-footnote-scope");
+        if (scope && footerScope && scope !== footerScope) continue;
+        if (
+          !scope &&
+          rect.top < (top ??= boundaryRect(element).top) &&
+          element.compareDocumentPosition(boundary) & Node.DOCUMENT_POSITION_PRECEDING
+        )
+          continue;
+      }
+      bottom = Math.min(bottom, rect.top);
+    }
+    if (Number.isFinite(bottom) || !includeLegacyActivity) return bottom;
+    if (!legacyActivity?.isConnected)
+      legacyActivity = boundaryRoot.querySelector<HTMLElement>(
+        '[data-testid="timeline-live-activity-layer"]',
+      );
+    const activity = legacyActivity;
+    if (!activity || activity.contains(element)) return Infinity;
+    for (let parent = activity.parentElement; parent; parent = parent.parentElement) {
+      if (parent.style.position === "sticky") return boundaryRect(activity).top;
+      if (parent === boundaryRoot) break;
+    }
+    return bottom;
+  };
+  const paintBoundary = (includeLegacyActivity = true): number => {
+    const cached = boundaryGeometry?.edges.get(includeLegacyActivity);
+    if (cached !== undefined) return cached;
+    const edge = measurePaintBoundary(includeLegacyActivity);
+    boundaryGeometry?.edges.set(includeLegacyActivity, edge);
+    return edge;
+  };
+  const preparePaintBoundary = () => {
+    if (!frameElement || disposed) return;
+    const bypassed = bypass();
+    const edge = bypassed ? Infinity : paintBoundary();
+    if (!bypassed && Number.isFinite(edge)) {
+      const rect = boundaryRect(frameElement);
+      const height = Math.max(0, edge - rect.top - 1);
+      const values = [
+        ["--t3-smooth-paint-height", height],
+        ["--t3-smooth-clip-extension", Math.max(0, height - rect.height)],
+        ["--t3-smooth-clip-bottom", rect.height - height],
+      ] as const;
+      return () => {
+        if (disposed) return;
+        if (frameElement.dataset.smoothTextBoundary === undefined)
+          frameElement.dataset.smoothTextBoundary = "";
+        for (const [property, value] of values) {
+          const next = `${value}px`;
+          if (frameElement.style.getPropertyValue(property) !== next)
+            frameElement.style.setProperty(property, next);
+        }
+      };
+    }
+    return () => {
+      if (disposed) return;
+      if (frameElement.dataset.smoothTextBoundary !== undefined)
+        delete frameElement.dataset.smoothTextBoundary;
+      for (const property of [
+        "--t3-smooth-paint-height",
+        "--t3-smooth-clip-extension",
+        "--t3-smooth-clip-bottom",
+      ])
+        if (frameElement.style.getPropertyValue(property))
+          frameElement.style.removeProperty(property);
+    };
+  };
+  const updatePaintBoundary = () => preparePaintBoundary()?.();
+  const refreshPaintBoundary = (event?: Event) => {
+    invalidatePaintBoundary();
+    const detail =
+      event?.type === SMOOTH_TEXT_LAYOUT_COMMIT_EVENT
+        ? (event as CustomEvent<SmoothTextLayoutCommitDetail>).detail
+        : undefined;
+    const previousCommitGeometry = commitGeometry;
+    commitGeometry = detail?.geometry ?? null;
+    let write: (() => void) | undefined;
+    try {
+      write = preparePaintBoundary();
+    } finally {
+      commitGeometry = previousCommitGeometry;
+    }
+    const writes = detail?.boundaryWrites;
+    if (write && writes) writes.push(write);
+    else write?.();
+    // A finite actual cap can leave a native mask idle after its phase ends.
+    // Existing commit/boundary events retry that gate once, without polling or
+    // requesting another permission receipt for the same live publication.
+    if (
+      !disposed &&
+      !paused &&
+      frame === null &&
+      !candidate &&
+      !model.pending &&
+      !reserving() &&
+      !hasPendingCommit() &&
+      decorations.gated &&
+      !decorations.pending
+    )
+      frame = requestSmoothTextLayoutFrame(element, tick);
+  };
   const lineDirection = () => {
     if (!scrollParent?.contains(element)) {
       scrollParent = null;
@@ -1442,26 +2558,8 @@ function observeSmoothText(
       : -1;
   };
   const pinnedActivityHeight = (top: number) => {
-    if (!pinnedActivity?.isConnected)
-      pinnedActivity =
-        element
-          .closest("main")
-          ?.querySelector<HTMLElement>('[data-testid="timeline-live-activity-layer"]') ?? null;
-    const activity = pinnedActivity;
-    // Footnotes displayed inside the activity row own its height. Its own top
-    // cannot be their lower paint boundary or the FIFO waits on itself forever.
-    if (!activity || activity.contains(element)) return Infinity;
-    for (let parent = activity.parentElement; parent; parent = parent.parentElement) {
-      if (parent.style.position === "sticky") {
-        // LegendList learns an animated row's size after RAF. A requested
-        // frame height can be ready while native end-follow is still one
-        // layout pass behind. Keep the new line masked until the actual
-        // viewport provides its space above the pinned activity label.
-        return activity.getBoundingClientRect().top - top;
-      }
-      if (parent.tagName === "MAIN") break;
-    }
-    return Infinity;
+    const boundary = paintBoundary();
+    return Number.isFinite(boundary) ? boundary - top : Infinity;
   };
   // The virtual row, native scroll offset and DOMRect use different rounding
   // precisions. A subpixel remainder cannot hold a fully opened FIFO forever.
@@ -1473,12 +2571,22 @@ function observeSmoothText(
     objects.some(({ surface }) => surface instanceof HTMLImageElement && !surface.complete);
   const hasStructuralContent = () => structuralContent;
   const notifySettled = () => {
-    if (paused || settled || streaming || reserving() || model.pending || hasPendingCode()) return;
+    if (
+      paused ||
+      settled ||
+      candidate !== null ||
+      streaming ||
+      reservations.some((reservation) => !reservation.hiddenSettle) ||
+      model.pending ||
+      hasPendingCode()
+    )
+      return;
     settled = true;
     onSettled?.();
   };
   const notifyPlaybackComplete = () => {
     if (
+      candidate !== null ||
       playbackFinished ||
       paused ||
       streaming ||
@@ -1527,10 +2635,19 @@ function observeSmoothText(
   };
   const hasSurfaceFades = () =>
     [...activeSurfaces.values()].some((entry) => !entry.finished && entry.startedAt !== null);
-  const advanceMediaClock = (now: number) => {
+  const advanceSpaceClock = (now: number) => {
     const open = reservations[0];
-    const surface = open && geometryEntries[geometryEntryIndex(open.start)]?.surface;
-    if (bypass() || !open || open.reflow || !surface?.matches(MEDIA_CONTENT)) return;
+    // Structural metric corrections retain their FIFO deadline. Restored tail
+    // space instead follows delivered paint time without delaying glyph admission.
+    if (
+      (candidate && candidate.reservation !== open) ||
+      bypass() ||
+      !open ||
+      (open.reflow && !open.hiddenSettle)
+    )
+      return;
+    const surface = geometryEntries[geometryEntryIndex(open.start)]?.surface;
+    const media = !open.reflow && surface?.matches(MEDIA_CONTENT) === true;
     // Correct the visual clock before testing release deadlines as well as
     // before painting. Otherwise a stall longer than the whole curve retires
     // its reservation before the missing frames can be removed from its age.
@@ -1538,21 +2655,59 @@ function observeSmoothText(
       0,
       now - Math.max(lastPaintAt, open.startedAt, open.visualClockAt ?? 0),
     );
-    // Slow devices still need to finish the box. Capping every delivered frame
-    // at 30 Hz stretched it well past its plan under sustained frame pressure. Keep
-    // at least four visual steps, and learn the actual cadence after a stall.
-    const visualStep = Math.max(16, Math.min(80, open.nominalDuration / 4, mediaFrameMs));
+    // Media retains at least four visual steps under frame pressure. Text
+    // advances by the delivered cadence without repaying a suspended frame.
+    let visualStep = media
+      ? Math.max(16, Math.min(80, open.nominalDuration / 4, mediaFrameMs))
+      : Math.max(1, cadence.frameMs * 1.25);
+    // A resumed image starts with a short delivered step; its much larger
+    // distance must not turn the first post-stall paint into a text-row jump.
+    if (media && elapsed > Math.max(80, mediaFrameMs * 2)) visualStep /= 2;
     const delayed = Math.max(0, elapsed - visualStep);
     open.visualClockAt = now;
     open.startedAt += delayed;
     open.readyAt += delayed;
-    const media = surfaces.get(surface);
-    if (media?.startedAt != null && !media.finished) media.startedAt += delayed;
+    if (open.reflow && reflowDeadline) reflowDeadline.at += delayed;
+    const object = surface ? surfaces.get(surface) : undefined;
+    if (media && object?.startedAt != null && !object.finished) object.startedAt += delayed;
+    spaceClockShiftMs += delayed;
+  };
+  let initialDecorationPaint = true;
+  const prepareDecorations = (height: number, skip: boolean) => {
+    const write = decorations.prepare({
+      generation: geometryGeneration,
+      height:
+        Math.min(
+          height,
+          pinnedActivityHeight(geometryRootRect.top),
+          decorationPublication
+            ? publicationSpace(decorationPublication, geometryRootRect.top)
+            : admissionCommit || scopeCommit
+              ? 0
+              : Infinity,
+        ) - (retainedTail?.height ?? 0),
+      offset: model.nextStart ?? model.offset,
+      rootTop: geometryRootRect.top,
+      visibleEnd: (start, end) => model.visibleEnd(start, end),
+      bounds: glyphBounds,
+      bypass: skip,
+      now: lastPaintAt,
+      // Existing visible prefix pixels precede this observer's drawing clock.
+      yieldDurationMs: initialDecorationPaint ? 0 : yieldDurationMs,
+      fadeDurationMs: initialDecorationPaint ? 0 : fadeDurationMs,
+    });
+    return () => {
+      write();
+      initialDecorationPaint = false;
+    };
   };
   const paint = (layoutChanged = false, now = performance.now(), synchronousLayout = false) => {
-    now = Math.max(now, lastPaintAt);
-    advanceMediaClock(now);
+    // Paused DOM/EOF refreshes update masks without spending animation time.
+    // Resume shifts these frozen clocks by the full pause exactly once.
+    now = paused ? lastPaintAt : Math.max(now, lastPaintAt);
+    advanceSpaceClock(now);
     lastPaintAt = now;
+    spaceClockShiftMs = 0;
     const offset = model.offset;
     const skip = bypass();
     // Media shares the reservation's painted height. Its FIFO unit is still
@@ -1567,14 +2722,44 @@ function observeSmoothText(
             open.duration,
             open.startSlope,
             open.endSlope,
+            open.pulse,
           )
       : lastFrameHeight;
     const reserved = open?.reflow ? movingHeight : Math.max(lastFrameHeight, movingHeight);
-    const settledHeight =
-      hasLiveTableTail() || model.pending || hasPendingCode()
+    let settledHeight =
+      candidate !== null ||
+      hiddenSettleHeight !== null ||
+      hasLiveTableTail() ||
+      model.pending ||
+      hasPendingCode()
         ? lastFrameHeight
         : element.getBoundingClientRect().height;
-    const nextHeight = frameElement ? (reserving() ? reserved : settledHeight) : null;
+    // Revealed text can finish before its last block's margin or padding has
+    // been yielded. Writing that natural height directly would jump the tail
+    // by a row or more in one paint; ease it on the same settle curve instead.
+    if (
+      frameElement &&
+      !skip &&
+      !reserving() &&
+      !model.pending &&
+      modelText.length > 0 &&
+      // The initial unclaimed snapshot already owns its natural line box.
+      // Only subsequent paints need to reserve small remaining tail space.
+      (publishedOffset >= 0 || settledHeight > lastFrameHeight + 20) &&
+      !hasPendingCode() &&
+      !hasLiveTableTail() &&
+      settledHeight > lastFrameHeight + 0.5
+    ) {
+      openSettleReflow(settledHeight, now);
+      settledHeight = lastFrameHeight;
+    }
+    const nextHeight = frameElement
+      ? candidate
+        ? Math.max(candidate.height, lastFrameHeight)
+        : reserving()
+          ? reserved
+          : settledHeight
+      : null;
     // End-follow applies this growth before paint. Clipping an image to the
     // old sticky edge withheld its first pixels for another frame, then
     // released two frames of area together. Readers who detached keep the
@@ -1596,6 +2781,11 @@ function observeSmoothText(
     }
     // Read all required surface geometry and glyph colors before any style
     // writes. A batch of Markdown labels otherwise flushes style once per label.
+    const surfaceFrontier = skip
+      ? Infinity
+      : Math.max(model.nextStart ?? model.offset, open?.end ?? 0);
+    activateSurfaces(surfaceFrontier);
+    let queuedSurfaceAdded = false;
     const preparedSurfaces = [...activeSurfaces].map(([surface, entry]) => {
       const surfaceEnd = model.visibleEnd(entry.start, entry.end);
       let clip: string | null = null;
@@ -1636,6 +2826,8 @@ function observeSmoothText(
       color: getComputedStyle(parent).color,
     }));
     pendingFadeColors.clear();
+    const paintDecorations = prepareDecorations(nextHeight ?? Infinity, skip || !frameElement);
+    paintDecorations();
     if (retainedTail) {
       if (!model.pending && !reserving()) clearRetainedTail();
       else {
@@ -1662,6 +2854,13 @@ function observeSmoothText(
           surface.dataset.smoothInlinePending = "";
         if (surface.style.getPropertyValue("--t3-smooth-surface-opacity") !== "0")
           surface.style.setProperty("--t3-smooth-surface-opacity", "0");
+        // Mask future surfaces once; wake them when text or reserved space
+        // reaches their range instead of scanning the queued document per frame.
+        if (entry.startedAt === null && entry.start > surfaceFrontier) {
+          activeSurfaces.delete(surface);
+          queuedSurfaces.push([surface, entry]);
+          queuedSurfaceAdded = true;
+        }
       } else {
         entry.startedAt ??= now;
         const surfaceFadeMs = entry.object && surface.matches(MEDIA_CONTENT) ? 180 : fadeDurationMs;
@@ -1690,6 +2889,12 @@ function observeSmoothText(
       }
       if (entry.finished && surfaceEnd >= entry.end) activeSurfaces.delete(surface);
     }
+    if (queuedSurfaceAdded) {
+      queuedSurfaces = queuedSurfaces
+        .slice(queuedSurfaceIndex)
+        .sort((a, b) => a[1].start - b[1].start);
+      queuedSurfaceIndex = 0;
+    }
     advanceFadeRanges(now);
     let frameHeightChanged = false;
     if (frameElement) {
@@ -1702,7 +2907,15 @@ function observeSmoothText(
       } else {
         delete frameElement.dataset.smoothTextClipping;
       }
-      setSmoothTextFrameHeight(frameElement, nextHeight!, synchronousLayout);
+      const heightChanges = !hasSmoothTextFrameHeight(frameElement, nextHeight!);
+      if (heightChanges) invalidatePaintBoundary();
+      const publishedLayout = setSmoothTextFrameHeight(
+        frameElement,
+        nextHeight!,
+        synchronousLayout,
+      );
+      if (publishedLayout) invalidatePaintBoundary();
+      updatePaintBoundary();
       if (frameElement.dataset.smoothTextFrame === undefined)
         frameElement.dataset.smoothTextFrame = "";
       frameHeightChanged = Math.abs(nextHeight! - lastFrameHeight) > 0.1;
@@ -1747,11 +2960,131 @@ function observeSmoothText(
     }
   };
   const tick = (now: number) => {
+    if (syncLayoutScope()) return;
+    boundaryGeometry = { rects: new Map(), edges: new Map() };
+    try {
+      tickFrame(now);
+    } finally {
+      boundaryGeometry = null;
+    }
+  };
+  const tickFrame = (now: number) => {
     frame = null;
     if (disposed || paused) return;
-    lineEnterOffsets.clear();
+    // Any early exit below (candidate, detached row, intersection, bypass)
+    // must still retire entrances whose CSS clock already finished.
+    retireLineEntrances(now);
+    if (admissionCommit && !reservations.includes(admissionCommit.reservation))
+      cancelAdmissionCommit(false);
+    // Portal children run their layout effects before the parent attaches the
+    // target. No layout here must not select the unframed FIFO fallback.
+    if (frameElement && !element.isConnected && !candidate) {
+      model.hold(now);
+      previousFrameAt = null;
+      frame = requestSmoothTextLayoutFrame(element, tick);
+      return;
+    }
+    // Candidate space is delivered on the same display frames as the FIFO.
+    // Learning only after commit leaves a slow candidate permanently at 60Hz.
     mediaFrameMs = cadence.frameMs;
-    cadence.frame(now);
+    cadence.frame(now, previousFrameAt !== null);
+    if (candidate) {
+      const pending = candidate;
+      const measurable = !bypass() && element.isConnected;
+      const rootRect = measurable ? element.getBoundingClientRect() : null;
+      const width = rootRect?.width ?? 0;
+      if (!rootRect || width <= 0) {
+        pending.cancelCommit?.();
+        pending.cancelCommit = null;
+        pending.delivered = true;
+        if (bypass()) clearAllLineEntrances();
+        else scheduleLiveLineEnterClears();
+        pending.request.commit();
+        return;
+      }
+      geometryRootRect = rootRect;
+      if (pending.width !== width) pending.invalid = true;
+      if (
+        pending.reservation &&
+        (pending.reservation !== reservations[0] ||
+          pending.reservation.target < pending.target ||
+          pending.reservation.target <= pending.reservation.from)
+      )
+        pending.invalid = true;
+      if (pending.invalid) measureCandidate();
+      if (pending.delivered) {
+        scheduleLiveLineEnterClears();
+        return;
+      }
+      const elapsed = Math.max(0, now - pending.lastAt);
+      // Preserve the FIFO's existing reservations without admitting new glyphs.
+      for (const open of reservations) {
+        if (open === pending.reservation) continue;
+        open.startedAt += elapsed;
+        open.readyAt += elapsed;
+        if (open.visualClockAt !== undefined) open.visualClockAt += elapsed;
+      }
+      model.hold(now);
+      pending.lastAt = now;
+      pending.elapsed += Math.min(elapsed, Math.max(1, cadence.frameMs * 1.25));
+      const duration = Math.min(
+        600,
+        Math.max(yieldDurationMs, (pending.target - pending.from) * 5),
+      );
+      if (pending.reservation) {
+        // Keep the original curve, including its pulse, slopes and delivered
+        // frame clock. Reaching C's height still requires C's own owner receipt.
+        advanceSpaceClock(now);
+        const open = pending.reservation;
+        pending.height = Math.max(
+          pending.height,
+          open.from +
+            (open.target - open.from) *
+              smoothLineCurveProgress(
+                now - open.startedAt,
+                open.duration,
+                open.startSlope,
+                open.endSlope,
+                open.pulse,
+              ),
+        );
+      } else {
+        const progress = bypass() ? 1 : smoothLineCurveProgress(pending.elapsed, duration, 0, 0);
+        pending.height = Math.max(
+          pending.height,
+          pending.from + (pending.target - pending.from) * progress,
+        );
+        if (bypass() || pending.elapsed >= duration) pending.height = pending.target;
+      }
+      paint(false, now);
+      if (pending.height >= pending.target) deliverCandidate();
+      if (
+        (!pending.delivered && !pending.cancelCommit) ||
+        (pending.reservation &&
+          now < pending.reservation.startedAt + pending.reservation.duration) ||
+        fadeRanges.length > 0 ||
+        hasSurfaceFades() ||
+        decorations.pending ||
+        hasLiveLineEnter(now)
+      )
+        frame = requestSmoothTextLayoutFrame(element, tick);
+      previousFrameAt = now;
+      return;
+    }
+    if (
+      scopeCommit &&
+      !bypass() &&
+      !model.pending &&
+      !reserving() &&
+      fadeRanges.length === 0 &&
+      !hasSurfaceFades()
+    ) {
+      model.hold(now);
+      paint(false, now);
+      scheduleLiveLineEnterClears();
+      return;
+    }
+    lineEnterOffsets.clear();
     // A layout commit can paint after the frame's RAF timestamp was sampled.
     // Retiming must start at that painted position, never at an older frame.
     now = Math.max(now, lastPaintAt);
@@ -1761,7 +3094,9 @@ function observeSmoothText(
     // layout. Pause its FIFO instead of exposing the entire provider batch.
     if (!intersecting && !bypass()) return;
     if (bypass()) {
+      cancelAdmissionCommit();
       reservations = [];
+      clearAllLineEntrances();
       model.finish();
       clearFadeRanges();
     } else {
@@ -1771,6 +3106,18 @@ function observeSmoothText(
       // this frame's origin or later rows look as if their space already exists.
       geometryRootRect = rootRect;
       const hasLayout = frameElement && (rootRect.height > 0 || objects.length > 0);
+      if (frameElement && !hasLayout && model.pending) {
+        boundsCache.clear();
+        const next = model.nextStart ?? 0;
+        const glyph = modelText.slice(next).search(/\S/u);
+        if (glyph >= 0 && !glyphBounds(next + glyph, next + glyph + 1)) {
+          model.hold(now);
+          geometryDirty = true;
+          previousFrameAt = null;
+          frame = requestSmoothTextLayoutFrame(element, tick);
+          return;
+        }
+      }
       if (rootRect.width !== lastWidth || rootRect.height !== lastNaturalHeight) {
         lastWidth = rootRect.width;
         lastNaturalHeight = rootRect.height;
@@ -1778,28 +3125,41 @@ function observeSmoothText(
         resizeDirty = true;
         geometryGeneration++;
       }
-      for (const motion of lineMotions) {
-        if (now - motion.startedAt >= SMOOTH_LINE_ENTER_MS) {
-          motion.enter?.removeAttribute(SMOOTH_LINE_ENTER_ATTRIBUTE);
-          motion.enter?.style.removeProperty("--t3-smooth-line-offset");
-          motion.enter = null;
-        }
-      }
-      lineMotions = lineMotions.filter((line) => now - line.startedAt < SMOOTH_LINE_ENTER_MS);
       if (geometryDirty) {
-        if (hasLayout) syncGeometry();
+        if (hasLayout) syncGeometry(now);
         else geometryDirty = false;
       }
+      if (hasLayout && admittedPublication && model.pending) {
+        const next = model.nextStart ?? modelText.length;
+        const bounds = admittedOffset > next ? glyphBounds(next, admittedOffset) : null;
+        const space = publicationSpace(admittedPublication, rootRect.top);
+        if (bounds && bounds.bottom + (retainedTail?.height ?? 0) > space + 0.5) {
+          // Local reflow can extend an already opened row. Revoke only unread
+          // space that a later real commit shrank, so it obtains a new receipt.
+          admittedOffset = Math.max(next, Math.min(admittedOffset, lineLimit(space, next)));
+          unstartedSpaceLines = unstartedSpaceLines.filter((start) => start < admittedOffset);
+        }
+      }
       updateMode(now);
-      advanceMediaClock(now);
-      retimeSpace(now, Math.max(frameStart, lastPaintAt));
-      foldFollowingRow(Math.max(frameStart, lastPaintAt));
+      advanceSpaceClock(now);
+      // Sampling a shifted clock at the old wall time would rewind its paint.
+      const paintedSpaceAt = lastPaintAt + spaceClockShiftMs;
+      retimeSpace(now, paintedSpaceAt);
+      foldFollowingRow(paintedSpaceAt);
+      // Synchronous layout commits inside one RAF are not new display frames.
+      const spacePaintAt = lastPaintAt;
       let layoutAt = frameStart;
       let layoutFlushes = 0;
       let releasedLines = 0;
       let releasedUnits = 0;
       let releasedGraphemes = 0;
       let revealedGlyphThisFrame = false;
+      let blockedByBoundary = false;
+      const holdPermit = () => {
+        if (!model.pending) return;
+        blockedByBoundary = true;
+        permitBacklog ??= model.pendingGraphemeCount;
+      };
       // Bound actual glyph work, rather than token count: short provider
       // fragments must not impose a refresh-rate-dependent throughput ceiling.
       // The line checks and time budget independently bound layout and CPU work.
@@ -1824,7 +3184,10 @@ function observeSmoothText(
       // budget remains independent so a long line can still catch up.
       const sourceInterval = model.arrivalInterval(now);
       const arrivalPace = Math.min(1, cadence.frameMs / Math.max(1, sourceInterval));
-      const linePace = Math.min(reservations[0]?.endSlope ?? previousSpaceContinuous, arrivalPace);
+      const linePace = Math.min(
+        reservations[0]?.continuous ?? reservations[0]?.endSlope ?? previousSpaceContinuous,
+        arrivalPace,
+      );
       const settlingReflow = reservations[0]?.reflow === true;
       const pendingPressure = model.pendingGraphemeCount > Math.max(64, cadence.columns * 2);
       const rapidSource =
@@ -1835,7 +3198,7 @@ function observeSmoothText(
       const continuousRegime =
         !settlingReflow &&
         (!largeDomBurst || now >= largeDomBurstUntil) &&
-        (linePace >= 0.5 || (pendingPressure && rapidSource) || now < highRateUntil);
+        (linePace > 0 || (pendingPressure && rapidSource) || now < highRateUntil);
       const lineTransitionBudget = continuousRegime
         ? hasStructuralContent()
           ? rapidSource
@@ -1862,31 +3225,107 @@ function observeSmoothText(
             if (model.advance(now, gap.end, Math.max(frameStart, gap.at)) > gap.start) continue;
           }
         }
-        // Every reservation whose space has fully opened releases its own line.
+        // Space admission follows its painted bounds, independently of the
+        // preceding row's glyph clock. model.advance still enforces glyph FIFO.
         for (let index = reservations.length - 1; index >= 0; index--) {
           const reservation = reservations[index]!;
+          const boundary = paintBoundary(false);
+          const parallel = reservation.paintAhead && Number.isFinite(boundary);
+          if (parallel && admittedOffset >= reservation.end) {
+            const continuation = followingLine(reservation.end);
+            // New source can extend the same physical row while its original
+            // space curve is moving. It shares that space and the glyph FIFO,
+            // rather than waiting for a second reservation of the same row.
+            if (continuation && continuation.glyphBottom <= reservation.glyphBottom + 0.5)
+              reservation.end = Math.max(reservation.end, continuation.end);
+          }
+          const paintBottom = parallel
+            ? (glyphBounds(reservation.start, reservation.end)?.bottom ?? reservation.glyphBottom) +
+              (retainedTail?.height ?? 0) +
+              (reservation.direction > 0 &&
+              reservation.enterVisible &&
+              lineEnterTarget(reservation.start)
+                ? reservation.displacement
+                : 0)
+            : reservation.readyHeight;
+          if (!parallel && now + 0.001 < reservation.readyAt) continue;
+          const fits = () =>
+            parallel
+              ? paintBottom <= paintBoundary() - rootRect.top - 1
+              : fitsPinnedActivity(reservation.readyHeight, rootRect.top);
+          const receipt = admissionCommit?.reservation === reservation ? admissionCommit : null;
+          const published = receipt?.publication ?? admittedPublication;
+          const requiredHeight = parallel ? paintBottom + 1 : reservation.readyHeight;
+          const fitsPublication = () =>
+            published !== null &&
+            published !== undefined &&
+            requiredHeight <= publicationSpace(published, rootRect.top) + 0.5;
           if (
-            now + 0.001 < reservation.readyAt ||
-            (model.nextStart ?? modelText.length) < reservation.start
-          )
-            continue;
-          if (!fitsPinnedActivity(reservation.readyHeight, rootRect.top)) {
+            (reservation.reflow || admittedOffset < reservation.end) &&
+            (!fits() ||
+              ((receipt !== null || published !== null || needsAdmissionPublication()) &&
+                !fitsPublication()))
+          ) {
             // When a row takes less than one display frame, commit its own
             // space before consuming it. Several such rows can share a paint,
             // but each still obtains and verifies space before exposing text.
             if (
-              (!reservation.wholeLine && now - reservation.readyAt < cadence.frameMs * 2) ||
+              (!parallel &&
+                !reservation.wholeLine &&
+                now - reservation.readyAt < cadence.frameMs * 2) ||
               layoutFlushes >= layoutFlushLimit ||
               performance.now() >= layoutDeadline
-            )
+            ) {
+              holdPermit();
               continue;
-            paint(false, now, true);
-            layoutFlushes++;
-            rootRect = element.getBoundingClientRect();
-            geometryRootRect = rootRect;
-            if (!fitsPinnedActivity(reservation.readyHeight, rootRect.top)) continue;
+            }
+            if (receipt && !receipt.publication && !fitsPublication()) {
+              holdPermit();
+              continue;
+            }
+            if (published && !fitsPublication()) {
+              paint(false, now);
+              if (
+                published.container.getBoundingClientRect().height >
+                published.containerHeight + 0.5
+              )
+                requestAdmissionCommit(reservation);
+              holdPermit();
+              continue;
+            }
+            if (published && fitsPublication()) {
+              paint(false, now);
+              rootRect = element.getBoundingClientRect();
+              geometryRootRect = rootRect;
+              if (!fits() || !fitsPublication()) {
+                holdPermit();
+                continue;
+              }
+            } else {
+              // A Timeline can confirm its virtual row on a later React commit.
+              // Do not promote that unrelated React work inside the glyph RAF.
+              if (receipt || requestAdmissionCommit(reservation)) {
+                paint(false, now);
+                holdPermit();
+                continue;
+              }
+              // A standalone frame has no owner receipt or virtual publication.
+              paint(false, now, true);
+              layoutFlushes++;
+              rootRect = element.getBoundingClientRect();
+              geometryRootRect = rootRect;
+              if (!fits()) {
+                holdPermit();
+                continue;
+              }
+            }
           }
-          revealLine(Math.max(frameStart, reservation.readyAt), reservation);
+          if (receipt) cancelAdmissionCommit(false);
+          if (!reservation.reflow && admittedOffset < reservation.end)
+            unstartedSpaceLines.push(reservation.start);
+          // A geometric permit is observed now, never backdated to time spent
+          // behind the boundary. The glyph FIFO and initial buffer still apply.
+          revealLine(parallel ? now : Math.max(frameStart, reservation.readyAt), reservation);
           if (now - reservation.startedAt + 0.001 < reservation.duration) continue;
           lastFrameHeight = reservation.reflow
             ? reservation.target
@@ -1895,7 +3334,7 @@ function observeSmoothText(
           previousSpaceEndAt = reservation.startedAt + reservation.duration;
           previousSpaceVelocity =
             ((reservation.target - reservation.from) / reservation.duration) * reservation.endSlope;
-          previousSpaceContinuous = reservation.endSlope;
+          previousSpaceContinuous = reservation.continuous ?? reservation.endSlope;
           reservations.splice(index, 1);
           releasedLines += 1;
         }
@@ -1925,24 +3364,50 @@ function observeSmoothText(
           );
           if (advancedSeparator > candidate.start) continue;
         }
-        // Begin moving the next line while only the last fraction of the
-        // admitted row remains. Its text still waits for the FIFO and its own
-        // complete paint space; only one next row may obtain that space.
-        // "Last fraction" is measured in time as well as characters: a row
-        // whose final fifth plays faster than the next row's space can open
-        // would otherwise pause at every line break. Never start before the
-        // row is half shown; only one row's space moves at a time, so the
-        // handoff still reads as one row after another.
+        // Deferred publications need the measured space lead after this row's
+        // first glyph. Half a row can play faster than its space action while
+        // the next source arrivals still wait upstream of the consumable FIFO.
+        // Direct deliveries keep their existing isolated/continuous handoff.
+        // Its text still waits for the FIFO and its own complete paint space;
+        // only one next row may obtain that space. A moving bridge can
+        // continue into the single next reservation while this row waits on
+        // its glyph clock. FIFO still withholds that next row's glyphs; waiting
+        // for the first glyph here would stop an already moving height edge.
         const remaining = admittedOffset - (model.nextStart ?? admittedOffset);
         const admittedLength = admittedOffset - admittedStart;
         const leadCharacters = Math.min(
-          Math.floor(admittedLength / 2),
+          model.deferredSupply ? Math.max(0, admittedLength - 1) : Math.floor(admittedLength / 2),
           Math.ceil(lineLeadMs / Math.max(1, model.characterInterval(now))),
         );
+        // A code row may receive its owner publication after its space curve
+        // ends. Once its FIFO has started, the next arrived row can obtain
+        // space without waiting for most of these unfaded glyphs to play.
+        const codeEntry =
+          !reserving() && remaining > 0 && (model.nextStart ?? admittedStart) > admittedStart
+            ? geometryEntries[geometryEntryIndex(admittedStart)]
+            : undefined;
+        const codeFollowing =
+          codeEntry &&
+          "node" in codeEntry &&
+          codeEntry.block.matches("pre, .chat-markdown-codeblock")
+            ? nextLine()
+            : null;
+        const codeFollowingEntry =
+          codeFollowing && geometryEntries[geometryEntryIndex(codeFollowing.start)];
+        const codeHandoff =
+          !!codeFollowing &&
+          !!codeFollowingEntry &&
+          "node" in codeFollowingEntry &&
+          !!codeEntry &&
+          "node" in codeEntry &&
+          codeFollowingEntry.block === codeEntry.block &&
+          lineReadyAt(codeFollowing.start) <= now;
         const nearEnd =
           hasLayout &&
           admittedOffset < modelText.length &&
-          remaining <= Math.max(1, Math.floor(admittedLength * 0.2), leadCharacters) &&
+          (codeHandoff ||
+            remaining <= Math.max(1, Math.floor(admittedLength * 0.2), leadCharacters) ||
+            (previousSpaceVelocity > 0 && previousSpaceEndAt >= spacePaintAt - 0.001)) &&
           (nextLine()?.end ?? 0) > admittedOffset;
         const handoffWait =
           hasLayout &&
@@ -1963,12 +3428,12 @@ function observeSmoothText(
         if (
           (!candidate || onlySeparatorsRemain || nearEnd) &&
           !handoffWait &&
+          pendingSpaceLines() < 2 &&
           (!reserving() || shrinkingReflow)
         ) {
           if (!hasLayout) break;
-          // A newly opened line gets its own frame before another reservation
-          // starts. This keeps the visible sequence "make room -> show row ->
-          // make room" even when several short rows are already due.
+          // Each line keeps its own space curve before the next reservation.
+          // Its glyphs may already paint in a measured safe gap during it.
           if (releasedLines >= lineTransitionBudget) break;
           if (reservations.length >= SMOOTH_LINE_PIPELINE && !shrinkingReflow) break;
           const pending = model.peek(now);
@@ -1984,15 +3449,50 @@ function observeSmoothText(
           const entry = geometryEntries[geometryEntryIndex(line.start)];
           const atomic =
             entry && !("node" in entry) && !entry.surface.matches("input[type=checkbox]");
-          if (opening && !atomic && pending.at > now) break;
+          if (opening && !atomic && pending.at > now && lineMode !== "adaptive") break;
           const from = lastFrameHeight;
           const target = line.bottom;
           if (shrinkingReflow && (target > reservations[0]!.target + 0.5 || target > from)) break;
           // A live suffix is only the part received so far, not a short row.
-          const plan = linePlan(now, line.start, line.end, Math.max(0, target - from));
-          const minimumDuration = atomic ? Math.min(80, cadence.frameMs) : 1;
-          const duration = visibleLineDuration(plan, minimumDuration);
-          const exponent = plan.exponent;
+          let plan = linePlan(
+            now,
+            line.start,
+            line.end,
+            Math.max(0, target - from),
+            line.lineHeight,
+          );
+          if (plan.peakVelocity !== null) {
+            const following = followingLine(line.end);
+            const followingEntry =
+              following && geometryEntries[geometryEntryIndex(following.start)];
+            if (
+              following &&
+              followingEntry &&
+              ("node" in followingEntry || followingEntry.surface.matches("input[type=checkbox]"))
+            ) {
+              plan = linePlan(
+                now,
+                line.start,
+                line.end,
+                Math.max(0, target - from),
+                line.lineHeight,
+                true,
+              );
+            }
+          }
+          const restingHandoff =
+            streaming &&
+            !opening &&
+            releasedLines === 0 &&
+            previousSpaceEndAt < spacePaintAt - 0.001 &&
+            plan.duration < cadence.frameMs;
+          const minimumDuration = atomic
+            ? Math.min(80, cadence.frameMs)
+            : restingHandoff
+              ? cadence.frameMs * 2
+              : 1;
+          const nominalDuration = visibleLineDuration(plan, minimumDuration);
+          let duration = nominalDuration;
           cadence.measureColumns(
             line.end - line.start,
             line.end < modelText.length && !hasLineStart(line.end),
@@ -2000,6 +3500,7 @@ function observeSmoothText(
           // Hand off as the preceding line's last glyph starts fading. Keep
           // that shared text clock; do not wait for its opacity animation.
           const sharedStart = Math.max(
+            streaming && sourceArrivalCount > 1 ? spacePaintAt : Number.NEGATIVE_INFINITY,
             layoutAt,
             Math.min(waiting.at, model.lastRevealAt ?? waiting.at),
           );
@@ -2023,7 +3524,7 @@ function observeSmoothText(
           // Footnotes skip the main stream's initial buffer, but their first
           // row still needs a real space curve instead of backdating it.
           const animateOpening = openingMedia || (opening && initialBufferMs === 0);
-          const startedAt = animateOpening
+          let startedAt = animateOpening
             ? waiting.at
             : opening
               ? waiting.at - duration
@@ -2032,54 +3533,144 @@ function observeSmoothText(
                 : protectHandoffReplay
                   ? now - duration * 0.75
                   : sharedStart;
-          const endSlope = lineMode === "parallel" ? 0 : plan.continuous;
-          const startSlope =
-            lineMode === "adaptive" &&
-            startedAt - previousSpaceEndAt <= cadence.frameMs &&
-            previousSpaceVelocity > 0
-              ? Math.min(3, (previousSpaceVelocity * duration) / Math.max(1, target - from))
-              : lineMode === "adaptive"
-                ? 0
-                : exponent;
-          // The first glyph keeps the stream's initial buffer window. Every later
-          // physical line obtains its full space before releasing any glyph.
-          if (target <= from) {
-            if (!fitsPinnedActivity(target, rootRect.top)) break;
-            // An appended suffix can already fit the same physical row. It needs
-            // no space, so it is ready now rather than on a 0/0 deadline.
-            lastFrameHeight = Math.max(lastFrameHeight, target);
-            revealLine(Math.max(frameStart, startedAt), {
-              start: line.start,
-              end: line.end,
-              direction: lineDirection(),
-              displacement: Math.min(
-                SMOOTH_LINE_DISPLACEMENT_PX * (1 - plan.continuous),
-                Math.max(0, line.bottom - line.glyphBottom),
-              ),
-              enterVisible: smoothLineEnterVisible(duration),
-              wholeLine: plan.wholeLine && duration < cadence.frameMs * 0.9,
-            });
-            candidate = model.peek(now, admittedOffset);
-          } else {
+          let endSlope = 0;
+          const inheritedVelocity =
+            previousSpaceVelocity > 0 &&
+            lineReadyAt(line.start) <= now &&
+            previousSpaceEndAt >= spacePaintAt - 0.001 &&
+            now - previousSpaceEndAt <= cadence.frameMs * 1.25
+              ? previousSpaceVelocity
+              : 0;
+          let startSlope =
+            lineMode === "adaptive"
+              ? Math.min(3, (inheritedVelocity * duration) / Math.max(1, target - from))
+              : 0;
+          let pulse: SmoothLinePulse | undefined;
+          if (plan.peakVelocity != null && target > from) {
+            // Every newly delivered text row starts at the actual painted
+            // boundary. A queued row cannot resurrect a retired velocity.
+            startedAt =
+              inheritedVelocity > 0
+                ? previousSpaceEndAt
+                : continuousRegime && !opening
+                  ? sharedStart
+                  : Math.max(now, performance.now());
+            const incoming =
+              now - previousSpaceEndAt <= cadence.frameMs * 1.25 ? inheritedVelocity : 0;
+            const blockedByPreviousRow = line.start > (model.nextStart ?? modelText.length);
+            const requestedEndVelocity = hasContinuationSpace(line.start)
+              ? restingHandoff
+                ? Math.min(plan.endVelocity, (target - from) / minimumDuration)
+                : plan.endVelocity
+              : 0;
+            // Code has no glyph fades and can wait several frames on its
+            // glyph clock. Give that blocked bridge a little braking room,
+            // without adding another full action or slowing prose throughput.
+            const brakingCode =
+              blockedByPreviousRow &&
+              requestedEndVelocity === 0 &&
+              incoming > 0 &&
+              entry &&
+              "node" in entry &&
+              entry.node.parentElement?.closest("pre, .chat-markdown-codeblock");
+            pulse = createSmoothLinePulse(
+              target - from,
+              incoming,
+              requestedEndVelocity,
+              brakingCode
+                ? Math.max(
+                    nominalDuration,
+                    Math.min(nominalDuration * 1.25, (2 * (target - from)) / incoming),
+                  )
+                : nominalDuration,
+            );
+            const endVelocity = pulse.endVelocity;
+            duration = pulse.duration;
+            // The initial buffer is a minimum glyph wait, not elapsed motion.
+            // Plan ahead when possible, but never backdate a first delivered paint.
+            if (opening) startedAt = Math.max(startedAt, waiting.at - duration);
+            startSlope = (incoming * duration) / Math.max(0.1, target - from);
+            endSlope = (endVelocity * duration) / Math.max(0.1, target - from);
+          }
+          // A burst can make its first short curve older than its full duration
+          // before any motion was painted. Deliver that handoff before allowing
+          // the existing bounded catch-up batch to retire more due rows.
+          if (restingHandoff && now - startedAt >= duration) startedAt = now - duration * 0.75;
+          // The first glyph keeps the stream's initial buffer window. Prose
+          // with a real boundary can paint in an already existing safe gap.
+          let useExistingSpace = target <= from;
+          if (useExistingSpace) {
+            const direction = lineDirection();
+            // A row whose glyph box already fills its line box has no leading
+            // to travel. Structure still has to be seen arriving, so keep the
+            // standard nudge instead of dropping the entrance entirely.
+            const lineSpace = Math.max(0, line.bottom - line.glyphBottom);
+            const displacement =
+              lineSpace > 0.5
+                ? Math.min(SMOOTH_LINE_DISPLACEMENT_PX * (1 - plan.continuous), lineSpace)
+                : SMOOTH_LINE_DISPLACEMENT_PX;
+            const enterVisible = smoothLineEnterVisible(duration);
+            const boundary = paintBoundary(false);
+            const parallel =
+              !atomic &&
+              Number.isFinite(boundary) &&
+              !(
+                entry &&
+                "node" in entry &&
+                entry.node.parentElement?.closest("pre, .chat-markdown-codeblock")
+              );
+            const paintBottom =
+              (glyphBounds(line.start, line.end)?.bottom ?? line.glyphBottom) +
+              (retainedTail?.height ?? 0) +
+              (direction > 0 && enterVisible && lineEnterTarget(line.start) ? displacement : 0);
+            if (
+              parallel
+                ? paintBottom > boundary - rootRect.top - 1
+                : !fitsPinnedActivity(target, rootRect.top)
+            ) {
+              holdPermit();
+              break;
+            }
+            const requiredHeight = parallel ? paintBottom + 1 : target;
+            if (
+              needsAdmissionPublication() ||
+              (admittedPublication &&
+                requiredHeight > publicationSpace(admittedPublication, rootRect.top) + 0.5)
+            ) {
+              // A local row can stay open after its virtual space shrinks.
+              // Its unread suffix must rejoin the normal receipt path.
+              useExistingSpace = false;
+            } else {
+              // An appended suffix can already fit the same physical row. It needs
+              // no space, so it is ready now rather than on a 0/0 deadline.
+              lastFrameHeight = Math.max(lastFrameHeight, target);
+              revealLine(parallel ? now : Math.max(frameStart, startedAt), {
+                start: line.start,
+                end: line.end,
+                direction,
+                displacement,
+                enterVisible,
+                wholeLine: plan.wholeLine && duration < cadence.frameMs * 0.9,
+              });
+              candidate = model.peek(now, admittedOffset);
+            }
+          }
+          if (!useExistingSpace) {
             const direction = lineDirection();
             const mediaDisplacement =
               atomic && entry?.surface?.matches(MEDIA_CONTENT)
                 ? SMOOTH_LINE_DISPLACEMENT_PX * (1 - plan.continuous)
                 : 0;
+            const lineSpace = Math.max(0, line.bottom - line.glyphBottom);
+            const entrance =
+              lineSpace > 0.5
+                ? Math.min(SMOOTH_LINE_DISPLACEMENT_PX * (1 - plan.continuous), lineSpace)
+                : SMOOTH_LINE_DISPLACEMENT_PX;
             const displacement = atomic
-              ? Math.max(
-                  mediaDisplacement,
-                  Math.min(
-                    SMOOTH_LINE_DISPLACEMENT_PX * (1 - plan.continuous),
-                    Math.max(0, line.bottom - line.glyphBottom),
-                  ),
-                )
+              ? Math.max(mediaDisplacement, entrance)
               : line.glyphBottom <= from + 0.5
                 ? 0
-                : Math.min(
-                    SMOOTH_LINE_DISPLACEMENT_PX * (1 - plan.continuous),
-                    Math.max(0, line.bottom - line.glyphBottom),
-                  );
+                : entrance;
             const finalTableRow =
               !streaming &&
               line.end === modelText.length &&
@@ -2092,9 +3683,17 @@ function observeSmoothText(
               target,
               readyHeight,
               glyphBottom: line.glyphBottom,
+              paintAhead:
+                !atomic &&
+                !finalTableRow &&
+                !(
+                  entry &&
+                  "node" in entry &&
+                  entry.node.parentElement?.closest("pre, .chat-markdown-codeblock")
+                ),
               startedAt,
               readyAt:
-                opening && !animateOpening
+                opening && !animateOpening && !pulse
                   ? waiting.at
                   : startedAt +
                     smoothLineCurveTime(
@@ -2102,13 +3701,18 @@ function observeSmoothText(
                       duration,
                       startSlope,
                       endSlope,
+                      pulse,
                     ),
               duration,
-              nominalDuration: duration,
+              nominalDuration,
+              yieldDurationMs,
               distance: target - from,
               minimumDuration,
+              lineHeight: line.lineHeight,
               startSlope,
               endSlope,
+              ...(pulse ? { pulse, plannedEndVelocity: pulse.endVelocity } : {}),
+              continuous: plan.continuous,
               wholeLine: plan.wholeLine,
               start: line.start,
               end: line.end,
@@ -2117,9 +3721,15 @@ function observeSmoothText(
               enterVisible: smoothLineEnterVisible(duration),
             });
             const opened = reservations.at(-1)!;
+            if (entry?.surface?.tagName === "HR") foldFollowingRow(startedAt);
             lineLeadMs = Math.max(0, opened.readyAt - opened.startedAt);
             nextLineCache = null;
-            if (!candidate && opened.readyAt <= now) continue;
+            if (
+              !candidate &&
+              (opened.readyAt <= now ||
+                (opened.paintAhead && Number.isFinite(paintBoundary(false))))
+            )
+              continue;
           }
         }
         if (!candidate || (candidate.at > now && !onlySeparatorsRemain)) break;
@@ -2155,11 +3765,12 @@ function observeSmoothText(
           lineMotion && !lineMotion.layoutWaitCharged
             ? Math.max(0, lineMotion.startedAt - candidate.at)
             : 0,
-          // Repay a space wait at twice the current glyph pace, so it spreads
-          // over about as long as it lasted. A per-frame floor released the
-          // whole wait within one or two paints, so slow text resumed every
-          // row as a block.
-          model.characterInterval(now) / LAYOUT_CATCH_UP_RATE,
+          // Deferred supply already uses pool feedback to recover its stock.
+          // Share that source-rate ceiling for layout debt instead of doubling
+          // the feedback rate again. Direct actions keep their shared clock.
+          model.deferredSupply
+            ? model.characterInterval(now, Number.POSITIVE_INFINITY)
+            : model.characterInterval(now) / LAYOUT_CATCH_UP_RATE,
         );
         if (advanced <= releasedFrom) break;
         releasedUnits +=
@@ -2172,6 +3783,7 @@ function observeSmoothText(
           revealedGlyphThisFrame = true;
         }
         addFadeRanges(releasedFrom, paintedTo, textNodes, now, revealAt);
+        activateSurfaces(paintedTo);
         for (const entry of activeSurfaces.values()) {
           if (entry.startedAt === null && entry.start < paintedTo && entry.end > releasedFrom)
             entry.startedAt = revealAt;
@@ -2179,9 +3791,17 @@ function observeSmoothText(
       }
       if (largeDomBurst && now >= largeDomBurstUntil && !reserving()) largeDomBurst = false;
       if (!model.pending && !reserving()) largeDomBurstUsed = false;
+      if (
+        !blockedByBoundary &&
+        permitBacklog !== null &&
+        model.pendingGraphemeCount <= permitBacklog
+      )
+        permitBacklog = null;
       updateMode(now);
       const tinyPendingTail =
         !streaming &&
+        !admissionCommit &&
+        !needsAdmissionPublication() &&
         model.pendingGraphemeCount <= 16 &&
         (!hasLayout || admittedOffset >= modelText.length) &&
         !reserving() &&
@@ -2218,17 +3838,98 @@ function observeSmoothText(
     paint(false, now);
     notifySettled();
     notifyPlaybackComplete();
+    // An entrance is a CSS animation with its own 160ms clock. Keep the
+    // frame loop alive until it retires so completion cannot cancel it.
     if (
       (model.pending && !waitingForGeometry) ||
       reserving() ||
       fadeRanges.length > 0 ||
-      hasSurfaceFades()
+      hasSurfaceFades() ||
+      decorations.pending ||
+      hasLiveLineEnter(now)
     )
-      frame = requestAnimationFrame(tick);
-    else if (!streaming && !model.pending && !hasPendingCode() && !hasPendingMedia()) dispose();
+      frame = requestSmoothTextLayoutFrame(element, tick);
+    else {
+      previousFrameAt = null;
+      if (
+        !candidate &&
+        !hasPendingCommit() &&
+        !decorations.gated &&
+        !retainOnComplete &&
+        hiddenSettleHeight === null &&
+        !streaming &&
+        !model.pending &&
+        !hasPendingCode() &&
+        !hasPendingMedia()
+      )
+        dispose();
+    }
   };
-  const refresh = (records: MutationRecord[] = []) => {
+  // A hidden document still reveals completed text at once, but the painted
+  // frame keeps its height until the reader returns. Snapping the remaining
+  // rows in while hidden is invisible work that the reader then discovers as a
+  // jump the moment the window is visible again; easing them then costs one
+  // short reflow instead.
+  let hiddenSettleHeight: number | null = null;
+  const holdHiddenSettle = () => {
+    if (!frameElement) return;
+    const naturalHeight = element.getBoundingClientRect().height;
+    if (Math.abs(naturalHeight - lastFrameHeight) <= 0.5) {
+      hiddenSettleHeight = null;
+      setSmoothTextFrameHeight(frameElement, naturalHeight);
+      lastFrameHeight = naturalHeight;
+      return;
+    }
+    hiddenSettleHeight = naturalHeight;
+  };
+  const openSettleReflow = (target: number, now: number) => {
+    if (!frameElement) return;
+    const from = lastFrameHeight;
+    if (Math.abs(target - from) <= 0.5) {
+      setSmoothTextFrameHeight(frameElement, target);
+      lastFrameHeight = target;
+      return;
+    }
+    const distance = target - from;
+    // Keep the restored rows on the same yield curve the reader saw while the
+    // output was playing; a longer distance buys proportionally more time so a
+    // whole hidden or completed block cannot cross the viewport in one blur.
+    const duration = Math.min(600, Math.max(yieldDurationMs, Math.abs(distance) * 5));
+    reservations = [
+      {
+        reflow: true,
+        hiddenSettle: true,
+        from,
+        target,
+        readyHeight: target,
+        glyphBottom: target,
+        startedAt: now,
+        readyAt: now + duration,
+        duration,
+        nominalDuration: duration,
+        yieldDurationMs,
+        distance,
+        minimumDuration: duration,
+        start: model.nextStart ?? modelText.length,
+        end: model.nextStart ?? modelText.length,
+        direction: lineDirection(),
+        displacement: 0,
+        enterVisible: false,
+        startSlope: 0,
+        endSlope: 0,
+        wholeLine: false,
+      },
+    ];
+  };
+  const easeHiddenSettle = (now: number) => {
+    const target = hiddenSettleHeight;
+    if (target === null || !frameElement) return;
+    hiddenSettleHeight = null;
+    openSettleReflow(target, now);
+  };
+  const refresh = (records: MutationRecord[] = [], reuseText = false) => {
     if (disposed) return;
+    syncLayoutScope();
     // The layout effect already handles this commit; do not replay its queued
     // mutation callback. Later Shiki/Suspense commits still notify normally.
     records = [...records, ...mutations.takeRecords()];
@@ -2244,17 +3945,27 @@ function observeSmoothText(
       textReadCache = createTextReadCache();
     const hadRetainedTail = retainedTail !== null;
     clearRetainedTail();
+    // EOF changes playback clocks, not the DOM index. Mutation records are
+    // drained again here so a same-commit rewrite or candidate cannot reuse it.
     const {
       text,
       nodes,
       objects: nextObjects,
       lineStarts,
       inactiveRanges,
-    } = readText(element, textReadCache);
+      historicalRanges,
+      codeLineCharacters: nextCodeLineCharacters,
+    } = reuseText && !candidate && !hasPlaybackMutation(records)
+      ? currentText
+      : (currentText = readText(element, textReadCache));
+    codeLineCharacters = nextCodeLineCharacters;
     pendingCode = element.querySelector("[data-markdown-code-pending]") !== null;
     hasClosedPanels = inactiveRanges.length > 0;
-    if (!structuralContent) structuralContent = element.querySelector(STRUCTURAL_CONTENT) !== null;
+    if (!structuralContent) structuralContent = hasPlaybackStructure();
     const isAppend = text.startsWith(modelText);
+    if (!isAppend) cancelAdmissionCommit();
+    const holdAppendClock =
+      isAppend && streaming && !complete && withinPaintWindow(performance.now());
     // A source append can grow natural height without moving earlier rows.
     // Its FIFO edge covers the only visible word that can wrap. Full history
     // scans belong to actual width/font/media resizes or Markdown rewrites.
@@ -2278,13 +3989,26 @@ function observeSmoothText(
           visibleNode.end < previousText.length &&
           nextVisibleNode.end === visibleNode.end));
     const nextNodes = isAppend ? null : new Map(nodes.map((entry) => [entry.node, entry]));
+    const decorationAnchors = nextNodes ? decorations.anchors(currentText.decorations) : [];
+    const remappedDecorationAnchors = nextNodes ? new Map<HTMLElement, number>() : undefined;
     let retainedOffset = 0;
-    const retainedRanges: Array<{ start: number; end: number }> = [...inactiveRanges];
+    const retainedRanges: Array<{ start: number; end: number }> = [
+      ...inactiveRanges,
+      ...historicalRanges,
+    ];
     if (nextNodes) {
       // Footnotes and reference links resolve earlier markup when their
       // definitions arrive at the end. Keep each surviving node's visible prefix
       // instead of hiding every paragraph after that first textual difference.
       const hidden = model.hiddenRanges;
+      // Reuse each already-proved visible old span for the current quotes' one
+      // ink endpoint. This map belongs only to this index, not to later frames.
+      const retainTextRange = (start: number, end: number, shift: number) => {
+        retainedRanges.push({ start: start + shift, end: end + shift });
+        for (const anchor of decorationAnchors)
+          if (anchor.start >= start && anchor.end <= end)
+            remappedDecorationAnchors!.set(anchor.element, anchor.end + shift);
+      };
       let hiddenIndex = 0;
       for (const entry of previousNodes) {
         if (entry.start >= model.offset) break;
@@ -2309,18 +4033,11 @@ function observeSmoothText(
           ) {
             const mask = hidden[index]!;
             if (start < mask.start) {
-              retainedRanges.push({
-                start: next.start + start - entry.start,
-                end: next.start + Math.min(mask.start, end) - entry.start,
-              });
+              retainTextRange(start, Math.min(mask.start, end), next.start - entry.start);
             }
             start = Math.max(start, mask.end);
           }
-          if (start < end)
-            retainedRanges.push({
-              start: next.start + start - entry.start,
-              end: next.start + end - entry.start,
-            });
+          if (start < end) retainTextRange(start, end, next.start - entry.start);
           retainedOffset = Math.max(retainedOffset, retainedRanges.at(-1)?.end ?? 0);
         }
       }
@@ -2353,12 +4070,35 @@ function observeSmoothText(
         for (let index = low; index < hidden.length; index++) {
           const mask = hidden[index]!;
           if (mask.start >= end) break;
-          if (start < mask.start)
-            retainedRanges.push({ start: start + shift, end: Math.min(mask.start, end) + shift });
+          if (start < mask.start) retainTextRange(start, Math.min(mask.start, end), shift);
           start = Math.max(start, mask.end);
         }
-        if (start < end) retainedRanges.push({ start: start + shift, end: end + shift });
+        if (start < end) retainTextRange(start, end, shift);
       };
+      if (sourceAppendOnly && previousSourceText !== undefined) {
+        // A delimiter appended to the source can turn an already painted
+        // paragraph into table cells. Match only the unchanged prefix, allowing
+        // removed pipes/spacing; never claim new or still-hidden glyphs.
+        let previous = 0;
+        let next = 0;
+        while (previous < Math.min(previousText.length, model.offset) && next < text.length) {
+          if (previousText[previous] === text[next]) {
+            const start = previous;
+            const target = next;
+            while (
+              previous < Math.min(previousText.length, model.offset) &&
+              next < text.length &&
+              previousText[previous] === text[next]
+            ) {
+              previous++;
+              next++;
+            }
+            retainSpan(start, previous, target - start);
+          } else if (/[\s|]/u.test(previousText[previous]!)) previous++;
+          else if (/\s/u.test(text[next]!)) next++;
+          else break;
+        }
+      }
       const nextBlocks = blockSpans(nodes);
       for (const [block, previous] of blockSpans(previousNodes)) {
         if (previous.start >= model.offset) continue;
@@ -2387,11 +4127,13 @@ function observeSmoothText(
       }
     }
     const previousFades = fadeRanges;
+    const sameNodes = nodes === textNodes && nextObjects === objects;
     textNodes = nodes;
     objects = nextObjects;
-    geometryEntries = [...nodes, ...objects].toSorted((a, b) => a.start - b.start);
+    if (!sameNodes) geometryEntries = [...nodes, ...objects].toSorted((a, b) => a.start - b.start);
     selectTextEnd(fullEnd, text.length);
     const now = performance.now();
+    retireLineEntrances(now);
     // `useDeferredValue` and Markdown reconciliation can deliver a large DOM
     // suffix in one commit even though the provider arrived gradually. Give
     // that suffix a short single-line settling window so the parser catch-up
@@ -2408,46 +4150,50 @@ function observeSmoothText(
         largeDomBurstUntil = now + LARGE_DOM_SETTLE_MS;
       }
     }
-    const nextSurfaces: typeof surfaces = new Map();
-    for (const entry of nodes) {
-      if (!entry.surface) continue;
-      const current = nextSurfaces.get(entry.surface);
-      if (current) current.end = entry.end;
-      else
-        nextSurfaces.set(entry.surface, {
-          start: entry.start,
-          end: entry.end,
-          startedAt: surfaces.get(entry.surface)?.startedAt ?? null,
+    // An EOF clock update can reuse the exact DOM index. Keep its surface
+    // ownership as well; none of these glyphs or atomic offsets changed.
+    if (!sameNodes) {
+      const nextSurfaces: typeof surfaces = new Map();
+      for (const entry of nodes) {
+        if (!entry.surface) continue;
+        const current = nextSurfaces.get(entry.surface);
+        if (current) current.end = entry.end;
+        else
+          nextSurfaces.set(entry.surface, {
+            start: entry.start,
+            end: entry.end,
+            startedAt: surfaces.get(entry.surface)?.startedAt ?? null,
+            finished:
+              surfaces.get(entry.surface)?.finished ??
+              (model.visibleEnd(entry.start, entry.end) === entry.end &&
+                previousNodes.some((node) => node.surface === entry.surface)),
+            inlineCode: entry.inlineCode,
+            clipEnd: surfaces.get(entry.surface)?.clipEnd ?? null,
+            clipGeneration: surfaces.get(entry.surface)?.clipGeneration ?? -1,
+            object: false,
+          });
+      }
+      for (const object of objects) {
+        const previous = surfaces.get(object.surface);
+        nextSurfaces.set(object.surface, {
+          start: object.start,
+          end: object.end,
+          startedAt: previous?.startedAt ?? null,
           finished:
-            surfaces.get(entry.surface)?.finished ??
-            (model.visibleEnd(entry.start, entry.end) === entry.end &&
-              previousNodes.some((node) => node.surface === entry.surface)),
-          inlineCode: entry.inlineCode,
-          clipEnd: surfaces.get(entry.surface)?.clipEnd ?? null,
-          clipGeneration: surfaces.get(entry.surface)?.clipGeneration ?? -1,
-          object: false,
+            previous?.finished ??
+            (model.visibleEnd(object.start, object.end) === object.end &&
+              previousObjects.some((entry) => entry.surface === object.surface)),
+          inlineCode: false,
+          clipEnd: null,
+          clipGeneration: -1,
+          object: true,
         });
+      }
+      for (const surface of surfaces.keys()) {
+        if (!nextSurfaces.has(surface)) clearSurface(surface);
+      }
+      surfaces = nextSurfaces;
     }
-    for (const object of objects) {
-      const previous = surfaces.get(object.surface);
-      nextSurfaces.set(object.surface, {
-        start: object.start,
-        end: object.end,
-        startedAt: previous?.startedAt ?? null,
-        finished:
-          previous?.finished ??
-          (model.visibleEnd(object.start, object.end) === object.end &&
-            previousObjects.some((entry) => entry.surface === object.surface)),
-        inlineCode: false,
-        clipEnd: null,
-        clipGeneration: -1,
-        object: true,
-      });
-    }
-    for (const surface of surfaces.keys()) {
-      if (!nextSurfaces.has(surface)) clearSurface(surface);
-    }
-    surfaces = nextSurfaces;
     modelLineStarts = lineStarts;
     const sourceOffsetsMatch = previousSourceText?.startsWith(text) === true;
     // Markdown offsets no longer address displayed glyphs. Do not retain a
@@ -2455,6 +4201,13 @@ function observeSmoothText(
     sourceChunkEnds = sourceOffsetsMatch
       ? sourceChunkEnds.filter((end) => end > (model.nextStart ?? model.offset))
       : [];
+    const arrivalFloor = Math.min(measuredArrivalEnd, model.nextStart ?? model.offset);
+    const keepArrival = (arrivals: typeof sourceArrivals) =>
+      arrivals.filter(
+        (arrival, index) => arrival.end > arrivalFloor || index === arrivals.length - 1,
+      );
+    sourceArrivals = sourceOffsetsMatch ? keepArrival(sourceArrivals) : sourceArrivals.slice(-1);
+    textArrivals = keepArrival(textArrivals);
     // The final text budget also contains sequential layout passes. Leave
     // room for them instead of spending the entire budget on glyph intervals.
     const drainLayoutMs =
@@ -2494,6 +4247,18 @@ function observeSmoothText(
         (surface) => !surface.inlineCode || mode !== "character",
       ),
     });
+    if (text != modelText) {
+      textArrivals = textArrivals.filter(
+        (arrival) => arrival.end <= (isAppend ? modelText.length : (retainedOffset ?? 0)),
+      );
+      textArrivals.push({ end: text.length, at: sourceArrivals.at(-1)?.at ?? now });
+      measuredArrivalEnd = Math.min(
+        measuredArrivalEnd,
+        isAppend ? modelText.length : (retainedOffset ?? 0),
+      );
+      if (!isAppend) demandGlyph = null;
+      sourceAppendOnly = true;
+    }
     modelText = text;
     if (!isAppend) {
       // A rewrite beyond the moving row must not revoke space already opened
@@ -2508,6 +4273,7 @@ function observeSmoothText(
         unchanged++;
       admittedOffset = unchanged;
       admittedStart = Math.min(admittedStart, admittedOffset);
+      unstartedSpaceLines = unstartedSpaceLines.filter((start) => start < unchanged);
     }
     if (frameElement && model.pending && (!isAppend || hadRetainedTail)) {
       let tailIndex = geometryEntries.length;
@@ -2576,6 +4342,8 @@ function observeSmoothText(
     }
     // Settled labels stay in the geometry index, but only unfinished fades or
     // clipped prefixes need per-frame work. A later append can activate them.
+    queuedSurfaces = [];
+    queuedSurfaceIndex = 0;
     activeSurfaces = new Map(
       [...surfaces].filter(
         ([, entry]) =>
@@ -2584,6 +4352,12 @@ function observeSmoothText(
           model.visibleEnd(entry.start, entry.end) < entry.end,
       ),
     );
+    if (!sameNodes)
+      decorations.index(
+        currentText.decorations,
+        (start, end) => model.visibleEnd(start, end),
+        remappedDecorationAnchors,
+      );
     updateMode(now);
     geometryDirty = true;
     waitingForGeometry = false;
@@ -2616,57 +4390,60 @@ function observeSmoothText(
       !bypass() &&
       element.getBoundingClientRect().height > 0
     )
-      syncGeometry();
+      syncGeometry(holdAppendClock ? lastPaintAt : now);
     // Measure before invalidating highlight markers. Keep parent colors while
     // rebuilding fades; paint() restores those whose glyphs are no longer active.
-    fadeRanges = [];
-    const nodesByIdentity = new Map(nodes.map((entry) => [entry.node, entry]));
-    const removedFadeBuckets = new Set<number>();
-    // Markdown may replace text nodes. Restore fades by logical offsets without
-    // restarting their clocks when a provider append reparses the subtree.
-    for (const entry of previousFades) {
-      let start = entry.start;
-      let end = entry.end;
-      if (nextNodes) {
-        const previousNode = previousNodes.find((node) => node.start <= start && node.end >= end);
-        const nextNode = previousNode && nextNodes.get(previousNode.node);
-        if (!previousNode || !nextNode) {
+    if (!sameNodes) {
+      fadeRanges = [];
+      const nodesByIdentity = new Map(nodes.map((entry) => [entry.node, entry]));
+      const removedFadeBuckets = new Set<number>();
+      // Markdown may replace text nodes. Restore fades by logical offsets without
+      // restarting their clocks when a provider append reparses the subtree.
+      for (const entry of previousFades) {
+        let start = entry.start;
+        let end = entry.end;
+        if (nextNodes) {
+          const previousNode = previousNodes.find((node) => node.start <= start && node.end >= end);
+          const nextNode = previousNode && nextNodes.get(previousNode.node);
+          if (!previousNode || !nextNode) {
+            updateHighlightRange(fadeHighlight(entry.bucket), entry.range, false);
+            removedFadeBuckets.add(entry.bucket);
+            continue;
+          }
+          const localStart = start - previousNode.start;
+          const localEnd = end - previousNode.start;
+          if (previousText.slice(start, end) !== nextNode.node.data.slice(localStart, localEnd)) {
+            updateHighlightRange(fadeHighlight(entry.bucket), entry.range, false);
+            removedFadeBuckets.add(entry.bucket);
+            continue;
+          }
+          start = nextNode.start + localStart;
+          end = nextNode.start + localEnd;
+        }
+        const visibleEnd = model.visibleEnd(start, end);
+        const node = nodesByIdentity.get(entry.range.startContainer as Text);
+        if (
+          node &&
+          entry.range.startContainer === entry.range.endContainer &&
+          node.start + entry.range.startOffset === start &&
+          node.start + entry.range.endOffset === visibleEnd
+        ) {
+          entry.start = start;
+          entry.end = visibleEnd;
+          fadeRanges.push(entry);
+        } else {
           updateHighlightRange(fadeHighlight(entry.bucket), entry.range, false);
           removedFadeBuckets.add(entry.bucket);
-          continue;
+          addFadeRanges(start, visibleEnd, nodes, now, entry.startedAt, entry);
         }
-        const localStart = start - previousNode.start;
-        const localEnd = end - previousNode.start;
-        if (previousText.slice(start, end) !== nextNode.node.data.slice(localStart, localEnd)) {
-          updateHighlightRange(fadeHighlight(entry.bucket), entry.range, false);
-          removedFadeBuckets.add(entry.bucket);
-          continue;
-        }
-        start = nextNode.start + localStart;
-        end = nextNode.start + localEnd;
       }
-      const visibleEnd = model.visibleEnd(start, end);
-      const node = nodesByIdentity.get(entry.range.startContainer as Text);
-      if (
-        node &&
-        entry.range.startContainer === entry.range.endContainer &&
-        node.start + entry.range.startOffset === start &&
-        node.start + entry.range.endOffset === visibleEnd
-      ) {
-        entry.start = start;
-        entry.end = visibleEnd;
-        fadeRanges.push(entry);
-      } else {
-        updateHighlightRange(fadeHighlight(entry.bucket), entry.range, false);
-        removedFadeBuckets.add(entry.bucket);
-        addFadeRanges(start, visibleEnd, nodes, now, entry.startedAt, entry);
-      }
+      for (const bucket of removedFadeBuckets) publishFadeHighlight(bucket);
     }
-    for (const bucket of removedFadeBuckets) publishFadeHighlight(bucket);
     // A definition can insert the final text before already painted footnotes.
     // Logical admission offsets then describe a different row; verify the
     // bounded tail's actual glyph space before finishing that physical row.
     let finalLineFits = !frameElement;
+    let finalLineBottom = 0;
     if (complete && frameElement && model.pendingGraphemeCount <= TOKEN_FRAME_GRAPHEME_BUDGET) {
       let top = Infinity;
       let bottom = 0;
@@ -2684,34 +4461,46 @@ function observeSmoothText(
       const parent = entry && ("node" in entry ? entry.node.parentElement : entry.surface);
       const lineHeight = Number.parseFloat(getComputedStyle(parent ?? element).lineHeight) || 20;
       finalLineFits &&= bottom <= lastFrameHeight + 0.5 && bottom - top <= lineHeight + 0.5;
+      finalLineBottom = bottom;
+    }
+    const publishedFinalSpace = admittedPublication;
+    if (finalLineFits && publishedFinalSpace && frameElement) {
+      finalLineFits =
+        finalLineBottom <=
+        publicationSpace(publishedFinalSpace, element.getBoundingClientRect().top) + 0.5;
     }
     const admittedFinalTail =
       model.pendingGraphemeCount <= TOKEN_FRAME_GRAPHEME_BUDGET &&
       finalLineFits &&
+      !admissionCommit &&
+      !needsAdmissionPublication() &&
       !waitingForGeometry &&
       ![...objects].some((object) => model.visibleEnd(object.start, object.end) < object.end);
     // A small character count can still span many physical rows. Only an
-    // admitted tail (or the first single text row) can finish in this commit;
+    // admitted tail can finish in this commit;
     // plain prose needs the same space checks as structured Markdown.
     const immediateCompletion =
       !paused &&
       complete &&
       ((!frameElement && model.pendingGraphemeCount <= COMPLETED_SNAPSHOT_IMMEDIATE_TAIL) ||
-        (model.nextStart === 0 &&
-          !hasStructuralContent() &&
-          model.pendingGraphemeCount <= COMPLETED_SNAPSHOT_IMMEDIATE_TAIL &&
-          nextLine()?.end === modelText.length) ||
         admittedFinalTail);
     if (bypass()) {
+      cancelAdmissionCommit();
       reservations = [];
+      clearAllLineEntrances();
       model.finish();
       clearFadeRanges();
       if (frameElement) {
-        const naturalHeight = element.getBoundingClientRect().height;
-        setSmoothTextFrameHeight(frameElement, naturalHeight);
-        lastFrameHeight = naturalHeight;
+        if (document.hidden) holdHiddenSettle();
+        else {
+          const naturalHeight = element.getBoundingClientRect().height;
+          hiddenSettleHeight = null;
+          setSmoothTextFrameHeight(frameElement, naturalHeight);
+          lastFrameHeight = naturalHeight;
+        }
       }
     } else if (immediateCompletion) {
+      cancelAdmissionCommit();
       // Glyph admission already guarantees paint space. A final row's bottom
       // padding may still be moving; it must neither delay the short text tail
       // past completion nor snap to its target when that tail finishes.
@@ -2751,96 +4540,159 @@ function observeSmoothText(
       model.finish();
       if (frameElement && !preserveFinalSpace) {
         const naturalHeight = element.getBoundingClientRect().height;
-        setSmoothTextFrameHeight(frameElement, naturalHeight);
-        lastFrameHeight = naturalHeight;
+        // A short tail can finish while its final block space (padding,
+        // margins, a collapsed disclosure) is still unopened. Writing that
+        // height directly drops the last rows in one paint; ease it instead.
+        if (naturalHeight > lastFrameHeight + 0.5 || naturalHeight < lastFrameHeight - 20) {
+          openSettleReflow(naturalHeight, now);
+        } else {
+          setSmoothTextFrameHeight(frameElement, naturalHeight);
+          lastFrameHeight = naturalHeight;
+        }
       }
     }
-    const previousRanges = ranges;
-    const previousRangesByNode = new Map<Node, typeof ranges>();
-    for (const entry of previousRanges) {
-      const node = entry.range.startContainer;
-      const entries = previousRangesByNode.get(node) ?? [];
-      entries.push(entry);
-      previousRangesByNode.set(node, entries);
-    }
-    const retainedHiddenRanges = new Set<StaticRange>();
-    ranges = [];
-    let nodeIndex = 0;
-    for (const hidden of model.hiddenRanges) {
-      while (nodeIndex < nodes.length && nodes[nodeIndex]!.end <= hidden.start) nodeIndex++;
-      for (let index = nodeIndex; index < nodes.length; index++) {
-        const entry = nodes[index]!;
-        if (entry.start >= hidden.end) break;
-        const start = Math.max(hidden.start, entry.start);
-        const end = Math.min(hidden.end, entry.end);
-        // Fixed endpoints survive virtualized rows being reparented before
-        // the next frame; each logical line retains its own hidden suffix.
-        const previous = previousRangesByNode
-          .get(entry.node)
-          ?.find(
-            (candidate) =>
-              candidate.range.startOffset === start - entry.start &&
-              candidate.range.endOffset === end - entry.start,
-          );
-        const range =
-          previous?.range ??
-          new StaticRange({
-            startContainer: entry.node,
-            startOffset: start - entry.start,
-            endContainer: entry.node,
-            endOffset: end - entry.start,
-          });
-        ranges.push({ range, start, end });
-        if (previous) retainedHiddenRanges.add(range);
-        else updateHighlightRange(highlight, range, true);
+    if (!sameNodes || immediateCompletion || bypass()) {
+      const previousRanges = ranges;
+      const previousRangesByNode = new Map<Node, typeof ranges>();
+      for (const entry of previousRanges) {
+        const node = entry.range.startContainer;
+        const entries = previousRangesByNode.get(node) ?? [];
+        entries.push(entry);
+        previousRangesByNode.set(node, entries);
       }
+      const retainedHiddenRanges = new Set<StaticRange>();
+      ranges = [];
+      let nodeIndex = 0;
+      for (const hidden of model.hiddenRanges) {
+        while (nodeIndex < nodes.length && nodes[nodeIndex]!.end <= hidden.start) nodeIndex++;
+        for (let index = nodeIndex; index < nodes.length; index++) {
+          const entry = nodes[index]!;
+          if (entry.start >= hidden.end) break;
+          const start = Math.max(hidden.start, entry.start);
+          const end = Math.min(hidden.end, entry.end);
+          // Fixed endpoints survive virtualized rows being reparented before
+          // the next frame; each logical line retains its own hidden suffix.
+          const previous = previousRangesByNode
+            .get(entry.node)
+            ?.find(
+              (candidate) =>
+                candidate.range.startOffset === start - entry.start &&
+                candidate.range.endOffset === end - entry.start,
+            );
+          const range =
+            previous?.range ??
+            new StaticRange({
+              startContainer: entry.node,
+              startOffset: start - entry.start,
+              endContainer: entry.node,
+              endOffset: end - entry.start,
+            });
+          ranges.push({ range, start, end });
+          if (previous) retainedHiddenRanges.add(range);
+          else updateHighlightRange(highlight, range, true);
+        }
+      }
+      // Unchanged queued nodes keep their highlight objects. Rebuilding every
+      // hidden range on each append invalidates highlight styles across history.
+      for (const { range } of previousRanges)
+        if (!retainedHiddenRanges.has(range)) updateHighlightRange(highlight, range, false);
     }
-    // Unchanged queued nodes keep their highlight objects. Rebuilding every
-    // hidden range on each append invalidates highlight styles across history.
-    for (const { range } of previousRanges)
-      if (!retainedHiddenRanges.has(range)) updateHighlightRange(highlight, range, false);
-    // An append beyond the unchanged visible node only needs new masks. Keep
-    // the last painted reservation position until RAF advances it; advancing
-    // it here forces another virtual-row layout between animation frames.
-    paint(true, deferAppendGeometry ? lastPaintAt : now);
+    // Candidates skip syncGeometry, but EOF/status commits can move the whole
+    // followed root. Current row bounds and actual caps need the same origin.
+    if (candidate) geometryRootRect = element.getBoundingClientRect();
+    // Keep active append geometry on the delivered paint clock. Real reflows
+    // still fit their visible glyph bounds, but ordinary commits do not spend
+    // part of the next RAF's travel between paints.
+    paint(true, deferAppendGeometry || holdAppendClock ? lastPaintAt : now);
     notifySettled();
     notifyPlaybackComplete();
     if (
       !paused &&
-      (model.pending || reserving() || fadeRanges.length > 0 || hasSurfaceFades()) &&
+      (candidate ||
+        model.pending ||
+        reserving() ||
+        fadeRanges.length > 0 ||
+        hasSurfaceFades() ||
+        decorations.pending ||
+        hasLiveLineEnter(now)) &&
       frame === null
     ) {
-      frame = requestAnimationFrame(tick);
+      frame = requestSmoothTextLayoutFrame(element, tick);
     }
-    if (!model.pending && !reserving() && fadeRanges.length === 0 && !hasSurfaceFades()) {
+    if (
+      !candidate &&
+      !model.pending &&
+      !reserving() &&
+      fadeRanges.length === 0 &&
+      !hasSurfaceFades() &&
+      !decorations.pending &&
+      !hasLiveLineEnter(now)
+    ) {
       cancelFrame();
-      if (!streaming && !hasPendingCode() && !hasPendingMedia()) dispose();
+      if (
+        !candidate &&
+        !hasPendingCommit() &&
+        !decorations.gated &&
+        !retainOnComplete &&
+        hiddenSettleHeight === null &&
+        !streaming &&
+        !hasPendingCode() &&
+        !hasPendingMedia()
+      )
+        dispose();
     }
   };
   const onVisibility = () => {
+    if (candidate) {
+      candidate.invalid = true;
+      if (bypass() || !intersecting) clearAllLineEntrances();
+      else retireLineEntrances();
+      if (!paused && frame === null) frame = requestSmoothTextLayoutFrame(element, tick);
+      return;
+    }
     if (paused) {
+      if (bypass()) clearAllLineEntrances();
+      else retireLineEntrances();
+      cancelAdmissionCommit();
       cancelFrame();
       return;
     }
     if (bypass()) {
+      cancelAdmissionCommit();
       reservations = [];
+      clearAllLineEntrances();
       model.finish();
       clearFadeRanges();
+      if (frameElement && document.hidden) holdHiddenSettle();
       paint(false, performance.now());
       if (frameElement) {
-        const naturalHeight = element.getBoundingClientRect().height;
-        setSmoothTextFrameHeight(frameElement, naturalHeight);
-        lastFrameHeight = naturalHeight;
+        if (document.hidden) holdHiddenSettle();
+        else {
+          const naturalHeight = element.getBoundingClientRect().height;
+          hiddenSettleHeight = null;
+          setSmoothTextFrameHeight(frameElement, naturalHeight);
+          lastFrameHeight = naturalHeight;
+        }
       }
       clearRanges();
       cancelFrame();
       notifySettled();
       notifyPlaybackComplete();
-      if (!streaming && !hasPendingCode()) dispose();
+      if (
+        !candidate &&
+        !retainOnComplete &&
+        hiddenSettleHeight === null &&
+        !streaming &&
+        !hasPendingCode()
+      )
+        dispose();
     } else if (!intersecting) {
+      cancelAdmissionCommit();
       cancelFrame();
       clearFadeRanges();
+      clearAllLineEntrances();
     } else {
+      easeHiddenSettle(performance.now());
       refresh();
     }
     if (bypass() || !intersecting) flushHighlightUpdates(element.ownerDocument);
@@ -2849,6 +4701,14 @@ function observeSmoothText(
   // Watch Shiki/Suspense commits as well as the provider's React updates.
   const isPlaybackMutation = (record: MutationRecord) => {
     const target = record.target instanceof Element ? record.target : record.target.parentElement;
+    // React can assign an input's existing type again during EOF. An unchanged
+    // attribute cannot change text ownership or invalidate the geometry index.
+    if (
+      record.type === "attributes" &&
+      record.attributeName !== null &&
+      target?.getAttribute(record.attributeName) === record.oldValue
+    )
+      return false;
     // The target itself can become excluded or visible, so its attributes
     // still matter. Descendants of an excluded shell (such as favicon opacity
     // classes) cannot change the text queue or invalidate historical ownership.
@@ -2868,6 +4728,7 @@ function observeSmoothText(
     characterData: true,
     subtree: true,
     attributes: true,
+    attributeOldValue: true,
     attributeFilter: [
       "data-markdown-details-open",
       "data-markdown-code-pending",
@@ -2890,7 +4751,9 @@ function observeSmoothText(
       parent,
       color: getComputedStyle(parent).color,
     }));
+    const paintDecorationColors = decorations.prepareColors();
     for (const { parent, color } of colors) setFadeForeground(parent, color);
+    paintDecorationColors();
   });
   themeChanges.observe(element.ownerDocument.documentElement, {
     attributes: true,
@@ -2909,7 +4772,9 @@ function observeSmoothText(
   intersection?.observe(element.closest("[data-stream-footnotes]") ?? frameElement ?? element);
   const invalidateGeometry = (event?: Event) => {
     if (disposed) return;
-    if (event?.target instanceof Element && event.target.closest(EXCLUDED_TEXT)) return;
+    syncLayoutScope();
+    if (candidate) candidate.invalid = true;
+    else if (event?.target instanceof Element && event.target.closest(EXCLUDED_TEXT)) return;
     scrollParent = null;
     geometryDirty = true;
     appendedGeometry = false;
@@ -2919,11 +4784,32 @@ function observeSmoothText(
     nextLineCache = null;
     // ResizeObserver runs after animation callbacks but before paint. Fit
     // already visible glyphs now; waiting for the next frame clips the reflow.
-    if (!paused && frameElement && !bypass() && element.getBoundingClientRect().height > 0) {
-      syncGeometry();
-      paint(true);
+    if (!candidate && showingHistory()) {
+      if (frameElement) {
+        lastFrameHeight = element.getBoundingClientRect().height;
+        setSmoothTextFrameHeight(frameElement, lastFrameHeight, true);
+      }
+      return;
     }
-    if (!paused && frame === null) frame = requestAnimationFrame(tick);
+    if (candidate || (paused && frameElement && !bypass())) {
+      // The committed DOM still reflows while a candidate waits. Refresh only
+      // its decoration geometry, without spending clocks or candidate space.
+      if (frameElement && !bypass()) {
+        geometryRootRect = element.getBoundingClientRect();
+        boundsCache.clear();
+        lineEnterOffsets.clear();
+        prepareDecorations(lastFrameHeight, false)();
+      }
+      if (!paused && frame === null) frame = requestSmoothTextLayoutFrame(element, tick);
+      return;
+    }
+    if (!paused && frameElement && !bypass() && element.getBoundingClientRect().height > 0) {
+      const now = performance.now();
+      const at = withinPaintWindow(now) ? lastPaintAt : now;
+      syncGeometry(at);
+      paint(true, at);
+    }
+    if (!paused && frame === null) frame = requestSmoothTextLayoutFrame(element, tick);
   };
   const resize =
     typeof ResizeObserver === "undefined"
@@ -2938,6 +4824,52 @@ function observeSmoothText(
           invalidateGeometry();
         });
   resize?.observe(element);
+  const boundaryResize =
+    !boundaryRoot || !frameElement || typeof ResizeObserver === "undefined"
+      ? null
+      : new ResizeObserver(() => refreshPaintBoundary());
+  const observeBoundaries = () => {
+    const next = [
+      ...(boundaryRoot?.querySelectorAll<HTMLElement>(paintBoundarySelector) ?? []),
+    ].filter((boundary) => !boundary.closest("[data-smooth-text-measure]"));
+    const previous = new Set(paintBoundaries);
+    const current = new Set(next);
+    for (const boundary of previous)
+      if (!current.has(boundary)) boundaryResize?.unobserve(boundary);
+    for (const boundary of next) if (!previous.has(boundary)) boundaryResize?.observe(boundary);
+    paintBoundaries = next;
+    legacyActivity = null;
+    refreshPaintBoundary();
+  };
+  const boundaryMutations = new MutationObserver((records) => {
+    const selector = `${paintBoundarySelector}, [data-testid="timeline-live-activity-layer"]`;
+    const includesBoundary = (node: Node) =>
+      node instanceof Element &&
+      !node.closest("[data-smooth-text-measure]") &&
+      (node.matches(selector) || node.querySelector(selector) !== null);
+    const relevant = records.some((record) => {
+      if (record.target instanceof Element && record.target.closest("[data-smooth-text-measure]"))
+        return false;
+      if (record.type === "attributes")
+        return (
+          record.target instanceof HTMLElement &&
+          (record.target.matches(selector) || paintBoundaries?.includes(record.target))
+        );
+      return [...record.addedNodes, ...record.removedNodes].some(includesBoundary);
+    });
+    if (relevant) observeBoundaries();
+  });
+  if (boundaryRoot)
+    boundaryMutations.observe(boundaryRoot, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["data-timeline-tail-anchor", "data-timeline-status-height", "class"],
+    });
+  observeBoundaries();
+  boundaryRoot?.addEventListener("scroll", refreshPaintBoundary, true);
+  boundaryRoot?.addEventListener(SMOOTH_TEXT_LAYOUT_COMMIT_EVENT, refreshPaintBoundary);
+  window.addEventListener("resize", refreshPaintBoundary);
   window.addEventListener("resize", invalidateGeometry);
   element.addEventListener("load", invalidateGeometry, true);
   element.addEventListener("error", invalidateGeometry, true);
@@ -2951,6 +4883,13 @@ function observeSmoothText(
   function dispose() {
     if (disposed) return;
     disposed = true;
+    cancelAdmissionCommit();
+    decorationPublication = null;
+    scopeCommit?.cancel();
+    scopeCommit = null;
+    candidate?.cancelCommit?.();
+    candidate = null;
+    activeSmoothTextObservers--;
     cancelFrame();
     clearRetainedTail();
     clearRanges();
@@ -2958,12 +4897,20 @@ function observeSmoothText(
     for (const surface of surfaces.keys()) clearSurface(surface);
     surfaces.clear();
     activeSurfaces.clear();
+    queuedSurfaces = [];
+    queuedSurfaceIndex = 0;
+    decorations.clear();
     releaseLineEnter();
     lineMotions = [];
     mutations.disconnect();
     themeChanges.disconnect();
     intersection?.disconnect();
     resize?.disconnect();
+    boundaryResize?.disconnect();
+    boundaryMutations.disconnect();
+    boundaryRoot?.removeEventListener("scroll", refreshPaintBoundary, true);
+    boundaryRoot?.removeEventListener(SMOOTH_TEXT_LAYOUT_COMMIT_EVENT, refreshPaintBoundary);
+    window.removeEventListener("resize", refreshPaintBoundary);
     window.removeEventListener("resize", invalidateGeometry);
     element.removeEventListener("load", invalidateGeometry, true);
     element.removeEventListener("error", invalidateGeometry, true);
@@ -2975,12 +4922,84 @@ function observeSmoothText(
     delete element.dataset.smoothOutput;
     if (frameElement) {
       delete frameElement.dataset.smoothTextClipping;
+      delete frameElement.dataset.smoothTextBoundary;
+      frameElement.style.removeProperty("--t3-smooth-paint-height");
+      frameElement.style.removeProperty("--t3-smooth-clip-extension");
+      frameElement.style.removeProperty("--t3-smooth-clip-bottom");
       setSmoothTextFrameHeight(frameElement, null);
     }
-    onDispose(settled);
+    onDispose(
+      settled,
+      model.pending
+        ? {
+            text: modelText,
+            sourceText: previousSourceText,
+            height: lastFrameHeight,
+            visibleText:
+              modelText === previousSourceText && model.offset <= modelText.length
+                ? modelText.slice(0, model.offset)
+                : null,
+            intervalMs: Number.isFinite(model.characterInterval(performance.now()))
+              ? model.characterInterval(performance.now())
+              : null,
+            pending: true,
+          }
+        : {
+            text: modelText,
+            sourceText: previousSourceText,
+            height: lastFrameHeight,
+            visibleText: modelText === previousSourceText ? modelText : null,
+            intervalMs: Number.isFinite(model.characterInterval(performance.now()))
+              ? model.characterInterval(performance.now())
+              : null,
+            pending: false,
+          },
+    );
   }
 
   return {
+    candidate(request: SmoothTextCandidate | undefined) {
+      syncLayoutScope();
+      if (candidate?.request === request) return;
+      const awaitingSpace = candidate !== null && !candidate.delivered;
+      if (request) cancelAdmissionCommit();
+      candidate?.cancelCommit?.();
+      candidate = request
+        ? {
+            request,
+            reservation: null,
+            from: lastFrameHeight,
+            height: lastFrameHeight,
+            target: lastFrameHeight,
+            elapsed: 0,
+            lastAt: performance.now(),
+            width: lastWidth,
+            font: "",
+            invalid: false,
+            delivered: false,
+            cancelCommit: null,
+          }
+        : null;
+      if (!candidate) return;
+      settled = false;
+      playbackFinished = false;
+      if (bypass() || !element.isConnected || element.getBoundingClientRect().width <= 0) {
+        candidate.delivered = true;
+        request!.commit();
+        return;
+      }
+      measureCandidate();
+      if (candidate.delivered) return;
+      if (candidate.target <= lastFrameHeight) {
+        // A replaced candidate's local painted height may still be awaiting
+        // its owner. Equal or smaller targets must obtain their own receipt.
+        if (awaitingSpace) deliverCandidate();
+        else {
+          candidate.delivered = true;
+          candidate.request.commit();
+        }
+      } else if (!paused && frame === null) frame = requestSmoothTextLayoutFrame(element, tick);
+    },
     update(
       isStreaming: boolean,
       sourceText: string | undefined,
@@ -2989,14 +5008,24 @@ function observeSmoothText(
       nextLineMode: SmoothOutputLineMode | undefined,
       nextPaused: boolean,
       nextFadeDurationMs: number,
+      nextYieldDurationMs: number,
       nextDrainOnComplete: boolean,
+      nextRetainOnComplete: boolean,
+      arrivalSourceText: string | undefined,
     ) {
       // `complete` closes the activity label in the same React commit. Treat
       // that snapshot as the end of the playback clock as well, even if the
       // provider's row has not flipped its streaming bit yet.
       fadeDurationMs = nextFadeDurationMs;
+      yieldDurationMs = nextYieldDurationMs;
       fadeBucketDurationMs = fadeDurationMs / (FADE_BUCKET_COUNT - 1);
       const nextStreaming = isStreaming && !isComplete;
+      const endingPlayback =
+        sourceInitialized && !nextStreaming && (streaming || (!complete && isComplete));
+      // A retained segment can advance across Markdown that emits no DOM.
+      // Its next boundary still needs a fresh completion notification.
+      const retainedSourceChanged =
+        (retainOnComplete || nextRetainOnComplete) && sourceText !== previousSourceText;
       const presentationChanged =
         !sourceInitialized ||
         streaming !== nextStreaming ||
@@ -3004,22 +5033,30 @@ function observeSmoothText(
         outputMode !== (nextOutputMode ?? "character") ||
         lineMode !== (nextLineMode ?? "adaptive") ||
         paused !== nextPaused ||
-        drainOnComplete !== nextDrainOnComplete;
+        drainOnComplete !== nextDrainOnComplete ||
+        retainOnComplete !== nextRetainOnComplete;
       drainOnComplete = nextDrainOnComplete;
+      retainOnComplete = nextRetainOnComplete;
       if (paused !== nextPaused) {
         const now = performance.now();
         paused = nextPaused;
         if (paused) {
           pausedAt = now;
+          cancelAdmissionCommit();
           cancelFrame();
         } else {
           const delay = now - (pausedAt ?? now);
           for (const reservation of reservations) {
             reservation.startedAt += delay;
             reservation.readyAt += delay;
+            reservation.visualClockAt = (reservation.visualClockAt ?? lastPaintAt) + delay;
           }
+          if (candidate) candidate.lastAt = now;
+          lastPaintAt += delay;
           for (const fade of fadeRanges) fade.startedAt += delay;
           for (const line of lineMotions) line.startedAt += delay;
+          retireLineEntrances(now);
+          decorations.shiftClocks(delay);
           previousFrameAt = null;
           drainLayoutDeadline = null;
           model.hold(now);
@@ -3028,25 +5065,67 @@ function observeSmoothText(
       }
       const records = mutations.takeRecords();
       const contentChanged = hasPlaybackMutation(records);
+      // A coordinated source boundary limits playback/checkpoints, while the
+      // provider keeps delivering. Sample that feed without replaying its debt
+      // as a fresh arrival when the boundary hands off to the body.
+      const arrivalSource = arrivalSourceText ?? sourceText;
+      if (
+        arrivalSource &&
+        ((bufferInitialText && !sourceInitialized) || arrivalSource !== previousArrivalSourceText)
+      ) {
+        const previous = bufferInitialText && !sourceInitialized ? "" : previousArrivalSourceText;
+        if (previous !== undefined && arrivalSource.startsWith(previous)) {
+          let count = 0;
+          for (const _segment of graphemeSegmenter.segment(arrivalSource.slice(previous.length)))
+            count++;
+          model.recordArrival(count, performance.now());
+        }
+      }
+      previousArrivalSourceText = arrivalSource;
       // Fences and other unpainted Markdown tokens still start the first window.
+      if (!sourceText) sourceArrivalCount = 0;
+      if (
+        sourceText !== undefined &&
+        previousSourceText !== undefined &&
+        !sourceText.startsWith(previousSourceText)
+      )
+        sourceAppendOnly = false;
       if (
         sourceText &&
         ((bufferInitialText && !sourceInitialized) || sourceText !== previousSourceText)
       ) {
         const now = performance.now();
         const previousSource = bufferInitialText && !sourceInitialized ? "" : previousSourceText;
+        if (previousSource === undefined || !sourceText.startsWith(previousSource))
+          sourceAppendOnly = false;
         if (previousSource !== undefined && sourceText.startsWith(previousSource)) {
-          const appendedSource = sourceText.slice(previousSource.length);
-          let count = 0;
-          for (const _segment of graphemeSegmenter.segment(appendedSource)) count += 1;
-          model.recordArrival(count, now);
+          const hasSourceAppend = sourceText.length > previousSource.length;
+          if (
+            hasSourceAppend &&
+            model.pendingGraphemeCount === 0 &&
+            !reserving() &&
+            (previousSpaceVelocity === 0 ||
+              previousSpaceEndAt < lastPaintAt - 0.001 ||
+              now - previousSpaceEndAt > cadence.frameMs * 1.25)
+          ) {
+            // A delivered stationary paint or a real idle gap starts at rest.
+            // A source delivery at the next moving boundary can keep that speed.
+            previousSpaceVelocity = 0;
+            sourceArrivalCount = 0;
+          }
+          if (hasSourceAppend) sourceArrivalCount++;
           sourceChunkEnds.push(sourceText.length);
+          sourceArrivals.push({ end: sourceText.length, at: now });
         } else {
+          sourceArrivalCount = 0;
           sourceChunkEnds = [sourceText.length];
+          sourceArrivals = [{ end: sourceText.length, at: now }];
         }
         model.start(now);
       }
       previousSourceText = sourceText;
+      if (sourceText !== undefined && !sourceText.startsWith(modelText))
+        sourceArrivals = sourceArrivals.slice(-1);
       sourceInitialized = true;
       streaming = nextStreaming;
       complete = isComplete;
@@ -3055,13 +5134,14 @@ function observeSmoothText(
         outputMode = nextOutputMode ?? "character";
         modeChangedAt = Number.NEGATIVE_INFINITY;
       }
-      if (nextStreaming || contentChanged) {
+      if (nextStreaming || contentChanged || retainedSourceChanged) {
         settled = false;
         playbackFinished = false;
       }
       // Deferred Markdown can leave the DOM unchanged through several source
       // arrivals. Keep their rate samples without rescanning the same subtree.
-      if (presentationChanged || contentChanged) refresh(records);
+      if (presentationChanged || contentChanged || retainedSourceChanged)
+        refresh(records, endingPlayback);
     },
     dispose,
   };
@@ -3072,6 +5152,7 @@ export function useSmoothText(
   ref: RefObject<HTMLDivElement | null>,
   {
     enabled,
+    candidate,
     paused = false,
     mode = "character",
     lineMode = "adaptive",
@@ -3081,11 +5162,16 @@ export function useSmoothText(
     onPlaybackComplete,
     initialBufferMs,
     fadeDurationMs = 200,
+    yieldDurationMs = SMOOTH_TEXT_YIELD_DURATION_MS,
     drainOnComplete = true,
+    retainOnComplete = false,
     claimInitialText,
     sourceText,
+    arrivalSourceText,
+    resume,
   }: {
     enabled: boolean;
+    candidate?: SmoothTextCandidate | undefined;
     paused?: boolean | undefined;
     mode?: SmoothOutputMode | undefined;
     lineMode?: SmoothOutputLineMode | undefined;
@@ -3095,14 +5181,29 @@ export function useSmoothText(
     onPlaybackComplete?: (() => void) | undefined;
     initialBufferMs?: number | undefined;
     fadeDurationMs?: number | undefined;
+    yieldDurationMs?: number | undefined;
     /** Queued footnotes still play normally when their source is already complete. */
     drainOnComplete?: boolean | undefined;
+    /** A coordinated segment keeps its DOM ownership until the next handoff. */
+    retainOnComplete?: boolean | undefined;
     claimInitialText?: (() => boolean) | undefined;
     sourceText?: string | undefined;
+    /** Provider arrival sampling only; sourceText still owns boundaries and recovery. */
+    arrivalSourceText?: string | undefined;
+    resume?: SmoothTextResumeInput | undefined;
   },
 ) {
   const observer = useRef<ReturnType<typeof observeSmoothText> | null>(null);
+  const previousPlayback = useRef<SmoothTextPlaybackSnapshot | null>(null);
+  const checkpointSnapshot = useRef<SmoothTextPlaybackSnapshot | null>(null);
   const bufferInitialTextRef = useRef<boolean | null>(null);
+  const disabledSourceText = useRef<string | undefined>(undefined);
+  const resumeRef = useRef(resume);
+  const recovery = useRef<{
+    input: SmoothTextResumeInput;
+    sourceText: string | undefined;
+    visibleText: string | null | undefined;
+  } | null>(null);
   const claimInitialTextRef = useRef(claimInitialText);
   const onSettledRef = useRef(onSettled);
   const onPlaybackCompleteRef = useRef(onPlaybackComplete);
@@ -3116,10 +5217,35 @@ export function useSmoothText(
     claimInitialTextRef.current = claimInitialText;
   }, [claimInitialText]);
   useLayoutEffect(() => {
+    const oldResume = resumeRef.current;
+    const identityChanged = oldResume?.key !== resume?.key;
+    if (identityChanged) {
+      observer.current?.dispose();
+      const snapshot = checkpointSnapshot.current;
+      if (oldResume && snapshot?.visibleText !== null && snapshot?.visibleText !== undefined)
+        smoothTextPlaybackStore.set(oldResume.key, {
+          visibleText: snapshot.visibleText,
+          sourceText: snapshot.sourceText ?? snapshot.text,
+          intervalMs: snapshot.intervalMs,
+          recordedAt: Date.now(),
+        });
+      previousPlayback.current = null;
+      checkpointSnapshot.current = null;
+      bufferInitialTextRef.current = null;
+      recovery.current = null;
+      disabledSourceText.current = undefined;
+    }
+    resumeRef.current = resume;
     if (!enabled) {
+      disabledSourceText.current = sourceText;
       bufferInitialTextRef.current = false;
       observer.current?.dispose();
+      previousPlayback.current = null;
+      checkpointSnapshot.current = null;
+      recovery.current = null;
+      if (resumeRef.current) smoothTextPlaybackStore.delete(resumeRef.current.key);
       if (ref.current) clearSmoothTextEnd(ref.current);
+      candidate?.commit();
       return;
     }
     const element = ref.current;
@@ -3130,7 +5256,8 @@ export function useSmoothText(
       typeof CSS === "undefined" ||
       !CSS.highlights
     ) {
-      if (!streaming) {
+      candidate?.commit();
+      if (!streaming && !candidate) {
         onSettledRef.current?.();
         onPlaybackCompleteRef.current?.();
       }
@@ -3140,28 +5267,114 @@ export function useSmoothText(
     // restored history, so its first style calculation precedes a new stream.
     ensureSmoothTextMotionStyles(element.ownerDocument);
     if (!observer.current) {
-      bufferInitialTextRef.current ??= claimInitialTextRef.current?.() ?? false;
+      const claim = bufferInitialTextRef.current ?? claimInitialTextRef.current?.() ?? false;
+      // A paused disclosure can mount before its parent grants live playback.
+      // Leave that claim undecided, and its completion callback unspent, until
+      // it becomes visible or explicitly claims the queued initial text.
+      if (paused && !claim && claimInitialTextRef.current) return;
+      bufferInitialTextRef.current = claim;
     }
     // A fast provider can complete before React mounts its first text snapshot.
-    if (!observer.current && (streaming || bufferInitialTextRef.current)) {
+    const resumedSource =
+      previousPlayback.current !== null &&
+      sourceText !== undefined &&
+      sourceText !== previousPlayback.current.sourceText;
+    let resumedVisibleText: string | null | undefined;
+    const previousRecovery = recovery.current;
+    const recoveryChanged =
+      resume !== undefined &&
+      (previousRecovery === null ||
+        previousRecovery.input.key !== resume.key ||
+        previousRecovery.input.generation !== resume.generation ||
+        previousRecovery.input.baselineText !== resume.baselineText ||
+        previousRecovery.input.synchronized !== resume.synchronized ||
+        previousRecovery.input.forceShow !== resume.forceShow ||
+        (resume.forceShow === true && previousRecovery.sourceText !== sourceText));
+    // EOF belongs to the active observer's space/glyph clock. Only a real
+    // recovery boundary may replace it with the completed-history shortcut.
+    if (resume && sourceText !== undefined && recoveryChanged) {
+      // A synchronization boundary belongs to the active instance too. Discard
+      // only its old animation queues, keeping the actually painted lower bound.
+      observer.current?.dispose();
+      const snapshot = checkpointSnapshot.current;
+      const checkpoint =
+        snapshot?.visibleText !== null && snapshot?.visibleText !== undefined
+          ? {
+              visibleText: snapshot.visibleText,
+              sourceText: snapshot.sourceText ?? snapshot.text,
+              intervalMs: snapshot.intervalMs,
+              recordedAt: Date.now(),
+            }
+          : smoothTextPlaybackStore.get(resume.key);
+      // A claimed first snapshot without history still owns live playback,
+      // even when the provider has already ended before this mount.
+      const liveInitialText =
+        bufferInitialTextRef.current && !resume.synchronized && checkpoint === null;
+      if (resume.forceShow || ((complete || !streaming) && !liveInitialText))
+        resumedVisibleText = null;
+      else if (resume.synchronized || checkpoint) {
+        let mountText = resume.mountText ?? previousRecovery?.sourceText ?? sourceText;
+        if (
+          disabledSourceText.current &&
+          sourceText.startsWith(disabledSourceText.current) &&
+          disabledSourceText.current.length > mountText.length
+        )
+          mountText = disabledSourceText.current;
+        // Validate the longer history boundary as a whole. A rewritten mount
+        // version must not fall back to replaying history after an old marker.
+        const baselineText =
+          mountText.length > resume.baselineText.length ? mountText : resume.baselineText;
+        resumedVisibleText = resolveSmoothTextResume({
+          checkpoint,
+          baselineText,
+          currentText: sourceText,
+          now: Date.now(),
+          complete: false,
+        }).visibleText;
+      }
+      recovery.current = { input: resume, sourceText, visibleText: resumedVisibleText };
+      previousPlayback.current = null;
+    } else if (
+      !observer.current &&
+      previousRecovery &&
+      previousRecovery.sourceText === sourceText
+    ) {
+      // StrictMode's effect teardown is not time spent away from the thread.
+      resumedVisibleText = checkpointSnapshot.current?.visibleText ?? previousRecovery.visibleText;
+    }
+    if (
+      !observer.current &&
+      (candidate || streaming || bufferInitialTextRef.current || resumedSource || !drainOnComplete)
+    ) {
       observer.current = observeSmoothText(
         element,
-        (settled) => {
+        (settled, snapshot) => {
           observer.current = null;
-          if (settled) bufferInitialTextRef.current = false;
+          checkpointSnapshot.current = snapshot;
+          previousPlayback.current = snapshot?.pending ? null : snapshot;
+          // A nonempty completed snapshot owns its consumed prefix even when
+          // pause prevented the settled callback. Empty deferred DOM does not.
+          if (settled || (snapshot !== null && !snapshot.pending && snapshot.text.length > 0))
+            bufferInitialTextRef.current = false;
         },
         () => onSettledRef.current?.(),
         () => onPlaybackCompleteRef.current?.(),
-        bufferInitialTextRef.current ?? false,
+        resumedVisibleText !== undefined ? false : (bufferInitialTextRef.current ?? false),
         sourceText,
+        arrivalSourceText,
         mode,
         lineMode,
         initialBufferMs,
         paused,
         fadeDurationMs,
+        yieldDurationMs,
         drainOnComplete,
+        retainOnComplete,
+        previousPlayback.current,
+        resumedVisibleText,
       );
     }
+    observer.current?.candidate(candidate);
     if (observer.current)
       observer.current.update(
         streaming,
@@ -3171,7 +5384,10 @@ export function useSmoothText(
         lineMode,
         paused,
         fadeDurationMs,
+        yieldDurationMs,
         drainOnComplete,
+        retainOnComplete,
+        arrivalSourceText,
       );
     else if (!streaming) {
       onSettledRef.current?.();
@@ -3179,21 +5395,43 @@ export function useSmoothText(
     }
   }, [
     enabled,
+    candidate,
     paused,
     ref,
     streaming,
     sourceText,
+    arrivalSourceText,
     complete,
     mode,
     lineMode,
     initialBufferMs,
     fadeDurationMs,
+    yieldDurationMs,
     drainOnComplete,
+    retainOnComplete,
+    resume,
   ]);
   useLayoutEffect(() => {
     const element = ref.current;
     return () => {
       observer.current?.dispose();
+      const activeResume = resumeRef.current;
+      if (activeResume) {
+        const snapshot = checkpointSnapshot.current;
+        if (
+          typeof window !== "undefined" &&
+          window.matchMedia("(prefers-reduced-motion: reduce)").matches
+        ) {
+          smoothTextPlaybackStore.delete(activeResume.key);
+        } else if (snapshot?.visibleText !== null && snapshot?.visibleText !== undefined) {
+          smoothTextPlaybackStore.set(activeResume.key, {
+            visibleText: snapshot.visibleText,
+            sourceText: snapshot.sourceText ?? snapshot.text,
+            intervalMs: snapshot.intervalMs,
+            recordedAt: Date.now(),
+          });
+        }
+      }
       if (element) clearSmoothTextEnd(element);
     };
   }, [ref]);

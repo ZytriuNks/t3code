@@ -237,13 +237,43 @@ describe("incremental Markdown parsing", () => {
     ]) {
       parsedSources.length = 0;
       const source = before + tail;
-      expect(render(source, incremental, parsedSources)).toEqual(render(source));
-      expect(parsedSources.includes(source)).toBe(tail.includes("[^b]:"));
+      const result = render(source, incremental, parsedSources);
+      expect(result).toEqual(render(source));
+      expect(result.html).toContain('href="#user-content-fn-a"');
+      if (tail.includes("[^b]:")) {
+        expect(result.html).toContain('href="#user-content-fn-b"');
+        expect(parsedSources.some((text) => text.includes("History[^a] and [^b]"))).toBe(true);
+      }
+      expect(parsedSources).not.toContain(source);
+      expect(parsedSources.every((text) => !text.includes("const values = [1, 2];"))).toBe(true);
     }
     parsedSources.length = 0;
     const source = before + "[^a]: first more\n    continued\n\n[^b]: second body";
     expect(render(source, incremental, parsedSources)).toEqual(render(source));
     expect(parsedSources).not.toContain(source);
+  });
+
+  it.each([
+    "  > [!NOTE]\n  > [ref] &amp; [^one]\n\n# Outside\n\n",
+    "- [x] [ref]\n  continued &amp; [^one]\n\n# Outside\n\n",
+    "-       [ref]\n\n        [^one]\n\n# Outside\n\n",
+    "-       text\n\n        [ref]: /recovered\n\n# Outside [ref]\n\n",
+    "  [ref] &amp; \\*literal*\n  continued [^one]\n\n",
+    "| Reference | Note |\n| :--- | ---: |\n| [ref] &amp; | [^one] |\n\n",
+    "<div>\n\n[ref] &amp; [^one]\n\n</div>\n\n",
+    "<!-- open\n\n[ref] -->\n\n[ref] and [^one]\n\n",
+    "[^old]: [ref] and [^one]\n\nRead[^old]\n\n",
+    '  [ref]: /first\n    "existing title"\n\nRead [ref] and [^one]\n\n',
+  ])("refreshes definitions with exact positions and transformed HTML after %j", (history) => {
+    const incremental = createIncrementalMarkdownPlugin();
+    const before = history + prefix + "Tail\n\n";
+    expect(render(before, incremental)).toEqual(render(before));
+    const definitions =
+      '[ref]: /target "title\ncontinued"\n\n[^one]: A [ref] note\n    continued\n\nNext';
+    for (let end = 0; end <= definitions.length; end++) {
+      const source = before + definitions.slice(0, end);
+      expect(render(source, incremental), `definition prefix ${end}`).toEqual(render(source));
+    }
   });
 
   it.each([

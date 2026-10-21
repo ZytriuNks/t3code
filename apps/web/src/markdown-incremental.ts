@@ -2,6 +2,140 @@ import type { Root, RootContent } from "mdast";
 import type { Parser as UnifiedParser, Plugin } from "unified";
 
 type Parser = UnifiedParser<Root>;
+type RetainCompletedBlock = (node: RootContent) => RootContent | undefined;
+const retainedBlocksByProcessor = new WeakMap<object, RetainCompletedBlock>();
+
+/** Opt in only for a pipeline whose transforms have no unknown global dependencies.
+ * The callback sees pristine completed blocks, never the active parser tail. */
+export const remarkRetainIncrementalMarkdown: Plugin<[RetainCompletedBlock], Root> = function (
+  retain,
+) {
+  retainedBlocksByProcessor.set(this, retain);
+};
+
+const independentBlocks = new WeakMap<RootContent, boolean>();
+function isIndependentBlock(node: RootContent): boolean {
+  const cached = independentBlocks.get(node);
+  if (cached !== undefined) return cached;
+  const independent = (() => {
+    switch (node.type) {
+      // Unresolved labels may acquire document-wide reference semantics later.
+      case "text":
+        return !node.value.includes("[");
+      case "code":
+      case "thematicBreak":
+      case "inlineCode":
+      case "break":
+      case "image":
+        return true;
+      case "paragraph":
+      case "heading":
+      case "link":
+      case "emphasis":
+      case "strong":
+      case "delete":
+      case "blockquote":
+      case "list":
+      case "listItem":
+      case "table":
+      case "tableRow":
+      case "tableCell":
+        // Nested block code can be reparsed by indentation recovery, introducing
+        // definitions that affect content outside the otherwise stable container.
+        return node.children.every((child) => child.type !== "code" && isIndependentBlock(child));
+      default:
+        return false;
+    }
+  })();
+  independentBlocks.set(node, independent);
+  return independent;
+}
+
+const rawHtmlBlocks = new WeakMap<RootContent, boolean>();
+const tableBlocks = new WeakMap<RootContent, boolean>();
+function containsTable(node: RootContent): boolean {
+  const cached = tableBlocks.get(node);
+  if (cached !== undefined) return cached;
+  const result = node.type === "table" || ("children" in node && node.children.some(containsTable));
+  tableBlocks.set(node, result);
+  return result;
+}
+
+function mayReparentHtml(node: RootContent, source: string): boolean {
+  const cached = rawHtmlBlocks.get(node);
+  if (cached !== undefined) return cached;
+  const offset = node.position?.start.offset;
+  const raw =
+    node.type === "html" ||
+    (node.type === "code" &&
+      node.value.includes("<") &&
+      (offset === undefined || !/^ {0,3}(?:`{3,}|~{3,})/.test(source.slice(offset)))) ||
+    ("children" in node && node.children.some((child) => mayReparentHtml(child, source)));
+  rawHtmlBlocks.set(node, raw);
+  return raw;
+}
+
+const uncontainedHtmlBlocks = new WeakMap<RootContent, boolean>();
+const disclosureHtmlTags = new WeakMap<RootContent, readonly string[] | null>();
+function readDisclosureHtmlTags(node: Extract<RootContent, { type: "html" }>) {
+  const cached = disclosureHtmlTags.get(node);
+  if (cached !== undefined) return cached;
+  const tags: string[] = [];
+  let rest = node.value;
+  while (rest.includes("<")) {
+    rest = rest.slice(rest.indexOf("<"));
+    const comment = /^<!--[^<>]*?-->/.exec(rest);
+    if (comment) {
+      rest = rest.slice(comment[0].length);
+      continue;
+    }
+    const tag = /^<(\/?)(details|summary|dl|dt|dd)([ \t\n\f\r]+open)?[ \t\n\f\r]*>/i.exec(rest);
+    if (!tag || (tag[3] && (tag[1] || tag[2]!.toLowerCase() !== "details"))) {
+      disclosureHtmlTags.set(node, null);
+      return null;
+    }
+    tags.push(tag[1] + tag[2]!.toLowerCase());
+    rest = rest.slice(tag[0].length);
+  }
+  disclosureHtmlTags.set(node, tags);
+  return tags;
+}
+
+function mayReparentFollowingBlocks(node: RootContent, source: string): boolean {
+  const cached = uncontainedHtmlBlocks.get(node);
+  if (cached !== undefined) return cached;
+  const result = (() => {
+    if (!mayReparentHtml(node, source)) return false;
+    if (node.type !== "paragraph" && node.type !== "heading" && node.type !== "tableCell") {
+      return "children" in node
+        ? node.children.some((child) => mayReparentFollowingBlocks(child, source))
+        : true;
+    }
+    // Only simple inline formatting with text inside is known to close within
+    // this block. Attributes, raw containers and mixed Markdown nesting remain
+    // on the conservative path, including every unfinished streaming prefix.
+    const tags: string[] = [];
+    for (const child of node.children) {
+      if (child.type !== "html") {
+        if ((tags.length > 0 && child.type !== "text") || mayReparentFollowingBlocks(child, source))
+          return true;
+        continue;
+      }
+      if (/^<br[ \t\n\f\r]*\/?>$/i.test(child.value)) continue;
+      const tag = /^<(\/?)(b|i|s|u|em|strong|del|mark|small|sub|sup|kbd|span|code)>$/i.exec(
+        child.value,
+      );
+      if (!tag) return true;
+      const name = tag[2]!.toLowerCase();
+      if (tag[1]) {
+        if (tags.pop() !== name) return true;
+      } else tags.push(name);
+    }
+    return tags.length > 0;
+  })();
+  uncontainedHtmlBlocks.set(node, result);
+  return result;
+}
 
 interface ParsedPrefix {
   source: string;
@@ -117,12 +251,12 @@ function createContainerTailParser(parse: Parser): Parser {
  * closed fences also provide a boundary. New definitions re-resolve the prefix;
  * completed definitions can be supplied as context for subsequent suffix parses.
  */
-function createIncrementalMarkdownParser(parse: Parser): Parser {
+function createIncrementalMarkdownParser(parse: Parser) {
   let cached: ParsedPrefix | undefined;
   let previousSource = "";
   let definitionKeys = new Set<string>();
 
-  return (source, file) => {
+  return (source: string, file: Parameters<Parser>[1], retain?: RetainCompletedBlock) => {
     const appended = source.startsWith(previousSource);
     previousSource = source;
     // A streaming CR can become half of a CRLF. A BOM at the suffix boundary
@@ -143,19 +277,86 @@ function createIncrementalMarkdownParser(parse: Parser): Parser {
           (node) => (node.position?.start.offset ?? 0) >= prefix.definitions.length,
         );
       }
-      // The immutable prefix cannot introduce a new definition. Only the
-      // reparsed suffix can change document-wide reference resolution.
-      if (
-        root.children.some(
-          (node) =>
-            (node.type === "definition" || node.type === "footnoteDefinition") &&
-            !definitionKeys.has(`${node.type}:${node.identifier}`),
-        )
-      ) {
-        // A newly arriving definition can resolve a reference anywhere in the
-        // document. Rebuild once, then resume caching after it becomes stable.
-        cached = undefined;
-        root = parse(source, file);
+      const nextDefinitionKeys = new Set(
+        [...prefix.children, ...root.children].flatMap((node) =>
+          node.type === "definition" || node.type === "footnoteDefinition"
+            ? [`${node.type}:${node.identifier}`]
+            : [],
+        ),
+      );
+      const definitionsChanged =
+        nextDefinitionKeys.size !== definitionKeys.size ||
+        [...nextDefinitionKeys].some((key) => !definitionKeys.has(key));
+      if (definitionsChanged) {
+        const unsafe =
+          prefix.children.some((node) => mayReparentFollowingBlocks(node, source)) ||
+          root.children.some(
+            (node) =>
+              node.type !== "definition" &&
+              node.type !== "footnoteDefinition" &&
+              hasDefinitions(node),
+          );
+        if (unsafe) {
+          cached = undefined;
+          root = parse(source, file);
+        } else {
+          // Only reference-dependent history needs new inline resolution. Batch
+          // it with the tail, retaining independent blocks at authored positions.
+          // Rules separate omitted blocks so lists/quotes cannot merge across them.
+          const segments: Array<{
+            from: number;
+            to: number;
+            offset: number;
+            line: number;
+            parsedLine: number;
+            index: number;
+          }> = [];
+          let compact = prefix.definitions;
+          let parsedLine = prefix.definitionLines + 1;
+          const append = (text: string, offset: number, line: number, index: number) => {
+            segments.push({
+              from: compact.length,
+              to: compact.length + text.length,
+              offset,
+              line,
+              parsedLine,
+              index,
+            });
+            compact += text;
+            parsedLine += text.split("\n").length - 1;
+          };
+          const groups = prefix.children.map((node, index) => {
+            if (isIndependentBlock(node)) return [node];
+            const start = node.position!.start;
+            const offset = source.lastIndexOf("\n", start.offset! - 1) + 1;
+            append(source.slice(offset, node.position!.end.offset), offset, start.line, index);
+            compact += "\n\n***\n\n";
+            parsedLine += 4;
+            return [] as RootContent[];
+          });
+          append(source.slice(prefix.offset), prefix.offset, prefix.line, groups.length);
+          const suffix = segments.at(-1)!;
+          root = parse(compact, file);
+          const tail: RootContent[] = [];
+          let segmentIndex = 0;
+          for (const node of root.children) {
+            const offset = node.position!.start.offset!;
+            while (segmentIndex < segments.length && offset >= segments[segmentIndex]!.to)
+              segmentIndex++;
+            const segment = segments[segmentIndex];
+            if (!segment || offset < segment.from) continue;
+            shiftPositions(node, segment.offset - segment.from, segment.line - segment.parsedLine);
+            (groups[segment.index] ?? tail).push(node);
+          }
+          reusedChildren = groups.flat();
+          cached = { ...prefix, children: reusedChildren };
+          root.children = [...reusedChildren, ...tail];
+          if (root.position) {
+            root.position.start = { line: 1, column: 1, offset: 0 };
+            root.position.end.offset = source.length;
+            root.position.end.line += suffix.line - suffix.parsedLine;
+          }
+        }
       } else {
         shiftPositions(
           root,
@@ -163,9 +364,9 @@ function createIncrementalMarkdownParser(parse: Parser): Parser {
           prefix.line - 1 - prefix.definitionLines,
         );
         if (root.position) root.position.start = { line: 1, column: 1, offset: 0 };
-        // Remark transforms mutate their input. The cache owns pristine nodes and
-        // each render receives its own copy, including source positions.
-        root.children.unshift(...prefix.children.map(cloneParsedNode));
+        // Keep pristine prefix nodes until cache bookkeeping is complete. The
+        // transform input is cloned or replaced with retained stubs below.
+        root.children.unshift(...prefix.children);
         reusedChildren = prefix.children;
       }
     } else {
@@ -268,6 +469,48 @@ function createIncrementalMarkdownParser(parse: Parser): Parser {
         definitionLines: definitions.split("\n").length - 1,
       };
     }
+    // A strictly balanced disclosure/definition-list region stops affecting
+    // later siblings after its explicit close. Keep the whole region in the
+    // HTML pipeline; unknown HTML and malformed nesting block all later reuse.
+    const htmlStack: string[] = [];
+    let unsafeHtml = false;
+    const hasHtml =
+      retain &&
+      root.children.some((node, index) => mayReparentHtml(cached?.children[index] ?? node, source));
+    root.children = root.children.map((node, index) => {
+      const pristine = cached?.children[index];
+      const original = pristine ?? node;
+      if (retain && !unsafeHtml && mayReparentFollowingBlocks(original, source)) {
+        const tags = original.type === "html" ? readDisclosureHtmlTags(original) : null;
+        if (tags === null) unsafeHtml = true;
+        else {
+          for (const tag of tags) {
+            if (tag.startsWith("/")) {
+              if (htmlStack.pop() !== tag.slice(1)) unsafeHtml = true;
+            } else {
+              const parent = htmlStack.at(-1);
+              const validParent =
+                tag === "summary"
+                  ? parent === "details"
+                  : tag === "dt" || tag === "dd"
+                    ? parent === "dl"
+                    : parent === undefined || parent === "details";
+              if (!validParent) unsafeHtml = true;
+              htmlStack.push(tag);
+            }
+          }
+        }
+      }
+      // The raw HTML pass also moves generated table whitespace outside the
+      // table, even when the authored HTML comes later in the document.
+      const retainSafe =
+        !unsafeHtml && htmlStack.length === 0 && (!hasHtml || !containsTable(original))
+          ? retain
+          : undefined;
+      const retained =
+        pristine && isIndependentBlock(pristine) ? retainSafe?.(pristine) : undefined;
+      return retained ?? (index < reusedChildren.length ? cloneParsedNode(node) : node);
+    });
     return root;
   };
 }
@@ -276,7 +519,7 @@ function createIncrementalMarkdownParser(parse: Parser): Parser {
  * parser because their document-wide dependencies are not known here.
  */
 export function createIncrementalMarkdownPlugin(): Plugin<[], Root> {
-  let parser: Parser | undefined;
+  let parser: ReturnType<typeof createIncrementalMarkdownParser> | undefined;
   return function () {
     const original = this.parser;
     if (!original) return;
@@ -284,6 +527,7 @@ export function createIncrementalMarkdownPlugin(): Plugin<[], Root> {
       createContainerTailParser((source, file) => original(source, file) as Root),
     );
     const parseDocument = parser;
+    const retain = retainedBlocksByProcessor;
     // ReactMarkdown creates a processor per render. Its first parse is the
     // document; transforms can then parse synthetic recovery text on that same
     // processor. Those parses must not read or replace the document's cache.
@@ -291,7 +535,7 @@ export function createIncrementalMarkdownPlugin(): Plugin<[], Root> {
     this.parser = (source, file) => {
       if (documentParsed) return original(source, file);
       documentParsed = true;
-      return parseDocument(source, file);
+      return parseDocument(source, file, retain.get(this));
     };
   };
 }

@@ -132,6 +132,7 @@ describe("searchSettings", () => {
     "平滑输出",
     "实时输出",
     "增量 输出",
+    "让位 动画 时长",
   ])("finds response streaming for %s", (query) => {
     expect(searchSettings(query, SETTINGS_SEARCH_ITEMS, zh)[0]).toMatchObject({
       id: "response-streaming",

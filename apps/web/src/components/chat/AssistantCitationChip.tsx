@@ -24,6 +24,11 @@ import { AssistantCitationCommentEditor } from "./AssistantCitationCommentEditor
 import { resolveAssistantCitationCommentDismissal } from "./assistantCitationCommentDismissal";
 import { observeAssistantCitationCommentSource } from "./AssistantCitationSource";
 import { composerFloatingLayerProps } from "./composerEventScope";
+import {
+  assistantCitationLabel,
+  ASSISTANT_CITATION_CHAT_LINK_CLASS_NAME,
+  ASSISTANT_CITATION_LABEL_CLASS_NAME,
+} from "./assistantCitationPresentation";
 
 export function AssistantCitationChip({
   citation,
@@ -94,8 +99,7 @@ export function AssistantCitationChip({
         },
       }
     : undefined;
-  const preview = (citation.comment?.trim() || citation.text).replace(/\s+/g, " ");
-  const label = preview.length > 64 ? `${preview.slice(0, 64)}…` : preview;
+  const label = assistantCitationLabel(citation);
   const sourceLinkProps = {
     to: "/$environmentId/$threadId" as const,
     params: { environmentId: citation.environmentId, threadId: citation.threadId },
@@ -117,17 +121,17 @@ export function AssistantCitationChip({
       aria-label={`View cited assistant text: ${label}`}
     >
       <QuoteIcon aria-hidden="true" />
-      <ContextChipLabel className="max-w-[16em]">{label}</ContextChipLabel>
+      <ContextChipLabel className={ASSISTANT_CITATION_LABEL_CLASS_NAME}>{label}</ContextChipLabel>
     </Link>
   );
   const chatSourceLink = (
     <Link
       {...sourceLinkProps}
-      className="inline-flex h-full min-w-0 items-center gap-[0.33em] rounded-sm text-inherit no-underline hover:bg-(--context-chip-accent)/17 focus-visible:outline-2 focus-visible:outline-foreground"
+      className={ASSISTANT_CITATION_CHAT_LINK_CLASS_NAME}
       aria-label={`View cited assistant text: ${label}`}
     >
       <QuoteIcon aria-hidden="true" />
-      <ContextChipLabel className="max-w-[16em]">{label}</ContextChipLabel>
+      <ContextChipLabel className={ASSISTANT_CITATION_LABEL_CLASS_NAME}>{label}</ContextChipLabel>
     </Link>
   );
   return (

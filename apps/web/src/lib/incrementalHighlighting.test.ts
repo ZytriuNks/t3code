@@ -2,7 +2,11 @@ import { toHtml } from "hast-util-to-html";
 import { getSharedHighlighter } from "@pierre/diffs";
 import { describe, expect, it } from "vite-plus/test";
 
-import { createIncrementalHighlightedDocument } from "./incrementalHighlighting";
+import {
+  appendPlainCodeTail,
+  createIncrementalHighlightedDocument,
+  reuseCompletedHighlightedLines,
+} from "./incrementalHighlighting";
 
 const samples = {
   typescript: "/* multi\nline comment */\nconst x = `template\n${1 + 2}`;\nconst re = /abc/;\n",
@@ -25,6 +29,37 @@ const highlighterPromise = getSharedHighlighter({
 });
 
 describe("incremental code highlighting", () => {
+  it("keeps completed line nodes mounted while a worker result and plain tail arrive", async () => {
+    const highlighter = await highlighterPromise;
+    const firstCode = "const a = 1;\nconst b";
+    const nextCode = "const a = 1;\nconst b = 2;";
+    const first = highlighter.codeToHast(firstCode, { lang: "typescript", theme: "pierre-dark" });
+    const pending = appendPlainCodeTail(first, firstCode, nextCode);
+    expect(pending).toBeDefined();
+    expect(toHtml(pending!)).toContain(" = 2;");
+    const next = reuseCompletedHighlightedLines(
+      first,
+      highlighter.codeToHast(nextCode, { lang: "typescript", theme: "pierre-dark" }),
+      firstCode,
+      nextCode,
+    );
+    const firstChildren = first.children[0];
+    const nextChildren = next.children[0];
+    expect(firstChildren?.type).toBe("element");
+    expect(nextChildren?.type).toBe("element");
+    if (firstChildren?.type !== "element" || nextChildren?.type !== "element") return;
+    const firstCodeNode = firstChildren.children[0];
+    const nextCodeNode = nextChildren.children[0];
+    expect(firstCodeNode?.type).toBe("element");
+    expect(nextCodeNode?.type).toBe("element");
+    if (firstCodeNode?.type !== "element" || nextCodeNode?.type !== "element") return;
+    expect(nextCodeNode.children[0]).toBe(firstCodeNode.children[0]);
+    expect(nextCodeNode.children[1]).toBe(firstCodeNode.children[1]);
+    expect(toHtml(next)).toBe(
+      highlighter.codeToHtml(nextCode, { lang: "typescript", theme: "pierre-dark" }),
+    );
+  });
+
   it.each(Object.entries(samples))(
     "matches full HTML at every streaming prefix in %s",
     async (language, code) => {

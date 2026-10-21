@@ -6,6 +6,8 @@ import type {
   SmoothOutputLineMode,
   WorktreeSetupSnapshot,
 } from "@t3tools/contracts";
+import type { ThreadTextPlaybackState } from "@t3tools/client-runtime/state/threads";
+import type { SmoothTextResumeInput } from "../../lib/smoothTextPlayback";
 import { ReadOnlySourcePreview } from "../files/AttachmentFilePreview";
 import { useRightPanelStore } from "~/rightPanelStore";
 import {
@@ -29,6 +31,7 @@ import {
   type ScopedThreadRef,
   type ServerProvider,
   type ServerProviderSkill,
+  type ProviderTurnId,
   type RunId,
   type ThreadId,
   type ToolActivityIcon,
@@ -193,6 +196,7 @@ import {
   type MessagesTimelineRowsProjection,
   liveWorkEntryLabel,
   resolveAssistantMessageCopyState,
+  resolveSmoothComplete,
   resolveTimelineDomIsAtEnd,
   resolveTimelineIsAtEnd,
   shouldCancelTimelineFollowOnNativeScroll,
@@ -257,13 +261,20 @@ import { useOpenPrLink } from "~/lib/openPullRequestLink";
 import { useClientSettings } from "~/hooks/useSettings";
 import type { ChatMarkdownContextReference } from "../ChatMarkdown";
 import { useMediaQuery } from "~/hooks/useMediaQuery";
+import { useTimelineSendMotionTarget } from "./timelineSendMotion";
 import {
   SmoothScrollLayoutBoundary,
   useSmoothScroll,
   type SmoothScrollHandle,
 } from "~/hooks/useSmoothScroll";
 import { cn } from "~/lib/utils";
-import { SMOOTH_TEXT_LAYOUT_EVENT, type SmoothTextLayoutDetail } from "~/lib/smoothTextLayout";
+import {
+  createTimelineLayout,
+  TimelineLayoutCommit,
+  type TimelineLayoutCommitRequest,
+} from "./timelineLayout";
+import { createTimelineListLayout, TimelineListLayoutCommit } from "./timelineListLayout";
+import { TimelineStatusHeight } from "./TimelineStatusHeight";
 import { flushSync } from "react-dom";
 import { OverlayScrollbar } from "~/components/ui/overlay-scrollbar";
 import { useUiStateStore } from "~/uiStateStore";
@@ -312,7 +323,20 @@ interface TimelineRowSharedState {
   smoothOutputLineMode: SmoothOutputLineMode;
   smoothMarkdownPreload: boolean;
   smoothTextFadeDurationMs: number;
+  smoothTextYieldDurationMs: number;
+  statusEntranceIdentity: string;
+  statusEntranceEnabled: boolean;
+  claimStatusEntrance: (identity: string) => boolean;
+  tailMessageId: MessageId | null;
+  registerTailAnchor: (element: HTMLElement) => () => void;
   footnotesAutoCollapse: boolean;
+  textPlayback: ThreadTextPlaybackState | null;
+  mountedText: ReadonlyMap<string, string>;
+  mountedPlaybackSurfaces: Set<string>;
+  committedPlaybackEntries: React.RefObject<{
+    navigation: ReadonlyMap<string, string>;
+    entries: ReadonlyArray<TimelineEntry>;
+  } | null>;
   claimInitialSmoothText: (entryId: string, createdAt: string) => boolean;
   citationRequest: AssistantCitationTarget | null;
   listRef: React.RefObject<LegendListRef | null>;
@@ -366,6 +390,7 @@ interface TimelineRowActivityState {
   activeTurnInProgress: boolean;
   isPreparingWorktree: boolean;
   latestRunId: RunId | null;
+  latestRunStatus: TimelineLatestRun["status"] | null;
   /**
    * Wording for the restructured gap between a finished tool and the response.
    * It lives here because the row renderer is deliberately closure-free, and
@@ -426,12 +451,32 @@ function TimelineLoadEarlierHeader({
     </div>
   );
 }
-/**
- * The live label lives in the footer rather than beside the list: as a child of
- * the scroll container it travels with the content, so it always rests on the
- * same line the body ends on without any per-tick positioning, and the composer
- * gap below it is part of the same flow.
- */
+function TimelineTailAnchor({
+  children,
+  className,
+  messageId,
+  kind = "activity",
+}: {
+  children: ReactNode;
+  className?: string;
+  messageId?: MessageId;
+  kind?: "activity" | "footnotes" | "meta";
+}) {
+  const { registerTailAnchor, tailMessageId } = use(TimelineRowCtx);
+  const ref = useRef<HTMLDivElement | null>(null);
+  const enabled = messageId === undefined || messageId === tailMessageId;
+  useLayoutEffect(() => {
+    if (!enabled || !ref.current) return;
+    return registerTailAnchor(ref.current);
+  }, [enabled, registerTailAnchor]);
+  return (
+    <div ref={ref} className={className} data-timeline-tail-anchor={enabled ? kind : undefined}>
+      {children}
+    </div>
+  );
+}
+
+/** The footer keeps the live label and composer gap in the same scroll flow. */
 const TimelineListFooter = memo(
   function TimelineListFooter({
     composerInset,
@@ -444,13 +489,19 @@ const TimelineListFooter = memo(
   }) {
     return (
       <div ref={footerRef}>
-        <div className="mx-auto w-full min-w-0 max-w-(--chat-max-width)">
+        <TimelineTailAnchor
+          kind="footnotes"
+          className="mx-auto w-full min-w-0 max-w-(--chat-max-width)"
+        >
           <StreamingFootnoteHost fallback />
-        </div>
+        </TimelineTailAnchor>
         {liveActivityRows.length > 0 ? (
           <div
             data-testid="timeline-live-activity-layer"
-            className="mx-auto w-full min-w-0 max-w-(--chat-max-width) pb-2"
+            className={cn(
+              "mx-auto w-full min-w-0 max-w-(--chat-max-width)",
+              liveActivityRows.at(-1)?.kind !== "thinking" && "pb-2",
+            )}
           >
             {liveActivityRows.map((row) => (
               <div key={row.id} data-timeline-live-row-kind={row.kind}>
@@ -534,11 +585,18 @@ export interface MessagesTimelineHistoryControls {
 }
 
 interface MessagesTimelineProps {
+  textPlayback?: ThreadTextPlaybackState | null;
+  /** The navigation target can precede the switch away from a held timeline. */
+  textPlaybackNavigation?: {
+    readonly threadKey: string;
+    readonly entries: ReadonlyArray<TimelineEntry>;
+  };
   smoothStreaming?: boolean;
   smoothOutputMode?: SmoothOutputMode;
   smoothOutputLineMode?: SmoothOutputLineMode;
   smoothMarkdownPreload?: boolean;
   smoothTextFadeDurationMs?: number;
+  smoothTextYieldDurationMs?: number;
   footnotesAutoCollapse?: boolean;
   smoothScrollRef?: React.RefObject<SmoothScrollHandle | null>;
   smoothEndRequest?: number;
@@ -575,6 +633,8 @@ interface MessagesTimelineProps {
   timelineEntries: ReadonlyArray<TimelineEntry>;
   latestRun: TimelineLatestRun | null;
   runningRunId?: RunId | null;
+  /** Current native provider turn when no application run owns the activity. */
+  activeProviderTurnId?: ProviderTurnId | null;
   turnDiffSummaries: ReadonlyArray<TurnDiffSummary>;
   routeThreadKey: string;
   displayThreadKey?: string;
@@ -641,11 +701,14 @@ interface MessagesTimelineProps {
 // ---------------------------------------------------------------------------
 
 export const MessagesTimeline = memo(function MessagesTimeline({
+  textPlayback = null,
+  textPlaybackNavigation,
   smoothStreaming = false,
   smoothOutputMode = "character",
   smoothOutputLineMode = "adaptive",
   smoothMarkdownPreload = true,
   smoothTextFadeDurationMs = 200,
+  smoothTextYieldDurationMs = 200,
   footnotesAutoCollapse = false,
   smoothScrollRef,
   smoothEndRequest = 0,
@@ -672,6 +735,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   timelineEntries,
   latestRun,
   runningRunId = null,
+  activeProviderTurnId = null,
   turnDiffSummaries,
   routeThreadKey,
   displayThreadKey,
@@ -714,6 +778,48 @@ export const MessagesTimeline = memo(function MessagesTimeline({
 }: MessagesTimelineProps) {
   const { language } = useI18n();
   const listIdentityKey = displayThreadKey ?? routeThreadKey;
+  const navigationThreadKey = textPlaybackNavigation?.threadKey ?? listIdentityKey;
+  const createPlaybackSnapshot = (threadKey: string, entries: ReadonlyArray<TimelineEntry>) => ({
+    threadKey,
+    text: new Map(
+      entries.flatMap((entry) =>
+        entry.kind === "message"
+          ? [[entry.id, entry.message.text] as const]
+          : entry.kind === "work" && entry.entry.itemType === "reasoning"
+            ? [[entry.id, entry.entry.detail ?? ""] as const]
+            : [],
+      ),
+    ),
+    mountedSurfaces: new Set<string>(),
+  });
+  const createNavigationSnapshot = () =>
+    createPlaybackSnapshot(navigationThreadKey, textPlaybackNavigation?.entries ?? timelineEntries);
+  const [navigationSnapshot, setNavigationSnapshot] = useState(createNavigationSnapshot);
+  let activeNavigationSnapshot = navigationSnapshot;
+  if (navigationSnapshot.threadKey !== navigationThreadKey) {
+    activeNavigationSnapshot = createNavigationSnapshot();
+    setNavigationSnapshot(activeNavigationSnapshot);
+  }
+  const [playbackSnapshot, setPlaybackSnapshot] = useState(() => activeNavigationSnapshot);
+  let mountedPlaybackSnapshot = playbackSnapshot;
+  if (playbackSnapshot.threadKey !== listIdentityKey) {
+    mountedPlaybackSnapshot =
+      activeNavigationSnapshot.threadKey === listIdentityKey
+        ? activeNavigationSnapshot
+        : createPlaybackSnapshot(listIdentityKey, timelineEntries);
+    setPlaybackSnapshot(mountedPlaybackSnapshot);
+  }
+  const committedPlaybackEntries =
+    useRef<TimelineRowSharedState["committedPlaybackEntries"]["current"]>(null);
+  const mountedNavigationText = mountedPlaybackSnapshot.text;
+  useLayoutEffect(() => {
+    // Child surfaces read the previous committed data before this effect. Keep
+    // the array itself so live deltas do not scan or copy the full history.
+    committedPlaybackEntries.current = {
+      navigation: mountedNavigationText,
+      entries: timelineEntries,
+    };
+  }, [mountedNavigationText, timelineEntries]);
   const createTextHistory = () => ({
     threadKey: listIdentityKey,
     ready: !citationHistoryLoading,
@@ -956,6 +1062,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         queuedMessages,
         latestRun,
         runningRunId,
+        activeProviderTurnId,
         expandedRunIds,
         expandedAttemptIds,
         expandedWorkGroupIds,
@@ -980,6 +1087,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     queuedMessages,
     latestRun,
     runningRunId,
+    activeProviderTurnId,
     expandedRunIds,
     expandedAttemptIds,
     expandedWorkGroupIds,
@@ -991,6 +1099,52 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     worktreeSetup,
   ]);
   const rows = useStableRows(rawRows, listIdentityKey);
+  const tailAssistantEntry = timelineEntries.findLast(
+    (entry) => entry.kind === "message" && entry.message.role === "assistant",
+  );
+  const tailMessageId =
+    tailAssistantEntry?.kind === "message" ? tailAssistantEntry.message.id : null;
+  const createStatusHistory = () => ({
+    thread: listIdentityKey,
+    working: isWorking,
+    run: latestRun?.runId ?? null,
+    awaitingRun: isWorking && latestRun?.status !== "running",
+    turn: 0,
+    seen: new Set(isWorking ? ["working", "thinking"] : []),
+  });
+  const [statusHistory, setStatusHistory] = useState(createStatusHistory);
+  let activeStatusHistory = statusHistory;
+  const statusRun = latestRun?.runId ?? null;
+  if (statusHistory.thread !== listIdentityKey) {
+    activeStatusHistory = createStatusHistory();
+  } else if (statusHistory.working !== isWorking || statusHistory.run !== statusRun) {
+    const started = !statusHistory.working && isWorking;
+    const assigned = statusRun !== null && statusRun !== statusHistory.run;
+    const newTurn =
+      started || (assigned && statusHistory.run !== null && !statusHistory.awaitingRun);
+    activeStatusHistory = {
+      ...statusHistory,
+      working: isWorking,
+      run: statusRun,
+      // An optimistic status may acquire its new run/startedAt after appearing.
+      awaitingRun: started ? !assigned : assigned || !isWorking ? false : statusHistory.awaitingRun,
+      turn: statusHistory.turn + (newTurn ? 1 : 0),
+      seen: newTurn ? new Set<string>() : statusHistory.seen,
+    };
+  }
+  if (activeStatusHistory !== statusHistory) setStatusHistory(activeStatusHistory);
+  const statusEntranceIdentity = `${listIdentityKey}:${activeStatusHistory.turn}`;
+  const statusEntranceEnabled = smoothStreaming && !prefersReducedMotion && !citationHistoryLoading;
+  const seenStatusEntrances = activeStatusHistory.seen;
+  const claimStatusEntrance = useCallback(
+    (identity: string) => {
+      const kind = identity.slice(identity.lastIndexOf(":") + 1);
+      if (seenStatusEntrances.has(kind)) return false;
+      seenStatusEntrances.add(kind);
+      return true;
+    },
+    [seenStatusEntrances],
+  );
   // The restructured shape pins the live label out of the virtualized rows so it
   // cannot be measured, recycled, or displaced as body rows grow. Those rows
   // leave the list and render in the footer instead, still inside the scroll
@@ -1323,6 +1477,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     [shouldRestoreVisibleContentPosition],
   );
   const timelineFooterRef = useRef<HTMLDivElement | null>(null);
+  const tailAnchors = useRef(new Set<HTMLElement>());
   const timelineListFooter = useMemo(
     () => (
       <TimelineListFooter
@@ -1364,45 +1519,35 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     !anchoredEndSpace &&
     !disclosureToggleSettling &&
     settlingListIdentity === null;
+  const layoutRef = useRef<ReturnType<typeof createTimelineLayout> | null>(null);
+  const listLayout = useMemo(createTimelineListLayout, [listIdentityKey]);
+  const layoutCommitRef = useRef<((request: TimelineLayoutCommitRequest) => void) | null>(null);
+  const requestTimelineLayout = useCallback(() => layoutRef.current?.request(), []);
+  const registerTailAnchor = useCallback((element: HTMLElement) => {
+    tailAnchors.current.add(element);
+    layoutRef.current?.request();
+    return () => {
+      tailAnchors.current.delete(element);
+      element.style.removeProperty("translate");
+      layoutRef.current?.request();
+    };
+  }, []);
   useLayoutEffect(() => {
     if (!smoothStreaming || !timelineScrollableNode) return;
-    let measuredRow: { id: string; width: number } | null = null;
-    const measureFrame = (event: Event) => {
-      const detail = (event as CustomEvent<SmoothTextLayoutDetail>).detail;
-      if (detail?.phase === "before") return;
-      if (!detail?.delta && !detail?.synchronous) return;
-      const row = (event.target as Element | null)?.closest?.<HTMLElement>(
-        "[data-timeline-row-id]",
-      );
-      const id = row?.dataset.timelineRowId;
-      if (!row || !id) return;
-      const { width, height } = row.getBoundingClientRect();
-      // LegendList rounds its published row size to whole CSS pixels. Keep
-      // that spacer/native edge and pass its subpixel remainder to end-follow.
-      detail.rowFraction = height - Math.round(height);
-      if (
-        !detail.synchronous &&
-        measuredRow?.id === id &&
-        measuredRow.width === width &&
-        listRef.current?.getState?.().sizes.get(id) === Math.round(height)
-      )
-        return;
-      measuredRow = { id, width };
-      const publish = () => listRef.current?.setItemSize(id, { width, height });
-      const finish = smoothFollowControl.current?.beginLayout();
-      try {
-        if (detail.synchronous) flushSync(publish);
-        else publish();
-      } finally {
-        finish?.();
-      }
+    const layout = createTimelineLayout(timelineScrollableNode, {
+      list: () => listRef.current,
+      footer: () => timelineFooterRef.current,
+      tails: () => tailAnchors.current,
+      control: () => smoothFollowControl.current,
+      requestCommit: (generation) => layoutCommitRef.current?.({ owner: layout, generation }),
+      synchronous: flushSync,
+    });
+    layoutRef.current = layout;
+    return () => {
+      layout.dispose();
+      if (layoutRef.current === layout) layoutRef.current = null;
     };
-    // Publish the animated size before end-follow reads its edge. Waiting for
-    // ResizeObserver leaves every newly admitted row a layout pass behind.
-    timelineScrollableNode.addEventListener(SMOOTH_TEXT_LAYOUT_EVENT, measureFrame, true);
-    return () =>
-      timelineScrollableNode.removeEventListener(SMOOTH_TEXT_LAYOUT_EVENT, measureFrame, true);
-  }, [listRef, smoothFollowControl, smoothStreaming, timelineScrollableNode]);
+  }, [listIdentityKey, listRef, smoothFollowControl, smoothStreaming, timelineScrollableNode]);
   const requestSmoothFollow = useSmoothScroll({
     element: timelineScrollableNode,
     enabled: smoothFollowEnabled,
@@ -1413,6 +1558,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     endRequest: smoothEndRequest + restoredEndRequest,
     onDetach: onManualNavigation,
     onFollowingChange: setSmoothFollowing,
+    onLayoutRequest: requestTimelineLayout,
   });
   useLayoutEffect(() => {
     requestSmoothFollow();
@@ -1455,10 +1601,14 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onContentOverflowChange(measureContentOverflow(), measureLiveFooterHeight());
     });
   }, [measureContentOverflow, measureLiveFooterHeight, onContentOverflowChange]);
-  const handleItemSizeChanged = useCallback(() => {
-    requestSmoothFollow();
-    reportContentOverflow();
-  }, [reportContentOverflow, requestSmoothFollow]);
+  const handleItemSizeChanged = useCallback(
+    (info: { itemKey: string; size: number }) => {
+      listLayout.itemSizeChanged(layoutRef.current, info);
+      requestSmoothFollow();
+      reportContentOverflow();
+    },
+    [listLayout, reportContentOverflow, requestSmoothFollow],
+  );
   useEffect(() => cancelContentOverflowFrame, [cancelContentOverflowFrame]);
   // The list's own layout effects have already run here, so estimated row
   // positions are in place. Reporting before the first paint lets a thread
@@ -1481,10 +1631,13 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   useLayoutEffect(() => {
     const footer = timelineFooterRef.current;
     if (!footer || liveActivityRows.length === 0) return;
-    const observer = new ResizeObserver(reportContentOverflow);
+    const observer = new ResizeObserver(() => {
+      requestTimelineLayout();
+      reportContentOverflow();
+    });
     observer.observe(footer);
     return () => observer.disconnect();
-  }, [liveActivityRows.length, reportContentOverflow]);
+  }, [liveActivityRows.length, reportContentOverflow, requestTimelineLayout]);
 
   const liveFooterStyle = useMemo(() => {
     if (liveActivityRows.length === 0) return undefined;
@@ -1729,7 +1882,17 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       smoothOutputLineMode,
       smoothMarkdownPreload,
       smoothTextFadeDurationMs,
+      smoothTextYieldDurationMs,
+      statusEntranceIdentity,
+      statusEntranceEnabled,
+      claimStatusEntrance,
+      tailMessageId,
+      registerTailAnchor,
       footnotesAutoCollapse,
+      textPlayback,
+      mountedText: mountedPlaybackSnapshot.text,
+      mountedPlaybackSurfaces: mountedPlaybackSnapshot.mountedSurfaces,
+      committedPlaybackEntries,
       claimInitialSmoothText,
       citationRequest: readyCitationRequest,
       listRef,
@@ -1775,7 +1938,16 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       smoothOutputLineMode,
       smoothMarkdownPreload,
       smoothTextFadeDurationMs,
+      smoothTextYieldDurationMs,
+      statusEntranceIdentity,
+      statusEntranceEnabled,
+      claimStatusEntrance,
+      tailMessageId,
+      registerTailAnchor,
       footnotesAutoCollapse,
+      textPlayback,
+      mountedPlaybackSnapshot.text,
+      mountedPlaybackSnapshot.mountedSurfaces,
       claimInitialSmoothText,
       listRef,
       timestampFormat,
@@ -1831,6 +2003,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       activeTurnInProgress,
       isPreparingWorktree,
       latestRunId: latestRun?.runId ?? null,
+      latestRunStatus: latestRun?.status ?? null,
       conversationStructureIdleLabel,
       conversationStructureThinkingLabel,
     }),
@@ -1844,6 +2017,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       isRevertingCheckpoint,
       isWorking,
       latestRun?.runId,
+      latestRun?.status,
     ],
   );
   const listHeader = useMemo(() => {
@@ -2008,6 +2182,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
           </TimelineRowActivityCtx>
         </TimelineRowCtx>
       </SmoothScrollLayoutBoundary>
+      <TimelineListLayoutCommit observer={listLayout} layoutRef={layoutRef} />
+      <TimelineLayoutCommit layoutRef={layoutRef} requestRef={layoutCommitRef} />
     </StreamingFootnoteProvider>
   );
 });
@@ -2437,9 +2613,9 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
       className={cn(
         // Commentary (non-terminal assistant) rows carry no metadata row, so
         // they sit closer to the work that follows them.
-        isWorkLogRow || isSubagentGroup
+        isWorkLogRow || isSubagentGroup || row.kind === "working"
           ? undefined
-          : row.kind === "turn-fold" || row.kind === "working"
+          : row.kind === "turn-fold"
             ? "pb-1.5"
             : (row.kind === "message" &&
                   row.message.role === "assistant" &&
@@ -2462,7 +2638,7 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
       }
       data-message-role={row.kind === "message" ? row.message.role : undefined}
     >
-      {isWorkLogRow ? (
+      {isWorkLogRow && row.kind !== "thinking" ? (
         <WorkLogBlock
           continues={row.continuesWorkLog}
           layout={
@@ -2483,9 +2659,9 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
           ) : null}
           {row.kind === "work-live" ? <LiveWorkEntryTimelineRow row={row} /> : null}
           {row.kind === "work-toggle" ? <WorkGroupToggleTimelineRow row={row} /> : null}
-          {row.kind === "thinking" ? <ThinkingTimelineRow row={row} /> : null}
         </WorkLogBlock>
       ) : null}
+      {row.kind === "thinking" ? <ThinkingTimelineRow row={row} /> : null}
       {row.kind === "turn-fold" ? <TurnFoldTimelineRow row={row} /> : null}
       {row.kind === "attempt-fold" ? <AttemptFoldTimelineRow row={row} /> : null}
       {row.kind === "context-compaction" ? <ContextCompactionTimelineRow row={row} /> : null}
@@ -2731,6 +2907,7 @@ function MessageAuthorHeading({ children }: { children: string }) {
 }
 
 function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
+  const sendMotionRef = useTimelineSendMotionTarget(row.message.id);
   const ctx = use(TimelineRowCtx);
   const { onImageExpand, onFileOpen } = ctx;
   const senderThreadId = row.message.senderThreadId;
@@ -2889,7 +3066,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
   );
 
   return (
-    <div className="group flex flex-col items-end gap-1">
+    <div ref={sendMotionRef} className="group flex flex-col items-end gap-1">
       {userMessage.isAutomation ? (
         <p
           className="me-1 text-2xs text-muted-foreground/70"
@@ -3279,10 +3456,107 @@ function AttemptFoldTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "at
   );
 }
 
+function useTextPlaybackResume(
+  ctx: TimelineRowSharedState,
+  itemId: string | undefined,
+  entryId: string,
+  runId: RunId | null,
+  surface: string,
+  currentText: string,
+): SmoothTextResumeInput | undefined {
+  const playback = ctx.textPlayback;
+  const key = JSON.stringify([
+    ctx.threadRef?.environmentId ?? ctx.activeThreadEnvironmentId,
+    ctx.threadRef?.threadId ?? ctx.routeThreadKey,
+    runId,
+    itemId ?? entryId,
+    surface,
+  ]);
+  const createMount = () => {
+    const committed = ctx.committedPlaybackEntries.current;
+    const committedEntry = (
+      committed?.navigation === ctx.mountedText ? committed.entries : []
+    ).find(
+      (entry) =>
+        (entry.kind === "message" || entry.kind === "work") &&
+        entry.id === entryId &&
+        ((entry.kind === "message" ? entry.projectedItem : entry.entry.projectedItem)?.item.id ??
+          entry.id) === (itemId ?? entryId) &&
+        (entry.kind === "message"
+          ? entry.message.runId === runId
+          : entry.kind === "work" && (entry.entry.runId ?? null) === runId),
+    );
+    const committedText =
+      committedEntry?.kind === "message"
+        ? committedEntry.message.text
+        : committedEntry?.kind === "work"
+          ? (committedEntry.entry.detail ?? "")
+          : undefined;
+    return {
+      key,
+      navigation: ctx.mountedText,
+      // A first source mounted in its receiving commit is live. A delayed first
+      // appearance also owns any text already committed while it was offscreen.
+      text: ctx.mountedPlaybackSurfaces.has(key)
+        ? currentText
+        : (committedText ?? ctx.mountedText.get(entryId) ?? ""),
+    };
+  };
+  const [mount, setMount] = useState(createMount);
+  let activeMount = mount;
+  if (mount.key !== key || mount.navigation !== ctx.mountedText) {
+    activeMount = createMount();
+    setMount(activeMount);
+  }
+  useLayoutEffect(() => {
+    ctx.mountedPlaybackSurfaces.add(key);
+  }, [ctx.mountedPlaybackSurfaces, key]);
+  const baseline = itemId ? playback?.baselineByItemId.get(itemId) : undefined;
+  const hasPlayback = playback !== null;
+  const legacyRun = playback?.legacyRunIds.has(runId ?? "") ?? false;
+  const forceShow =
+    playback !== null &&
+    (playback.phase === "pending" ||
+      legacyRun ||
+      (baseline !== undefined && baseline.runId !== runId) ||
+      (playback.phase === "legacy" && (baseline !== undefined || runId === null)));
+  const resumeBaselineText = forceShow ? "" : (baseline?.text ?? "");
+  const resumeMountText = activeMount.text;
+  const resumeSynchronized = forceShow || baseline !== undefined || resumeMountText.length > 0;
+  const resumeGeneration = playback?.generation;
+  return useMemo(() => {
+    if (!hasPlayback) return undefined;
+    return {
+      key,
+      baselineText: resumeBaselineText,
+      mountText: resumeMountText,
+      synchronized: resumeSynchronized,
+      ...(resumeGeneration === undefined ? {} : { generation: resumeGeneration }),
+      ...(forceShow ? { forceShow: true } : {}),
+    } satisfies SmoothTextResumeInput;
+  }, [
+    hasPlayback,
+    key,
+    resumeBaselineText,
+    resumeMountText,
+    resumeSynchronized,
+    resumeGeneration,
+    forceShow,
+  ]);
+}
+
 function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
   const ctx = use(TimelineRowCtx);
   const activity = use(TimelineRowActivityCtx);
   const messageText = row.message.text || (row.message.streaming ? "" : "(empty response)");
+  const playbackResume = useTextPlaybackResume(
+    ctx,
+    row.projectedItem?.item.id,
+    row.id,
+    row.message.runId,
+    "body",
+    messageText,
+  );
   // Every streamed fragment re-renders the mounted rows through the shared
   // context. A fresh closure here would also re-render each row's Markdown.
   const { claimInitialSmoothText: claimSmoothText } = ctx;
@@ -3303,6 +3577,7 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
           listRef={ctx.listRef}
         >
           <ChatMarkdown
+            key={ctx.displayThreadKey ?? ctx.routeThreadKey}
             text={messageText}
             cwd={ctx.markdownCwd}
             threadRef={ctx.threadRef ?? undefined}
@@ -3312,14 +3587,22 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
             smoothOutputLineMode={ctx.smoothOutputLineMode}
             smoothMarkdownPreload={ctx.smoothMarkdownPreload}
             smoothTextFadeDurationMs={ctx.smoothTextFadeDurationMs}
+            smoothTextYieldDurationMs={ctx.smoothTextYieldDurationMs}
             footnotesAutoCollapse={ctx.footnotesAutoCollapse}
-            smoothComplete={
-              ctx.smoothStreaming &&
-              (!activity.isWorking ||
-                (row.message.runId !== null &&
-                  activity.latestRunId !== null &&
-                  row.message.runId !== activity.latestRunId))
+            registerFootnoteTail={
+              row.message.id === ctx.tailMessageId ? ctx.registerTailAnchor : undefined
             }
+            smoothTextResume={playbackResume}
+            smoothComplete={resolveSmoothComplete({
+              smoothStreaming: ctx.smoothStreaming,
+              messageRunId: row.message.runId,
+              messageStreaming: row.message.streaming,
+              itemType: row.projectedItem?.item.type ?? null,
+              itemStatus: row.projectedItem?.item.status ?? null,
+              latestRunId: activity.latestRunId,
+              latestRunStatus: activity.latestRunStatus,
+              isWorking: activity.isWorking,
+            })}
             claimInitialSmoothText={claimInitialSmoothText}
             lineBreaks={shouldPreserveAssistantLineBreaks(messageText)}
             skills={ctx.skills}
@@ -3336,13 +3619,15 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
           onOpenTurnDiff={ctx.onOpenTurnDiff}
         />
         {row.showAssistantMeta ? (
-          <AssistantMessageMeta
-            className="mt-1.5"
-            projectedItem={row.projectedItem}
-            message={row.message}
-            showCopyButton={row.showAssistantCopyButton}
-            copyStreaming={row.assistantCopyStreaming}
-          />
+          <TimelineTailAnchor kind="meta" messageId={row.message.id}>
+            <AssistantMessageMeta
+              className="mt-1.5"
+              projectedItem={row.projectedItem}
+              message={row.message}
+              showCopyButton={row.showAssistantCopyButton}
+              copyStreaming={row.assistantCopyStreaming}
+            />
+          </TimelineTailAnchor>
         ) : row.reserveAssistantMeta ? (
           <div aria-hidden className="mt-1.5 h-6" />
         ) : null}
@@ -3403,7 +3688,11 @@ function AssistantMetaTimelineRow({
   row: Extract<TimelineRow, { kind: "assistant-meta" }>;
 }) {
   return (
-    <div className="px-1">
+    <TimelineTailAnchor
+      kind={row.reserveAssistantMeta ? "activity" : "meta"}
+      className="px-1"
+      messageId={row.message.id}
+    >
       {row.reserveAssistantMeta ? (
         <div aria-hidden className="mt-0.5 h-6" />
       ) : (
@@ -3416,7 +3705,7 @@ function AssistantMetaTimelineRow({
           alwaysVisible
         />
       )}
-    </div>
+    </TimelineTailAnchor>
   );
 }
 
@@ -4344,6 +4633,7 @@ function toolIconAcceptsTint(
 }
 
 function WorkingTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "working" }> }) {
+  const ctx = use(TimelineRowCtx);
   const { isCompacting, isPreparingWorktree, backgroundWorktreeSetup } =
     use(TimelineRowActivityCtx);
   // One span for every label so the setup-to-working handoff swaps text in
@@ -4361,20 +4651,29 @@ function WorkingTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "workin
     "Working..."
   );
   return (
-    <div className="border-b border-border/60 pb-2 pt-1">
-      <div className="flex h-6 min-w-0 items-baseline gap-2 px-1 text-sm leading-relaxed text-muted-foreground tabular-nums">
-        <span
-          ref={shimmer ? observeVisibleAnimation : undefined}
-          className="relative shrink-0 overflow-hidden whitespace-nowrap"
-        >
-          {label}
-          {shimmer ? <ActivityShimmerOverlay>{label}</ActivityShimmerOverlay> : null}
-        </span>
-        {backgroundWorktreeSetup ? (
-          <BackgroundWorktreeSetupChip snapshot={backgroundWorktreeSetup} />
-        ) : null}
+    <TimelineStatusHeight
+      identity={`${ctx.statusEntranceIdentity}:working`}
+      enabled={ctx.statusEntranceEnabled}
+      duration={ctx.smoothTextYieldDurationMs}
+      claim={ctx.claimStatusEntrance}
+    >
+      <div className="pb-1.5">
+        <div className="border-b border-border/60 pb-2 pt-1">
+          <div className="flex h-6 min-w-0 items-baseline gap-2 px-1 text-sm leading-relaxed text-muted-foreground tabular-nums">
+            <span
+              ref={shimmer ? observeVisibleAnimation : undefined}
+              className="relative shrink-0 overflow-hidden whitespace-nowrap"
+            >
+              {label}
+              {shimmer ? <ActivityShimmerOverlay>{label}</ActivityShimmerOverlay> : null}
+            </span>
+            {backgroundWorktreeSetup ? (
+              <BackgroundWorktreeSetupChip snapshot={backgroundWorktreeSetup} />
+            ) : null}
+          </div>
+        </div>
       </div>
-    </div>
+    </TimelineStatusHeight>
   );
 }
 
@@ -4430,6 +4729,7 @@ function CompactingLabel() {
 }
 
 function ThinkingTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "thinking" }> }) {
+  const ctx = use(TimelineRowCtx);
   const { t } = useI18n();
   const {
     isCompacting,
@@ -4443,13 +4743,28 @@ function ThinkingTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "think
       ? conversationStructureIdleLabel || t("chat.liveActivity.idleDefault")
       : conversationStructureThinkingLabel || t("chat.liveActivity.thinkingDefault");
   // Reserve the activity row during setup so the handoff keeps the same height.
-  return isPreparingWorktree || isCompacting ? (
-    <WorkLogRow label="" />
-  ) : (
-    <>
-      <StreamingFootnoteHost />
+  const status =
+    isPreparingWorktree || isCompacting ? (
+      <WorkLogRow label="" />
+    ) : (
       <LiveActivityRow label={label} iconName="brain" active shimmer />
-    </>
+    );
+  return (
+    <TimelineTailAnchor>
+      {!isPreparingWorktree && !isCompacting ? <StreamingFootnoteHost /> : null}
+      <TimelineStatusHeight
+        identity={`${ctx.statusEntranceIdentity}:thinking`}
+        enabled={ctx.statusEntranceEnabled}
+        duration={ctx.smoothTextYieldDurationMs}
+        claim={ctx.claimStatusEntrance}
+      >
+        {ctx.conversationStructure === "restructured" ? (
+          <div className="pb-2">{status}</div>
+        ) : (
+          <WorkLogBlock continues={row.continuesWorkLog}>{status}</WorkLogBlock>
+        )}
+      </TimelineStatusHeight>
+    </TimelineTailAnchor>
   );
 }
 
@@ -5901,6 +6216,14 @@ function ReasoningTraceContent({ entries }: { entries: ReadonlyArray<TimelineWor
 function ReasoningTraceEntryMarkdown({ entry }: { entry: TimelineWorkEntry }) {
   const ctx = use(TimelineRowCtx);
   const { isWorking, latestRunId } = use(TimelineRowActivityCtx);
+  const playbackResume = useTextPlaybackResume(
+    ctx,
+    entry.projectedItem?.item.id,
+    entry.id,
+    entry.runId ?? null,
+    "reasoning",
+    entry.detail ?? "",
+  );
   // A fresh closure per render would defeat ChatMarkdown's memo on every
   // streamed fragment of any other row.
   const { claimInitialSmoothText: claimSmoothText } = ctx;
@@ -5923,7 +6246,12 @@ function ReasoningTraceEntryMarkdown({ entry }: { entry: TimelineWorkEntry }) {
       smoothOutputLineMode={ctx.smoothOutputLineMode}
       smoothMarkdownPreload={ctx.smoothMarkdownPreload}
       smoothTextFadeDurationMs={ctx.smoothTextFadeDurationMs}
+      smoothTextYieldDurationMs={ctx.smoothTextYieldDurationMs}
       footnotesAutoCollapse={ctx.footnotesAutoCollapse}
+      registerFootnoteTail={
+        entry.runId != null && entry.runId === latestRunId ? ctx.registerTailAnchor : undefined
+      }
+      smoothTextResume={playbackResume}
       smoothComplete={
         ctx.smoothStreaming &&
         (!isWorking || (entry.runId != null && latestRunId !== null && entry.runId !== latestRunId))

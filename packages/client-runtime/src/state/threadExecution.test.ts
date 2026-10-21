@@ -1,199 +1,81 @@
-import {
-  TurnItemId,
-  NodeId,
-  MessageId,
-  RunId,
-  type OrchestrationV2RunStatus,
-} from "@t3tools/contracts";
-import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
+import * as DateTime from "effect/DateTime";
 
-import { v2Projection } from "./orchestrationV2TestFixtures.ts";
-import {
-  deriveLatestThreadRun,
-  deriveThreadActivityRun,
-  deriveThreadRuntime,
-  threadRuntimeHasInterruptibleRun,
-} from "./threadExecution.ts";
-import { threadRuntimeCanArchive, type ThreadRuntimeSummary } from "./models.ts";
+import { deriveActiveNativeProviderTurn } from "./threadExecution.ts";
 
-const now = DateTime.makeUnsafe("2026-07-28T10:00:00.000Z");
+const projection = (overrides: Record<string, unknown> = {}) =>
+  ({
+    thread: { activeProviderThreadId: "provider-thread" },
+    runs: [],
+    messages: [],
+    providerTurns: [],
+    ...overrides,
+  }) as never;
 
-function run(id: string, ordinal: number, status: OrchestrationV2RunStatus) {
-  return {
-    id: RunId.make(id),
-    threadId: v2Projection.thread.id,
-    ordinal,
-    providerInstanceId: v2Projection.thread.providerInstanceId,
-    modelSelection: v2Projection.thread.modelSelection,
-    providerThreadId: null,
-    userMessageId: MessageId.make(`message-${id}`),
-    rootNodeId: null,
-    activeAttemptId: null,
-    status,
-    requestedAt: now,
-    startedAt: status === "queued" ? null : now,
-    completedAt: null,
-    checkpointId: null,
-    contextHandoffId: null,
-  };
-}
-
-describe("thread execution presentation", () => {
-  it("derives the current root failure without inheriting errors from children or previous runs", () => {
-    const failed = { ...run("limited", 1, "failed"), rootNodeId: NodeId.make("root") };
-    const item = {
-      id: TurnItemId.make("limit-error"),
-      threadId: v2Projection.thread.id,
-      runId: failed.id,
-      nodeId: failed.rootNodeId,
-      providerThreadId: null,
-      providerTurnId: null,
-      nativeItemRef: null,
-      parentItemId: null,
-      ordinal: 1,
-      type: "error" as const,
-      status: "failed" as const,
-      title: "Usage limit reached",
-      startedAt: now,
-      completedAt: now,
-      updatedAt: now,
-      failure: {
-        class: "usage_limit" as const,
-        message: "Plan limit reached",
-        code: "usageLimitExceeded",
-        retryable: null,
-      },
-    };
-    const projection = { ...v2Projection, runs: [failed], turnItems: [item] };
-    expect(deriveThreadRuntime(projection)).toMatchObject({
-      lastError: "Plan limit reached",
-      lastErrorClass: "usage_limit",
-    });
-    expect(
-      deriveThreadRuntime({
-        ...projection,
-        turnItems: [{ ...item, nodeId: NodeId.make("child") }],
-      }),
-    ).toMatchObject({ lastError: null, lastErrorClass: null });
-    expect(
-      deriveThreadRuntime({
-        ...projection,
-        runs: [{ ...failed, rootNodeId: NodeId.make("new-root") }],
-      }),
-    ).toMatchObject({ lastError: null, lastErrorClass: null });
-    expect(
-      deriveThreadRuntime({ ...projection, runs: [failed, run("new", 2, "running")] }),
-    ).toMatchObject({ status: "running", lastError: null, lastErrorClass: null });
-  });
-
-  it("keeps live activity attached to an executing run when a newer run is queued", () => {
-    const runningRun = run("run-running", 1, "running");
-    const queuedRun = run("run-queued", 2, "queued");
-    const projection = { ...v2Projection, runs: [queuedRun, runningRun], updatedAt: now };
-
-    expect(deriveLatestThreadRun(projection)?.runId).toBe(queuedRun.id);
-    expect(deriveThreadActivityRun(projection)).toMatchObject({
-      runId: runningRun.id,
-      status: "running",
-    });
-
-    const runtime = deriveThreadRuntime(projection);
-    expect(runtime).toMatchObject({
-      status: "running",
-      activeRunId: runningRun.id,
-    });
-    expect(threadRuntimeHasInterruptibleRun(runtime)).toBe(true);
-  });
-
-  it("does not expose a queued-only run as interruptible", () => {
-    const queuedRun = run("run-queued", 1, "queued");
-    const projection = { ...v2Projection, runs: [queuedRun], updatedAt: now };
-
-    expect(deriveThreadActivityRun(projection)).toMatchObject({
-      runId: queuedRun.id,
-      status: "queued",
-    });
-
-    const runtime = deriveThreadRuntime(projection);
-    expect(runtime).toMatchObject({
-      status: "queued",
-      activeRunId: null,
-    });
-    expect(threadRuntimeHasInterruptibleRun(runtime)).toBe(false);
-  });
-
-  it("keeps checkpoint-wait activity visible without exposing a non-functional interrupt", () => {
-    const waitingRun = run("run-waiting", 1, "waiting");
-    const projection = { ...v2Projection, runs: [waitingRun], updatedAt: now };
-
-    expect(deriveThreadActivityRun(projection)).toMatchObject({
-      runId: waitingRun.id,
-      status: "waiting",
-    });
-
-    const runtime = deriveThreadRuntime(projection);
-    expect(runtime).toMatchObject({
-      status: "waiting",
-      activeRunId: null,
-    });
-    expect(threadRuntimeHasInterruptibleRun(runtime)).toBe(false);
-  });
-
-  it("does not expose a stale active run after the runtime parks at idle", () => {
-    const runtime = {
-      status: "idle" as const,
-      activeRunId: RunId.make("run-stale"),
-      providerInstanceId: v2Projection.thread.providerInstanceId,
-      providerName: null,
-      lastError: null,
-      updatedAt: DateTime.formatIso(now),
-    };
-
-    expect(threadRuntimeHasInterruptibleRun(runtime)).toBe(false);
-  });
-
-  it.each(["preparing", "starting"] as const)("keeps an active %s run interruptible", (status) => {
-    const runtime = {
-      status,
-      activeRunId: RunId.make(`run-${status}`),
-      providerInstanceId: v2Projection.thread.providerInstanceId,
-      providerName: null,
-      lastError: null,
-      updatedAt: DateTime.formatIso(now),
-    };
-
-    expect(threadRuntimeHasInterruptibleRun(runtime)).toBe(true);
-  });
+const nativeTurn = (overrides: Record<string, unknown> = {}) => ({
+  id: "provider-turn",
+  providerThreadId: "provider-thread",
+  nodeId: "node",
+  runAttemptId: null,
+  nativeTurnRef: null,
+  ordinal: 1,
+  status: "running",
+  startedAt: "2026-01-01T00:00:00Z",
+  completedAt: null,
+  ...overrides,
 });
 
-describe("threadRuntimeCanArchive", () => {
-  const runtime = (
-    status: ThreadRuntimeSummary["status"],
-    activeRunId: ThreadRuntimeSummary["activeRunId"],
-  ): ThreadRuntimeSummary => ({
-    status,
-    activeRunId,
-    providerInstanceId: v2Projection.thread.providerInstanceId,
-    providerName: null,
-    lastError: null,
-    updatedAt: DateTime.formatIso(now),
+describe("deriveActiveNativeProviderTurn", () => {
+  it("selects the newest pending or running turn for the active provider thread", () => {
+    const active = nativeTurn({ id: "newest", ordinal: 2, status: "pending" });
+    const result = deriveActiveNativeProviderTurn(
+      projection({
+        providerTurns: [
+          nativeTurn({ id: "old", ordinal: 1, status: "running" }),
+          nativeTurn({ id: "other-thread", providerThreadId: "other", ordinal: 3 }),
+          active,
+        ],
+      }),
+    );
+
+    expect(result).toBe(active);
   });
 
-  it.each(["preparing", "starting", "running"] as const)(
-    "blocks archive while a provider is %s",
-    (status) => {
-      expect(threadRuntimeCanArchive(runtime(status, RunId.make(`run-${status}`)))).toBe(false);
-    },
-  );
+  it("ignores a native turn after the current provider thread has a newer terminal turn", () => {
+    const result = deriveActiveNativeProviderTurn(
+      projection({
+        providerTurns: [
+          nativeTurn({ id: "running", ordinal: 1 }),
+          nativeTurn({
+            id: "completed",
+            ordinal: 2,
+            status: "completed",
+            completedAt: "2026-01-01T00:00:01Z",
+          }),
+        ],
+      }),
+    );
 
-  it("only blocks a queued runtime when a provider run remains attached", () => {
-    expect(threadRuntimeCanArchive(runtime("queued", RunId.make("run-queued")))).toBe(false);
-    expect(threadRuntimeCanArchive(runtime("queued", null))).toBe(true);
+    expect(result).toBeNull();
   });
 
-  it("allows waiting and idle threads", () => {
-    expect(threadRuntimeCanArchive(runtime("waiting", RunId.make("run-finished")))).toBe(true);
-    expect(threadRuntimeCanArchive(runtime("idle", null))).toBe(true);
+  it("does not compete with an application run", () => {
+    const result = deriveActiveNativeProviderTurn(
+      projection({
+        runs: [
+          {
+            id: "application-run",
+            ordinal: 1,
+            status: "running",
+            requestedAt: DateTime.makeUnsafe("2026-01-01T00:00:00.000Z"),
+            startedAt: DateTime.makeUnsafe("2026-01-01T00:00:00.000Z"),
+            completedAt: null,
+          },
+        ],
+        providerTurns: [nativeTurn()],
+      }),
+    );
+
+    expect(result).toBeNull();
   });
 });

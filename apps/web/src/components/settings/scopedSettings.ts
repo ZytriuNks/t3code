@@ -13,6 +13,10 @@ import {
 } from "@t3tools/contracts";
 import type { EnvironmentConnectionPhase } from "@t3tools/client-runtime/connection";
 import {
+  resolveConversationOverridesClear,
+  resolveConversationSettingsPatch,
+} from "@t3tools/shared/conversationSettings";
+import {
   clearProjectSettingsOverrides,
   resolveProjectSettings,
   resolveWorktreeCleanup,
@@ -220,74 +224,88 @@ export function planScopedSettingsPatch(
   const serverPatch = Object.fromEntries(
     Object.entries(patch).filter(([key]) => SERVER_KEYS.has(key)),
   ) as ServerSettingsPatch;
-  const serverKeys = Object.keys(serverPatch);
   const { connectedEnvironments } = selectScopedSettingsEnvironments(scope, environments, null);
   const isProjectScope = scope.kind === "project" || scope.kind === "checkout";
   const unscopableKeys = isProjectScope
-    ? serverKeys.filter((key) => !isProjectScopedSettingKey(key))
+    ? Object.keys(serverPatch).filter((key) => !isProjectScopedSettingKey(key))
     : [];
+  const applicableServerPatch = isProjectScope
+    ? (Object.fromEntries(
+        Object.entries(serverPatch).filter(([key]) => isProjectScopedSettingKey(key)),
+      ) as ServerSettingsPatch)
+    : serverPatch;
   const serverWrites: ScopedServerWrite[] =
-    serverKeys.length === 0
+    Object.keys(applicableServerPatch).length === 0
       ? []
       : isProjectScope
-        ? unscopableKeys.length > 0
-          ? []
-          : projectOverrideWrites(scope, environments, (current, settings, projectId) => {
-              // Object-valued keys arrive as partial patches (the writing style
-              // rows send one field); an override entry stores the whole value,
-              // so complete the patch from the target's effective value.
-              const effective = resolveProjectSettings(settings, projectId).settings;
-              const next: Record<string, unknown> = { ...current };
-              for (const [key, value] of Object.entries(serverPatch)) {
-                if (key === "worktreeCleanup" && serverPatch.worktreeCleanup?.mode === "custom") {
-                  next[key] = {
-                    mode: "custom",
-                    rules: {
-                      ...resolveWorktreeCleanup(settings, projectId),
-                      ...serverPatch.worktreeCleanup.rules,
-                    },
-                  };
-                  continue;
-                }
-                // A picker's "Inherit" sends null; for keys whose override
-                // cannot store null that means remove the override.
-                if (
-                  value === null &&
-                  !isNullableProjectSettingsOverride(key as ProjectScopedServerSettingKey)
-                ) {
-                  delete next[key];
-                  continue;
-                }
-                const base = effective[key as keyof ServerSettings];
-                next[key] =
-                  isPlainObject(value) && isPlainObject(base) ? { ...base, ...value } : value;
+        ? projectOverrideWrites(scope, environments, (current, settings, projectId) => {
+            // Object-valued keys arrive as partial patches (the writing style
+            // rows send one field); an override entry stores the whole value,
+            // so complete the patch from the target's effective value.
+            const effective = resolveProjectSettings(settings, projectId).settings;
+            const targetPatch = resolveConversationSettingsPatch(effective, applicableServerPatch);
+            const next: Record<string, unknown> = { ...current };
+            for (const [key, value] of Object.entries(targetPatch)) {
+              if (key === "worktreeCleanup" && targetPatch.worktreeCleanup?.mode === "custom") {
+                next[key] = {
+                  mode: "custom",
+                  rules: {
+                    ...resolveWorktreeCleanup(settings, projectId),
+                    ...targetPatch.worktreeCleanup.rules,
+                  },
+                };
+                continue;
               }
-              return next as ProjectSettingsOverrides;
-            })
+              // A picker's "Inherit" sends null; for keys whose override
+              // cannot store null that means remove the override.
+              if (
+                value === null &&
+                !isNullableProjectSettingsOverride(key as ProjectScopedServerSettingKey)
+              ) {
+                delete next[key];
+                continue;
+              }
+              const base = effective[key as keyof ServerSettings];
+              next[key] =
+                isPlainObject(value) && isPlainObject(base) ? { ...base, ...value } : value;
+            }
+            return next as ProjectSettingsOverrides;
+          })
         : scope.kind === "all" || scope.kind === "environment"
-          ? connectedEnvironments.map((environment) => ({
-              environmentId: environment.environmentId,
-              label: environment.label,
-              patch:
-                environment.serverConfig?.settings.worktreeCleanup != null &&
-                serverPatch.storageCleanup &&
-                Object.keys(serverPatch.storageCleanup).some((key) => key.startsWith("worktree"))
-                  ? {
-                      ...serverPatch,
-                      worktreeCleanup: {
-                        mode: "custom",
-                        rules: {
-                          ...resolveWorktreeCleanup(environment.serverConfig.settings, null),
-                          ...Object.fromEntries(
-                            Object.entries(serverPatch.storageCleanup).filter(([key]) =>
-                              key.startsWith("worktree"),
-                            ),
-                          ),
-                        },
-                      },
-                    }
-                  : serverPatch,
-            }))
+          ? connectedEnvironments.flatMap((environment) => {
+              if (!environment.serverConfig) return [];
+              const targetPatch = resolveConversationSettingsPatch(
+                environment.serverConfig.settings,
+                serverPatch,
+              );
+              return [
+                {
+                  environmentId: environment.environmentId,
+                  label: environment.label,
+                  patch:
+                    environment.serverConfig?.settings.worktreeCleanup != null &&
+                    targetPatch.storageCleanup &&
+                    Object.keys(targetPatch.storageCleanup).some((key) =>
+                      key.startsWith("worktree"),
+                    )
+                      ? {
+                          ...targetPatch,
+                          worktreeCleanup: {
+                            mode: "custom",
+                            rules: {
+                              ...resolveWorktreeCleanup(environment.serverConfig.settings, null),
+                              ...Object.fromEntries(
+                                Object.entries(targetPatch.storageCleanup).filter(([key]) =>
+                                  key.startsWith("worktree"),
+                                ),
+                              ),
+                            },
+                          },
+                        }
+                      : targetPatch,
+                },
+              ];
+            })
           : [];
   const hasClientWrite = Object.keys(clientPatch).length > 0;
   const hasWrite = hasClientWrite || serverWrites.length > 0;
@@ -313,7 +331,11 @@ export function planScopedSettingsClear(
   const serverWrites =
     scope.kind === "project" || scope.kind === "checkout"
       ? projectOverrideWrites(scope, environments, (_current, settings, projectId) =>
-          clearProjectSettingsOverrides(settings, projectId, keys),
+          clearProjectSettingsOverrides(
+            settings,
+            projectId,
+            resolveConversationOverridesClear(settings, projectId, keys),
+          ),
         )
       : [];
   return {
@@ -373,7 +395,11 @@ export function planProjectOverridesClear(
       patch: {
         projectSettingsOverrides: {
           ...existing?.patch.projectSettingsOverrides,
-          [projectId]: clearProjectSettingsOverrides(settings, projectId, keys),
+          [projectId]: clearProjectSettingsOverrides(
+            settings,
+            projectId,
+            resolveConversationOverridesClear(settings, projectId, keys),
+          ),
         },
       },
     });

@@ -20,6 +20,28 @@ const projectId = ProjectId.make("project-a");
 const otherProjectId = ProjectId.make("project-b");
 
 describe("resolveProjectSettings", () => {
+  it("inherits, overrides, and resets the smooth text yield duration per project", () => {
+    const baseline = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      smoothTextYieldDurationMs: 350,
+    });
+    expect(resolveProjectSettings(baseline, projectId).settings.smoothTextYieldDurationMs).toBe(
+      350,
+    );
+    const overridden = applyServerSettingsPatch(baseline, {
+      projectSettingsOverrides: { [projectId]: { smoothTextYieldDurationMs: 620 } },
+    });
+    expect(resolveProjectSettings(overridden, projectId).settings.smoothTextYieldDurationMs).toBe(
+      620,
+    );
+    expect(
+      resolveProjectSettings(overridden, otherProjectId).settings.smoothTextYieldDurationMs,
+    ).toBe(350);
+    const reset = applyServerSettingsPatch(overridden, {
+      projectSettingsOverrides: { [projectId]: {} },
+    });
+    expect(resolveProjectSettings(reset, projectId).settings.smoothTextYieldDurationMs).toBe(350);
+  });
+
   it("inherits every scopable key when the project has no overrides", () => {
     const resolved = resolveProjectSettings(DEFAULT_SERVER_SETTINGS, projectId);
     expect(resolved.settings).toBe(DEFAULT_SERVER_SETTINGS);

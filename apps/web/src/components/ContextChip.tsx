@@ -102,11 +102,13 @@ function ContextChip({ className, kind, state, render, ...props }: ContextChipPr
   });
 }
 
+export const CONTEXT_CHIP_LABEL_CLASS_NAME = "block min-w-0 self-center truncate leading-tight";
+
 /** The chip's text. Truncates to the chip's width. */
 function ContextChipLabel({ className, ...props }: React.ComponentProps<"span">) {
   return (
     <span
-      className={cn("block min-w-0 self-center truncate leading-tight", className)}
+      className={cn(CONTEXT_CHIP_LABEL_CLASS_NAME, className)}
       data-slot="context-chip-label"
       {...props}
     />
@@ -130,4 +132,10 @@ function ContextChipAction({ className, render, ...props }: useRender.ComponentP
   });
 }
 
-export { ContextChip, ContextChipAction, ContextChipLabel, type ContextChipKind };
+export {
+  contextChipVariants,
+  ContextChip,
+  ContextChipAction,
+  ContextChipLabel,
+  type ContextChipKind,
+};

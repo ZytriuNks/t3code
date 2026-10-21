@@ -5,6 +5,17 @@ import { EMPTY_THREAD_HISTORY_META, type ThreadHistoryMeta } from "./threadHisto
 
 export type EnvironmentThreadStatus = "empty" | "cached" | "synchronizing" | "live" | "deleted";
 
+export interface ThreadTextPlaybackState {
+  readonly generation: number;
+  readonly phase: "pending" | "synchronized" | "legacy";
+  /** Turn-item IDs (including inherited visible items), not message IDs. */
+  readonly baselineByItemId: ReadonlyMap<
+    string,
+    { readonly runId: string | null; readonly text: string }
+  >;
+  readonly legacyRunIds: ReadonlySet<string>;
+}
+
 export interface EnvironmentThreadState {
   readonly data: Option.Option<OrchestrationV2ThreadProjection>;
   readonly status: EnvironmentThreadStatus;
@@ -15,6 +26,7 @@ export interface EnvironmentThreadState {
    * promoted into the environment disconnect path.
    */
   readonly history: ThreadHistoryMeta;
+  readonly textPlayback?: ThreadTextPlaybackState;
 }
 
 export const EMPTY_ENVIRONMENT_THREAD_STATE: EnvironmentThreadState = {

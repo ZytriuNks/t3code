@@ -2049,6 +2049,20 @@ code {
   list-style-type: none;
 }
 
+.chat-markdown li[data-smooth-list-marker]::marker {
+  color: color-mix(
+    in srgb,
+    currentColor calc(var(--t3-smooth-marker-opacity, 1) * 100%),
+    transparent
+  );
+}
+
+/* The checkbox shares its list prefix clock without fading later wrapped text. */
+.chat-markdown li[data-smooth-list-marker] > input[type="checkbox"],
+.chat-markdown li[data-smooth-list-marker] > p > input[type="checkbox"] {
+  opacity: var(--t3-smooth-marker-opacity, 1);
+}
+
 .chat-markdown li[data-smooth-list-empty]::marker {
   color: transparent;
 }
@@ -2087,6 +2101,31 @@ code {
   color: var(--contrast-muted-foreground);
 }
 
+/* Only the decoration follows this edge; text keeps its physical-line FIFO. */
+[data-smooth-quote-border] {
+  position: relative;
+  /* Keep native border color/width readable when this queued quote becomes
+     active. A transparent border image changes paint without changing layout. */
+  border-image: linear-gradient(transparent, transparent) 1;
+}
+
+[data-smooth-quote-border]::before {
+  content: "";
+  position: absolute;
+  pointer-events: none;
+  left: calc(-1 * var(--t3-smooth-border-width));
+  top: 0;
+  width: var(--t3-smooth-border-width);
+  height: var(--t3-smooth-border-height);
+  background: var(--t3-smooth-border-color);
+}
+
+/* Keep native collapsed-border geometry and each cell's authored color. Only
+   its color alpha advances after the row and full edge fit published space. */
+[data-smooth-row-divider=""] > :is(th, td) {
+  border-bottom-color: var(--t3-smooth-divider-color, transparent) !important;
+}
+
 .chat-markdown section[data-footnotes] {
   margin-top: 1.25rem;
   border-top: 1px solid var(--contrast-border);
@@ -2107,6 +2146,25 @@ code {
   margin-top: 0.35rem;
 }
 
+/* The next note reserves its gap together with its first row. */
+[data-stream-footnotes]
+  section[data-footnotes]
+  > ol
+  > li[data-smooth-footnote-item]:not([hidden])
+  ~ li[data-smooth-footnote-item]:not([hidden]) {
+  margin-top: 0;
+}
+
+[data-stream-footnotes]
+  section[data-footnotes]
+  > ol
+  > li[data-smooth-footnote-item]:not([hidden])
+  ~ li[data-smooth-footnote-item]:not([hidden])
+  > [data-smooth-text-frame]
+  > .flow-root {
+  padding-top: 0.35rem;
+}
+
 [data-stream-footnotes] section[data-footnotes] {
   margin-top: 0;
   border-top: 0;
@@ -2123,10 +2181,13 @@ code {
 
 .streaming-markdown-footnotes {
   position: relative;
+  color: var(--contrast-muted-foreground);
+}
+
+.streaming-markdown-footnotes-heading {
   margin-top: 1.25rem;
   border-top: 1px solid var(--contrast-border);
   padding-top: 0.25rem;
-  color: var(--contrast-muted-foreground);
 }
 
 [data-stream-footnote-host]:not(:empty) {
@@ -2143,6 +2204,27 @@ code {
   text-decoration: none;
   font-size: 0.6875rem;
   font-weight: 600;
+}
+
+@keyframes t3-footnote-backref-enter {
+  from {
+    opacity: 0;
+    transform: translateX(-2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.chat-markdown a[data-footnote-backref][data-smooth-footnote-backref="enter"] {
+  animation: t3-footnote-backref-enter var(--t3-footnote-backref-duration, 200ms) ease-out both;
+}
+
+@media (prefers-reduced-motion: reduce), (forced-colors: active) {
+  .chat-markdown a[data-footnote-backref][data-smooth-footnote-backref="enter"] {
+    animation: none;
+  }
 }
 
 .chat-markdown :not(pre) > code {
@@ -2217,9 +2299,11 @@ code {
 }
 
 /* Keep the original text and layout for copying and citations. Only newly
-   received glyphs are masked; the registry is empty whenever reveal is idle. */
+   received glyphs are masked; the registry is empty whenever reveal is idle.
+   Observers own and remove their ranges. Keep the selector stable when their
+   marker is removed, avoiding a response-wide highlight style invalidation. */
 @media (prefers-reduced-motion: no-preference) and (forced-colors: none) {
-  [data-smooth-output]::highlight(t3-smooth-hidden) {
+  ::highlight(t3-smooth-hidden) {
     color: transparent;
     text-shadow: none;
     text-decoration-color: transparent;
@@ -2284,8 +2368,27 @@ code {
   }
 }
 
-/* Only lines still obtaining space need a clipped frame. Fully admitted text
-   uses native overflow so glyphs extending past the line box remain intact. */
+/* Keep per-frame clip updates out of Markdown's inherited styles. */
+@property --t3-smooth-paint-height {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+
+@property --t3-smooth-clip-extension {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+
+@property --t3-smooth-clip-bottom {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+
+/* Without a timeline boundary, clip only lines still obtaining space. Fully
+   admitted standalone text keeps glyphs extending past its line box intact. */
 [data-smooth-text-frame] {
   /* Footnote accessibility headings are absolute. Anchor them inside this
      frame so a hidden footer cannot extend the timeline's scrollable area. */
@@ -2294,6 +2397,16 @@ code {
 
 [data-smooth-text-frame][data-smooth-text-clipping] {
   overflow: clip;
+}
+
+/* Layout height still follows the FIFO space curve. Extend only the paint
+   clip into the measured gap, then cut it at the actual footer/Thinking edge.
+   overflow:clip keeps this from contributing native scroll overflow or
+   establishing another scroll container; clip-path also bounds the sides. */
+[data-smooth-text-frame][data-smooth-text-boundary] {
+  overflow: clip;
+  overflow-clip-margin: var(--t3-smooth-clip-extension, 0px);
+  clip-path: inset(0 0 var(--t3-smooth-clip-bottom, 0px) 0);
 }
 
 /* Diagnostics-style tables: row separators only, uppercase headers, and a

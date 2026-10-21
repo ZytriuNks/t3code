@@ -39,6 +39,7 @@ import {
   type MessageId,
   type WorktreeSetupSnapshot,
   type OrchestrationV2ProjectedTurnItem,
+  type ProviderTurnId,
   type RunAttemptId,
   type RunId,
 } from "@t3tools/contracts";
@@ -268,6 +269,47 @@ export function shouldRearmTimelineFollow(input: {
   return (
     input.isAtEnd && (input.scrollMode === "following-end" || input.scrollIntent === "toward-end")
   );
+}
+
+/**
+ * When the Markdown body may leave its live streaming state. A run can settle
+ * before its last assistant chunk lands, so the body waits for the message's
+ * own streaming bit. Stale runs and terminal items (cancelled, failed,
+ * interrupted) can keep that bit after recovery and must not hold the reveal
+ * open forever; only the active run's real tail earns the extra wait.
+ */
+export function resolveSmoothComplete(input: {
+  readonly smoothStreaming: boolean;
+  readonly messageRunId: RunId | null;
+  readonly messageStreaming: boolean;
+  readonly itemType: OrchestrationV2ProjectedTurnItem["item"]["type"] | null;
+  readonly itemStatus: OrchestrationV2ProjectedTurnItem["item"]["status"] | null;
+  readonly latestRunId: RunId | null;
+  readonly latestRunStatus?: TimelineLatestRun["status"] | null;
+  readonly isWorking: boolean;
+}): boolean {
+  if (!input.smoothStreaming) return false;
+  const staleRun =
+    input.messageRunId !== null &&
+    input.latestRunId !== null &&
+    input.messageRunId !== input.latestRunId;
+  if (staleRun) return true;
+  if (
+    input.latestRunStatus === "completed" ||
+    input.latestRunStatus === "failed" ||
+    input.latestRunStatus === "interrupted" ||
+    input.latestRunStatus === "cancelled" ||
+    input.latestRunStatus === "rolled_back"
+  )
+    return true;
+  if (
+    input.itemType === "assistant_message" &&
+    (input.itemStatus === "cancelled" ||
+      input.itemStatus === "failed" ||
+      input.itemStatus === "interrupted")
+  )
+    return true;
+  return !input.messageStreaming && !input.isWorking;
 }
 
 /**
@@ -1215,6 +1257,11 @@ export function deriveMessagesTimelineRows(input: {
   liveAgentTaskIds?: ReadonlySet<string> | undefined;
   /** Drives live-label scope and tool archiving. Undefined behaves as "default". */
   conversationStructure?: ConversationStructure | undefined;
+  /**
+   * Native subagent turns have no application run. Their tool items carry this
+   * provider turn instead, and it scopes the live activity like a running run.
+   */
+  activeProviderTurnId?: ProviderTurnId | null | undefined;
   /** Live bootstrap progress. Renders a stage card under the first user message. */
   worktreeSetup?: WorktreeSetupSnapshot | null;
 }): MessagesTimelineRow[] {
@@ -1270,11 +1317,16 @@ export function deriveMessagesTimelineRows(input: {
       }
     }
   }
+  const activeProviderTurnId =
+    unsettledRunId === null ? (input.activeProviderTurnId ?? null) : null;
+  const workEntryInActiveScope = (entry: WorkLogEntry) =>
+    unsettledRunId !== null
+      ? entry.runId === unsettledRunId
+      : activeProviderTurnId !== null &&
+        entry.runId == null &&
+        entry.structuredPayload?.providerTurnId === activeProviderTurnId;
   const workEntryIsInActiveRun = (entry: WorkLogEntry) =>
-    input.isWorking &&
-    unsettledRunId !== null &&
-    entry.toolLifecycleStatus === "inProgress" &&
-    entry.runId === unsettledRunId;
+    input.isWorking && entry.toolLifecycleStatus === "inProgress" && workEntryInActiveScope(entry);
 
   // A steer continues the current turn. Keep its elapsed-time header below
   // the initiating prompt (or automatic wake), rather than moving it down.
@@ -1287,12 +1339,15 @@ export function deriveMessagesTimelineRows(input: {
   // and once everything settles it keeps the latest tool in past tense
   // instead of vanishing (#8984).
   const activeToolEntries: Array<Extract<TimelineEntry, { kind: "work" }>> = [];
-  if (input.isWorking && unsettledRunId !== null) {
+  if (
+    input.isWorking &&
+    (unsettledRunId !== null || (restructured && activeProviderTurnId !== null))
+  ) {
     if (restructured) {
       for (const entry of timelineEntries) {
         if (
           entry.kind === "work" &&
-          entry.entry.runId === unsettledRunId &&
+          workEntryInActiveScope(entry.entry) &&
           entry.attempt?.status !== "superseded" &&
           entry.entry.sourceActivityKind !== "context-compaction" &&
           entry.entry.itemType !== "system_notice" &&
@@ -1783,7 +1838,7 @@ export function deriveMessagesTimelineRows(input: {
       showAssistantCopyButton: showAssistantMeta,
       assistantCopyStreaming: timelineEntry.message.streaming || assistantResponseStillInProgress,
       assistantTurnDiffSummary:
-        timelineEntry.message.role === "assistant"
+        timelineEntry.message.role === "assistant" && !assistantResponseStillInProgress
           ? turnDiffSummaryByAssistantMessageId.get(timelineEntry.message.id)
           : undefined,
       revertTurnCount:

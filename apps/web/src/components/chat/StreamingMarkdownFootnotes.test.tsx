@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, useState } from "react";
+import { act, Profiler, StrictMode, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -15,6 +15,52 @@ import { use } from "react";
 let root: Root;
 let page: HTMLDivElement;
 let host: HTMLDivElement;
+let frames: Map<number, FrameRequestCallback>;
+let clock: number;
+
+const rangeBounds = Object.getOwnPropertyDescriptor(Range.prototype, "getBoundingClientRect");
+const rangeRects = Object.getOwnPropertyDescriptor(Range.prototype, "getClientRects");
+
+class TestHighlight extends Set<AbstractRange> {}
+
+function enableSmoothPlayback() {
+  vi.spyOn(performance, "now").mockImplementation(() => clock);
+  vi.stubGlobal("Highlight", TestHighlight);
+  vi.stubGlobal("CSS", { highlights: new Map<string, TestHighlight>() });
+  vi.stubGlobal("matchMedia", () => ({
+    matches: false,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  }));
+  Object.defineProperty(Range.prototype, "getBoundingClientRect", {
+    configurable: true,
+    value(this: Range) {
+      return { bottom: 20, height: this.toString().trim() ? 10 : 0 } as DOMRect;
+    },
+  });
+  Object.defineProperty(Range.prototype, "getClientRects", {
+    configurable: true,
+    value: () => [],
+  });
+}
+
+async function stepPlayback(ms = 16) {
+  clock += ms;
+  await act(async () => {
+    vi.advanceTimersByTime(ms);
+    const callbacks = [...frames.values()];
+    frames.clear();
+    callbacks.forEach((callback) => callback(clock));
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
+
+function backrefPhase(link: HTMLElement) {
+  return link.style.visibility === "hidden"
+    ? "waiting"
+    : (link.dataset.smoothFootnoteBackref ?? "ready");
+}
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -25,7 +71,8 @@ beforeEach(() => {
   root = createRoot(page);
   vi.stubGlobal("matchMedia", () => ({ matches: false }));
   let frameId = 0;
-  const frames = new Map<number, FrameRequestCallback>();
+  clock = 0;
+  frames = new Map<number, FrameRequestCallback>();
   vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
     frames.set(++frameId, callback);
     return frameId;
@@ -38,6 +85,11 @@ afterEach(async () => {
   host.remove();
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+  if (rangeBounds) Object.defineProperty(Range.prototype, "getBoundingClientRect", rangeBounds);
+  else Reflect.deleteProperty(Range.prototype, "getBoundingClientRect");
+  if (rangeRects) Object.defineProperty(Range.prototype, "getClientRects", rangeRects);
+  else Reflect.deleteProperty(Range.prototype, "getClientRects");
 });
 
 function Body({
@@ -86,6 +138,479 @@ function Body({
   );
 }
 
+describe("footnote backref playback", () => {
+  const view = ({
+    text = "AB",
+    complete = true,
+    secondRef = false,
+    smooth = true,
+    streaming = true,
+    duration = 200,
+    collapse = false,
+    queued = false,
+    block = "paragraph",
+  }: {
+    text?: string;
+    complete?: boolean;
+    secondRef?: boolean;
+    smooth?: boolean;
+    streaming?: boolean;
+    duration?: number;
+    collapse?: boolean;
+    queued?: boolean;
+    block?: "paragraph" | "paragraphs" | "code" | "list";
+  } = {}) => (
+    <StreamingMarkdownFootnotes
+      host={host}
+      detached
+      streaming={streaming}
+      smooth={smooth}
+      mode="character"
+      lineMode="adaptive"
+      fadeDurationMs={duration}
+      autoCollapse={collapse}
+      items={[
+        { id: "footnote-one", text, complete, navigationKey: String(secondRef) },
+        ...(queued ? [{ id: "footnote-two", text: "CD", complete: true }] : []),
+      ]}
+    >
+      <ol>
+        <StreamingMarkdownFootnoteItem id="footnote-one">
+          {block === "code" ? (
+            <pre>
+              <code>{text}</code>
+            </pre>
+          ) : block === "list" ? (
+            <ul>
+              <li>{text}</li>
+            </ul>
+          ) : block === "paragraphs" ? (
+            <>
+              <p>Prefix</p>
+              <p>{text}</p>
+            </>
+          ) : (
+            <p>{text}</p>
+          )}
+          <p>
+            <a data-footnote-backref="" href="#reference-one" aria-label="Back to reference 1">
+              ↩
+            </a>
+            {secondRef ? (
+              <a data-footnote-backref="" href="#reference-two" aria-label="Back to reference 2">
+                ↩<sup>2</sup>
+              </a>
+            ) : null}
+          </p>
+        </StreamingMarkdownFootnoteItem>
+        {queued ? (
+          <StreamingMarkdownFootnoteItem id="footnote-two">
+            <p>CD</p>
+            <p>
+              <a data-footnote-backref="" href="#reference-two">
+                ↩
+              </a>
+            </p>
+          </StreamingMarkdownFootnoteItem>
+        ) : null}
+      </ol>
+    </StreamingMarkdownFootnotes>
+  );
+
+  async function finishBody(link: HTMLElement) {
+    for (let frame = 0; frame < 250 && backrefPhase(link) === "waiting"; frame++)
+      await stepPlayback();
+    expect(backrefPhase(link)).not.toBe("waiting");
+  }
+
+  it("drains a completed footnote instead of replaying it one glyph at a time", async () => {
+    enableSmoothPlayback();
+    const text = "A".repeat(200);
+    await act(() => root.render(view({ text, complete: true, streaming: false })));
+    const link = host.querySelector<HTMLAnchorElement>("a")!;
+    const started = clock;
+    await finishBody(link);
+    expect(clock - started).toBeLessThanOrEqual(400);
+  });
+
+  it("hides an already displayed backref while appended text waits for its new tail fade", async () => {
+    enableSmoothPlayback();
+    await act(() => root.render(view()));
+    const link = host.querySelector<HTMLAnchorElement>("a")!;
+    await finishBody(link);
+    await stepPlayback(200);
+    expect(backrefPhase(link)).toBe("ready");
+    await act(() => root.render(view({ text: "AB new tail", complete: false })));
+    expect(backrefPhase(link)).toBe("waiting");
+    expect(CSS.highlights.get("t3-smooth-hidden")?.size ?? 0).toBeGreaterThan(0);
+    const hiddenTail = CSS.highlights.get("t3-smooth-hidden") as TestHighlight;
+    const hiddenText = [...hiddenTail]
+      .map((range) => {
+        const copy = document.createRange();
+        copy.setStart(range.startContainer, range.startOffset);
+        copy.setEnd(range.endContainer, range.endOffset);
+        return copy.toString();
+      })
+      .join("");
+    expect(hiddenText).not.toContain("AB");
+    await stepPlayback(400);
+    expect(backrefPhase(link)).toBe("waiting");
+    await act(() => root.render(view({ text: "AB new tail" })));
+    await finishBody(link);
+    expect(backrefPhase(link)).toBe("enter");
+    await stepPlayback(200);
+    expect(backrefPhase(link)).toBe("ready");
+  });
+
+  it("waits for an appended completed snapshot's new glyphs rather than replaying the prefix", async () => {
+    enableSmoothPlayback();
+    await act(() => root.render(view()));
+    const link = host.querySelector<HTMLAnchorElement>("a")!;
+    await finishBody(link);
+    await stepPlayback(200);
+    await act(() => root.render(view({ text: "AB a completed appended tail" })));
+    expect(backrefPhase(link)).toBe("waiting");
+    expect(CSS.highlights.get("t3-smooth-hidden")?.size ?? 0).toBeGreaterThan(0);
+    await finishBody(link);
+    expect(backrefPhase(link)).toBe("enter");
+  });
+
+  it("animates only a newly added reference without replaying completed body or collapsing over it", async () => {
+    enableSmoothPlayback();
+    await act(() => root.render(view({ collapse: true })));
+    const first = host.querySelector<HTMLAnchorElement>("a")!;
+    await finishBody(first);
+    await stepPlayback(200);
+    // The new reference arrives during the outgoing close; its own tail reopens it.
+    await stepPlayback(100);
+    await act(() => root.render(view({ collapse: true, secondRef: true })));
+    const second = host.querySelectorAll<HTMLAnchorElement>("a")[1]!;
+    expect(backrefPhase(first)).toBe("ready");
+    expect(backrefPhase(second)).toBe("enter");
+    expect(CSS.highlights.get("t3-smooth-hidden")?.size ?? 0).toBe(0);
+    const widget = host.querySelector<HTMLElement>("[data-stream-footnotes]")!;
+    await stepPlayback(60);
+    expect(widget.dataset.markdownDetailsOpen).toBe("true");
+    await stepPlayback(140);
+    expect(backrefPhase(second)).toBe("ready");
+    await stepPlayback(16);
+    expect(widget.dataset.markdownDetailsOpen).toBe("false");
+  });
+
+  it("resumes an interrupted tail after hiding and expanding without replaying completed glyphs", async () => {
+    enableSmoothPlayback();
+    await act(() => root.render(view()));
+    const link = host.querySelector<HTMLAnchorElement>("a")!;
+    await finishBody(link);
+    const widget = host.querySelector<HTMLElement>("[data-stream-footnotes]")!;
+    await act(() => widget.querySelector<HTMLButtonElement>("button")!.click());
+    const end = new Event("transitionend", { bubbles: true });
+    Object.defineProperty(end, "propertyName", { value: "height" });
+    await act(() => widget.querySelector('[data-slot="collapsible-panel"]')!.dispatchEvent(end));
+    await stepPlayback(500);
+    expect(link.closest("li")!.hidden).toBe(true);
+    await act(() => widget.dispatchEvent(new Event("t3-expand-footnotes")));
+    expect(backrefPhase(link)).toBe("enter");
+    expect(CSS.highlights.get("t3-smooth-hidden")?.size ?? 0).toBe(0);
+    await stepPlayback(200);
+    expect(backrefPhase(link)).toBe("ready");
+  });
+
+  it("does not advance a queued note until every outgoing backref has finished entering", async () => {
+    enableSmoothPlayback();
+    const queued = (
+      <StreamingMarkdownFootnotes
+        host={host}
+        detached
+        streaming
+        smooth
+        mode="character"
+        lineMode="adaptive"
+        autoCollapse
+        items={[
+          { id: "footnote-one", text: "AB", complete: true },
+          { id: "footnote-two", text: "CD", complete: true },
+        ]}
+      >
+        <ol>
+          <StreamingMarkdownFootnoteItem id="footnote-one">
+            <p>
+              AB{" "}
+              <a data-footnote-backref="" href="#one">
+                ↩
+              </a>{" "}
+              <a data-footnote-backref="" href="#one-two">
+                ↩
+              </a>
+            </p>
+          </StreamingMarkdownFootnoteItem>
+          <StreamingMarkdownFootnoteItem id="footnote-two">
+            <p>
+              CD{" "}
+              <a data-footnote-backref="" href="#two">
+                ↩
+              </a>
+            </p>
+          </StreamingMarkdownFootnoteItem>
+        </ol>
+      </StreamingMarkdownFootnotes>
+    );
+    await act(() => root.render(queued));
+    const widget = host.querySelector<HTMLElement>("[data-stream-footnotes]")!;
+    const items = widget.querySelectorAll("li");
+    const links = widget.querySelectorAll<HTMLAnchorElement>("a");
+    expect(items[1]!.hidden).toBe(true);
+    await finishBody(links[0]!);
+    expect(backrefPhase(links[0]!)).toBe("enter");
+    expect(backrefPhase(links[1]!)).toBe("enter");
+    await stepPlayback(199);
+    expect(widget.dataset.markdownDetailsOpen).toBe("true");
+    expect(items[1]!.hidden).toBe(true);
+    await stepPlayback(1);
+    expect(links[0] && backrefPhase(links[0])).toBe("ready");
+    expect(links[1] && backrefPhase(links[1])).toBe("ready");
+    await stepPlayback(16);
+    expect(widget.dataset.markdownDetailsOpen).toBe("false");
+    const end = new Event("transitionend", { bubbles: true });
+    Object.defineProperty(end, "propertyName", { value: "height" });
+    await act(() => widget.querySelector('[data-slot="collapsible-panel"]')!.dispatchEvent(end));
+    expect(items[0]!.hidden).toBe(true);
+    expect(items[1]!.hidden).toBe(false);
+    expect(backrefPhase(links[2]!)).toBe("waiting");
+    await finishBody(links[2]!);
+    expect(backrefPhase(links[2]!)).toBe("enter");
+  });
+
+  it.each(["visibility", "(prefers-reduced-motion: reduce)", "(forced-colors: active)"])(
+    "keeps a queued note waiting for its body after temporary %s bypass",
+    async (bypass) => {
+      enableSmoothPlayback();
+      const hidden = vi.spyOn(document, "hidden", "get").mockReturnValue(false);
+      const media = new Map<string, EventTarget & { matches: boolean }>();
+      vi.stubGlobal("matchMedia", (query: string) => {
+        if (!media.has(query))
+          media.set(query, Object.assign(new EventTarget(), { matches: false }));
+        return media.get(query)!;
+      });
+      const setBypass = (active: boolean) => {
+        if (bypass === "visibility") {
+          hidden.mockReturnValue(active);
+          document.dispatchEvent(new Event("visibilitychange"));
+        } else {
+          const query = media.get(bypass)!;
+          query.matches = active;
+          query.dispatchEvent(new Event("change"));
+        }
+      };
+      await act(() => root.render(view({ collapse: true, queued: true })));
+      const widget = host.querySelector<HTMLElement>("[data-stream-footnotes]")!;
+      const items = widget.querySelectorAll("li");
+      const links = widget.querySelectorAll<HTMLAnchorElement>("a");
+      expect(items[1]!.hidden).toBe(true);
+      expect(backrefPhase(links[1]!)).toBe("waiting");
+      await act(() => setBypass(true));
+      await act(() => root.render(view({ collapse: true, queued: true })));
+      await act(() => setBypass(false));
+      expect(backrefPhase(links[0]!)).toBe("ready");
+      expect(widget.dataset.markdownDetailsOpen).toBe("false");
+      expect(items[1]!.hidden).toBe(true);
+      const end = new Event("transitionend", { bubbles: true });
+      Object.defineProperty(end, "propertyName", { value: "height" });
+      await act(() => widget.querySelector('[data-slot="collapsible-panel"]')!.dispatchEvent(end));
+      expect(items[1]!.hidden).toBe(false);
+      const masks = CSS.highlights.get("t3-smooth-hidden") as TestHighlight;
+      expect([...masks].some((range) => items[1]!.contains(range.startContainer))).toBe(true);
+      expect(backrefPhase(links[1]!)).toBe("waiting");
+      await finishBody(links[1]!);
+      expect(backrefPhase(links[1]!)).toBe("enter");
+      await stepPlayback(200);
+      expect(backrefPhase(links[1]!)).toBe("ready");
+    },
+  );
+
+  it("finishes an empty note's tail when Strict Mode replays its mount effects", async () => {
+    enableSmoothPlayback();
+    await act(() => root.render(<StrictMode>{view({ text: "" })}</StrictMode>));
+    const link = host.querySelector<HTMLAnchorElement>("a")!;
+    await finishBody(link);
+    expect(backrefPhase(link)).toBe("enter");
+    await stepPlayback(200);
+    expect(backrefPhase(link)).toBe("ready");
+  });
+
+  it("only commits the completion record when the local navigation tail finishes", async () => {
+    enableSmoothPlayback();
+    let commits = 0;
+    await act(() =>
+      root.render(
+        <Profiler
+          id="footnotes"
+          onRender={() => {
+            commits++;
+          }}
+        >
+          {view()}
+        </Profiler>,
+      ),
+    );
+    const link = host.querySelector<HTMLAnchorElement>("a")!;
+    await finishBody(link);
+    expect(backrefPhase(link)).toBe("enter");
+    // The heading's one-time admission commit precedes this local tail.
+    const initialCommits = commits;
+    await stepPlayback(100);
+    expect(backrefPhase(link)).toBe("enter");
+    expect(commits).toBe(initialCommits);
+    await stepPlayback(100);
+    expect(backrefPhase(link)).toBe("ready");
+    // Keep the record for later auto-collapse setting changes without rendering animation frames.
+    expect(commits).toBe(initialCommits + 1);
+    await stepPlayback(200);
+    expect(commits).toBe(initialCommits + 1);
+  });
+
+  it.each(["(prefers-reduced-motion: reduce)", "(forced-colors: active)"])(
+    "settles an in-flight tail when %s becomes active",
+    async (query) => {
+      enableSmoothPlayback();
+      const listeners = new Map<string, () => void>();
+      const media = new Map<
+        string,
+        {
+          matches: boolean;
+          addEventListener: (_type: string, listener: () => void) => void;
+          removeEventListener: () => void;
+        }
+      >();
+      vi.stubGlobal("matchMedia", (key: string) => {
+        if (!media.has(key))
+          media.set(key, {
+            matches: false,
+            addEventListener: (_type, listener) => {
+              listeners.set(key, listener);
+            },
+            removeEventListener: () => {},
+          });
+        return media.get(key)!;
+      });
+      await act(() => root.render(view()));
+      const link = host.querySelector<HTMLAnchorElement>("a")!;
+      await finishBody(link);
+      expect(backrefPhase(link)).toBe("enter");
+      media.get(query)!.matches = true;
+      await act(() => listeners.get(query)!());
+      expect(backrefPhase(link)).toBe("ready");
+    },
+  );
+
+  it("still waits for the FIFO with zero-duration fades, then shows the backref without animation", async () => {
+    enableSmoothPlayback();
+    await act(() => root.render(view({ duration: 0 })));
+    const link = host.querySelector<HTMLAnchorElement>("a")!;
+    expect(backrefPhase(link)).toBe("waiting");
+    await finishBody(link);
+    expect(backrefPhase(link)).toBe("ready");
+  });
+
+  it.each(["history", "non-smooth", "unsupported", "reduced-motion", "forced-colors"])(
+    "shows navigation immediately for %s",
+    async (fallback) => {
+      if (fallback !== "unsupported") enableSmoothPlayback();
+      if (fallback === "reduced-motion" || fallback === "forced-colors")
+        vi.stubGlobal("matchMedia", (query: string) => ({
+          matches:
+            query ===
+            (fallback === "reduced-motion"
+              ? "(prefers-reduced-motion: reduce)"
+              : "(forced-colors: active)"),
+          addEventListener: () => {},
+          removeEventListener: () => {},
+        }));
+      await act(() =>
+        root.render(
+          view({
+            streaming: fallback !== "history",
+            smooth: fallback !== "non-smooth",
+            duration: 200,
+            complete: fallback === "history",
+          }),
+        ),
+      );
+      expect(backrefPhase(host.querySelector<HTMLAnchorElement>("a")!)).toBe("ready");
+    },
+  );
+
+  it.each(["non-smooth", "unsupported"])(
+    "shows a queued note's navigation after opening with %s static output",
+    async (fallback) => {
+      enableSmoothPlayback();
+      if (fallback === "unsupported") vi.stubGlobal("Highlight", undefined);
+      await act(() =>
+        root.render(view({ collapse: true, queued: true, smooth: fallback !== "non-smooth" })),
+      );
+      const widget = host.querySelector<HTMLElement>("[data-stream-footnotes]")!;
+      const items = widget.querySelectorAll("li");
+      expect(items[1]!.hidden).toBe(true);
+      await stepPlayback(250);
+      expect(widget.dataset.markdownDetailsOpen).toBe("false");
+      const end = new Event("transitionend", { bubbles: true });
+      Object.defineProperty(end, "propertyName", { value: "height" });
+      await act(() => widget.querySelector('[data-slot="collapsible-panel"]')!.dispatchEvent(end));
+      expect(items[1]!.hidden).toBe(false);
+      expect(backrefPhase(items[1]!.querySelector<HTMLAnchorElement>("a")!)).toBe("ready");
+      await stepPlayback(650);
+      expect(widget.dataset.markdownDetailsOpen).toBe("false");
+    },
+  );
+
+  it.each(["paragraph", "paragraphs", "code", "list"] as const)(
+    "waits for the %s tail's FIFO and fade before entering every backref",
+    async (block) => {
+      enableSmoothPlayback();
+      await act(() => root.render(view({ block, secondRef: true, collapse: true })));
+      const links = [...host.querySelectorAll<HTMLAnchorElement>("a[data-footnote-backref]")];
+      expect(links.map(backrefPhase)).toEqual(["waiting", "waiting"]);
+      const hidden = CSS.highlights.get("t3-smooth-hidden") as TestHighlight | undefined;
+      expect(
+        [...(hidden ?? [])]
+          .map((range) => {
+            const copy = document.createRange();
+            copy.setStart(range.startContainer, range.startOffset);
+            copy.setEnd(range.endContainer, range.endOffset);
+            return copy.toString();
+          })
+          .join(""),
+      ).not.toContain("↩");
+      let entered = false;
+      for (let frame = 0; frame < 250; frame++) {
+        await stepPlayback();
+        if (links.some((link) => backrefPhase(link) === "enter")) {
+          entered = true;
+          expect(
+            [...CSS.highlights.entries()]
+              .filter(([name]) => name.startsWith("t3-smooth-fade-"))
+              .flatMap(([, ranges]) => [...ranges]),
+          ).toHaveLength(0);
+          break;
+        }
+        expect(links.map(backrefPhase)).toEqual(["waiting", "waiting"]);
+      }
+      expect(entered).toBe(true);
+      expect(links.map(backrefPhase)).toEqual(["enter", "enter"]);
+      expect(links[0]!.getAttribute("href")).toBe("#reference-one");
+      expect(links[1]!.getAttribute("aria-label")).toBe("Back to reference 2");
+      const widget = host.querySelector<HTMLElement>("[data-stream-footnotes]")!;
+      await stepPlayback(199);
+      expect(widget.dataset.markdownDetailsOpen).toBe("true");
+      await stepPlayback(1);
+      expect(links.map(backrefPhase)).toEqual(["ready", "ready"]);
+      // The final glyph/navigation fades consumed part of the reading window.
+      await stepPlayback(650);
+      expect(widget.dataset.markdownDetailsOpen).toBe("false");
+    },
+  );
+});
+
 describe("streaming footnote ownership", () => {
   it("keeps the same local placement when source playback and Thinking end separately", async () => {
     const local = document.createElement("div");
@@ -117,7 +642,7 @@ describe("streaming footnote ownership", () => {
     }
   });
 
-  it("does not restart the completed note's reading pause when another note arrives", async () => {
+  it("starts closing a completed note immediately and preserves the queued next note", async () => {
     await act(() => root.render(<Body autoCollapse finished />));
     const widget = host.querySelector<HTMLElement>("[data-stream-footnotes]")!;
     await act(() => vi.advanceTimersByTime(500));
@@ -129,8 +654,7 @@ describe("streaming footnote ownership", () => {
   it("cancels automatic collapse when a note grows again or the reader expands it", async () => {
     await act(() => root.render(<Body autoCollapse finished />));
     const widget = host.querySelector<HTMLElement>("[data-stream-footnotes]")!;
-    await act(() => vi.advanceTimersByTime(500));
-    expect(widget.dataset.markdownDetailsOpen).toBe("true");
+    expect(widget.dataset.markdownDetailsOpen).toBe("false");
     await act(() => root.render(<Body autoCollapse text="continued note" />));
     await act(() => vi.advanceTimersByTime(1000));
     expect(widget.dataset.markdownDetailsOpen).toBe("true");
@@ -192,7 +716,7 @@ describe("streaming footnote ownership", () => {
     await act(() => root.render(<Body autoCollapse second />));
     const widget = host.querySelector<HTMLElement>("[data-stream-footnotes]")!;
     await act(() => root.render(<Body autoCollapse second finished />));
-    expect(widget.dataset.markdownDetailsOpen).toBe("true");
+    expect(widget.dataset.markdownDetailsOpen).toBe("false");
     await act(() => vi.advanceTimersByTime(250));
     const panel = widget.querySelector('[data-slot="collapsible-panel"]')!;
     const event = new Event("transitionend", { bubbles: true });
@@ -223,7 +747,7 @@ describe("streaming footnote ownership", () => {
     expect(first.hidden).toBe(false);
     expect(second.hidden).toBe(true);
     await act(() => root.render(<Body autoCollapse second finished />));
-    expect(widget.dataset.markdownDetailsOpen).toBe("true");
+    expect(widget.dataset.markdownDetailsOpen).toBe("false");
     await act(() => vi.advanceTimersByTime(250));
     expect(widget.dataset.markdownDetailsOpen).toBe("false");
     expect(first.hidden).toBe(false);
@@ -298,16 +822,19 @@ describe("streaming footnote ownership", () => {
       expect(widget.dataset.markdownDetailsOpen).toBe("false");
     });
 
-    it("keeps the run open when its next note arrives during the reading pause", async () => {
+    it("finishes the old close before opening an adjacent note that arrives after completion", async () => {
       await act(() => root.render(run({ second: false, finished: true })));
       const widget = host.querySelector<HTMLElement>("[data-stream-footnotes]")!;
       const first = widget.querySelector("li")!;
       await act(() => vi.advanceTimersByTime(300));
       await act(() => root.render(run({ second: true, finished: false })));
-      await act(() => vi.advanceTimersByTime(1_000));
       const second = widget.querySelectorAll("li")[1]!;
-      expect(widget.dataset.markdownDetailsOpen).toBe("true");
+      expect(widget.dataset.markdownDetailsOpen).toBe("false");
       expect(first.hidden).toBe(false);
+      expect(second.hidden).toBe(true);
+      await act(() => completeTransition(widget));
+      expect(widget.dataset.markdownDetailsOpen).toBe("true");
+      expect(first.hidden).toBe(true);
       expect(second.hidden).toBe(false);
     });
   });

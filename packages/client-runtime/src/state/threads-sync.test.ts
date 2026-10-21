@@ -1448,6 +1448,7 @@ describe("EnvironmentThreads", () => {
       // Seeded projection reference path: event path kept partial meta intact.
       expect(after.history.historyCursor).toBe("partial-cursor");
       expect(after.history.hasMoreHistory).toBe(true);
+      expect(after.textPlayback).toBe(seeded.textPlayback);
       // Title event applied; drop itself did not clear progressive meta.
       expect(seededProjection.turnItems.map((item) => String(item.id))).toEqual([
         String(recent.id),

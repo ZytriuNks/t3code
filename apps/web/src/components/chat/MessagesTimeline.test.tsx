@@ -31,7 +31,6 @@ import { readTimelinePosition, rememberTimelinePosition } from "./timelineScroll
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import type { LegendListRef } from "@legendapp/list/react";
 import type { SmoothScrollHandle } from "../../hooks/useSmoothScroll";
-import type { SmoothTextLayoutDetail } from "../../lib/smoothTextLayout";
 
 const activityTestState = vi.hoisted(() => ({
   expanded: false,
@@ -386,6 +385,108 @@ function buildSnapShotTimelineEntry(previewUrl?: string) {
 }
 
 describe("MessagesTimeline", () => {
+  it.each(
+    (["default", "restructured"] as const).flatMap((structure) =>
+      [false, true].map((priorRun) => [structure, priorRun] as const),
+    ),
+  )(
+    "animates new status space in %s once across optimistic startedAt and label updates (prior run: %s)",
+    async (conversationStructure, priorRun) => {
+      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+      const frames = new Map<number, FrameRequestCallback>();
+      let next = 0;
+      let now = 0;
+      vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+        frames.set(++next, callback);
+        return next;
+      });
+      vi.stubGlobal("cancelAnimationFrame", (id: number) => frames.delete(id));
+      const clock = vi.spyOn(performance, "now").mockImplementation(() => now);
+      const ownerDocument = { createElement: () => ({ style: { height: "" } }) };
+      const nodes = new Map<string, { style: { height: string } }>();
+      const props = {
+        ...buildProps(),
+        conversationStructure,
+        smoothStreaming: true,
+        timelineEntries: [],
+        latestRun: priorRun
+          ? {
+              runId: RunId.make("previous-status-run"),
+              status: "completed" as const,
+              startedAt: MESSAGE_CREATED_AT,
+              completedAt: MESSAGE_CREATED_AT,
+            }
+          : null,
+      };
+      let renderer: ReactTestRenderer | undefined;
+      const render = async (isWorking: boolean, started = false, label = "Thinking") => {
+        const element = (
+          <MessagesTimeline
+            {...props}
+            isWorking={isWorking}
+            conversationStructureThinkingLabel={label}
+            latestRun={
+              started
+                ? {
+                    runId: RunId.make("status-run"),
+                    status: "running",
+                    startedAt: MESSAGE_CREATED_AT,
+                    completedAt: null,
+                  }
+                : props.latestRun
+            }
+          />
+        );
+        await act(() => {
+          if (renderer) renderer.update(element);
+          else
+            renderer = create(element, {
+              createNodeMock: (node) => {
+                const props = node.props as Record<string, unknown>;
+                if (!props["data-timeline-status-height"] && props.className !== "flow-root")
+                  return null;
+                const target = Object.assign(new EventTarget(), {
+                  ownerDocument,
+                  style: { height: "" },
+                  parentElement: null,
+                  isConnected: false,
+                  getBoundingClientRect: () => ({ height: 40 }),
+                });
+                if (typeof props["data-timeline-status-height"] === "string")
+                  nodes.set(props["data-timeline-status-height"], target);
+                return target;
+              },
+            });
+        });
+      };
+      const deliver = async (at: number) => {
+        now = at;
+        const batch = [...frames.values()];
+        frames.clear();
+        await act(() => batch.forEach((callback) => callback(at)));
+      };
+      try {
+        await render(false);
+        await render(true);
+        expect(nodes.size).toBe(2);
+        expect([...nodes.values()].map((node) => node.style.height)).toEqual(["0px", "0px"]);
+        await deliver(50);
+        const middle = [...nodes.values()].map((node) => node.style.height);
+        expect(
+          middle.every((height) => Number.parseFloat(height) > 0 && Number.parseFloat(height) < 40),
+        ).toBe(true);
+        await render(true, true, "Idle");
+        expect([...nodes.values()].map((node) => node.style.height)).toEqual(middle);
+        await deliver(200);
+        expect([...nodes.values()].map((node) => node.style.height)).toEqual(["", ""]);
+        await render(true, true, "Thinking again");
+        expect([...nodes.values()].map((node) => node.style.height)).toEqual(["", ""]);
+      } finally {
+        await act(() => renderer?.unmount());
+        clock.mockRestore();
+      }
+    },
+  );
   it.each(["default", "restructured"] as const)(
     "updates streaming text without rebuilding the %s virtual list or historical Markdown",
     async (conversationStructure) => {
@@ -703,8 +804,13 @@ describe("MessagesTimeline", () => {
   );
 
   it("retains owned follow across a native clamp but cancels the next reader movement", async () => {
-    vi.stubGlobal("requestAnimationFrame", () => 1);
-    vi.stubGlobal("cancelAnimationFrame", () => {});
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextFrame = 0;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frames.set(++nextFrame, callback);
+      return nextFrame;
+    });
+    vi.stubGlobal("cancelAnimationFrame", (id: number) => frames.delete(id));
     vi.stubGlobal(
       "ResizeObserver",
       class {
@@ -755,10 +861,16 @@ describe("MessagesTimeline", () => {
       expect(onManualNavigation).not.toHaveBeenCalled();
       await act(() => {
         finish?.();
+        const batch = [...frames.values()];
+        frames.clear();
+        batch.forEach((callback) => callback(16));
         for (const listener of listeners.get("scroll") ?? []) listener();
       });
       expect(viewport.scrollTop).toBe(1000);
       expect(smoothScrollRef.current?.isFollowing()).toBe(true);
+      await act(() => {
+        for (const listener of listeners.get("scroll") ?? []) listener();
+      });
       await act(() => {
         viewport.scrollTop -= 0.25;
         for (const listener of listeners.get("scroll") ?? []) listener();
@@ -768,91 +880,6 @@ describe("MessagesTimeline", () => {
       expect(viewport.scrollTop).toBe(999.75);
     } finally {
       await act(() => renderer?.unmount());
-    }
-  });
-
-  it("publishes an animated row size before following its new native edge", async () => {
-    vi.stubGlobal("requestAnimationFrame", () => 1);
-    vi.stubGlobal("cancelAnimationFrame", () => {});
-    vi.stubGlobal(
-      "ResizeObserver",
-      class {
-        observe() {}
-        disconnect() {}
-      },
-    );
-    const listeners = new Map<string, Set<(event: Event) => void>>();
-    const viewport = {
-      scrollTop: 1000,
-      scrollHeight: 1300,
-      clientHeight: 300,
-      setAttribute: vi.fn(),
-      removeAttribute: vi.fn(),
-      addEventListener(type: string, listener: (event: Event) => void) {
-        const callbacks = listeners.get(type) ?? new Set();
-        callbacks.add(listener);
-        listeners.set(type, callbacks);
-      },
-      removeEventListener: (type: string, listener: (event: Event) => void) =>
-        listeners.get(type)?.delete(listener),
-      ownerDocument: { addEventListener() {}, removeEventListener() {} },
-    };
-    const props = buildProps();
-    props.routeThreadKey = "environment-local:immediate-smooth-row-size";
-    const sizes = new Map<string, number>([["entry-1", 24]]);
-    const publishedSizes: number[] = [];
-    props.listRef.current = {
-      getScrollableNode: () => viewport,
-      getState: () => ({ sizes }),
-      setItemSize(id: string, size: { height: number }) {
-        const height = Math.round(size.height);
-        publishedSizes.push(height);
-        viewport.scrollHeight += height - (sizes.get(id) ?? 0);
-        sizes.set(id, height);
-      },
-    } as unknown as LegendListRef;
-    let renderer: ReactTestRenderer | null = null;
-    try {
-      await act(() => {
-        renderer = create(
-          <MessagesTimeline
-            {...props}
-            smoothStreaming
-            timelineEntries={[buildAssistantTimelineEntry("Response")]}
-          />,
-        );
-      });
-      const grow = async (height: number, synchronous = false) => {
-        const event = new CustomEvent<SmoothTextLayoutDetail>("t3-smooth-text-layout", {
-          detail: { delta: 0.1, synchronous },
-        });
-        Object.defineProperty(event, "target", {
-          value: {
-            closest: () => ({
-              dataset: { timelineRowId: "entry-1" },
-              getBoundingClientRect: () => ({ width: 600, height }),
-            }),
-          },
-        });
-        await act(() => {
-          for (const listener of listeners.get("t3-smooth-text-layout") ?? []) listener(event);
-        });
-        return event.detail.rowFraction;
-      };
-      await grow(48);
-      expect(sizes.get("entry-1")).toBe(48);
-      expect(viewport.scrollTop).toBe(1024);
-      expect(await grow(48.1)).toBeCloseTo(0.1);
-      expect(await grow(48.2)).toBeCloseTo(0.2);
-      expect(publishedSizes).toEqual([48]);
-      await grow(48.3, true);
-      expect(publishedSizes).toEqual([48, 48]);
-      await grow(48.6);
-      expect(viewport.scrollTop).toBe(1025);
-      expect(publishedSizes).toEqual([48, 48, 49]);
-    } finally {
-      await act(() => renderer?.unmount());
-      expect(listeners.get("t3-smooth-text-layout")?.size ?? 0).toBe(0);
     }
   });
 
