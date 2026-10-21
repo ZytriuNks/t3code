@@ -2,12 +2,14 @@ import {
   EnvironmentId,
   EventId,
   MessageId,
+  RunId,
   ORCHESTRATION_V2_WS_METHODS,
   TurnItemId,
   type OrchestrationV2ThreadHistoryPage,
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2ThreadDetailSnapshot,
   type OrchestrationV2ThreadStreamItem,
+  type OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
 import { afterEach, describe, expect, it, vi } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
@@ -62,6 +64,7 @@ const SNAPSHOT: OrchestrationV2ThreadDetailSnapshot = { snapshotSequence: 7, pro
 const makeHarness = Effect.fn("TestThreadAtoms.makeHarness")(function* (options?: {
   readonly snapshot?: OrchestrationV2ThreadDetailSnapshot;
   readonly snapshotUnavailable?: boolean;
+  readonly completionMarker?: boolean;
 }) {
   const subscriptions = yield* Queue.unbounded<{
     readonly afterSequence: number | undefined;
@@ -102,7 +105,7 @@ const makeHarness = Effect.fn("TestThreadAtoms.makeHarness")(function* (options?
   const session: RpcSession = {
     client,
     initialConfig: Effect.succeed({
-      threadResumeCompletionMarker: true,
+      threadResumeCompletionMarker: options?.completionMarker ?? true,
       threadSnapshotPagination: true,
     } as never),
     subscribeServerConfig: (input) => client.subscribeServerConfig(input),
@@ -234,6 +237,10 @@ const makeHarness = Effect.fn("TestThreadAtoms.makeHarness")(function* (options?
     stateAtom,
     details,
     ref,
+    supervisorState: supervisor.state,
+    replaceSession: SubscriptionRef.update(supervisor.session, (value) =>
+      Option.map(value, (session) => ({ ...session })),
+    ),
     subscriptions,
     olderLoads,
     loadEarlier: () => historyController.loadEarlier(TARGET.environmentId, THREAD_ID),
@@ -600,5 +607,291 @@ it.effect("keeps snapshot boundaries and completion markers ordered inside a rep
     expect(next.afterSequence).toBe(21);
     remount();
     yield* Deferred.await(next.closed);
+  }),
+);
+
+function playbackItem(
+  id: string,
+  text: string,
+  type: "assistant_message" | "reasoning" = "assistant_message",
+): Extract<OrchestrationV2TurnItem, { type: "assistant_message" | "reasoning" }> {
+  return {
+    id: TurnItemId.make(id),
+    type,
+    messageId: MessageId.make(`message-${id}`),
+    threadId: THREAD_ID,
+    runId: RunId.make("playback-run"),
+    nodeId: null,
+    providerThreadId: null,
+    providerTurnId: null,
+    nativeItemRef: null,
+    parentItemId: null,
+    ordinal: type === "reasoning" ? 1 : 2,
+    status: "running",
+    title: null,
+    text,
+    streaming: true,
+    startedAt: THREAD.updatedAt,
+    completedAt: null,
+    updatedAt: THREAD.updatedAt,
+  };
+}
+
+function playbackUpdate(
+  sequence: number,
+  item: OrchestrationV2TurnItem,
+): OrchestrationV2ThreadStreamItem {
+  return {
+    kind: "event",
+    sequence,
+    event: {
+      id: EventId.make(`playback-${sequence}`),
+      type: "turn-item.updated",
+      threadId: THREAD_ID,
+      occurredAt: THREAD.updatedAt,
+      payload: item,
+    },
+  };
+}
+
+it.effect("retains each text boundary at the marker when replay and live arrive in one batch", () =>
+  Effect.gen(function* () {
+    const h = yield* makeHarness();
+    yield* SubscriptionRef.set(h.supervisorState, {
+      desired: true,
+      network: "online",
+      phase: "connected",
+      stage: null,
+      attempt: 1,
+      generation: 1,
+      lastFailure: null,
+      retryAt: null,
+    });
+    const unmount = h.registry.mount(h.stateAtom);
+    const first = yield* Queue.take(h.subscriptions);
+    yield* Queue.offerAll(first.events, [
+      playbackUpdate(8, playbackItem("body", "replayed body")),
+      playbackUpdate(9, playbackItem("thought", "replayed reasoning", "reasoning")),
+      { kind: "synchronized" },
+      playbackUpdate(10, playbackItem("body", "replayed body live")),
+      playbackUpdate(11, playbackItem("thought", "replayed reasoning live", "reasoning")),
+    ]);
+    const state = yield* observeState(
+      h.registry,
+      h.stateAtom,
+      (value) =>
+        Option.getOrNull(value.data)?.turnItems.some(
+          (item) => item.type === "reasoning" && item.text.endsWith(" live"),
+        ) === true,
+    );
+    expect(state.status).toBe("live");
+    expect(state.textPlayback?.phase).toBe("synchronized");
+    expect(state.textPlayback?.generation).toBe(1);
+    expect(state.textPlayback!.baselineByItemId).toEqual(
+      new Map([
+        ["body", { runId: "playback-run", text: "replayed body" }],
+        ["thought", { runId: "playback-run", text: "replayed reasoning" }],
+      ]),
+    );
+    expect(h.registry.get(h.details.textPlaybackAtom(h.ref))).toBe(state.textPlayback);
+    const boundary = state.textPlayback;
+    yield* Queue.offer(first.events, playbackUpdate(12, playbackItem("body", "more live")));
+    const live = yield* observeState(
+      h.registry,
+      h.stateAtom,
+      (value) =>
+        Option.getOrNull(value.data)?.turnItems.some(
+          (item) => item.type === "assistant_message" && item.text === "more live",
+        ) === true,
+    );
+    expect(live.textPlayback).toBe(boundary);
+    unmount();
+    yield* Deferred.await(first.closed);
+    const remount = h.registry.mount(h.stateAtom);
+    const next = yield* Queue.take(h.subscriptions);
+    expect(h.registry.get(h.stateAtom).status).toBe("live");
+    expect(next.afterSequence).toBe(12);
+    expect(h.registry.get(h.stateAtom).textPlayback?.generation).toBe(2);
+    expect(h.registry.get(h.stateAtom).textPlayback?.phase).toBe("pending");
+    yield* Queue.offerAll(next.events, [
+      playbackUpdate(13, playbackItem("body", "warm replay")),
+      { kind: "synchronized" },
+      playbackUpdate(14, playbackItem("body", "warm replay live")),
+    ]);
+    const resumed = yield* observeState(
+      h.registry,
+      h.stateAtom,
+      (value) =>
+        Option.getOrNull(value.data)?.turnItems.some(
+          (item) => item.type === "assistant_message" && item.text === "warm replay live",
+        ) === true,
+    );
+    expect(resumed.textPlayback?.baselineByItemId.get("body")?.text).toBe("warm replay");
+    expect(resumed.textPlayback?.generation).toBe(2);
+    yield* h.replaceSession;
+    yield* Deferred.await(next.closed);
+    const reconnected = yield* Queue.take(h.subscriptions);
+    expect(reconnected.afterSequence).toBe(14);
+    expect(h.registry.get(h.stateAtom).textPlayback?.generation).toBe(3);
+    expect(h.registry.get(h.stateAtom).textPlayback?.phase).toBe("pending");
+    expect(h.registry.get(h.stateAtom).status).toBe("synchronizing");
+    yield* Queue.offerAll(reconnected.events, [
+      playbackUpdate(15, playbackItem("body", "reconnected replay")),
+      { kind: "synchronized" },
+      playbackUpdate(16, playbackItem("body", "reconnected replay live")),
+    ]);
+    const recovered = yield* observeState(
+      h.registry,
+      h.stateAtom,
+      (value) =>
+        Option.getOrNull(value.data)?.turnItems.some(
+          (item) => item.type === "assistant_message" && item.text === "reconnected replay live",
+        ) === true,
+    );
+    expect(recovered.textPlayback?.baselineByItemId.get("body")?.text).toBe("reconnected replay");
+    expect(recovered.textPlayback?.generation).toBe(3);
+    remount();
+    yield* Deferred.await(reconnected.closed);
+  }),
+);
+
+it.effect(
+  "replaces text baselines at a socket fallback and leaves them intact during history paging",
+  () =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness();
+      const unmount = h.registry.mount(h.stateAtom);
+      const first = yield* Queue.take(h.subscriptions);
+      yield* Queue.offerAll(first.events, [
+        playbackUpdate(8, playbackItem("stale-body", "stale")),
+        {
+          kind: "snapshot",
+          snapshotSequence: 20,
+          projection: {
+            ...THREAD,
+            turnItems: [
+              playbackItem("body", "fallback"),
+              {
+                ...playbackItem("tool", "excluded"),
+                type: "command_execution",
+                input: "pwd",
+                output: "excluded tool output",
+                exitCode: 0,
+              },
+            ],
+          },
+          historyCursor: "older-text",
+          hasMoreHistory: true,
+          latestLocalTurnOrdinal: 2,
+        },
+        { kind: "synchronized" },
+        playbackUpdate(21, playbackItem("body", "fallback live")),
+      ]);
+      const state = yield* observeState(
+        h.registry,
+        h.stateAtom,
+        (value) =>
+          Option.getOrNull(value.data)?.turnItems.some(
+            (item) => item.type === "assistant_message" && item.text === "fallback live",
+          ) === true,
+      );
+      expect([...state.textPlayback!.baselineByItemId.keys()]).toEqual(["body"]);
+      expect(state.textPlayback?.baselineByItemId.get("body")?.text).toBe("fallback");
+      const loading = yield* h.loadEarlier().pipe(Effect.forkScoped);
+      const request = yield* Queue.take(h.olderLoads);
+      const older = playbackItem("older", "old reasoning", "reasoning");
+      yield* Deferred.succeed(request.response, {
+        snapshotSequence: 21,
+        items: [
+          {
+            position: 0,
+            visibility: "local",
+            sourceThreadId: THREAD_ID,
+            sourceItemId: older.id,
+            item: older,
+          },
+        ],
+        nextCursor: null,
+        hasMoreHistory: false,
+      });
+      expect(yield* Fiber.join(loading)).toEqual({ _tag: "loaded" });
+      // The older page is finished history: it joins the baseline at its
+      // loaded text, while every existing (possibly live) baseline is kept.
+      const paged = h.registry.get(h.stateAtom).textPlayback!;
+      expect(paged.generation).toBe(state.textPlayback!.generation);
+      expect(paged.phase).toBe(state.textPlayback!.phase);
+      expect(paged.baselineByItemId.get(older.id)).toEqual({
+        runId: older.runId,
+        text: "old reasoning",
+      });
+      for (const [id, baseline] of state.textPlayback!.baselineByItemId)
+        expect(paged.baselineByItemId.get(id)).toBe(baseline);
+      // A live item's baseline is not advanced to its streamed text.
+      expect(paged.baselineByItemId.get("body")?.text).toBe("fallback");
+      expect(
+        Option.getOrThrow(h.registry.get(h.stateAtom).data).turnItems.some(
+          (item) => item.id === older.id,
+        ),
+      ).toBe(true);
+      yield* Queue.offerAll(first.events, [
+        {
+          kind: "event",
+          sequence: 22,
+          event: {
+            id: EventId.make("playback-delete"),
+            type: "thread.deleted",
+            threadId: THREAD_ID,
+            occurredAt: THREAD.updatedAt,
+            payload: { ...THREAD.thread, deletedAt: THREAD.updatedAt },
+          },
+        },
+        { kind: "synchronized" },
+      ]);
+      const removed = yield* observeState(
+        h.registry,
+        h.stateAtom,
+        (value) => value.status === "deleted",
+      );
+      expect(removed.textPlayback).toBeUndefined();
+      expect(h.registry.get(h.details.textPlaybackAtom(h.ref))).toBeNull();
+      unmount();
+      yield* Deferred.await(first.closed);
+    }),
+);
+
+it.effect("legacy resumes suppress only restored runs and never wait for a completion marker", () =>
+  Effect.gen(function* () {
+    const h = yield* makeHarness({
+      completionMarker: false,
+      snapshot: {
+        snapshotSequence: 7,
+        projection: { ...THREAD, turnItems: [playbackItem("body", "cached")] },
+      },
+    });
+    const unmount = h.registry.mount(h.stateAtom);
+    const subscription = yield* Queue.take(h.subscriptions);
+    const restored = h.registry.get(h.stateAtom);
+    expect(restored.status).toBe("live");
+    expect(restored.textPlayback?.phase).toBe("legacy");
+    expect(restored.textPlayback?.baselineByItemId.get("body")?.text).toBe("cached");
+    expect(restored.textPlayback?.legacyRunIds).toEqual(new Set(["playback-run"]));
+    yield* Queue.offerAll(subscription.events, [
+      playbackUpdate(8, playbackItem("body", "cached continued")),
+      playbackUpdate(9, {
+        ...playbackItem("new-body", "new run live"),
+        runId: RunId.make("new-run"),
+      }),
+    ]);
+    const live = yield* observeState(
+      h.registry,
+      h.stateAtom,
+      (value) =>
+        Option.getOrNull(value.data)?.turnItems.some((item) => item.id === "new-body") === true,
+    );
+    expect(live.status).toBe("live");
+    expect(live.textPlayback).toBe(restored.textPlayback);
+    expect(live.textPlayback?.legacyRunIds.has("new-run")).toBe(false);
+    unmount();
+    yield* Deferred.await(subscription.closed);
   }),
 );

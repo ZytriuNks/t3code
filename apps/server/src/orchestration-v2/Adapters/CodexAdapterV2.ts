@@ -1109,11 +1109,34 @@ type CodexWebSearchItem = {
     | null;
 };
 
+type CodexFileChangeItem = Extract<
+  CodexSchema.V2ItemCompletedNotification__ThreadItem,
+  { readonly type: "fileChange" }
+>;
+
 export type CodexDynamicToolItem = Extract<
   | CodexSchema.V2ItemStartedNotification__ThreadItem
   | CodexSchema.V2ItemCompletedNotification__ThreadItem,
   { readonly type: "mcpToolCall" | "dynamicToolCall" }
 >;
+
+// Codex emits clock.sleep as a native item, rather than a dynamicToolCall.
+// Normalize it here so persistence, interruption and the tool history use the
+// same lifecycle as every other tool.
+function codexSleepToolItem(
+  item: Extract<CodexSchema.V2ItemStartedNotification__ThreadItem, { readonly type: "sleep" }>,
+  completed: boolean,
+): CodexDynamicToolItem {
+  return {
+    type: "dynamicToolCall",
+    id: item.id,
+    namespace: "clock",
+    tool: "sleep",
+    arguments: { duration_ms: item.durationMs },
+    status: completed ? "completed" : "inProgress",
+    ...(completed ? { success: true } : {}),
+  };
+}
 
 type CodexCollabAgentToolCallItem = Extract<
   CodexSchema.V2ItemCompletedNotification__ThreadItem,
@@ -1610,6 +1633,9 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
         const runningDynamicToolsByTurn = yield* Ref.make(
           new Map<string, Map<string, CodexDynamicToolItem>>(),
         );
+        const runningFileChangesByTurn = yield* Ref.make(
+          new Map<string, Map<string, CodexFileChangeItem>>(),
+        );
         const interruptingNativeTurns = yield* Ref.make(new Set<string>());
         const terminalizedNonCompletedNativeTurns = yield* Ref.make(new Set<string>());
         // Keep the run event stream open until descendant provider state is
@@ -1820,6 +1846,19 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
               updated.set(nativeTurnId, remaining);
             }
             return updated;
+          });
+
+        const takeRunningFileChange = (nativeTurnId: string, nativeItemId: string) =>
+          Ref.modify(runningFileChangesByTurn, (current) => {
+            const items = current.get(nativeTurnId);
+            const item = items?.get(nativeItemId);
+            if (item === undefined) return [undefined, current] as const;
+            const remaining = new Map(items);
+            remaining.delete(nativeItemId);
+            const updated = new Map(current);
+            if (remaining.size === 0) updated.delete(nativeTurnId);
+            else updated.set(nativeTurnId, remaining);
+            return [item, updated] as const;
           });
 
         const turnHasRetainedBackgroundWork = (nativeTurnId: string) =>
@@ -2049,6 +2088,34 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
               }
               return updated;
             });
+          });
+
+        const terminalizeRunningFileChanges = (
+          context: ActiveCodexTurnContext,
+          nativeTurnId: string,
+          status: "cancelled" | "interrupted" | "failed",
+          completedAt: DateTime.Utc,
+        ) =>
+          Effect.gen(function* () {
+            const items = yield* Ref.modify(runningFileChangesByTurn, (current) => {
+              const updated = new Map(current);
+              updated.delete(nativeTurnId);
+              return [current.get(nativeTurnId), updated] as const;
+            });
+            for (const item of items?.values() ?? []) {
+              const artifacts = yield* buildFileChangeArtifacts(context, item);
+              if (artifacts === null) continue;
+              yield* emitProviderEvent({
+                type: "node.updated",
+                driver: CODEX_PROVIDER,
+                node: { ...artifacts.node, status, completedAt },
+              });
+              yield* emitProviderEvent({
+                type: "turn_item.updated",
+                driver: CODEX_PROVIDER,
+                turnItem: { ...artifacts.turnItem, status, completedAt, updatedAt: completedAt },
+              });
+            }
           });
 
         const resolveItemOrdinal = (context: ActiveCodexTurnContext, nativeItemId: string) =>
@@ -3085,10 +3152,7 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
 
         const buildFileChangeArtifacts = (
           context: ActiveCodexTurnContext,
-          item: Extract<
-            CodexSchema.V2ItemCompletedNotification__ThreadItem,
-            { type: "fileChange" }
-          >,
+          item: CodexFileChangeItem,
         ) =>
           Effect.gen(function* () {
             const firstChange = item.changes[0];
@@ -3143,6 +3207,16 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
               type: "file_change",
               fileName: firstChange.path,
               diffStr: firstChange.diff,
+              changes: item.changes.map((change) => ({
+                operation: change.kind.type,
+                path:
+                  change.kind.type === "update"
+                    ? (change.kind.move_path ?? change.path)
+                    : change.path,
+                ...(change.kind.type === "update" && change.kind.move_path
+                  ? { oldPath: change.path }
+                  : {}),
+              })),
             };
             return { node, turnItem };
           });
@@ -3980,11 +4054,45 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
               return;
             }
 
-            if (payload.item.type === "mcpToolCall" || payload.item.type === "dynamicToolCall") {
-              if (!codexItemStatus(payload.item.status).completed) {
-                yield* trackRunningDynamicTool(payload.turnId, payload.item);
+            if (
+              payload.item.type === "mcpToolCall" ||
+              payload.item.type === "dynamicToolCall" ||
+              payload.item.type === "sleep"
+            ) {
+              const toolItem =
+                payload.item.type === "sleep"
+                  ? codexSleepToolItem(payload.item, false)
+                  : payload.item;
+              if (!codexItemStatus(toolItem.status).completed) {
+                yield* trackRunningDynamicTool(payload.turnId, toolItem);
               }
-              const artifacts = yield* buildDynamicToolArtifacts(context, payload.item);
+              const artifacts = yield* buildDynamicToolArtifacts(context, toolItem);
+              yield* emitProviderEvent({
+                type: "node.updated",
+                driver: CODEX_PROVIDER,
+                node: artifacts.node,
+              });
+              yield* emitProviderEvent({
+                type: "turn_item.updated",
+                driver: CODEX_PROVIDER,
+                turnItem: artifacts.turnItem,
+              });
+              return;
+            }
+
+            if (payload.item.type === "fileChange") {
+              const item = payload.item;
+              if (!codexItemStatus(item.status).completed) {
+                yield* Ref.update(runningFileChangesByTurn, (current) => {
+                  const updated = new Map(current);
+                  const items = new Map(updated.get(payload.turnId) ?? []);
+                  items.set(item.id, item);
+                  updated.set(payload.turnId, items);
+                  return updated;
+                });
+              } else yield* takeRunningFileChange(payload.turnId, item.id);
+              const artifacts = yield* buildFileChangeArtifacts(context, item);
+              if (artifacts === null) return;
               yield* emitProviderEvent({
                 type: "node.updated",
                 driver: CODEX_PROVIDER,
@@ -4122,9 +4230,18 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
               return;
             }
 
-            if (payload.item.type === "mcpToolCall" || payload.item.type === "dynamicToolCall") {
+            if (
+              payload.item.type === "mcpToolCall" ||
+              payload.item.type === "dynamicToolCall" ||
+              payload.item.type === "sleep"
+            ) {
               yield* clearRunningDynamicTool(payload.turnId, payload.item.id);
-              const artifacts = yield* buildDynamicToolArtifacts(context, payload.item);
+              const artifacts = yield* buildDynamicToolArtifacts(
+                context,
+                payload.item.type === "sleep"
+                  ? codexSleepToolItem(payload.item, true)
+                  : payload.item,
+              );
               yield* emitProviderEvent({
                 type: "node.updated",
                 driver: CODEX_PROVIDER,
@@ -4142,7 +4259,12 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
             }
 
             if (payload.item.type === "fileChange") {
-              const artifacts = yield* buildFileChangeArtifacts(context, payload.item);
+              const started = yield* takeRunningFileChange(payload.turnId, payload.item.id);
+              const item =
+                payload.item.changes.length === 0 && started !== undefined
+                  ? { ...payload.item, changes: started.changes }
+                  : payload.item;
+              const artifacts = yield* buildFileChangeArtifacts(context, item);
               if (artifacts === null) {
                 return;
               }
@@ -5091,6 +5213,12 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
                 dynamicToolStatus,
                 input.completedAt,
                 input.status === "interrupted" || input.status === "failed",
+              );
+              yield* terminalizeRunningFileChanges(
+                input.context,
+                input.nativeTurnId,
+                dynamicToolStatus,
+                input.completedAt,
               );
               if (input.context.subagent === null) {
                 yield* emitOrDeferRootTerminal({

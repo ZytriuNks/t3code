@@ -1,4 +1,5 @@
 import { usePullRequestLinking } from "~/hooks/usePullRequestLinking";
+import { flushSync } from "react-dom";
 import { useAtomValue } from "@effect/atom-react";
 import {
   COMPOSER_CONTEXT_CLIPBOARD_MIME,
@@ -68,6 +69,9 @@ import React, {
   useCallback,
   memo,
   useEffect,
+  useEffectEvent,
+  useLayoutEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -80,7 +84,17 @@ import type {
 } from "react-markdown";
 import ReactMarkdown from "react-markdown";
 import { toHtml } from "hast-util-to-html";
-import { createIncrementalMarkdownPlugin } from "../markdown-incremental";
+import {
+  createIncrementalMarkdownPlugin,
+  remarkRetainIncrementalMarkdown,
+} from "../markdown-incremental";
+import type { Root as MarkdownRoot, RootContent as MarkdownRootContent } from "mdast";
+import { rehypeRawIfPresent, remarkStableTaskCheckboxes } from "../markdown-streaming";
+import {
+  remarkStreamingFootnoteAdmission,
+  rehypeStreamingFootnoteAdmission,
+  type StreamingFootnoteAdmissionData,
+} from "../lib/streamingFootnoteAdmission";
 import { defaultUrlTransform } from "react-markdown";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
@@ -88,8 +102,20 @@ import remarkBreaks from "remark-breaks";
 import { parseAssistantCitationHref } from "@t3tools/shared/assistantCitations";
 import { parseComposerContextHref } from "@t3tools/shared/composerContextReferences";
 import { AssistantCitationChip } from "./chat/AssistantCitationChip";
+import {
+  assistantCitationLabel,
+  ASSISTANT_CITATION_CHAT_LINK_CLASS_NAME,
+  ASSISTANT_CITATION_LABEL_CLASS_NAME,
+} from "./chat/assistantCitationPresentation";
+import {
+  StreamingFootnoteHostContext,
+  StreamingFootnotePlaybackContext,
+  StreamingFootnoteItemVisibilityContext,
+  StreamingMarkdownFootnoteItem,
+  StreamingMarkdownFootnotes,
+} from "./chat/StreamingMarkdownFootnotes";
 import remarkGfm from "remark-gfm";
-import type { Processor } from "unified";
+import type { Plugin, Processor } from "unified";
 import { isWindowsAbsolutePath } from "@t3tools/shared/path";
 import { remarkGithubAlerts } from "../markdown-github-alerts";
 import {
@@ -98,7 +124,7 @@ import {
   remarkCodexDirectives,
   renderCodexFileCitationsAsMarkdown,
 } from "@t3tools/client-runtime/codex-markdown-directives";
-import { renderSkillInlineMarkdownChildren } from "./chat/SkillInlineText";
+import { renderSkillInlineMarkdownChildren, skillInlineMatches } from "./chat/SkillInlineText";
 import {
   resolveMarkdownMediaPreview,
   type ExpandedImagePreview,
@@ -121,7 +147,12 @@ import {
 import { hasSpecificPierreIconForFileName, syntheticFileNameForLanguageId } from "../pierre-icons";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 import { Button } from "./ui/button";
-import { ContextChip } from "./ContextChip";
+import {
+  measureSmoothTextBlocks,
+  type SmoothTextCandidate,
+  type SmoothTextVisibleNode,
+} from "../lib/smoothTextCommit";
+import { contextChipVariants, CONTEXT_CHIP_LABEL_CLASS_NAME, ContextChip } from "./ContextChip";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "./ui/collapsible";
 import { ScrollArea } from "./ui/scroll-area";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "./ui/menu";
@@ -137,11 +168,21 @@ import { resolveDiffThemeName, type DiffThemeName } from "../lib/diffRendering";
 import { fnv1a32 } from "../lib/diffRendering";
 import { LRUCache } from "../lib/lruCache";
 import { getSyntaxHighlighterPromise } from "../lib/syntaxHighlighting";
+import {
+  getCodeHighlightCoordinator,
+  type CodeHighlightResult,
+} from "../lib/asyncCodeHighlighting";
 import { GitHubIcon } from "./Icons";
-import { createIncrementalHighlightedDocument } from "../lib/incrementalHighlighting";
+import {
+  appendPlainCodeTail,
+  createIncrementalHighlightedDocument,
+  reuseCompletedHighlightedLines,
+} from "../lib/incrementalHighlighting";
 import { HighlightedCodeLines } from "./chat/HighlightedCodeLines";
 import { RenderErrorBoundary } from "./RenderErrorBoundary";
 import { useTheme } from "../hooks/useTheme";
+import { useSmoothText } from "../hooks/useSmoothText";
+import { useStreamingMarkdownText } from "../hooks/useStreamingMarkdownText";
 import { getClientSettings, useClientSettings } from "../hooks/useSettings";
 import {
   chatMarkdownClipboardPayload,
@@ -149,6 +190,10 @@ import {
   serializeTableElementToMarkdown,
 } from "../markdown-clipboard";
 import { remarkNormalizeListItemIndentation } from "../markdown-list-indentation";
+import { createInlineBufferPlugin } from "../markdown-streaming";
+import { SMOOTH_TEXT_BUFFER_MS } from "../lib/smoothText";
+import type { SmoothTextResumeInput } from "../lib/smoothTextPlayback";
+import type { SmoothOutputMode, SmoothOutputLineMode } from "@t3tools/contracts";
 import {
   extractMarkdownLinkHrefs,
   isWindowsDrivePathHref,
@@ -213,6 +258,20 @@ interface ChatMarkdownProps {
   environmentId?: EnvironmentId | undefined;
   onTaskListChange?: ((input: { markerOffset: number; checked: boolean }) => void) | undefined;
   isStreaming?: boolean;
+  smoothStreaming?: boolean;
+  smoothOutputMode?: SmoothOutputMode;
+  smoothOutputLineMode?: SmoothOutputLineMode;
+  smoothMarkdownPreload?: boolean;
+  smoothTextFadeDurationMs?: number;
+  smoothTextYieldDurationMs?: number | undefined;
+  footnotesAutoCollapse?: boolean;
+  /** Registers the message-local footnote control with its timeline's tail coordinates. */
+  registerFootnoteTail?: ((element: HTMLElement) => () => void) | undefined;
+  /** Marks source completion while preserving playback geometry and fades. */
+  smoothComplete?: boolean;
+  smoothTextResume?: SmoothTextResumeInput | undefined;
+  /** Claims the first snapshot of a newly received timeline entry for buffering. */
+  claimInitialSmoothText?: (() => boolean) | undefined;
   skills?: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
   className?: string;
   /** Treat single newlines as hard breaks — chat-style user input. */
@@ -398,6 +457,7 @@ type MarkdownImageHastNode = {
   tagName?: string;
   properties?: Record<string, unknown>;
   children?: MarkdownImageHastNode[];
+  position?: { start: { offset?: number }; end?: { offset?: number } };
 };
 
 function meaningfulHastChildren(node: MarkdownImageHastNode): MarkdownImageHastNode[] {
@@ -451,7 +511,8 @@ function markStandaloneImages(node: MarkdownImageHastNode) {
 
 /** Carries authored image source metadata through the sanitizer to the image renderer. */
 function rehypePreserveImageSourceMeta() {
-  return (tree: MarkdownImageHastNode) => {
+  return (tree: MarkdownImageHastNode, file: { toString(): string }) => {
+    const source = String(file);
     const visit = (node: MarkdownImageHastNode) => {
       const src = node.properties?.src;
       const title = node.properties?.title;
@@ -462,6 +523,18 @@ function rehypePreserveImageSourceMeta() {
           ...(typeof title === "string" ? { dataMarkdownTitle: title } : {}),
         };
       }
+      if (node.type === "element" && node.tagName === "li") {
+        const start = node.position?.start.offset;
+        const markerOffset =
+          typeof start === "number" ? findTaskListMarkerOffset(source, start) : null;
+        if (markerOffset !== null)
+          node.properties = { ...node.properties, dataTaskMarkerOffset: markerOffset };
+      }
+      if (node.type === "element" && node.tagName === "pre")
+        node.properties = {
+          ...node.properties,
+          dataClosedCodeFence: isClosedCodeFence(node, source),
+        };
       node.children?.forEach(visit);
     };
 
@@ -479,11 +552,14 @@ const CHAT_MARKDOWN_SANITIZE_SCHEMA = {
     blockquote: [...(defaultSchema.attributes?.blockquote ?? []), "dataAlert"],
     div: [...(defaultSchema.attributes?.div ?? []), ...CODEX_ARTIFACT_TEMPLATE_HAST_PROPERTIES],
     a: [...(defaultSchema.attributes?.a ?? []), "dataPullRequestAutolink"],
+    li: [...(defaultSchema.attributes?.li ?? []), "dataTaskMarkerOffset"],
+    pre: [...(defaultSchema.attributes?.pre ?? []), "dataClosedCodeFence"],
     img: [
       ...(defaultSchema.attributes?.img ?? []),
       "dataLocalSrc",
       "dataMarkdownTitle",
       "dataStandalone",
+      "dataStreamImagePending",
     ],
   },
   protocols: {
@@ -519,6 +595,13 @@ const CHAT_MARKDOWN_REHYPE_PLUGINS = [
   rehypePreserveImageSourceMeta,
   [rehypeSanitize, CHAT_MARKDOWN_SANITIZE_SCHEMA],
 ] satisfies NonNullable<ReactMarkdownOptions["rehypePlugins"]>;
+
+const SMOOTH_MARKDOWN_REHYPE_PLUGINS = [
+  rehypeRawIfPresent,
+  rehypePreserveImageSourceMeta,
+  [rehypeSanitize, CHAT_MARKDOWN_SANITIZE_SCHEMA],
+] satisfies NonNullable<ReactMarkdownOptions["rehypePlugins"]>;
+const LITERAL_MARKDOWN_REHYPE_PLUGINS = [rehypePreserveImageSourceMeta];
 
 /** GitHub's own five alert kinds, in its colors: the glyph names the urgency, the title says it. */
 const GITHUB_ALERT_PRESENTATIONS: Record<
@@ -594,15 +677,19 @@ function extractPreCodeMeta(node: unknown): string | undefined {
   return typeof meta === "string" && meta.trim().length > 0 ? meta.trim() : undefined;
 }
 
-function isClosedCodeFence(node: ReactMarkdownExtraProps["node"], text: string): boolean {
+function isClosedCodeFence(
+  node: MarkdownImageHastNode | undefined,
+  text: string,
+): boolean | undefined {
   const start = node?.position?.start.offset;
-  const end = node?.position?.end.offset;
-  if (start === undefined || end === undefined) return false;
+  const end = node?.position?.end?.offset;
+  if (start === undefined || end === undefined) return;
   const source = text.slice(start, end);
-  const opening = /^(?:`{3,}|~{3,})/.exec(source)?.[0];
+  const opening = /^ {0,3}(`{3,}|~{3,})/.exec(source)?.[1];
+  if (!opening) return;
   // One class for the blockquote prefix: nested quantifiers here backtrack
   // exponentially on code lines that start with many `> ` markers.
-  const closing = /(?:^|\n)[ \t>]*(`{3,}|~{3,})[ \t\r]*$/.exec(source)?.[1];
+  const closing = /\n[ \t>]*(`{3,}|~{3,})[ \t\r]*$/.exec(source)?.[1];
   return (
     opening !== undefined &&
     closing !== undefined &&
@@ -755,6 +842,8 @@ function readInitialWordWrapSetting(): boolean {
   return getClientSettings().wordWrap;
 }
 
+const EMPTY_MARKDOWN_FILE_LINKS = new Map<string, MarkdownFileLinkMeta>();
+
 function MarkdownTable({ children, ...props }: React.ComponentProps<"table">) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const tableRef = useRef<HTMLTableElement | null>(null);
@@ -835,7 +924,7 @@ function MarkdownTable({ children, ...props }: React.ComponentProps<"table">) {
           {children}
         </table>
       </ScrollArea>
-      <div className="mt-0.5 flex items-center justify-between select-none">
+      <div data-smooth-atomic="" className="mt-0.5 flex items-center justify-between select-none">
         <Tooltip>
           <TooltipTrigger
             render={
@@ -910,6 +999,7 @@ function MarkdownDetails({
         <CollapsibleTrigger
           className="flex w-full items-center gap-2 py-2 text-left text-sm font-medium text-foreground data-panel-open:[&_svg]:rotate-90"
           data-markdown-details-summary=""
+          data-smooth-atomic=""
         >
           <ChevronRightIcon
             className="size-4 shrink-0 text-muted-foreground transition-transform"
@@ -917,7 +1007,7 @@ function MarkdownDetails({
           />
           <span>{summary}</span>
         </CollapsibleTrigger>
-        <CollapsiblePanel>
+        <CollapsiblePanel keepMounted>
           <div
             className="pb-3 ps-6 text-foreground/[calc(80%+var(--appearance-contrast-boost)/5)]"
             data-markdown-details-content=""
@@ -978,6 +1068,8 @@ function MarkdownCodeBlock({
   theme,
   onRunShellCommand,
   isStreaming,
+  pendingCode = false,
+  historical = false,
   children,
 }: {
   code: string;
@@ -986,6 +1078,8 @@ function MarkdownCodeBlock({
   theme: "light" | "dark";
   onRunShellCommand?: ((command: string) => void) | undefined;
   isStreaming: boolean;
+  pendingCode?: boolean;
+  historical?: boolean;
   children: ReactNode;
 }) {
   const [copied, setCopied] = useState(false);
@@ -1047,7 +1141,9 @@ function MarkdownCodeBlock({
     <div
       className="chat-markdown-codeblock my-[0.65rem] overflow-hidden rounded-lg border border-border/70 bg-secondary leading-snug dark:border-transparent dark:bg-input/32"
       data-language={language}
+      data-smooth-history={historical ? "" : undefined}
       data-wrap={wrapped ? "true" : "false"}
+      data-markdown-code-pending={pendingCode ? "" : undefined}
     >
       <div className="chat-markdown-codeblock-header flex items-center justify-between gap-2 pt-1.5 pr-1.5 pb-0 pl-3 select-none">
         <span className="inline-flex min-w-0 items-center gap-1.5 font-mono text-2xs">
@@ -1147,6 +1243,19 @@ function SuspenseShikiCodeBlock({
     );
   }
 
+  if (/^(?:js|javascript|jsx|ts|typescript|tsx)$/.test(language) && typeof Worker !== "undefined") {
+    return (
+      <WorkerShikiCodeBlock
+        code={code}
+        language={language}
+        themeName={themeName}
+        cacheKey={cacheKey}
+        isStreaming={isStreaming}
+        preserveLines={isStreaming || hasStreamed}
+      />
+    );
+  }
+
   return (
     <UncachedShikiCodeBlock
       code={code}
@@ -1156,6 +1265,148 @@ function SuspenseShikiCodeBlock({
       isStreaming={isStreaming}
       preserveLines={isStreaming || hasStreamed}
     />
+  );
+}
+
+function WorkerShikiCodeBlock({
+  code,
+  language,
+  themeName,
+  cacheKey,
+  isStreaming,
+  preserveLines,
+}: UncachedShikiCodeBlockProps) {
+  const [failed, setFailed] = useState(false);
+  const [highlighted, setHighlighted] = useState<{
+    code: string;
+    language: string;
+    theme: DiffThemeName;
+    root: ReturnType<Awaited<ReturnType<typeof getSyntaxHighlighterPromise>>["codeToHast"]>;
+  }>();
+  const sessionRef = useRef<ReturnType<
+    ReturnType<typeof getCodeHighlightCoordinator>["open"]
+  > | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const currentCode = useEffectEvent(() => code);
+
+  useEffect(() => {
+    const ownerDocument = containerRef.current?.ownerDocument;
+    let pending: CodeHighlightResult | undefined;
+    let disposed = false;
+    const selectionIntersectsCode = () => {
+      const container = containerRef.current;
+      const selection = ownerDocument?.getSelection();
+      if (!container || !selection || selection.isCollapsed) return false;
+      for (let index = 0; index < selection.rangeCount; index++) {
+        if (selection.getRangeAt(index).intersectsNode(container)) return true;
+      }
+      return false;
+    };
+    const applyResult = (result: CodeHighlightResult) => {
+      pending = undefined;
+      ownerDocument?.removeEventListener("selectionchange", onSelectionChange);
+      if (result.error || !result.root) {
+        sessionRef.current?.close();
+        sessionRef.current = null;
+        setFailed(true);
+        return;
+      }
+      setHighlighted((previous) => ({
+        code: result.code,
+        language,
+        theme: themeName,
+        root:
+          previous?.language === language && previous.theme === themeName
+            ? reuseCompletedHighlightedLines(
+                previous.root,
+                result.root!,
+                previous.code,
+                result.code,
+              )
+            : result.root!,
+      }));
+    };
+    const onSelectionChange = () => {
+      if (disposed || !pending || selectionIntersectsCode()) return;
+      applyResult(pending);
+    };
+    const receiveResult = (result: CodeHighlightResult) => {
+      if (disposed) return;
+      if (selectionIntersectsCode()) {
+        pending = result;
+        ownerDocument?.addEventListener("selectionchange", onSelectionChange);
+      } else {
+        applyResult(result);
+      }
+    };
+    let session: ReturnType<ReturnType<typeof getCodeHighlightCoordinator>["open"]> | undefined;
+    try {
+      session = getCodeHighlightCoordinator().open(language, themeName, receiveResult);
+      sessionRef.current = session;
+      session.update(currentCode());
+    } catch {
+      const fallbackCode = currentCode();
+      queueMicrotask(() =>
+        receiveResult({
+          documentId: 0,
+          requestId: 0,
+          code: fallbackCode,
+          error: "Worker unavailable",
+        }),
+      );
+    }
+    return () => {
+      disposed = true;
+      pending = undefined;
+      ownerDocument?.removeEventListener("selectionchange", onSelectionChange);
+      if (sessionRef.current === session) sessionRef.current = null;
+      session?.close();
+    };
+  }, [language, themeName]);
+
+  useEffect(() => {
+    sessionRef.current?.update(code);
+  }, [code]);
+
+  useEffect(() => {
+    if (
+      isStreaming ||
+      highlighted?.code !== code ||
+      highlighted.language !== language ||
+      highlighted.theme !== themeName
+    )
+      return;
+    const html = toHtml(highlighted.root);
+    highlightedCodeCache.set(cacheKey, html, estimateHighlightedSize(html, code));
+  }, [cacheKey, code, highlighted, isStreaming, language, themeName]);
+
+  if (failed) {
+    return (
+      <UncachedShikiCodeBlock
+        code={code}
+        language={language}
+        themeName={themeName}
+        cacheKey={cacheKey}
+        isStreaming={isStreaming}
+        preserveLines={preserveLines}
+      />
+    );
+  }
+
+  const visible =
+    highlighted?.language === language && highlighted.theme === themeName
+      ? appendPlainCodeTail(highlighted.root, highlighted.code, code)
+      : undefined;
+  return (
+    <div ref={containerRef} className="chat-markdown-shiki">
+      {visible ? (
+        <HighlightedCodeLines root={visible} />
+      ) : (
+        <pre className="shiki">
+          <code>{code}</code>
+        </pre>
+      )}
+    </div>
   );
 }
 
@@ -1328,6 +1579,8 @@ function normalizeMarkdownLinkHrefKey(href: string): string {
     : rewrittenHref;
 }
 
+const MARKDOWN_LINK_FAVICON_BOX_CLASS_NAME =
+  "relative ms-[0.25em] me-[0.2em] inline-block size-[14px] align-[-0.125em] [contain:strict]";
 const MARKDOWN_LINK_FAVICON_CLASS_NAME = "block size-full shrink-0 select-none";
 
 /** Hosts whose favicon request already failed this session — skip straight to the globe. */
@@ -1340,32 +1593,47 @@ function brandLinkIcon(host: string): typeof GitHubIcon | null {
   return null;
 }
 
-const MarkdownLinkFavicon = memo(function MarkdownLinkFavicon({ host }: { host: string }) {
+const MarkdownLinkFavicon = memo(function MarkdownLinkFavicon({ host }: { host: string | null }) {
   const [failedHost, setFailedHost] = useState<string | null>(null);
-  const BrandIcon = brandLinkIcon(host);
-  const faviconUrl = BrandIcon ? null : faviconUrlForOrigin(`https://${host}`);
+  const [loadedHost, setLoadedHost] = useState<string | null>(null);
+  const BrandIcon = host ? brandLinkIcon(host) : null;
+  // The fixed, aria-hidden box stays outside the text queue. Its leading-label
+  // surface owns entry opacity, including any later favicon/fallback swap, so
+  // the request can start as soon as the link renders.
+  const faviconUrl = !host || BrandIcon ? null : faviconUrlForOrigin(`https://${host}`);
   return (
-    <span
-      className="ms-[0.25em] me-[0.2em] inline-flex size-[14px] [vertical-align:-0.125em]"
-      aria-hidden
-    >
-      {BrandIcon ? (
-        <BrandIcon className={MARKDOWN_LINK_FAVICON_CLASS_NAME} />
-      ) : faviconUrl === null || failedHost === host || failedFaviconHosts.has(host) ? (
-        <GlobeIcon className={MARKDOWN_LINK_FAVICON_CLASS_NAME} />
-      ) : (
-        <img
-          src={faviconUrl}
-          alt=""
-          loading="lazy"
-          draggable={false}
-          className={cn(MARKDOWN_LINK_FAVICON_CLASS_NAME, "rounded-sm")}
-          onError={() => {
-            failedFaviconHosts.add(host);
-            setFailedHost(host);
-          }}
-        />
-      )}
+    <span className={MARKDOWN_LINK_FAVICON_BOX_CLASS_NAME} aria-hidden>
+      <span className="absolute inset-0 flex">
+        {BrandIcon ? (
+          <BrandIcon className={MARKDOWN_LINK_FAVICON_CLASS_NAME} />
+        ) : faviconUrl === null || failedHost === host || (host && failedFaviconHosts.has(host)) ? (
+          <GlobeIcon className={MARKDOWN_LINK_FAVICON_CLASS_NAME} />
+        ) : (
+          <>
+            <GlobeIcon
+              className={cn(MARKDOWN_LINK_FAVICON_CLASS_NAME, loadedHost === host && "invisible")}
+            />
+            <img
+              src={faviconUrl}
+              alt=""
+              loading="lazy"
+              decoding="async"
+              draggable={false}
+              className={cn(
+                MARKDOWN_LINK_FAVICON_CLASS_NAME,
+                "absolute inset-0 rounded-sm transition-opacity duration-150 motion-reduce:transition-none",
+                loadedHost === host ? "opacity-100" : "opacity-0",
+              )}
+              onLoad={() => setLoadedHost(host)}
+              onError={() => {
+                if (!host) return;
+                failedFaviconHosts.add(host);
+                setFailedHost(host);
+              }}
+            />
+          </>
+        )}
+      </span>
     </span>
   );
 });
@@ -1491,13 +1759,13 @@ const CHAT_MARKDOWN_IMAGE_FRAME_CLASS_NAME = cn(
 );
 
 /**
- * A standalone image holds a 16:9 slot (or its authored size) until it has
- * decoded, and keeps that slot if it fails, so a timeline row moves at most
- * once: when the natural size arrives. A bare `<img>` is zero height until
- * then. Once decoded the image renders bare again so its box, hit area, and
- * alignment are exactly the image's own. Inline images (badges, icons in a
- * sentence) skip the slot: a placeholder taller than the image would move the
- * page more than the image does.
+ * A standalone image reserves a 16:9 slot (or its authored size) before it
+ * decodes, and keeps that slot if loading fails. Loaded images adopt their
+ * authored or natural size; the smooth text frame animates any size change.
+ * The wrapper keeps its DOM identity throughout, preserving
+ * admitted space and the clipping clock. Inline
+ * images (badges, icons in a sentence) skip the slot: a placeholder taller than
+ * the image would move the page more than the image does.
  *
  * Callers key this on the file's identity, not its URL: a re-signed URL for
  * the same file keeps the decoded image on screen while the new bytes arrive,
@@ -1506,6 +1774,8 @@ const CHAT_MARKDOWN_IMAGE_FRAME_CLASS_NAME = cn(
 function ChatMarkdownImage(props: {
   /** Null while the URL is being resolved; the last decoded image stays up. */
   readonly src: string | null;
+  /** Signed URL refreshes keep the same decoded asset visible. */
+  readonly preserveDecodedImage?: boolean;
   readonly sourceFailed?: boolean | undefined;
   readonly alt: string;
   readonly copyMarkdown: string | undefined;
@@ -1520,17 +1790,22 @@ function ChatMarkdownImage(props: {
   readonly originalUrl?: string | undefined;
   readonly onImageExpand?: ((preview: ExpandedImagePreview) => void) | undefined;
 }) {
+  const smooth = use(SmoothMarkdownContext).smooth;
   const [loadedSrc, setLoadedSrc] = useState<string | null>(null);
   const [failedSrc, setFailedSrc] = useState<string | null>(null);
   const src = props.src ?? loadedSrc;
   const failed = props.sourceFailed === true || (src !== null && failedSrc === src);
   // A failure forgets the decoded image so the next URL loads behind the slot.
-  const settled = src !== null && !failed && (!props.standalone || loadedSrc !== null);
+  const settled =
+    src !== null &&
+    !failed &&
+    (!props.standalone ||
+      (loadedSrc !== null && (props.preserveDecodedImage || loadedSrc === src)));
   // Cached images are complete before `onLoad` can fire.
   const markLoadedIfComplete = useCallback(
     (image: HTMLImageElement | null) => {
       if (!image) return;
-      if (image.complete && image.naturalWidth > 0) setLoadedSrc(image.currentSrc || image.src);
+      if (image.complete && image.naturalWidth > 0) setLoadedSrc(src);
       markdownImageItems.set(image, {
         src,
         name: props.alt.trim() || "image",
@@ -1551,7 +1826,7 @@ function ChatMarkdownImage(props: {
     },
   });
 
-  if (settled) {
+  if (settled && !props.standalone) {
     return (
       <MediaActions source={props.actionsSource}>
         <img
@@ -1564,6 +1839,7 @@ function ChatMarkdownImage(props: {
           draggable={false}
           className={cn(
             CHAT_MARKDOWN_IMAGE_SIZE_CLASS_NAME,
+            "align-top",
             props.className,
             props.onImageExpand && "cursor-zoom-in",
           )}
@@ -1586,6 +1862,7 @@ function ChatMarkdownImage(props: {
         id={props.imageProps?.id}
         data-markdown-copy={props.copyMarkdown}
         role="status"
+        data-markdown-media-pending=""
         aria-label="Loading image"
         className={CHAT_MARKDOWN_MEDIA_LAYOUT_CLASS_NAME}
       />
@@ -1594,30 +1871,53 @@ function ChatMarkdownImage(props: {
   return (
     <MediaActions source={props.actionsSource}>
       <span
-        id={props.imageProps?.id}
+        id={settled ? undefined : props.imageProps?.id}
         data-markdown-copy={props.copyMarkdown}
+        data-smooth-media=""
+        data-markdown-media-pending={settled || failed ? undefined : ""}
         className={cn(
           CHAT_MARKDOWN_MEDIA_LAYOUT_CLASS_NAME,
-          CHAT_MARKDOWN_IMAGE_FRAME_CLASS_NAME,
-          "relative",
+          !settled && CHAT_MARKDOWN_IMAGE_FRAME_CLASS_NAME,
+          CHAT_MARKDOWN_MEDIA_FRAME_CLASS_NAME,
+          CHAT_MARKDOWN_MEDIA_MAX_WIDTH_CLASS_NAME,
+          "relative overflow-hidden align-bottom",
         )}
         style={props.style}
-        {...(failed
-          ? { role: "alert" as const }
-          : { role: "status" as const, "aria-label": "Loading image" })}
+        {...(settled
+          ? {}
+          : failed
+            ? { role: "alert" as const }
+            : { role: "status" as const, "aria-label": "Loading image" })}
       >
+        {!settled && !failed ? (
+          <span aria-hidden className="absolute inset-0 flex items-center justify-center">
+            <ImageIcon className="size-6 text-muted-foreground/50" />
+          </span>
+        ) : null}
         {failed ? (
           <span className="flex size-full items-center justify-center p-2 text-center text-xs text-muted-foreground">
             <ChatMarkdownMediaUnavailableLabel alt={props.alt} />
           </span>
         ) : src !== null ? (
           <img
+            {...(settled ? props.imageProps : {})}
             ref={markLoadedIfComplete}
             src={src}
             alt={props.alt}
             decoding="async"
             draggable={false}
-            className="invisible absolute inset-0 size-full"
+            className={
+              settled
+                ? cn(
+                    CHAT_MARKDOWN_IMAGE_SIZE_CLASS_NAME,
+                    props.className,
+                    smooth && "transition-opacity duration-150 motion-reduce:transition-none",
+                    props.onImageExpand && "cursor-zoom-in",
+                  )
+                : "absolute inset-0 size-full opacity-0"
+            }
+            style={settled ? props.style : undefined}
+            {...(settled ? expandableMarkdownImageProps(props.onImageExpand, props.alt) : {})}
             {...imageEvents(src)}
           />
         ) : null}
@@ -1767,12 +2067,15 @@ export const ChatMarkdownAssetImage = memo(function ChatMarkdownAssetImage(props
     <ChatMarkdownImage
       key={JSON.stringify([props.environmentId, props.resource, props.srcFragment])}
       src={src}
+      preserveDecodedImage
       sourceFailed={assetUrl._tag === "Failure" && fallbackSrc === undefined}
       alt={props.alt}
       copyMarkdown={props.copyMarkdown}
       standalone={props.standalone ?? true}
       className={cn(
-        props.framed === false ? undefined : CHAT_MARKDOWN_WORKSPACE_IMAGE_CLASS_NAME,
+        props.framed !== false && props.standalone === false
+          ? CHAT_MARKDOWN_WORKSPACE_IMAGE_CLASS_NAME
+          : undefined,
         props.className,
       )}
       style={style}
@@ -1788,15 +2091,6 @@ function leadingExternalLinkTextLength(text: string): number {
   const protocol = /^(?:https?:\/\/)/i.exec(text)?.[0];
   if (protocol) return protocol.length;
   return Math.min(text.length, 1);
-}
-
-function breakableExternalLinkText(text: string): ReactNode[] {
-  return Array.from(text, (character, index) => (
-    <React.Fragment key={`${index}:${character}`}>
-      {character}
-      <wbr />
-    </React.Fragment>
-  ));
 }
 
 function plainHastText(node: unknown): string | null {
@@ -1826,11 +2120,39 @@ function plainHastText(node: unknown): string | null {
  */
 function hastPlainTextDeep(node: unknown): string {
   if (!node || typeof node !== "object") return "";
+  if (
+    "properties" in node &&
+    node.properties &&
+    typeof node.properties === "object" &&
+    "dataFootnoteBackref" in node.properties
+  )
+    // Generated navigation updates must not requeue an already played footnote.
+    return "";
   if ("type" in node && node.type === "text" && "value" in node && typeof node.value === "string") {
     return node.value;
   }
   if (!("children" in node) || !Array.isArray(node.children)) return "";
   return node.children.map(hastPlainTextDeep).join("");
+}
+
+function footnoteNavigationKey(node: HastElement): string {
+  const links: unknown[] = [];
+  const visit = (entry: HastElement) => {
+    if (entry.properties.dataFootnoteBackref !== undefined) links.push(entry.properties);
+    else for (const child of entry.children) if (child.type === "element") visit(child);
+  };
+  visit(node);
+  return JSON.stringify(links);
+}
+
+function hasFootnoteContent(node: HastElement): boolean {
+  if (node.properties.dataFootnoteBackref !== undefined) return false;
+  if (["img", "video", "audio", "input", "hr"].includes(node.tagName)) return true;
+  return node.children.some((child) =>
+    child.type === "text"
+      ? /\S/u.test(child.value)
+      : child.type === "element" && hasFootnoteContent(child),
+  );
 }
 
 /**
@@ -1877,6 +2199,15 @@ function findMarkdownFragmentTarget(anchor: HTMLAnchorElement, href: string): HT
   const matchesFragment = (element: HTMLElement) =>
     element.id === decodedId || normalizeSanitizedFragmentId(element.id) === normalizedId;
   const markdownRoot = anchor.closest<HTMLElement>(".chat-markdown");
+  const footnoteScope = anchor.closest<HTMLElement>("[data-markdown-footnote-scope]")?.dataset
+    .markdownFootnoteScope;
+  if (footnoteScope) {
+    for (const scope of document.querySelectorAll<HTMLElement>("[data-markdown-footnote-scope]")) {
+      if (scope.dataset.markdownFootnoteScope !== footnoteScope) continue;
+      const target = Array.from(scope.querySelectorAll<HTMLElement>("[id]")).find(matchesFragment);
+      if (target) return target;
+    }
+  }
   if (markdownRoot) {
     const localTargets = Array.from(markdownRoot.querySelectorAll<HTMLElement>("[id]"));
     const localTarget = localTargets.find(matchesFragment);
@@ -1906,6 +2237,10 @@ function handleMarkdownFragmentClick(event: ReactMouseEvent<HTMLAnchorElement>, 
   if (!target) return;
 
   event.preventDefault();
+  const footnotes = target.closest("[data-stream-footnotes]");
+  if (footnotes) flushSync(() => footnotes.dispatchEvent(new Event("t3-expand-footnotes")));
+  const disclosure = target.closest("details");
+  if (disclosure && !disclosure.open) disclosure.open = true;
   const nextUrl = new URL(window.location.href);
   nextUrl.hash = href.slice(1);
   window.history.pushState(window.history.state, "", nextUrl);
@@ -1917,7 +2252,7 @@ function MarkdownExternalLinkContent({
   plainText,
   children,
 }: {
-  host: string;
+  host: string | null;
   plainText: string | null;
   children: ReactNode;
 }) {
@@ -1925,11 +2260,11 @@ function MarkdownExternalLinkContent({
     const leadingLength = leadingExternalLinkTextLength(plainText);
     return (
       <>
-        <span className="whitespace-nowrap">
+        <span data-smooth-atomic="" className="whitespace-nowrap">
           <MarkdownLinkFavicon host={host} />
           {plainText.slice(0, leadingLength)}
         </span>
-        {breakableExternalLinkText(plainText.slice(leadingLength))}
+        <span className="[overflow-wrap:anywhere]">{plainText.slice(leadingLength)}</span>
       </>
     );
   }
@@ -1941,11 +2276,11 @@ function MarkdownExternalLinkContent({
     const leadingLength = leadingExternalLinkTextLength(firstChild);
     return (
       <>
-        <span className="whitespace-nowrap">
+        <span data-smooth-atomic="" className="whitespace-nowrap">
           <MarkdownLinkFavicon host={host} />
           {firstChild.slice(0, leadingLength)}
         </span>
-        {breakableExternalLinkText(firstChild.slice(leadingLength))}
+        <span className="[overflow-wrap:anywhere]">{firstChild.slice(leadingLength)}</span>
         {childNodes.slice(1)}
       </>
     );
@@ -1953,7 +2288,7 @@ function MarkdownExternalLinkContent({
 
   return (
     <>
-      <span className="whitespace-nowrap">
+      <span data-smooth-atomic="" className="whitespace-nowrap">
         <MarkdownLinkFavicon host={host} />
         {firstChild}
       </span>
@@ -2262,6 +2597,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
               render={<a href={href} />}
               className={MARKDOWN_FILE_LINK_CLASS_NAME}
               data-markdown-copy={copyMarkdown}
+              data-smooth-atomic=""
               onClick={(event) => {
                 event.preventDefault();
                 event.stopPropagation();
@@ -2287,6 +2623,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
               aria-haspopup="menu"
               className={cn(MARKDOWN_FILE_LINK_CLASS_NAME, "select-text")}
               data-markdown-copy={copyMarkdown}
+              data-smooth-atomic=""
               onClick={handleContextMenu}
               onContextMenu={handleContextMenu}
             >
@@ -2331,6 +2668,30 @@ function areMarkdownFileLinkPropsEqual(
   );
 }
 
+function useStableMarkdownFileLinks(next: Map<string, MarkdownFileLinkMeta>) {
+  const [previous, setPrevious] = useState(next);
+  const stable =
+    previous.size === next.size &&
+    [...next].every(([key, value]) => {
+      const old = previous.get(key);
+      return (
+        old !== undefined &&
+        old.filePath === value.filePath &&
+        old.targetPath === value.targetPath &&
+        old.displayPath === value.displayPath &&
+        old.workspaceRelativePath === value.workspaceRelativePath &&
+        old.basename === value.basename &&
+        old.line === value.line &&
+        old.column === value.column
+      );
+    })
+      ? previous
+      : next;
+  // Unchanged links must not invalidate every historical Markdown consumer.
+  if (stable !== previous) setPrevious(stable);
+  return stable;
+}
+
 function useChatMarkdownState({
   text,
   cwd,
@@ -2339,7 +2700,7 @@ function useChatMarkdownState({
   environmentId: explicitEnvironmentId,
   onTaskListChange,
   isStreaming = false,
-  skills = EMPTY_MARKDOWN_SKILLS,
+  smoothComplete = false,
   onUseArtifactTemplate,
   onRunShellCommand,
   imageBaseDir,
@@ -2422,7 +2783,10 @@ function useChatMarkdownState({
   );
   const serverConfig = useAtomValue(serverEnvironment.configValueAtom(environmentId));
   const projects = useProjects();
-  const availableEditors = serverConfig?.availableEditors ?? [];
+  const availableEditors = useMemo(
+    () => serverConfig?.availableEditors ?? [],
+    [serverConfig?.availableEditors],
+  );
   const [preferredEditor] = usePreferredEditor(availableEditors);
   const preferredEditorMenuLabel = openInEditorMenuLabel(preferredEditor);
   const openInPreferredEditor = useOpenInPreferredEditor(environmentId, availableEditors);
@@ -2470,7 +2834,7 @@ function useChatMarkdownState({
     [environmentId, openInEditor],
   );
   const diffThemeName = resolveDiffThemeName(resolvedTheme);
-  const markdownFileLinkMetaByHref = useMemo(() => {
+  const parsedMarkdownFileLinks = useMemo(() => {
     const metaByHref = new Map<
       string,
       NonNullable<ReturnType<typeof resolveMarkdownFileLinkMeta>>
@@ -2484,9 +2848,9 @@ function useChatMarkdownState({
         metaByHref.set(normalizedHref, meta);
       }
     }
-    return metaByHref;
+    return metaByHref.size ? metaByHref : EMPTY_MARKDOWN_FILE_LINKS;
   }, [cwd, imageBaseDir, text]);
-  const inlineCodeFileLinkMetaByText = useMemo(() => {
+  const parsedInlineCodeFileLinks = useMemo(() => {
     const metaByText = new Map<string, MarkdownFileLinkMeta>();
     for (const span of extractInlineCodeSpans(text)) {
       if (metaByText.has(span)) continue;
@@ -2495,8 +2859,10 @@ function useChatMarkdownState({
         metaByText.set(span, meta);
       }
     }
-    return metaByText;
+    return metaByText.size ? metaByText : EMPTY_MARKDOWN_FILE_LINKS;
   }, [cwd, imageBaseDir, text]);
+  const markdownFileLinkMetaByHref = useStableMarkdownFileLinks(parsedMarkdownFileLinks);
+  const inlineCodeFileLinkMetaByText = useStableMarkdownFileLinks(parsedInlineCodeFileLinks);
   const fileLinkParentSuffixByPath = useMemo(() => {
     const filePaths = [
       ...[...markdownFileLinkMetaByHref.values()].map((meta) => meta.filePath),
@@ -2795,6 +3161,7 @@ function useChatMarkdownState({
       imageBaseDir,
       inlineCodeFileLinkMetaByText,
       isStreaming,
+      smoothComplete,
       linkTargetPreference,
       markdownFileLinkMetaByHref,
       onTaskListChange,
@@ -2809,8 +3176,6 @@ function useChatMarkdownState({
       resolveThreadPullRequest,
       resolvedTheme,
       serverConfig,
-      skills,
-      text,
       threadRef,
       updateThreadPullRequestLink,
     }),
@@ -2826,6 +3191,7 @@ function useChatMarkdownState({
       imageBaseDir,
       inlineCodeFileLinkMetaByText,
       isStreaming,
+      smoothComplete,
       linkTargetPreference,
       markdownFileLinkMetaByHref,
       onTaskListChange,
@@ -2840,8 +3206,6 @@ function useChatMarkdownState({
       resolveThreadPullRequest,
       resolvedTheme,
       serverConfig,
-      skills,
-      text,
       threadRef,
       updateThreadPullRequestLink,
     ],
@@ -2859,6 +3223,25 @@ function useChatMarkdownState({
 const ChatMarkdownRendererContext = React.createContext<
   ReturnType<typeof useChatMarkdownState>["componentState"]
 >(null!);
+const ChatMarkdownSourceContext = React.createContext("");
+// Paragraphs only need skills. Completion and link metadata must not render
+// every historical paragraph through the full renderer context again.
+const ChatMarkdownSkillsContext = React.createContext(EMPTY_MARKDOWN_SKILLS);
+
+const SmoothMarkdownContext = React.createContext({
+  host: null as HTMLElement | null,
+  inlineHost: null as HTMLElement | null,
+  detached: false,
+  streaming: false,
+  smooth: false,
+  mode: "character" as NonNullable<ChatMarkdownProps["smoothOutputMode"]>,
+  lineMode: "adaptive" as NonNullable<ChatMarkdownProps["smoothOutputLineMode"]>,
+  scope: "",
+  autoCollapse: false,
+  fadeDurationMs: 200,
+  yieldDurationMs: 200,
+  playbackResume: undefined as SmoothTextResumeInput | undefined,
+});
 
 // Screen readers take a heading's level from its tag, which would let a `#` in a
 // message outrank the heading placed above it. Override only the exposed level:
@@ -2898,7 +3281,7 @@ const CHAT_MARKDOWN_COMPONENTS = {
     return <div {...props}>{children}</div>;
   },
   p: function MarkdownParagraph({ node: _node, children, ...props }) {
-    const { skills } = use(ChatMarkdownRendererContext);
+    const skills = use(ChatMarkdownSkillsContext);
     return <p {...props}>{renderSkillInlineMarkdownChildren(children, skills)}</p>;
   },
   blockquote: function MarkdownBlockquote({ node: _node, children, ...props }) {
@@ -2919,6 +3302,9 @@ const CHAT_MARKDOWN_COMPONENTS = {
       </div>
     );
   },
+  ul: function MarkdownUnorderedList({ node: _node, ...props }) {
+    return <ul {...props} />;
+  },
   ol: function MarkdownOrderedList({ node, start, style, ...props }) {
     const itemCount =
       node?.children?.filter((child) => child.type === "element" && child.tagName === "li")
@@ -2929,12 +3315,24 @@ const CHAT_MARKDOWN_COMPONENTS = {
     );
   },
   li: function MarkdownListItem({ node, children, ...props }) {
-    const { text, skills } = use(ChatMarkdownRendererContext);
-    const listItemStart = node?.position?.start.offset;
-    const markerOffset =
-      typeof listItemStart === "number" ? findTaskListMarkerOffset(text, listItemStart) : null;
+    const skills = use(ChatMarkdownSkillsContext);
+    const footnotes = use(StreamingFootnoteItemVisibilityContext);
+    const { smooth } = use(SmoothMarkdownContext);
+    if (footnotes?.items.some((item) => item.id === props.id))
+      return (
+        <StreamingMarkdownFootnoteItem {...props}>
+          {renderSkillInlineMarkdownChildren(children, skills)}
+        </StreamingMarkdownFootnoteItem>
+      );
+    // The parser owns source offsets. Completed list rows no longer subscribe
+    // to every new character in the document just to keep their checkbox target.
+    const markerOffset = node?.properties.dataTaskMarkerOffset;
     return (
-      <li {...props} data-task-marker-offset={markerOffset ?? undefined}>
+      <li
+        {...props}
+        data-task-marker-offset={typeof markerOffset === "number" ? markerOffset : undefined}
+        data-smooth-list-empty={smooth && !hastPlainTextDeep(node).trim() ? "" : undefined}
+      >
         {renderSkillInlineMarkdownChildren(children, skills)}
       </li>
     );
@@ -2968,6 +3366,25 @@ const CHAT_MARKDOWN_COMPONENTS = {
     );
   },
   a: function MarkdownAnchor({ node, href, children, title: _title, ...props }) {
+    if (
+      node?.properties?.dataFootnoteRef !== undefined ||
+      node?.properties?.dataFootnoteBackref !== undefined
+    ) {
+      // Footnote navigation is native document navigation. It does not depend
+      // on the changing message context or workspace/external-link resolution.
+      return (
+        <a
+          {...props}
+          href={href || undefined}
+          onClick={(event) => {
+            props.onClick?.(event);
+            if (href) handleMarkdownFragmentClick(event, href);
+          }}
+        >
+          {children}
+        </a>
+      );
+    }
     const {
       cwd,
       environmentId,
@@ -2988,21 +3405,27 @@ const CHAT_MARKDOWN_COMPONENTS = {
       renderContextReference,
     } = use(ChatMarkdownRendererContext);
     const citation = href ? parseAssistantCitationHref(href) : null;
-    if (citation) return <AssistantCitationChip citation={citation} />;
+    if (citation)
+      return (
+        <span data-smooth-atomic="">
+          <AssistantCitationChip citation={citation} />
+        </span>
+      );
     const contextReference = href ? parseComposerContextHref(href) : null;
     if (contextReference) {
       const label = hastPlainTextDeep(node) || contextReference.contextId;
       return renderContextReference ? (
-        renderContextReference({ ...contextReference, label })
+        <span data-smooth-atomic="">{renderContextReference({ ...contextReference, label })}</span>
       ) : (
         <span>{label}</span>
       );
     }
     const normalizedHref = href ? normalizeMarkdownLinkHrefKey(href) : "";
-    const fileLinkMeta = normalizedHref
-      ? (markdownFileLinkMetaByHref.get(normalizedHref) ??
-        resolveMarkdownFileLinkMeta(normalizedHref, cwd, imageBaseDir ?? cwd))
-      : null;
+    const fileLinkMeta = markdownAnchorFileMeta(href, {
+      cwd,
+      imageBaseDir,
+      markdownFileLinkMetaByHref,
+    });
     if (!fileLinkMeta) {
       const faviconHost = resolveExternalWebLinkHost(href);
       const pullRequestAutolink = String(
@@ -3035,7 +3458,8 @@ const CHAT_MARKDOWN_COMPONENTS = {
           {...props}
           className={cn(props.className, pullRequestAutolink === "commit" && "font-mono")}
           data-markdown-copy={pullRequestCopy}
-          href={href}
+          data-smooth-atomic={isPullRequestAutolink ? "" : undefined}
+          href={href || undefined}
           target={isSameDocumentLink ? undefined : "_blank"}
           rel={isSameDocumentLink ? undefined : "noopener noreferrer"}
           onClick={(event) => {
@@ -3153,7 +3577,7 @@ const CHAT_MARKDOWN_COMPONENTS = {
             });
           }}
         >
-          {faviconHost && hastHasText(node) && !isPullRequestAutolink ? (
+          {(faviconHost || href === "") && hastHasText(node) && !isPullRequestAutolink ? (
             <MarkdownExternalLinkContent host={faviconHost} plainText={plainHastText(node)}>
               {linkChildren}
             </MarkdownExternalLinkContent>
@@ -3162,7 +3586,7 @@ const CHAT_MARKDOWN_COMPONENTS = {
           )}
         </a>
       );
-      if (!faviconHost || !href) {
+      if (href !== "" && (!faviconHost || !href)) {
         return link;
       }
       if (pullRequestPreviewTarget !== null) {
@@ -3209,9 +3633,11 @@ const CHAT_MARKDOWN_COMPONENTS = {
     );
     if (node?.properties?.dataInlineCode != null) {
       const codeText = nodeToPlainText(children);
-      const fileLinkMeta =
-        inlineCodeFileLinkMetaByText.get(codeText.trim()) ??
-        resolveInlineCodeFileLinkMeta(codeText, cwd, imageBaseDir ?? cwd);
+      const fileLinkMeta = markdownInlineCodeFileMeta(codeText, {
+        cwd,
+        imageBaseDir,
+        inlineCodeFileLinkMetaByText,
+      });
       if (fileLinkMeta) {
         return fileLinkChip(
           fileLinkMeta,
@@ -3259,6 +3685,18 @@ const CHAT_MARKDOWN_COMPONENTS = {
     const copyMarkdown = markdownImageCopy(altText, srcString, authoredTitle);
     const { className, style: _style, width, height, ...imageProps } = props;
     const authoredSizeStyle = authoredImageSizeStyle(width, height);
+    // rehype-raw serializes custom data attributes when HTML shares the document.
+    if (node?.properties?.dataStreamImagePending !== undefined) {
+      return (
+        <ChatMarkdownImage
+          src={null}
+          alt={altText}
+          copyMarkdown={undefined}
+          standalone={standalone}
+          actionsSource={{ kind: "image", name: altText || "image", src: null }}
+        />
+      );
+    }
     const imageSource = classifyMarkdownImageSource(classifiedSrc, imageBaseDir ?? cwd);
     const kind = mediaKindFromPath(classifiedSrc) ?? "image";
     const directUri = imageSource._tag === "Direct" ? imageSource.uri : null;
@@ -3319,7 +3757,6 @@ const CHAT_MARKDOWN_COMPONENTS = {
       }
       return (
         <ChatMarkdownImage
-          key={mediaSrc}
           src={mediaSrc}
           alt={altText}
           copyMarkdown={copyMarkdown}
@@ -3358,11 +3795,102 @@ const CHAT_MARKDOWN_COMPONENTS = {
   table: function MarkdownTableRenderer({ node: _node, ...props }) {
     return <MarkdownTable {...props} />;
   },
+  section: function MarkdownSection({ node, children, ...props }) {
+    const smooth = use(SmoothMarkdownContext);
+    const { isStreaming, smoothComplete } = use(ChatMarkdownRendererContext);
+    const text = use(ChatMarkdownSourceContext);
+    if (node?.properties?.dataFootnotes === undefined)
+      return <section {...props}>{children}</section>;
+    const stableChildren = React.Children.toArray(children).map((child) => {
+      if (
+        !React.isValidElement<ReactMarkdownExtraProps & { children?: ReactNode }>(child) ||
+        child.props.node?.tagName !== "ol"
+      )
+        return child;
+      return React.cloneElement(child, {
+        children: React.Children.toArray(child.props.children).map((item) =>
+          React.isValidElement<{ id?: string }>(item) && item.props.id
+            ? React.cloneElement(item, { key: item.props.id })
+            : item,
+        ),
+      });
+    });
+    const definitions = node.children.flatMap((list) =>
+      list.type === "element" && list.tagName === "ol"
+        ? list.children.flatMap((item) =>
+            item.type === "element" && item.tagName === "li" ? [item] : [],
+          )
+        : [],
+    );
+    // Notes are numbered by first reference, but a run is about where they
+    // were written: definitions with only whitespace between them in the source.
+    const follows = new Map<HastElement, string>();
+    const bySource = definitions
+      .filter((item) => item.position?.start.offset !== undefined)
+      .toSorted((a, b) => a.position!.start.offset! - b.position!.start.offset!);
+    for (let index = 1; index < bySource.length; index++) {
+      const previous = bySource[index - 1]!;
+      const item = bySource[index]!;
+      if (!/\S/u.test(text.slice(previous.position!.end.offset, item.position!.start.offset)))
+        follows.set(item, String(previous.properties.id));
+    }
+    return (
+      <StreamingMarkdownFootnotes
+        {...props}
+        {...smooth}
+        items={definitions.map((item) => {
+          const trailing = text.slice(item.position?.end.offset ?? text.length).trimStart();
+          const playbackBaseline = smooth.playbackResume;
+          const baselineMatches =
+            playbackBaseline !== undefined && text.startsWith(playbackBaseline.baselineText);
+          const historyLength = playbackBaseline
+            ? Math.max(
+                playbackBaseline.baselineText.length,
+                text.startsWith(playbackBaseline.mountText ?? text)
+                  ? (playbackBaseline.mountText ?? text).length
+                  : 0,
+              )
+            : 0;
+          // A split next-definition marker is not an authored prose boundary.
+          const pendingDefinition = /^\[(?:\^(?:\\[^\r\n]|[^\]\\\r\n])*(?:\\|\])?)?$/.test(
+            trailing,
+          );
+          return {
+            id: String(item.properties.id),
+            text: hastPlainTextDeep(item).trimEnd(),
+            synchronized:
+              playbackBaseline !== undefined &&
+              (playbackBaseline.forceShow === true ||
+                !baselineMatches ||
+                (item.position?.end.offset ?? Infinity) <= historyLength),
+            // Raw Markdown offsets cannot safely split the rendered glyphs of
+            // a definition spanning history/live. Admit it to FIFO, but show
+            // this one definition directly rather than replay its old prefix.
+            historyContinuation:
+              playbackBaseline !== undefined &&
+              (item.position?.start.offset ?? Infinity) < historyLength &&
+              (item.position?.end.offset ?? 0) > historyLength,
+            navigationKey: footnoteNavigationKey(item),
+            blocked:
+              (item.data as StreamingFootnoteAdmissionData | undefined)
+                ?.streamingFootnoteBlocked === true,
+            hasContent: hasFootnoteContent(item),
+            complete:
+              !(isStreaming && !smoothComplete) || (trailing.length > 0 && !pendingDefinition),
+            follows: follows.get(item) ?? null,
+          };
+        })}
+      >
+        {stableChildren}
+      </StreamingMarkdownFootnotes>
+    );
+  },
   details: function MarkdownDetailsRenderer({ node: _node, children, open: detailsOpen }) {
     return <MarkdownDetails open={detailsOpen}>{children}</MarkdownDetails>;
   },
   pre: function MarkdownPre({ node, children, ...props }) {
-    const { resolvedTheme, diffThemeName, isStreaming, onRunShellCommand, text } = use(
+    const { smooth } = use(SmoothMarkdownContext);
+    const { resolvedTheme, diffThemeName, isStreaming, smoothComplete, onRunShellCommand } = use(
       ChatMarkdownRendererContext,
     );
     const codeBlock = extractCodeBlock(children);
@@ -3372,38 +3900,50 @@ const CHAT_MARKDOWN_COMPONENTS = {
 
     const language = extractFenceLanguage(codeBlock.className);
     const fenceTitle = extractFenceTitle(extractPreCodeMeta(node));
+    const pendingCode =
+      smooth && isStreaming && !smoothComplete && node?.properties.dataClosedCodeFence === false;
     return (
       <MarkdownCodeBlock
+        historical={node?.properties.dataSmoothHistory !== undefined}
         code={codeBlock.code}
         language={language}
         fenceTitle={fenceTitle}
         theme={resolvedTheme}
         onRunShellCommand={
-          onRunShellCommand && !isStreaming && isClosedCodeFence(node, text)
+          onRunShellCommand && !isStreaming && node?.properties.dataClosedCodeFence === true
             ? onRunShellCommand
             : undefined
         }
         isStreaming={isStreaming}
+        pendingCode={pendingCode}
       >
         <RenderErrorBoundary
           resetKeys={[codeBlock.code, language, diffThemeName, isStreaming]}
           fallback={<pre {...props}>{children}</pre>}
         >
-          {/* Reserve the block's height but stay hidden until Shiki has colored
-              it, so plain text never flashes before the highlighted version. */}
+          {/* Resource loading cannot withhold a smooth stream's code FIFO. */}
           <Suspense
             fallback={
-              <pre {...props} className="invisible" aria-hidden data-markdown-code-pending="">
+              <pre
+                {...props}
+                className={smooth || smoothComplete ? undefined : "invisible"}
+                aria-hidden={smooth || smoothComplete ? undefined : true}
+                data-markdown-code-pending={smooth || smoothComplete ? undefined : ""}
+              >
                 {children}
               </pre>
             }
           >
-            <SuspenseShikiCodeBlock
-              className={codeBlock.className}
-              code={codeBlock.code}
-              themeName={diffThemeName}
-              isStreaming={isStreaming}
-            />
+            {pendingCode ? (
+              <pre {...props}>{children}</pre>
+            ) : (
+              <SuspenseShikiCodeBlock
+                className={codeBlock.className}
+                code={codeBlock.code}
+                themeName={diffThemeName}
+                isStreaming={isStreaming}
+              />
+            )}
           </Suspense>
         </RenderErrorBoundary>
       </MarkdownCodeBlock>
@@ -3411,14 +3951,1361 @@ const CHAT_MARKDOWN_COMPONENTS = {
   },
 } satisfies Components;
 
+type HastElement = NonNullable<ReactMarkdownExtraProps["node"]>;
+type HastRoot = Parameters<ReturnType<typeof rehypeRaw>>[0];
+
+interface MarkdownBlockCacheEntry {
+  signature: string;
+  parsed?: MarkdownRootContent | undefined;
+  child: ReactNode;
+  children?: ReactNode[];
+}
+
+type MarkdownRetainedRun = Array<string | { key: string; entry: MarkdownBlockCacheEntry }>;
+
+/** Build a new cache without mutating the last committed render's snapshot. */
+function retainMarkdownChildren(
+  children: ReactNode,
+  previousBlocks: ReadonlyMap<string, MarkdownBlockCacheEntry>,
+  retainedRuns: WeakMap<HastElement, MarkdownRetainedRun>,
+  rootKeys: WeakMap<HastElement, string>,
+  parsedByOffset: ReadonlyMap<number, MarkdownRootContent>,
+) {
+  const nextBlocks = new Map<string, MarkdownBlockCacheEntry>();
+  const stableKey = (child: ReactNode) =>
+    React.isValidElement<ReactMarkdownExtraProps>(child) &&
+    child.props.node?.properties.dataFootnotes !== undefined
+      ? React.cloneElement(child, { key: "stream-footnotes" })
+      : child;
+  // A later authored section changes ReactMarkdown's section-N key. Keep the
+  // generated footnotes' owner alive while surrounding block types evolve.
+  const groupChildren = (children: ReactNode[], path: string): ReactNode[] => {
+    const result: ReactNode[] = [];
+    let pending: ReactNode[] = [];
+    let index = 0;
+    const flush = () => {
+      if (pending.length === 0) return;
+      const key = `$group/${path}/${index++}`;
+      const previous = previousBlocks.get(key);
+      const group =
+        previous?.children?.length === pending.length &&
+        pending.every((child, index) => child === previous.children![index])
+          ? previous
+          : {
+              signature: "",
+              children: pending,
+              child: <React.Fragment key={key}>{pending}</React.Fragment>,
+            };
+      nextBlocks.set(key, group);
+      result.push(group.child);
+      pending = [];
+    };
+    for (const child of children) {
+      // Generated footnotes must stay outside the growing body groups. A new
+      // paragraph can cross a group boundary without remounting their queue.
+      if (React.isValidElement(child) && child.key === "stream-footnotes") {
+        flush();
+        result.push(child);
+      } else {
+        pending.push(child);
+        if (pending.length === 32) flush();
+      }
+    }
+    flush();
+    return result;
+  };
+  const preserveBlock = (child: ReactNode, path = ""): ReactNode => {
+    const keyed = stableKey(child);
+    if (!React.isValidElement<ReactMarkdownExtraProps>(keyed) || !keyed.props.node) return keyed;
+    const key = path + String(keyed.key);
+    const previous = previousBlocks.get(key);
+    const offset = keyed.props.node.position?.start.offset;
+    const parsed = offset === undefined ? undefined : parsedByOffset.get(offset);
+    if (["ul", "ol", "li", "table", "thead", "tbody", "tr"].includes(keyed.props.node.tagName)) {
+      // A growing list/table is one top-level block. Retain completed rows as
+      // well, so appending its last cell does not render every earlier row.
+      const parent = keyed as React.ReactElement<
+        ReactMarkdownExtraProps & { children?: ReactNode }
+      >;
+      const children = React.Children.toArray(parent.props.children).map((nested) =>
+        preserveBlock(nested, `${key}/`),
+      );
+      const grouped = groupChildren(children, key);
+      // Compare each subtree once. Serializing whole lists at every nesting
+      // level repeats the same history and discards descendant caches on reuse.
+      const signature = JSON.stringify({ ...keyed.props.node, children: undefined });
+      const retained =
+        previous?.signature === signature &&
+        previous.children?.length === children.length &&
+        children.every((child, index) => child === previous.children![index])
+          ? previous.child
+          : React.cloneElement(parent, { children: grouped });
+      nextBlocks.set(key, { signature, child: retained, children, parsed });
+      return retained;
+    }
+    const signature = JSON.stringify(keyed.props.node);
+    const retained = previous?.signature === signature ? previous.child : keyed;
+    nextBlocks.set(key, { signature, child: retained, parsed });
+    return retained;
+  };
+  const retainedChildren = (Array.isArray(children) ? children : [children]).flatMap((child) => {
+    if (React.isValidElement<ReactMarkdownExtraProps>(child) && child.props.node) {
+      const run = retainedRuns.get(child.props.node);
+      if (run)
+        return run.map((item) => {
+          if (typeof item === "string") return item;
+          const { key, entry } = item;
+          const retained =
+            React.isValidElement<ReactMarkdownExtraProps>(entry.child) && entry.child.key !== key
+              ? React.cloneElement(entry.child, { key })
+              : entry.child;
+          const offset = React.isValidElement<ReactMarkdownExtraProps>(retained)
+            ? retained.props.node?.position?.start.offset
+            : undefined;
+          const parsed = offset === undefined ? undefined : parsedByOffset.get(offset);
+          nextBlocks.set(key, { ...entry, child: retained, parsed });
+          return retained;
+        });
+      const key = rootKeys.get(child.props.node);
+      if (key !== undefined && child.key !== key) child = React.cloneElement(child, { key });
+    }
+    return [preserveBlock(child)];
+  });
+  // Equal blocks keep their children, and unchanged groups let reconciliation
+  // skip whole stretches of history. Fragments add no DOM wrappers. References
+  // still update changed blocks; context subscriptions retain live controls.
+  return {
+    blocks: nextBlocks,
+    children: groupChildren(retainedChildren, "root"),
+  };
+}
+
+interface FootnotePlaybackBoundary {
+  start: number;
+  end: number;
+  ids: string[];
+}
+
+type MarkdownBodyPlayback = Parameters<typeof useSmoothText>[1] & {
+  ref: React.RefObject<HTMLDivElement | null>;
+  coordinate: boolean;
+  live: boolean;
+};
+
+/** Only proven independent parser blocks bypass conversion. Everything else
+ * resolves and sanitizes as one document before reusing unchanged JSX. */
+function renderRetainedMarkdown(
+  props: ReactMarkdownOptions,
+  previousBlocks: ReadonlyMap<string, MarkdownBlockCacheEntry>,
+  completedThrough = Infinity,
+  historyThrough = -1,
+  markBlocks = false,
+) {
+  const retainedRuns = new WeakMap<HastElement, MarkdownRetainedRun>();
+  const rootKeys = new WeakMap<HastElement, string>();
+  const parsedByOffset = new Map<number, MarkdownRootContent>();
+  const retainedByOffset = new Map<number, MarkdownBlockCacheEntry>();
+  const previousByOffset = new Map<number, MarkdownBlockCacheEntry>();
+  for (const [key, entry] of previousBlocks) {
+    if (key.includes("/") || !React.isValidElement<ReactMarkdownExtraProps>(entry.child)) continue;
+    const offset = entry.child.props.node?.position?.start.offset;
+    if (offset !== undefined) previousByOffset.set(offset, entry);
+  }
+  const retainParsedBlock = (node: MarkdownRootContent): MarkdownRootContent | undefined => {
+    const offset = node.position?.start.offset;
+    if (offset === undefined) return;
+    parsedByOffset.set(offset, node);
+    const previous = previousByOffset.get(offset);
+    if (previous?.parsed !== node) return;
+    const previousNode = React.isValidElement<ReactMarkdownExtraProps>(previous.child)
+      ? previous.child.props.node
+      : undefined;
+    const crossesDefinition = (entry: MarkdownRootContent): boolean =>
+      entry.type === "footnoteDefinition" ||
+      ("children" in entry && entry.children.some(crossesDefinition));
+    // A clipped container must be rebuilt when its next segment is admitted.
+    if (
+      (previousNode?.data as { streamingBodyClipped?: boolean } | undefined)
+        ?.streamingBodyClipped ||
+      (Number.isFinite(completedThrough) && (node.type === "html" || crossesDefinition(node)))
+    )
+      return;
+    retainedByOffset.set(offset, previous);
+    // Empty paragraphs survive the normal conversion/sanitizer without visiting
+    // history. Restore the original sanitized tag before JSX keys are assigned.
+    return {
+      type: "paragraph",
+      children: [],
+      ...(node.position
+        ? { position: { start: { ...node.position.start }, end: { ...node.position.end } } }
+        : {}),
+    };
+  };
+  let boundary: FootnotePlaybackBoundary | null = null;
+  const limitBody: Plugin<[], HastRoot> = () => (tree) => {
+    if (!Number.isFinite(completedThrough)) return;
+    const definitions = tree.children
+      .flatMap((section) =>
+        section.type === "element" && section.properties.dataFootnotes !== undefined
+          ? section.children.flatMap((list) =>
+              list.type === "element" && list.tagName === "ol"
+                ? list.children.filter(
+                    (item): item is HastElement =>
+                      item.type === "element" &&
+                      item.tagName === "li" &&
+                      item.position?.start.offset !== undefined,
+                  )
+                : [],
+            )
+          : [],
+      )
+      .toSorted((a, b) => a.position!.start.offset! - b.position!.start.offset!);
+    const source = props.children ?? "";
+    for (const item of definitions) {
+      const start = item.position!.start.offset!;
+      const end = item.position!.end.offset ?? source.length;
+      if (end <= completedThrough) continue;
+      if (boundary && /\S/u.test(source.slice(boundary.end, start))) break;
+      if (!boundary) boundary = { start, end, ids: [] };
+      boundary.end = end;
+      boundary.ids.push(String(item.properties.id));
+    }
+    if (boundary) {
+      const cutoff = boundary.start;
+      const clip = <T extends HastRoot["children"][number]>(node: T): T | null => {
+        if (node.type === "element" && node.properties.dataFootnotes !== undefined) return node;
+        if ((node.position?.start.offset ?? 0) >= cutoff) return null;
+        if (node.type !== "element") return node;
+        const children = node.children.flatMap((child) => {
+          const retained = clip(child);
+          return retained ? [retained] : [];
+        });
+        const data: NonNullable<HastElement["data"]> & { streamingBodyClipped: boolean } = {
+          ...node.data,
+          streamingBodyClipped: true,
+        };
+        return children.length === node.children.length &&
+          children.every((child, index) => child === node.children[index])
+          ? node
+          : ({ ...node, data, children } as T);
+      };
+      tree.children = tree.children.flatMap((node) => {
+        const retained = clip(node);
+        return retained ? [retained] : [];
+      });
+    }
+  };
+  const markLayoutBlocks: Plugin<[], HastRoot> = () => (tree) => {
+    if (!markBlocks) return;
+    const visit = (node: HastRoot | HastElement) => {
+      if (
+        node.type === "element" &&
+        /^(?:p|li|h[1-6]|dt|dd)$/u.test(node.tagName) &&
+        node.position?.start.offset !== undefined
+      )
+        node.properties.dataSmoothBlockStart = node.position.start.offset;
+      for (const child of node.children) if (child.type === "element") visit(child);
+    };
+    visit(tree);
+  };
+  const reuseHistory: Plugin<[], HastRoot> = () => (tree) => {
+    const children: HastRoot["children"] = [];
+    const counts = new Map<string, number>();
+    let run: MarkdownRetainedRun | undefined;
+    for (const node of tree.children) {
+      if (node.type !== "element") {
+        if (run && node.type === "text") run.push(node.value);
+        else {
+          run = undefined;
+          children.push(node);
+        }
+        continue;
+      }
+      const offset = node.position?.start.offset;
+      const previous =
+        offset === undefined || node.properties.dataFootnotes !== undefined
+          ? undefined
+          : previousByOffset.get(offset);
+      const retained = offset === undefined ? undefined : retainedByOffset.get(offset);
+      const reused =
+        previous && (retained || previous.signature === JSON.stringify(node))
+          ? previous
+          : undefined;
+      const original =
+        reused && retained && React.isValidElement<ReactMarkdownExtraProps>(retained.child)
+          ? (retained.child.props.node ?? node)
+          : node;
+      // The JSX runtime counts siblings per tag. Preserve the uncompressed
+      // root keys; only this temporary pipeline tree has fewer siblings.
+      const count = counts.get(original.tagName) ?? 0;
+      const key = `${original.tagName}-${count}`;
+      counts.set(original.tagName, count + 1);
+      if (reused) {
+        if (!run) {
+          // One empty element represents a whole proven run through post/JSX.
+          // Restore every original child and text separator before grouping so
+          // no Fragment owner, key scope or DOM node moves with the run boundary.
+          const stub = { ...original, children: [] };
+          run = [];
+          retainedRuns.set(stub, run);
+          children.push(stub);
+        }
+        run.push({ key, entry: reused });
+      } else {
+        run = undefined;
+        rootKeys.set(node, key);
+        children.push(node);
+      }
+    }
+    tree.children = children;
+  };
+  const markHistory: Plugin<[], HastRoot> = () => (tree) => {
+    if (historyThrough <= 0) return;
+    const visit = (node: HastRoot | HastElement) => {
+      if (
+        node.type === "element" &&
+        ["pre", "img", "video", "audio", "iframe", "canvas"].includes(node.tagName) &&
+        (node.position?.end.offset ?? Infinity) <= historyThrough
+      )
+        node.properties.dataSmoothHistory = "";
+      for (const child of node.children) if (child.type === "element") visit(child);
+    };
+    visit(tree);
+  };
+  const markdown = ReactMarkdown({
+    ...props,
+    remarkPlugins: [
+      ...(props.remarkPlugins ?? []),
+      [remarkRetainIncrementalMarkdown, retainParsedBlock],
+    ],
+    rehypePlugins: [
+      ...(props.rehypePlugins ?? []),
+      rehypeStreamingFootnoteAdmission,
+      limitBody,
+      markHistory,
+      markLayoutBlocks,
+      reuseHistory,
+    ],
+  });
+  const retained = React.isValidElement<{ children?: ReactNode }>(markdown)
+    ? retainMarkdownChildren(
+        markdown.props.children,
+        previousBlocks,
+        retainedRuns,
+        rootKeys,
+        parsedByOffset,
+      )
+    : null;
+  const result = { markdown, retained, boundary: boundary as FootnotePlaybackBoundary | null };
+  return result;
+}
+
+type MarkdownLayoutState = ReturnType<typeof useChatMarkdownState>["componentState"];
+function markdownAnchorFileMeta(
+  href: string | undefined,
+  state: Pick<MarkdownLayoutState, "cwd" | "imageBaseDir" | "markdownFileLinkMetaByHref">,
+) {
+  const key = href ? normalizeMarkdownLinkHrefKey(href) : "";
+  return key
+    ? (state.markdownFileLinkMetaByHref.get(key) ??
+        resolveMarkdownFileLinkMeta(key, state.cwd, state.imageBaseDir ?? state.cwd))
+    : null;
+}
+function markdownInlineCodeFileMeta(
+  text: string,
+  state: Pick<MarkdownLayoutState, "cwd" | "imageBaseDir" | "inlineCodeFileLinkMetaByText">,
+) {
+  return (
+    state.inlineCodeFileLinkMetaByText.get(text.trim()) ??
+    resolveInlineCodeFileLinkMeta(text, state.cwd, state.imageBaseDir ?? state.cwd)
+  );
+}
+
+function markdownFileChipLayout(
+  state: MarkdownLayoutState,
+  meta: MarkdownFileLinkMeta,
+  copy: string,
+  media?: string,
+) {
+  const description = state.fileLinkChip(meta, copy, media);
+  if (!React.isValidElement<MarkdownFileLinkProps>(description)) return null;
+  const props = description.props;
+  const interactive = hasMarkdownFilePrimaryAction({
+    canOpenInEditor:
+      props.onOpen !== undefined || (props.threadRef !== undefined && Boolean(props.panelPath)),
+    canOpenInBrowser: props.onOpenInBrowser !== undefined,
+    canOpenInPanel: props.threadRef !== undefined && Boolean(props.panelPath),
+    canOpenMedia: props.onOpenMedia !== undefined,
+  });
+  return {
+    tag: interactive ? "a" : "button",
+    label: props.label,
+    className: cn(
+      contextChipVariants({ kind: "mention" }),
+      MARKDOWN_FILE_LINK_CLASS_NAME,
+      !interactive && "select-text",
+    ),
+  };
+}
+
+type MarkdownLayoutSkills = NonNullable<ChatMarkdownProps["skills"]>;
+
+// Retained JSX can keep its identity while a chip's context changes. Compare
+// pure presentation decisions before deciding which historical blocks to stage.
+function markdownLayoutIdentity(
+  node: HastElement,
+  state: MarkdownLayoutState,
+  skills: MarkdownLayoutSkills,
+) {
+  const identity: unknown[] = [];
+  const visit = (element: HastElement, skillText: boolean) => {
+    if (element.tagName === "a") {
+      const href =
+        typeof element.properties.href === "string" ? element.properties.href : undefined;
+      if (href && parseComposerContextHref(href))
+        identity.push(element.position?.start.offset, state.renderContextReference);
+      const meta = markdownAnchorFileMeta(href, state);
+      if (meta)
+        identity.push(
+          element.position?.start.offset,
+          JSON.stringify(markdownFileChipLayout(state, meta, "", href)),
+        );
+      return;
+    }
+    if (element.tagName === "code") {
+      const text = hastPlainTextDeep(element);
+      const meta = markdownInlineCodeFileMeta(text, state);
+      if (meta)
+        identity.push(
+          element.position?.start.offset,
+          JSON.stringify(markdownFileChipLayout(state, meta, "", text)),
+        );
+      return;
+    }
+    if (/^(?:img|video|audio|iframe|canvas|picture|source|object|embed)$/u.test(element.tagName)) {
+      identity.push(state.expandMedia, state.githubMedia, state.renderContextReference);
+      return;
+    }
+    for (const child of element.children) {
+      if (child.type === "element") visit(child, skillText);
+      else if (child.type === "text" && skillText)
+        for (const match of skillInlineMatches(child.value, skills))
+          identity.push(
+            child.position?.start.offset,
+            match.start,
+            match.end,
+            match.rawText,
+            match.label,
+          );
+    }
+  };
+  visit(node, node.tagName === "p" || node.tagName === "li");
+  return identity;
+}
+
+function unsupportedMarkdownLayout(node: HastElement, state: MarkdownLayoutState): boolean {
+  if (/^(?:img|video|audio|iframe|canvas|picture|source|object|embed)$/u.test(node.tagName))
+    return true;
+  if (
+    node.tagName === "a" &&
+    state.renderContextReference &&
+    typeof node.properties.href === "string" &&
+    parseComposerContextHref(node.properties.href)
+  )
+    return true;
+  return node.children.some(
+    (child) => child.type === "element" && unsupportedMarkdownLayout(child, state),
+  );
+}
+
+/** The sanitized inline tree is only a descriptor. Replace layout-sensitive
+ * links/code with the live renderer's decisions, never its behavior/effects. */
+function inertMarkdownBlock(
+  node: HastElement,
+  state: MarkdownLayoutState,
+  skills: MarkdownLayoutSkills,
+  document: Document,
+) {
+  const template = document.createElement("template");
+  template.innerHTML = toHtml(node);
+  const block = template.content.firstElementChild as HTMLElement;
+  const inlineChip = (
+    labelText: string,
+    kind: "skill" | "citation" | "mention",
+    tag = "span",
+    labelClass?: string,
+  ) => {
+    const chip = document.createElement(tag);
+    chip.className = cn(contextChipVariants({ kind }));
+    chip.dataset.slot = "context-chip";
+    const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    icon.setAttribute("aria-hidden", "true");
+    const label = document.createElement("span");
+    label.className = cn(CONTEXT_CHIP_LABEL_CLASS_NAME, labelClass);
+    label.dataset.slot = "context-chip-label";
+    label.textContent = labelText;
+    chip.append(icon, label);
+    return chip;
+  };
+  const fileChip = (meta: MarkdownFileLinkMeta, copy: string, media?: string) => {
+    const layout = markdownFileChipLayout(state, meta, copy, media);
+    if (!layout) return null;
+    const chip = inlineChip(layout.label, "mention", layout.tag);
+    chip.className = layout.className;
+    chip.dataset.smoothAtomic = "";
+    chip.dataset.markdownCopy = copy;
+    chip.querySelector("svg")!.setAttribute("class", "size-4 shrink-0");
+    return chip;
+  };
+  // Match the live p/li recursion: links and code never tokenize skills.
+  if (node.tagName === "p" || node.tagName === "li") {
+    const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT, {
+      acceptNode: (text) =>
+        text.parentElement?.closest("a, code")
+          ? NodeFilter.FILTER_REJECT
+          : NodeFilter.FILTER_ACCEPT,
+    });
+    const texts: Text[] = [];
+    while (walker.nextNode()) texts.push(walker.currentNode as Text);
+    for (const text of texts) {
+      const matches = skillInlineMatches(text.data, skills);
+      if (!matches.length) continue;
+      const fragment = document.createDocumentFragment();
+      let cursor = 0;
+      for (const match of matches) {
+        fragment.append(text.data.slice(cursor, match.start));
+        const chip = inlineChip(match.label, "skill");
+        chip.dataset.markdownCopy = match.rawText;
+        const icon = document.createElement("span");
+        icon.className = "contents";
+        icon.setAttribute("aria-hidden", "true");
+        icon.append(chip.firstChild!);
+        chip.prepend(icon);
+        fragment.append(chip);
+        cursor = match.end;
+      }
+      fragment.append(text.data.slice(cursor));
+      text.replaceWith(fragment);
+    }
+  }
+  for (const link of block.querySelectorAll<HTMLAnchorElement>("a")) {
+    const href = link.getAttribute("href") ?? undefined;
+    const citation = href ? parseAssistantCitationHref(href) : null;
+    if (citation) {
+      const atomic = document.createElement("span");
+      atomic.dataset.smoothAtomic = "";
+      const chip = inlineChip(
+        assistantCitationLabel(citation),
+        "citation",
+        "span",
+        ASSISTANT_CITATION_LABEL_CLASS_NAME,
+      );
+      chip.dataset.assistantCitationChip = "true";
+      const sourceLink = document.createElement("a");
+      sourceLink.className = ASSISTANT_CITATION_CHAT_LINK_CLASS_NAME;
+      sourceLink.append(...chip.childNodes);
+      chip.append(sourceLink);
+      atomic.append(chip);
+      link.replaceWith(atomic);
+      continue;
+    }
+    const contextReference = href ? parseComposerContextHref(href) : null;
+    if (contextReference) {
+      const fallback = document.createElement("span");
+      fallback.textContent = link.textContent || contextReference.contextId;
+      link.replaceWith(fallback);
+      continue;
+    }
+    const meta = markdownAnchorFileMeta(href, state);
+    if (meta) {
+      const chip = fileChip(meta, `[${meta.basename}](${href})`, href);
+      if (chip) link.replaceWith(chip);
+      continue;
+    }
+    const host = resolveExternalWebLinkHost(href);
+    const autolink = link.dataset.pullRequestAutolink;
+    if (autolink) {
+      link.dataset.smoothAtomic = "";
+      if (autolink === "commit") link.classList.add("font-mono");
+      continue;
+    }
+    if ((host || href === "") && link.textContent) {
+      const children = [...link.childNodes];
+      const first = children[0];
+      if (!first) continue;
+      const plain = children.every((child) => child.nodeType === Node.TEXT_NODE);
+      // Rich live link children arrive through MarkdownLinkContext as one
+      // child: its whole contents share the icon's nowrap surface.
+      const text = plain ? link.textContent : null;
+      const atomic = document.createElement("span");
+      atomic.dataset.smoothAtomic = "";
+      atomic.className = "whitespace-nowrap";
+      const icon = document.createElement("span");
+      icon.className = MARKDOWN_LINK_FAVICON_BOX_CLASS_NAME;
+      icon.setAttribute("aria-hidden", "true");
+      atomic.append(icon);
+      const suffix = document.createElement("span");
+      suffix.className = "[overflow-wrap:anywhere]";
+      if (text !== null) {
+        const leading = leadingExternalLinkTextLength(text);
+        atomic.append(text.slice(0, leading));
+        suffix.textContent = text.slice(leading);
+        link.replaceChildren(atomic, suffix, ...(plain ? [] : children.slice(1)));
+      } else {
+        atomic.append(...children);
+        link.replaceChildren(atomic);
+      }
+    }
+  }
+  for (const code of block.querySelectorAll<HTMLElement>("code[data-inline-code]")) {
+    const text = code.textContent ?? "";
+    const meta = markdownInlineCodeFileMeta(text, state);
+    if (meta) {
+      const chip = fileChip(meta, `\`${text}\``, inlineCodeFilePathCandidate(text) ?? text.trim());
+      if (chip) code.replaceWith(chip);
+    }
+  }
+  // Template contents never initiate loads. Strip resource/navigation inputs
+  // before attaching any part of this inert, short-lived block for layout.
+  for (const element of [block, ...block.querySelectorAll("*")]) {
+    element.removeAttribute("id");
+    for (const attribute of element.getAttributeNames())
+      if (
+        /^(?:on|src|poster|autoplay)/iu.test(attribute) ||
+        (attribute === "href" && element.tagName !== "A")
+      )
+        element.removeAttribute(attribute);
+  }
+  return block;
+}
+
+function reserveMarkdownCandidate(
+  root: HTMLElement,
+  previous: ReturnType<typeof renderRetainedMarkdown>,
+  next: ReturnType<typeof renderRetainedMarkdown>,
+  state: MarkdownLayoutState,
+  previousState: MarkdownLayoutState,
+  skills: MarkdownLayoutSkills,
+  previousSkills: MarkdownLayoutSkills,
+  visible: readonly SmoothTextVisibleNode[],
+) {
+  let bottom = 0;
+  const shown = visible.filter((entry) => entry.end > 0);
+  const lastVisible = shown.at(-1)?.node;
+  if (!lastVisible) return bottom;
+  const oldBlocks = [...root.querySelectorAll<HTMLElement>("[data-smooth-block-start]")];
+  const byOffset = new Map(
+    oldBlocks.map((block) => [Number(block.dataset.smoothBlockStart), block]),
+  );
+  const visibleByBlock = new Map<HTMLElement, SmoothTextVisibleNode[]>();
+  for (const entry of shown) {
+    const block = entry.node.parentElement?.closest<HTMLElement>("[data-smooth-block-start]");
+    if (!block) continue;
+    const entries = visibleByBlock.get(block);
+    if (entries) entries.push(entry);
+    else visibleByBlock.set(block, [entry]);
+  }
+  const changed = new Map<HTMLElement, HastElement>();
+  const contextChanged = state !== previousState || skills !== previousSkills;
+  for (const [key, entry] of next.retained?.blocks ?? []) {
+    const previousChild = previous.retained?.blocks.get(key)?.child;
+    const sameChild = previousChild === entry.child;
+    if (sameChild && !contextChanged) continue;
+    if (!React.isValidElement<ReactMarkdownExtraProps>(entry.child)) continue;
+    const node = entry.child.props.node;
+    if (!node || !/^(?:p|li|h[1-6]|dt|dd)$/u.test(node.tagName)) continue;
+    // A nested list/container is handled by its changed leaf inline blocks.
+    if (
+      node.children.some(
+        (child) => child.type === "element" && /^(?:p|ul|ol|li|pre|table)$/u.test(child.tagName),
+      )
+    )
+      continue;
+    const offset = node.position?.start.offset;
+    if (offset === undefined) continue;
+    const old = byOffset.get(offset);
+    if (
+      !old ||
+      (!old.contains(lastVisible) &&
+        (old.compareDocumentPosition(lastVisible) & Node.DOCUMENT_POSITION_FOLLOWING) === 0)
+    )
+      continue;
+    if (sameChild) {
+      const before = markdownLayoutIdentity(node, previousState, previousSkills);
+      const after = markdownLayoutIdentity(node, state, skills);
+      if (before.length === after.length && before.every((value, index) => value === after[index]))
+        continue;
+    }
+    const oldNode = React.isValidElement<ReactMarkdownExtraProps>(previousChild)
+      ? previousChild.props.node
+      : undefined;
+    // No guessed placeholder geometry for resource wrappers or injected React.
+    // Delegate the whole update before staging anything, preserving their
+    // existing live commit/load/effect/ResizeObserver lifecycle.
+    if (
+      unsupportedMarkdownLayout(node, state) ||
+      (oldNode && unsupportedMarkdownLayout(oldNode, previousState))
+    )
+      return null;
+    changed.set(old, node);
+  }
+  const changedEntries: Array<{
+    old: HTMLElement;
+    node: HastElement;
+    visible: readonly SmoothTextVisibleNode[];
+  }> = [];
+  // DOM order and per-block visibility are indexed once, not rediscovered for
+  // every changed block or visible Text node.
+  for (const old of oldBlocks) {
+    const node = changed.get(old);
+    if (node) changedEntries.push({ old, node, visible: visibleByBlock.get(old) ?? [] });
+  }
+  const measured = measureSmoothTextBlocks(
+    root,
+    changedEntries.map(({ old, node, visible }) => ({
+      oldBlock: old,
+      candidate: inertMarkdownBlock(node, state, skills, root.ownerDocument),
+      visible,
+    })),
+  );
+  const changes: { old: HTMLElement; bottom: number; delta: number }[] = changedEntries.map(
+    ({ old }, index) => ({ old, ...measured[index]! }),
+  );
+  let shift = 0;
+  for (const change of changes) {
+    if (change.bottom > 0) bottom = Math.max(bottom, change.bottom + shift);
+    shift += change.delta;
+  }
+  // Unchanged visible suffixes move by the changed blocks' natural delta.
+  // Measure only the last visible node of each unchanged region, without
+  // cloning or reading layout throughout the historical document.
+  const tails = new Map<number, { node: Text; end: number; shift: number }>();
+  let region = 0;
+  shift = 0;
+  for (const entry of shown) {
+    let change = changes[region];
+    while (
+      change &&
+      !change.old.contains(entry.node) &&
+      (change.old.compareDocumentPosition(entry.node) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0
+    ) {
+      shift += change.delta;
+      change = changes[++region];
+    }
+    if (change?.old.contains(entry.node)) continue;
+    if (region > 0 && shift > 0) tails.set(region, { ...entry, shift });
+  }
+  const range = root.ownerDocument.createRange();
+  const top = root.getBoundingClientRect().top;
+  for (const tail of tails.values()) {
+    range.setStart(tail.node, 0);
+    range.setEnd(tail.node, tail.end);
+    for (const rect of range.getClientRects())
+      if (rect.height > 0) bottom = Math.max(bottom, rect.bottom - top + tail.shift);
+  }
+  return bottom;
+}
+
+// The refs are optional caches of the last committed pipeline, not UI state.
+// oxlint-disable react/refs
+interface MarkdownSnapshot {
+  rendered: ReturnType<typeof renderRetainedMarkdown>;
+  source: string;
+  parseInputs: readonly unknown[];
+  historyThrough: number;
+  configuration: Pick<
+    ReactMarkdownOptions,
+    "remarkPlugins" | "rehypePlugins" | "components" | "urlTransform" | "skipHtml"
+  >;
+  rendererState: React.ContextType<typeof ChatMarkdownRendererContext>;
+  skills: MarkdownLayoutSkills;
+  smoothContext: React.ContextType<typeof SmoothMarkdownContext>;
+  bodyPlayback: MarkdownBodyPlayback;
+  bodyProps: React.ComponentProps<"div">;
+  coordinated: boolean;
+}
+
+function sameMarkdownRecord(left: object, right: object) {
+  const previous = left as Record<string, unknown>;
+  const current = right as Record<string, unknown>;
+  const keys = Object.keys(previous);
+  return (
+    keys.length === Object.keys(current).length &&
+    keys.every((key) => Object.is(previous[key], current[key]))
+  );
+}
+
+function sameMarkdownResume(
+  previous: SmoothTextResumeInput | undefined,
+  current: SmoothTextResumeInput | undefined,
+) {
+  return (
+    previous === current ||
+    (previous !== undefined &&
+      current !== undefined &&
+      previous.key === current.key &&
+      previous.generation === current.generation &&
+      previous.baselineText === current.baselineText &&
+      previous.mountText === current.mountText &&
+      previous.synchronized === current.synchronized &&
+      previous.forceShow === current.forceShow)
+  );
+}
+
+function sameMarkdownPlayback(previous: MarkdownBodyPlayback, current: MarkdownBodyPlayback) {
+  const { resume: previousResume, ...previousOptions } = previous;
+  const { resume: currentResume, ...currentOptions } = current;
+  return (
+    sameMarkdownRecord(previousOptions, currentOptions) &&
+    sameMarkdownResume(previousResume, currentResume)
+  );
+}
+
+function sameMarkdownSmoothContext(
+  previous: MarkdownSnapshot["smoothContext"],
+  current: MarkdownSnapshot["smoothContext"],
+) {
+  const { playbackResume: previousResume, ...previousOptions } = previous;
+  const { playbackResume: currentResume, ...currentOptions } = current;
+  return (
+    sameMarkdownRecord(previousOptions, currentOptions) &&
+    sameMarkdownResume(previousResume, currentResume)
+  );
+}
+
+function sameMarkdownSkills(previous: MarkdownLayoutSkills, current: MarkdownLayoutSkills) {
+  return (
+    previous.length === current.length &&
+    previous.every(
+      (skill, index) =>
+        skill.name === current[index]?.name && skill.displayName === current[index]?.displayName,
+    )
+  );
+}
+
+const MemoizedReactMarkdown = memo(function StableFootnoteMarkdown({
+  inlineBufferPlugin,
+  holdFootnoteAdmission,
+  bodyPlayback,
+  bodyProps,
+  bodyOverlay,
+  ...props
+}: ReactMarkdownOptions & {
+  inlineBufferPlugin: Plugin<[], MarkdownRoot> | undefined;
+  holdFootnoteAdmission: boolean;
+  bodyPlayback: MarkdownBodyPlayback;
+  bodyProps: React.ComponentProps<"div">;
+  bodyOverlay: ReactNode;
+}) {
+  const source = props.children ?? "";
+  const resume = bodyPlayback.resume;
+  const inFlight = useRef<{ snapshot: MarkdownSnapshot; request: SmoothTextCandidate } | null>(
+    null,
+  );
+  let pendingCandidate = inFlight.current;
+  const pendingResume = pendingCandidate?.snapshot.bodyPlayback.resume;
+  if (
+    !bodyPlayback.enabled ||
+    resume?.forceShow ||
+    pendingResume?.key !== resume?.key ||
+    pendingResume?.generation !== resume?.generation ||
+    pendingResume?.baselineText !== resume?.baselineText ||
+    pendingResume?.forceShow !== resume?.forceShow ||
+    pendingResume?.synchronized !== resume?.synchronized ||
+    (pendingCandidate && !source.startsWith(pendingCandidate.snapshot.source))
+  )
+    pendingCandidate = null;
+  const historyText = resume?.forceShow
+    ? source
+    : resume
+      ? [resume.baselineText, resume.mountText ?? source]
+          .filter((text) => source.startsWith(text))
+          .reduce((longest, text) => (text.length > longest.length ? text : longest), "")
+      : "";
+  const historyThrough = resume ? historyText.length : -1;
+  const [progress, setProgress] = useState({
+    prefix: "",
+    through: -1,
+    reached: -1,
+    live: bodyPlayback.live,
+    manual: false,
+  });
+  if (!source.startsWith(progress.prefix))
+    setProgress({
+      prefix: "",
+      through: -1,
+      reached: -1,
+      live: bodyPlayback.live,
+      manual: false,
+    });
+  else if (bodyPlayback.live && !progress.live) setProgress({ ...progress, live: true });
+  else if (progress.live && !bodyPlayback.coordinate && !progress.manual)
+    setProgress({ ...progress, manual: true });
+  const coordinated = bodyPlayback.coordinate && progress.live && !progress.manual;
+  const blocks = useRef(new Map<string, MarkdownBlockCacheEntry>());
+  const configuration = useRef(props);
+  const previousHistoryThrough = useRef(historyThrough);
+  const previousMarkBlocks = useRef(bodyPlayback.enabled);
+  const rendererState = use(ChatMarkdownRendererContext);
+  const skills = use(ChatMarkdownSkillsContext);
+  const smoothContext = use(SmoothMarkdownContext);
+  const parsedCandidate = useRef<{
+    inputs: readonly unknown[];
+    blocks: Map<string, MarkdownBlockCacheEntry> | null;
+    rendered: ReturnType<typeof renderRetainedMarkdown>;
+  } | null>(null);
+  const parseInputs = [
+    source,
+    props.remarkPlugins,
+    props.rehypePlugins,
+    props.components,
+    props.urlTransform,
+    props.skipHtml,
+    inlineBufferPlugin,
+    holdFootnoteAdmission,
+    coordinated,
+    progress.through,
+    historyThrough,
+    bodyPlayback.enabled,
+  ];
+  const pendingSnapshot = pendingCandidate?.snapshot;
+  if (
+    pendingSnapshot &&
+    (!bodyPlayback.streaming || bodyPlayback.complete) &&
+    (pendingSnapshot.source !== source ||
+      pendingSnapshot.parseInputs.length !== parseInputs.length ||
+      pendingSnapshot.parseInputs.some((input, index) => input !== parseInputs[index]) ||
+      !sameMarkdownRecord(pendingSnapshot.rendererState, rendererState) ||
+      !sameMarkdownSkills(pendingSnapshot.skills, skills) ||
+      !sameMarkdownSmoothContext(pendingSnapshot.smoothContext, smoothContext) ||
+      !sameMarkdownPlayback(pendingSnapshot.bodyPlayback, bodyPlayback) ||
+      !sameMarkdownRecord(pendingSnapshot.bodyProps, bodyProps))
+  ) {
+    // Prepare EOF against the committed tree. A suspended render must leave
+    // the current observer's request valid until this replacement commits.
+    pendingCandidate = null;
+  }
+  const currentPendingSnapshot = pendingCandidate?.snapshot;
+  // Finalizing buffered syntax invalidates that transform, not independent
+  // completed blocks. Playback-only commits reuse the full parse as well.
+  const renderedCandidate = (() => {
+    // A reserved candidate is immutable until its layout commit. Coalesce
+    // later buffered arrivals before running the expensive Markdown pipeline.
+    if (currentPendingSnapshot) return currentPendingSnapshot.rendered;
+    if (
+      parsedCandidate.current &&
+      (parsedCandidate.current.blocks === null ||
+        parsedCandidate.current.blocks === blocks.current ||
+        parsedCandidate.current.rendered.retained?.blocks === blocks.current) &&
+      parsedCandidate.current.inputs.every((input, index) => input === parseInputs[index])
+    )
+      return parsedCandidate.current.rendered;
+    const previous = configuration.current;
+    const samePipeline =
+      previousMarkBlocks.current === bodyPlayback.enabled &&
+      previousHistoryThrough.current === historyThrough &&
+      previous.remarkPlugins === props.remarkPlugins &&
+      previous.rehypePlugins === props.rehypePlugins &&
+      previous.components === props.components &&
+      previous.urlTransform === props.urlTransform &&
+      previous.skipHtml === props.skipHtml;
+    const rendered = renderRetainedMarkdown(
+      {
+        children: source,
+        components: props.components,
+        urlTransform: props.urlTransform,
+        skipHtml: props.skipHtml,
+        rehypePlugins: props.rehypePlugins,
+        remarkPlugins: [
+          ...(holdFootnoteAdmission ? [remarkStreamingFootnoteAdmission] : []),
+          ...(inlineBufferPlugin ? [inlineBufferPlugin] : []),
+          ...(props.remarkPlugins ?? []),
+        ],
+      },
+      samePipeline ? blocks.current : new Map(),
+      coordinated ? Math.max(progress.through, historyThrough) : Infinity,
+      historyThrough,
+      bodyPlayback.enabled,
+    );
+    // Only speculative EOF replacement can outlive the publication it was
+    // prepared against. Ordinary playback keeps its existing parse reuse.
+    parsedCandidate.current = {
+      inputs: parseInputs,
+      blocks: pendingSnapshot ? blocks.current : null,
+      rendered,
+    };
+    return rendered;
+  })();
+  const nextSnapshot = useMemo<MarkdownSnapshot>(
+    () =>
+      currentPendingSnapshot ?? {
+        rendered: renderedCandidate,
+        source,
+        parseInputs: [
+          source,
+          props.remarkPlugins,
+          props.rehypePlugins,
+          props.components,
+          props.urlTransform,
+          props.skipHtml,
+          inlineBufferPlugin,
+          holdFootnoteAdmission,
+          coordinated,
+          progress.through,
+          historyThrough,
+          bodyPlayback.enabled,
+        ],
+        historyThrough,
+        configuration: {
+          remarkPlugins: props.remarkPlugins,
+          rehypePlugins: props.rehypePlugins,
+          components: props.components,
+          urlTransform: props.urlTransform,
+          skipHtml: props.skipHtml,
+        },
+        rendererState,
+        skills,
+        smoothContext,
+        bodyPlayback,
+        bodyProps,
+        coordinated,
+      },
+    [
+      renderedCandidate,
+      source,
+      historyThrough,
+      props.remarkPlugins,
+      props.rehypePlugins,
+      props.components,
+      props.urlTransform,
+      props.skipHtml,
+      rendererState,
+      skills,
+      smoothContext,
+      bodyPlayback,
+      bodyProps,
+      coordinated,
+      currentPendingSnapshot,
+      inlineBufferPlugin,
+      holdFootnoteAdmission,
+      progress.through,
+    ],
+  );
+  const [committed, setCommitted] = useState(nextSnapshot);
+  const oldResume = committed.bodyPlayback.resume;
+  const recovering =
+    oldResume?.key !== resume?.key ||
+    oldResume?.generation !== resume?.generation ||
+    oldResume?.baselineText !== resume?.baselineText ||
+    oldResume?.forceShow !== resume?.forceShow ||
+    oldResume?.synchronized !== resume?.synchronized;
+  const pendingForCommit = (() => {
+    if (
+      committed !== nextSnapshot &&
+      (!bodyPlayback.enabled ||
+        resume?.forceShow === true ||
+        (!committed.bodyPlayback.live && !bodyPlayback.live) ||
+        recovering ||
+        (committed.rendered === nextSnapshot.rendered &&
+          committed.rendererState.cwd === nextSnapshot.rendererState.cwd &&
+          committed.rendererState.imageBaseDir === nextSnapshot.rendererState.imageBaseDir &&
+          committed.rendererState.environmentId === nextSnapshot.rendererState.environmentId &&
+          committed.rendererState.threadRef === nextSnapshot.rendererState.threadRef &&
+          committed.rendererState.projects === nextSnapshot.rendererState.projects &&
+          committed.rendererState.serverConfig === nextSnapshot.rendererState.serverConfig &&
+          committed.rendererState.resolvedTheme === nextSnapshot.rendererState.resolvedTheme &&
+          committed.rendererState.linkTargetPreference ===
+            nextSnapshot.rendererState.linkTargetPreference &&
+          committed.rendererState.markdownFileLinkMetaByHref ===
+            nextSnapshot.rendererState.markdownFileLinkMetaByHref &&
+          committed.rendererState.inlineCodeFileLinkMetaByText ===
+            nextSnapshot.rendererState.inlineCodeFileLinkMetaByText &&
+          committed.skills === nextSnapshot.skills) ||
+        !source.startsWith(committed.source))
+    ) {
+      setCommitted(nextSnapshot);
+      return null;
+    } else if (committed !== nextSnapshot && !pendingCandidate) {
+      const pending = {
+        snapshot: nextSnapshot,
+        request: {
+          measure(visible: readonly SmoothTextVisibleNode[]) {
+            const root = bodyPlayback.ref.current;
+            return root
+              ? reserveMarkdownCandidate(
+                  root,
+                  committed.rendered,
+                  nextSnapshot.rendered,
+                  nextSnapshot.rendererState,
+                  committed.rendererState,
+                  nextSnapshot.skills,
+                  committed.skills,
+                  visible,
+                )
+              : 0;
+          },
+          commit() {
+            if (inFlight.current === pending) {
+              inFlight.current = null;
+              // C may prepare during B's state update, before B's layout effect.
+              // Its stable blocks already belong to this approved publication.
+              configuration.current = pending.snapshot.configuration;
+              previousHistoryThrough.current = pending.snapshot.historyThrough;
+              previousMarkBlocks.current = pending.snapshot.bodyPlayback.enabled;
+              if (pending.snapshot.rendered.retained)
+                blocks.current = pending.snapshot.rendered.retained.blocks;
+              setCommitted(pending.snapshot);
+            }
+          },
+        },
+      };
+      return pending;
+    }
+    return pendingCandidate;
+  })();
+  const { markdown, retained, boundary } = committed.rendered;
+  const committedSource = committed.source;
+  const bodyDone = () => {
+    if (boundary && committed.coordinated)
+      setProgress((previous) =>
+        previous.reached === boundary.start
+          ? previous
+          : {
+              ...previous,
+              reached: boundary.start,
+              prefix: committedSource.slice(0, boundary.start),
+            },
+      );
+    // A claimed initial snapshot stays live through its notes and ends with the final body suffix.
+    else if (!inFlight.current && committedSource === bodyPlayback.sourceText)
+      bodyPlayback.onPlaybackComplete?.();
+  };
+  // Arrival sampling and EOF belong to the source clock, even while the next
+  // DOM snapshot is waiting for geometry. Never wait for Thinking to finish.
+  const { ref, coordinate: _coordinate, live: _live, ...playbackOptions } = bodyPlayback;
+  useLayoutEffect(() => {
+    // Publish ownership before useSmoothText can measure or deliver a request.
+    // Abandoned work-in-progress candidates never acquire the shared callback.
+    inFlight.current = pendingForCommit;
+  });
+  useSmoothText(ref, {
+    ...playbackOptions,
+    candidate: pendingForCommit?.request,
+    streaming: boundary ? false : bodyPlayback.streaming,
+    complete: boundary ? false : bodyPlayback.complete,
+    drainOnComplete: boundary ? false : bodyPlayback.drainOnComplete,
+    retainOnComplete: boundary !== null,
+    sourceText: boundary ? committedSource.slice(0, boundary.start) : bodyPlayback.sourceText,
+    arrivalSourceText: bodyPlayback.sourceText,
+    onPlaybackComplete: bodyDone,
+  });
+  const handoff = committed.coordinated
+    ? {
+        ids: boundary?.ids ?? [],
+        ready: boundary !== null && progress.reached === boundary.start,
+        complete: () => {
+          if (!boundary) return;
+          setProgress((previous) => ({
+            ...previous,
+            through: boundary.end,
+            prefix: committedSource.slice(0, boundary.end),
+            reached: -1,
+          }));
+        },
+        takeOver: () => setProgress((previous) => ({ ...previous, manual: true })),
+      }
+    : null;
+  useLayoutEffect(() => {
+    configuration.current = committed.configuration;
+    previousHistoryThrough.current = committed.historyThrough;
+    previousMarkBlocks.current = committed.bodyPlayback.enabled;
+    if (retained) blocks.current = retained.blocks;
+  });
+  const content =
+    retained && React.isValidElement<{ children?: ReactNode }>(markdown)
+      ? React.cloneElement(markdown, { children: retained.children })
+      : markdown;
+  return (
+    <div data-smooth-text-frame={bodyPlayback.enabled ? "" : undefined}>
+      <div {...committed.bodyProps} ref={ref}>
+        <ChatMarkdownRendererContext value={committed.rendererState}>
+          <ChatMarkdownSkillsContext value={committed.skills}>
+            <ChatMarkdownSourceContext value={committedSource}>
+              <SmoothMarkdownContext value={committed.smoothContext}>
+                <StreamingFootnotePlaybackContext value={handoff}>
+                  {content}
+                </StreamingFootnotePlaybackContext>
+              </SmoothMarkdownContext>
+            </ChatMarkdownSourceContext>
+          </ChatMarkdownSkillsContext>
+        </ChatMarkdownRendererContext>
+        {bodyOverlay}
+      </div>
+    </div>
+  );
+});
+// oxlint-enable react/refs
+
 function ChatMarkdown({
   text,
+  smoothStreaming = false,
+  smoothOutputMode = "character",
+  smoothOutputLineMode = "adaptive",
+  smoothMarkdownPreload = true,
+  smoothTextFadeDurationMs = 200,
+  smoothTextYieldDurationMs = 200,
+  footnotesAutoCollapse = false,
+  registerFootnoteTail,
+  smoothComplete = false,
+  smoothTextResume,
+  claimInitialSmoothText,
   className,
   lineBreaks = false,
   parseRawHtml = true,
   extraRemarkPlugins = EMPTY_REMARK_PLUGINS,
   ...props
 }: ChatMarkdownProps) {
+  const timelineFootnoteHost = use(StreamingFootnoteHostContext);
+  const [mountSnapshot, setMountSnapshot] = useState({ key: smoothTextResume?.key, text });
+  if (mountSnapshot.key !== smoothTextResume?.key)
+    setMountSnapshot({ key: smoothTextResume?.key, text });
+  const [fallbackSnapshot, setFallbackSnapshot] = useState<{
+    key: string;
+    generation: number | undefined;
+    baselineText: string;
+    mountText: string;
+    text: string;
+  } | null>(null);
+  const mountText =
+    smoothTextResume?.mountText ??
+    (mountSnapshot.key === smoothTextResume?.key ? mountSnapshot.text : text);
+  let fallbackText: string | undefined;
+  if (
+    smoothTextResume &&
+    fallbackSnapshot?.key === smoothTextResume.key &&
+    fallbackSnapshot.generation === smoothTextResume.generation &&
+    fallbackSnapshot.baselineText === smoothTextResume.baselineText &&
+    fallbackSnapshot.mountText === mountText &&
+    text.startsWith(fallbackSnapshot.text)
+  ) {
+    fallbackText = fallbackSnapshot.text;
+  } else if (
+    smoothTextResume &&
+    (!text.startsWith(smoothTextResume.baselineText) ||
+      (mountText.length > smoothTextResume.baselineText.length && !text.startsWith(mountText)))
+  ) {
+    fallbackText = text;
+    // Freeze the conservative range for this rewritten version. Body
+    // clipping, notes and glyph playback must agree before the first paint;
+    // later independent live appends remain outside that range.
+    setFallbackSnapshot({
+      key: smoothTextResume.key,
+      generation: smoothTextResume.generation,
+      baselineText: smoothTextResume.baselineText,
+      mountText,
+      text,
+    });
+  }
+  // Timeline rows can receive a fresh resume object on every streamed update.
+  // Keep the Markdown playback context stable when its actual values did not
+  // change, so retained blocks do not re-render just because the row wrapper
+  // allocated a new object.
+  const hasResume = smoothTextResume !== undefined;
+  const resumeKey = smoothTextResume?.key;
+  const resumeGeneration = smoothTextResume?.generation;
+  const resumeSynchronized = smoothTextResume?.synchronized;
+  const resumeForceShow = smoothTextResume?.forceShow;
+  const resumeBaselineText = smoothTextResume?.baselineText;
+  const normalizedBaselineText = hasResume ? (fallbackText ?? resumeBaselineText!) : undefined;
+  const normalizedMountText = hasResume ? (fallbackText ?? mountText) : undefined;
+  const playbackResume = useMemo(() => {
+    if (!hasResume) return undefined;
+    const resume: SmoothTextResumeInput = {
+      key: resumeKey!,
+      baselineText: normalizedBaselineText!,
+      mountText: normalizedMountText!,
+      synchronized: resumeSynchronized!,
+      ...(resumeGeneration === undefined ? {} : { generation: resumeGeneration }),
+      ...(resumeForceShow === undefined ? {} : { forceShow: resumeForceShow }),
+    };
+    return resume;
+  }, [
+    hasResume,
+    resumeKey,
+    resumeGeneration,
+    normalizedBaselineText,
+    normalizedMountText,
+    resumeSynchronized,
+    resumeForceShow,
+  ]);
+  const [claimedEndedInitialText, setClaimedEndedInitialText] = useState<{
+    key: string | undefined;
+  } | null>(null);
+  const claimInitialText = useCallback(() => {
+    const claimed = claimInitialSmoothText?.() ?? false;
+    // A successful first-snapshot claim keeps an already-ended message live through its handoff.
+    if (claimed && (props.isStreaming !== true || smoothComplete))
+      setClaimedEndedInitialText({ key: playbackResume?.key });
+    return claimed;
+  }, [claimInitialSmoothText, playbackResume?.key, props.isStreaming, smoothComplete]);
+  const claimedInitialLive =
+    claimedEndedInitialText !== null &&
+    playbackResume !== undefined &&
+    claimedEndedInitialText.key === playbackResume.key &&
+    playbackResume.synchronized !== true &&
+    playbackResume.forceShow !== true;
+  const [previousResume, setPreviousResume] = useState(playbackResume);
+  const recoveryCommit =
+    playbackResume !== undefined &&
+    (previousResume?.key !== playbackResume.key ||
+      previousResume?.generation !== playbackResume.generation ||
+      previousResume?.baselineText !== playbackResume.baselineText ||
+      previousResume?.forceShow !== playbackResume.forceShow);
+  if (recoveryCommit) setPreviousResume(playbackResume);
+  const footnoteScope = useId();
+  const [localFootnoteHost, setLocalFootnoteHost] = useState<HTMLDivElement | null>(null);
+  useLayoutEffect(() => {
+    if (!localFootnoteHost || !registerFootnoteTail) return;
+    return registerFootnoteTail(localFootnoteHost);
+  }, [localFootnoteHost, registerFootnoteTail]);
+  const activePlayback = (props.isStreaming === true && !smoothComplete) || claimedInitialLive;
+  const smoothContext = useMemo(
+    () => ({
+      host: timelineFootnoteHost ?? localFootnoteHost,
+      inlineHost: localFootnoteHost,
+      detached: activePlayback,
+      streaming: activePlayback,
+      smooth: smoothStreaming,
+      mode: smoothOutputMode,
+      lineMode: smoothOutputLineMode,
+      scope: footnoteScope,
+      autoCollapse: footnotesAutoCollapse,
+      fadeDurationMs: smoothTextFadeDurationMs,
+      yieldDurationMs: smoothTextYieldDurationMs,
+      playbackResume,
+    }),
+    [
+      timelineFootnoteHost,
+      localFootnoteHost,
+      activePlayback,
+      smoothStreaming,
+      smoothOutputMode,
+      smoothOutputLineMode,
+      footnoteScope,
+      footnotesAutoCollapse,
+      smoothTextFadeDurationMs,
+      smoothTextYieldDurationMs,
+      playbackResume,
+    ],
+  );
+  const renderedText = useStreamingMarkdownText(
+    text,
+    smoothStreaming &&
+      props.isStreaming === true &&
+      !smoothComplete &&
+      !playbackResume?.forceShow &&
+      !recoveryCommit,
+  );
   const {
     componentState,
     handleCopy,
@@ -3426,52 +5313,128 @@ function ChatMarkdown({
     markdownUrlTransform,
     localMediaPreview,
     setLocalMediaPreview,
-  } = useChatMarkdownState({ text, ...props });
+  } = useChatMarkdownState({ text: renderedText, smoothComplete, ...props });
+  const onPlaybackComplete = useCallback(() => {
+    setClaimedEndedInitialText((previous) =>
+      previous?.key === playbackResume?.key ? null : previous,
+    );
+  }, [playbackResume?.key]);
+  const bodyPlayback = useMemo<MarkdownBodyPlayback>(
+    () => ({
+      ref: markdownRef,
+      coordinate: smoothStreaming && footnotesAutoCollapse,
+      live: activePlayback,
+      enabled: smoothStreaming,
+      mode: smoothOutputMode,
+      lineMode: smoothOutputLineMode,
+      streaming: props.isStreaming === true,
+      complete: smoothComplete,
+      onPlaybackComplete,
+      claimInitialText,
+      sourceText: text,
+      resume: playbackResume,
+      // Match the FIFO's steady buffer horizon. A full second here creates
+      // thousands of queued glyphs before a fast response can begin playing.
+      initialBufferMs: SMOOTH_TEXT_BUFFER_MS,
+      fadeDurationMs: smoothTextFadeDurationMs,
+      yieldDurationMs: smoothTextYieldDurationMs,
+    }),
+    [
+      markdownRef,
+      smoothStreaming,
+      footnotesAutoCollapse,
+      activePlayback,
+      smoothOutputMode,
+      smoothOutputLineMode,
+      props.isStreaming,
+      smoothComplete,
+      onPlaybackComplete,
+      claimInitialText,
+      text,
+      playbackResume,
+      smoothTextFadeDurationMs,
+      smoothTextYieldDurationMs,
+    ],
+  );
+  const incrementalParser = useMemo(() => createIncrementalMarkdownPlugin(), []);
+  const holdingInline =
+    smoothStreaming && smoothMarkdownPreload && props.isStreaming === true && !smoothComplete;
+  const inlineBuffer = useMemo(() => createInlineBufferPlugin(), []);
+  const inlineBufferPlugin = inlineBuffer.configure(holdingInline);
+  useLayoutEffect(() => {
+    inlineBuffer.commit();
+  });
   const incrementalParsing =
-    props.isStreaming === true &&
     extraRemarkPlugins.length === 0 &&
-    /(?:^|\n) {0,3}(?:`{3}|~{3})/.test(text);
+    (smoothStreaming ||
+      (props.isStreaming === true && /(?:^|\n) {0,3}(?:`{3}|~{3})/.test(renderedText)));
   const remarkPlugins = useMemo(
     () => [
       ...(lineBreaks ? CHAT_MARKDOWN_REMARK_PLUGINS_WITH_BREAKS : CHAT_MARKDOWN_REMARK_PLUGINS),
+      ...(smoothStreaming ? [remarkStableTaskCheckboxes] : []),
       ...extraRemarkPlugins,
-      ...(incrementalParsing ? [createIncrementalMarkdownPlugin()] : []),
+      ...(incrementalParsing ? [incrementalParser] : []),
     ],
-    [extraRemarkPlugins, incrementalParsing, lineBreaks],
+    [extraRemarkPlugins, incrementalParsing, incrementalParser, lineBreaks, smoothStreaming],
+  );
+  const bodyProps = useMemo(
+    () =>
+      ({
+        className: cn(
+          "chat-markdown w-full min-w-0 text-sm leading-relaxed text-foreground/[calc(80%+var(--appearance-contrast-boost)/5)] [overflow-wrap:anywhere] [word-break:break-word]",
+          className,
+        ),
+        "data-streaming": componentState.isStreaming && !smoothStreaming ? "" : undefined,
+        "data-smooth-streaming": smoothStreaming ? "" : undefined,
+        "data-markdown-footnote-scope": footnoteScope,
+        onCopy: handleCopy,
+      }) as React.ComponentProps<"div">,
+    [className, componentState.isStreaming, smoothStreaming, footnoteScope, handleCopy],
   );
 
   // react-markdown converts unparsed HTML nodes to text when skipHtml is false.
   // Keep that behavior explicit because literal mode depends on escaping the
   // complete source token instead of dropping it from the rendered message.
   return (
-    <div
-      ref={markdownRef}
-      className={cn(
-        "chat-markdown w-full min-w-0 text-sm leading-relaxed text-foreground/[calc(80%+var(--appearance-contrast-boost)/5)] [overflow-wrap:anywhere] [word-break:break-word]",
-        className,
-      )}
-      // Gates the fade-in for blocks that arrive while the response streams.
-      data-streaming={componentState.isStreaming ? "" : undefined}
-      onCopy={handleCopy}
-    >
+    <>
       <ChatMarkdownRendererContext value={componentState}>
-        <ReactMarkdown
-          remarkPlugins={remarkPlugins}
-          rehypePlugins={parseRawHtml ? CHAT_MARKDOWN_REHYPE_PLUGINS : undefined}
-          skipHtml={false}
-          components={CHAT_MARKDOWN_COMPONENTS}
-          urlTransform={markdownUrlTransform}
-        >
-          {text}
-        </ReactMarkdown>
+        <ChatMarkdownSkillsContext value={props.skills ?? EMPTY_MARKDOWN_SKILLS}>
+          <ChatMarkdownSourceContext value={renderedText}>
+            <SmoothMarkdownContext value={smoothContext}>
+              <MemoizedReactMarkdown
+                key={playbackResume?.key}
+                bodyPlayback={bodyPlayback}
+                bodyProps={bodyProps}
+                bodyOverlay={
+                  localMediaPreview ? (
+                    <ExpandedImageDialog
+                      preview={localMediaPreview}
+                      onClose={() => setLocalMediaPreview(null)}
+                    />
+                  ) : null
+                }
+                inlineBufferPlugin={smoothStreaming ? inlineBufferPlugin : undefined}
+                holdFootnoteAdmission={smoothStreaming && footnotesAutoCollapse && activePlayback}
+                remarkPlugins={remarkPlugins}
+                rehypePlugins={
+                  parseRawHtml
+                    ? smoothStreaming && extraRemarkPlugins.length === 0
+                      ? SMOOTH_MARKDOWN_REHYPE_PLUGINS
+                      : CHAT_MARKDOWN_REHYPE_PLUGINS
+                    : LITERAL_MARKDOWN_REHYPE_PLUGINS
+                }
+                skipHtml={false}
+                components={CHAT_MARKDOWN_COMPONENTS}
+                urlTransform={markdownUrlTransform}
+              >
+                {renderedText}
+              </MemoizedReactMarkdown>
+            </SmoothMarkdownContext>
+          </ChatMarkdownSourceContext>
+        </ChatMarkdownSkillsContext>
       </ChatMarkdownRendererContext>
-      {localMediaPreview ? (
-        <ExpandedImageDialog
-          preview={localMediaPreview}
-          onClose={() => setLocalMediaPreview(null)}
-        />
-      ) : null}
-    </div>
+      <div ref={setLocalFootnoteHost} data-stream-footnote-local-host="" />
+    </>
   );
 }
 

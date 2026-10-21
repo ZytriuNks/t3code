@@ -19,6 +19,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderSessionId,
+  ProjectId,
   ProviderThreadId,
   ProviderTurnId,
   RunAttemptId,
@@ -3158,8 +3159,79 @@ it.effect("keeps completed runs completed when pull request refresh fails", () =
   }),
 );
 
+for (const mode of ["realtime", "smooth"] as const) {
+  for (const status of ["completed", "interrupted"] as const) {
+    it.effect(`ingests ${mode} assistant updates before the ${status} terminal`, () =>
+      Effect.gen(function* () {
+        const projectId = ProjectId.make(`${mode}-stream:${status}`);
+        const { ingested } = yield* captureRootRunTermination({
+          key: `${mode}-stream:${status}`,
+          projectId,
+          settingsOverrides: {
+            responseStreamingMode: "paragraph",
+            projectSettingsOverrides: {
+              [projectId]: { responseStreamingMode: mode },
+            },
+          },
+          shouldFinalizeRun: () => Effect.succeed(true),
+          events: (ids) => {
+            const message = {
+              createdBy: "agent" as const,
+              creationSource: "provider" as const,
+              id: MessageId.make(`message:${mode}-stream:${status}`),
+              threadId: ids.threadId,
+              runId: ids.runId,
+              nodeId: ids.rootNodeId,
+              role: "assistant" as const,
+              attachments: [],
+              createdAt: DateTime.makeUnsafe("2026-07-21T12:00:00.000Z"),
+              updatedAt: DateTime.makeUnsafe("2026-07-21T12:00:00.000Z"),
+            };
+            return Stream.fromIterable([
+              {
+                type: "message.updated",
+                driver,
+                message: { ...message, text: "partial response", streaming: true },
+              },
+              {
+                type: "message.updated",
+                driver,
+                message: { ...message, text: "partial response complete", streaming: false },
+              },
+              rootTerminalEvent(ids, status),
+            ] satisfies ReadonlyArray<ProviderAdapterV2Event>);
+          },
+        });
+
+        const messageUpdates = ingested.flatMap((event, index) =>
+          event.type === "message.updated" ? [{ event, index }] : [],
+        );
+        const terminalIndex = ingested.findIndex(
+          (event) => event.type === "turn.terminal" && event.status === status,
+        );
+        assert.deepEqual(
+          messageUpdates.map(({ event }) => ({
+            text: event.message.text,
+            streaming: event.message.streaming,
+          })),
+          [
+            { text: "partial response", streaming: true },
+            { text: "partial response complete", streaming: false },
+          ],
+        );
+        assert.isAtLeast(terminalIndex, 0);
+        assert.equal(messageUpdates.length, 2);
+        assert.isBelow(messageUpdates[0]!.index, terminalIndex);
+        assert.isBelow(messageUpdates[1]!.index, terminalIndex);
+      }),
+    );
+  }
+}
+
 function captureRootRunTermination(input: {
   readonly key: string;
+  readonly projectId?: ProjectId;
+  readonly settingsOverrides?: Parameters<typeof ServerSettingsService.layerTest>[0];
   readonly shouldFinalizeRun: () => Effect.Effect<boolean, never>;
   readonly hasUnpairedRunInterruptRequest?: () => Effect.Effect<boolean, never>;
   readonly seedOpenSubagent?: boolean;
@@ -3181,6 +3253,7 @@ function captureRootRunTermination(input: {
     });
     const writtenItems = yield* Ref.make<ReadonlyArray<OrchestrationV2TurnItem>>([]);
     const observed = yield* Ref.make<ReadonlyArray<string>>([]);
+    const ingested = yield* Ref.make<ReadonlyArray<ProviderAdapterV2Event>>([]);
     const ingestionDone = yield* Deferred.make<void>();
     const captureTurnItem = (payload: OrchestrationV2TurnItem) =>
       Ref.update(writtenItems, (current) => [...current, payload]);
@@ -3217,9 +3290,10 @@ function captureRootRunTermination(input: {
           }),
           idAllocatorLayer,
           Layer.mock(ProviderEventIngestorV2)({
-            ingestNormalized: () => Effect.succeed([]),
+            ingestNormalized: ({ event }) =>
+              Ref.update(ingested, (current) => [...current, event]).pipe(Effect.as([])),
           }),
-          ServerSettingsService.layerTest(),
+          ServerSettingsService.layerTest(input.settingsOverrides),
           Layer.succeed(RunFinalizationObserver, {
             refresh: () => Effect.void,
             refreshAfterTurn: () =>
@@ -3235,7 +3309,10 @@ function captureRootRunTermination(input: {
       const runExecution = yield* RunExecutionServiceV2;
       yield* runExecution.startRootRun({
         commandId: CommandId.make(`command:${input.key}`),
-        appThread: { id: ids.threadId } as OrchestrationV2AppThread,
+        appThread: {
+          id: ids.threadId,
+          ...(input.projectId === undefined ? {} : { projectId: input.projectId }),
+        } as OrchestrationV2AppThread,
         providerSessionId: ProviderSessionId.make(`session:${input.key}`),
         session: {
           events: Stream.empty,
@@ -3322,7 +3399,11 @@ function captureRootRunTermination(input: {
     }).pipe(Effect.provide(testLayer));
 
     yield* Deferred.await(ingestionDone);
-    return { written: yield* Ref.get(writtenItems), observed: yield* Ref.get(observed) };
+    return {
+      written: yield* Ref.get(writtenItems),
+      observed: yield* Ref.get(observed),
+      ingested: yield* Ref.get(ingested),
+    };
   });
 }
 

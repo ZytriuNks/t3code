@@ -6,7 +6,10 @@ import {
   ClientSettingsSchema,
   ClientSettingsPatch,
   ClaudeSettings,
+  DEFAULT_CONVERSATION_STRUCTURE,
   DEFAULT_SERVER_SETTINGS,
+  ProjectSettingsOverrides,
+  PROJECT_SCOPED_SERVER_SETTING_KEYS,
   resolveProviderInstanceEnabled,
   ServerSettings,
   ServerSettingsPatch,
@@ -19,6 +22,96 @@ const decodeServerSettings = Schema.decodeUnknownSync(ServerSettings);
 const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
+const decodeProjectSettingsOverrides = Schema.decodeSync(ProjectSettingsOverrides);
+
+describe("conversationStructure", () => {
+  it("validates and preserves smooth text yield duration in defaults, overrides and patches", () => {
+    expect(decodeServerSettings({}).smoothTextYieldDurationMs).toBe(200);
+    expect(decodeProjectSettingsOverrides({}).smoothTextYieldDurationMs).toBeUndefined();
+    for (const duration of [80, 200, 1000]) {
+      expect(
+        decodeServerSettingsPatch({ smoothTextYieldDurationMs: duration })
+          .smoothTextYieldDurationMs,
+      ).toBe(duration);
+      expect(
+        decodeProjectSettingsOverrides({ smoothTextYieldDurationMs: duration })
+          .smoothTextYieldDurationMs,
+      ).toBe(duration);
+    }
+    for (const duration of [79, 1001, 80.5, "200", null]) {
+      expect(() => decodeServerSettingsPatch({ smoothTextYieldDurationMs: duration })).toThrow();
+      expect(() =>
+        decodeProjectSettingsOverrides({ smoothTextYieldDurationMs: duration }),
+      ).toThrow();
+    }
+  });
+  it("includes the yield duration in the project-scoped setting set", () => {
+    expect(PROJECT_SCOPED_SERVER_SETTING_KEYS).toContain("smoothTextYieldDurationMs");
+  });
+  it("round-trips yield duration through server settings encoding and patches", () => {
+    const input = { smoothTextYieldDurationMs: 870 };
+    expect(encodeServerSettings(decodeServerSettings(input))).toMatchObject(input);
+    expect(decodeServerSettingsPatch(input)).toEqual(input);
+    expect(decodeProjectSettingsOverrides(input)).toEqual(input);
+  });
+
+  it("validates and preserves text fade duration in defaults, overrides and patches", () => {
+    expect(decodeServerSettings({}).smoothTextFadeDurationMs).toBe(200);
+    expect(decodeProjectSettingsOverrides({}).smoothTextFadeDurationMs).toBeUndefined();
+    for (const duration of [0, 180, 1000]) {
+      expect(
+        decodeServerSettingsPatch({ smoothTextFadeDurationMs: duration }).smoothTextFadeDurationMs,
+      ).toBe(duration);
+      expect(
+        decodeProjectSettingsOverrides({ smoothTextFadeDurationMs: duration })
+          .smoothTextFadeDurationMs,
+      ).toBe(duration);
+    }
+    for (const duration of [-1, 1001, 1.5, "180", null])
+      expect(() => decodeServerSettingsPatch({ smoothTextFadeDurationMs: duration })).toThrow();
+  });
+  it("defaults to the current behaviour with an idle label", () => {
+    const decoded = decodeProjectSettingsOverrides({});
+    expect(decoded.conversationStructure).toBeUndefined();
+    expect(decoded.conversationStructureThinkingLabel).toBeUndefined();
+    expect(decoded.conversationStructureIdleLabel).toBeUndefined();
+    expect(DEFAULT_CONVERSATION_STRUCTURE).toBe("default");
+  });
+
+  it("accepts both structure values and a custom idle label", () => {
+    const decoded = decodeProjectSettingsOverrides({
+      conversationStructure: "restructured",
+      conversationStructureThinkingLabel: "Working it out",
+      conversationStructureIdleLabel: "考虑下一步",
+    });
+    expect(decoded.conversationStructure).toBe("restructured");
+    expect(decoded.conversationStructureThinkingLabel).toBe("Working it out");
+    expect(decoded.conversationStructureIdleLabel).toBe("考虑下一步");
+  });
+
+  it("defaults both keys on the environment-wide server settings", () => {
+    const decoded = decodeServerSettings({});
+    expect(decoded.conversationStructure).toBe(DEFAULT_CONVERSATION_STRUCTURE);
+    // Empty labels mean the client's translated built-in text.
+    expect(decoded.conversationStructureThinkingLabel).toBe("");
+    expect(decoded.conversationStructureIdleLabel).toBe("");
+  });
+
+  it("round-trips both keys through the environment-wide settings write path", () => {
+    const input = {
+      conversationStructure: "restructured",
+      conversationStructureThinkingLabel: "Working it out",
+      conversationStructureIdleLabel: "考虑下一步",
+    };
+    expect(encodeServerSettings(decodeServerSettings(input))).toMatchObject(input);
+    expect(decodeServerSettingsPatch(input)).toEqual(input);
+  });
+
+  it("rejects an unknown structure value", () => {
+    expect(() => decodeServerSettings({ conversationStructure: "unknown" })).toThrow();
+    expect(() => decodeServerSettingsPatch({ conversationStructure: "unknown" })).toThrow();
+  });
+});
 
 describe("ClientSettings context menu visibility", () => {
   it("defaults to showing unavailable context menu items", () => {
@@ -30,11 +123,61 @@ describe("ClientSettings context menu visibility", () => {
 });
 
 describe("ServerSettings response streaming", () => {
+  it("enables Markdown preload by default and round-trips its environment and project overrides", () => {
+    expect(decodeServerSettings({}).smoothMarkdownPreload).toBe(true);
+    expect(decodeProjectSettingsOverrides({}).smoothMarkdownPreload).toBeUndefined();
+    const input = {
+      smoothMarkdownPreload: false,
+      projectSettingsOverrides: { project: { smoothMarkdownPreload: true } },
+    };
+    expect(encodeServerSettings(decodeServerSettings(input))).toMatchObject(input);
+    expect(decodeServerSettingsPatch(input)).toEqual(input);
+    expect(() => decodeServerSettingsPatch({ smoothMarkdownPreload: "yes" })).toThrow();
+  });
+  it("stores independent line strategies and inherits them when a project has no override", () => {
+    expect(decodeServerSettings({}).smoothOutputLineMode).toBe("adaptive");
+    expect(decodeProjectSettingsOverrides({}).smoothOutputLineMode).toBeUndefined();
+    const input = {
+      smoothOutputLineMode: "parallel",
+      projectSettingsOverrides: { project: { smoothOutputLineMode: "adaptive" } },
+    };
+    expect(encodeServerSettings(decodeServerSettings(input))).toMatchObject(input);
+    expect(decodeServerSettingsPatch(input)).toEqual(input);
+    expect(() => decodeServerSettingsPatch({ smoothOutputLineMode: "random" })).toThrow();
+  });
+  it("defaults to expanded footnotes and round-trips automatic collapse at every scope", () => {
+    expect(decodeServerSettings({}).footnotesAutoCollapse).toBe(false);
+    expect(decodeProjectSettingsOverrides({}).footnotesAutoCollapse).toBeUndefined();
+    const input = {
+      footnotesAutoCollapse: true,
+      projectSettingsOverrides: { project: { footnotesAutoCollapse: false } },
+    };
+    expect(encodeServerSettings(decodeServerSettings(input))).toMatchObject(input);
+    expect(decodeServerSettingsPatch(input)).toEqual(input);
+    expect(() => decodeServerSettingsPatch({ footnotesAutoCollapse: "yes" })).toThrow();
+  });
+  it("keeps character output as the default and round-trips token mode through every settings scope", () => {
+    expect(decodeServerSettings({}).smoothOutputMode).toBe("character");
+    expect(decodeProjectSettingsOverrides({}).smoothOutputMode).toBeUndefined();
+    const input = {
+      smoothOutputMode: "token",
+      projectSettingsOverrides: { project: { smoothOutputMode: "character" } },
+    };
+    expect(encodeServerSettings(decodeServerSettings(input))).toMatchObject(input);
+    expect(decodeServerSettingsPatch(input)).toEqual(input);
+    expect(() => decodeServerSettingsPatch({ smoothOutputMode: "word" })).toThrow();
+    // `auto` is opt-in: it adapts between the two, so it has to survive the
+    // same round trip as either fixed mode.
+    const adapting = { smoothOutputMode: "auto" as const };
+    expect(encodeServerSettings(decodeServerSettings(adapting))).toMatchObject(adapting);
+    expect(decodeServerSettingsPatch(adapting)).toEqual(adapting);
+  });
+
   it("defaults to paragraph buffering", () => {
     expect(decodeServerSettings({}).responseStreamingMode).toBe("paragraph");
   });
 
-  it.each(["turn", "paragraph"])(
+  it.each(["turn", "paragraph", "realtime", "smooth"])(
     "round-trips %s as an environment setting and project override",
     (responseStreamingMode) => {
       const input = {

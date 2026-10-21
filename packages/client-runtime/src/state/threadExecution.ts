@@ -67,6 +67,33 @@ export function deriveThreadActivityRun(
   return run === null ? null : summarizeThreadRun(projection, run);
 }
 
+export function deriveActiveNativeProviderTurn(
+  projection: OrchestrationV2ThreadProjection,
+): OrchestrationV2ThreadProjection["providerTurns"][number] | null {
+  const activityRun = deriveThreadActivityRun(projection);
+  if (activityRun !== null && ACTIVITY_RUN_STATUSES.has(activityRun.status)) return null;
+  const providerThreadId = projection.thread.activeProviderThreadId;
+  if (providerThreadId === null) return null;
+  // Native subagents have provider turns but no application run. Choose the
+  // current thread's newest turn before checking activity, so an old running
+  // turn cannot outlive a newer terminal turn or a provider-thread switch.
+  const latestTurn = projection.providerTurns.reduce<
+    OrchestrationV2ThreadProjection["providerTurns"][number] | null
+  >(
+    (latest, turn) =>
+      turn.providerThreadId === providerThreadId &&
+      (latest === null || turn.ordinal > latest.ordinal)
+        ? turn
+        : latest,
+    null,
+  );
+  return latestTurn?.runAttemptId === null &&
+    latestTurn.completedAt === null &&
+    (latestTurn.status === "pending" || latestTurn.status === "running")
+    ? latestTurn
+    : null;
+}
+
 export function deriveThreadRuntime(
   projection: OrchestrationV2ThreadProjection,
 ): ThreadRuntimeSummary | null {

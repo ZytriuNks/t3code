@@ -1087,9 +1087,41 @@ export type BackgroundActivitySettings = typeof BackgroundActivitySettings.Type;
  * How assistant text reaches clients while a turn runs.
  * - `turn`: hold the whole message until the turn finishes or pauses.
  * - `paragraph`: deliver each finished paragraph or closed code block.
+ * - `realtime`: deliver provider updates as they arrive, including unfinished markdown.
+ * - `smooth`: deliver provider updates as they arrive for gradual presentation in web and desktop.
  */
-export const ResponseStreamingMode = Schema.Literals(["turn", "paragraph"]);
+export const ResponseStreamingMode = Schema.Literals(["turn", "paragraph", "realtime", "smooth"]);
 export type ResponseStreamingMode = typeof ResponseStreamingMode.Type;
+
+/**
+ * Presentation units for the client-side smooth output buffer.
+ *
+ * `character` shows one character at a time, `token` shows whole provider
+ * fragments, and `auto` starts per character and switches to whole fragments
+ * only when the buffer shows the display is falling behind.
+ *
+ * `character` stays the default: adapting silently would change what an
+ * existing installation sees without it asking.
+ */
+export const SmoothOutputMode = Schema.Literals(["character", "token", "auto"]);
+export type SmoothOutputMode = typeof SmoothOutputMode.Type;
+
+/** Adjacent line fades may overlap; adaptive also blends the displacement by line cadence. */
+export const SmoothOutputLineMode = Schema.Literals(["adaptive", "parallel"]);
+export type SmoothOutputLineMode = typeof SmoothOutputLineMode.Type;
+
+export const SmoothTextFadeDurationMs = Schema.Int.check(
+  Schema.isBetween({ minimum: 0, maximum: 1000 }),
+);
+export const SmoothTextYieldDurationMs = Schema.Int.check(
+  Schema.isBetween({ minimum: 80, maximum: 1000 }),
+);
+
+/** 0: current timeline shape. 1: live label shows one operation, tools archive as they finish. */
+export const ConversationStructure = Schema.Literals(["default", "restructured"]);
+export type ConversationStructure = typeof ConversationStructure.Type;
+
+export const DEFAULT_CONVERSATION_STRUCTURE = "default" as const;
 
 /**
  * Server settings a project may override. Every other server setting is
@@ -1136,6 +1168,15 @@ export const PROJECT_SCOPED_SERVER_SETTING_KEYS = [
   "sidebarAutoSettleAfterDays",
   "continueThreadsAfterServerUpdate",
   "responseStreamingMode",
+  "smoothOutputMode",
+  "smoothOutputLineMode",
+  "smoothMarkdownPreload",
+  "smoothTextFadeDurationMs",
+  "smoothTextYieldDurationMs",
+  "footnotesAutoCollapse",
+  "conversationStructure",
+  "conversationStructureThinkingLabel",
+  "conversationStructureIdleLabel",
 ] as const;
 export type ProjectScopedServerSettingKey = (typeof PROJECT_SCOPED_SERVER_SETTING_KEYS)[number];
 
@@ -1163,6 +1204,15 @@ export const ProjectSettingsOverrides = Schema.Struct({
   sidebarAutoSettleAfterDays: Schema.optionalKey(Schema.NullOr(SidebarAutoSettleAfterDays)),
   continueThreadsAfterServerUpdate: Schema.optionalKey(Schema.Boolean),
   responseStreamingMode: Schema.optionalKey(ResponseStreamingMode),
+  smoothOutputMode: Schema.optionalKey(SmoothOutputMode),
+  smoothOutputLineMode: Schema.optionalKey(SmoothOutputLineMode),
+  smoothMarkdownPreload: Schema.optionalKey(Schema.Boolean),
+  smoothTextFadeDurationMs: Schema.optionalKey(SmoothTextFadeDurationMs),
+  smoothTextYieldDurationMs: Schema.optionalKey(SmoothTextYieldDurationMs),
+  footnotesAutoCollapse: Schema.optionalKey(Schema.Boolean),
+  conversationStructure: Schema.optionalKey(ConversationStructure),
+  conversationStructureThinkingLabel: Schema.optionalKey(Schema.String),
+  conversationStructureIdleLabel: Schema.optionalKey(Schema.String),
 } satisfies Record<ProjectScopedServerSettingKey, unknown>);
 export type ProjectSettingsOverrides = typeof ProjectSettingsOverrides.Type;
 
@@ -1205,6 +1255,30 @@ export const ServerSettings = Schema.Struct({
   ),
   responseStreamingMode: ResponseStreamingMode.pipe(
     Schema.withDecodingDefault(Effect.succeed("paragraph" as const)),
+  ),
+  smoothOutputMode: SmoothOutputMode.pipe(
+    Schema.withDecodingDefault(Effect.succeed("character" as const)),
+  ),
+  smoothOutputLineMode: SmoothOutputLineMode.pipe(
+    Schema.withDecodingDefault(Effect.succeed("adaptive" as const)),
+  ),
+  smoothMarkdownPreload: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  smoothTextFadeDurationMs: SmoothTextFadeDurationMs.pipe(
+    Schema.withDecodingDefault(Effect.succeed(200)),
+  ),
+  smoothTextYieldDurationMs: SmoothTextYieldDurationMs.pipe(
+    Schema.withDecodingDefault(Effect.succeed(200)),
+  ),
+  footnotesAutoCollapse: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  conversationStructure: ConversationStructure.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_CONVERSATION_STRUCTURE)),
+  ),
+  // Empty uses the client's built-in label, translated into the app language.
+  conversationStructureThinkingLabel: Schema.String.pipe(
+    Schema.withDecodingDefault(Effect.succeed("")),
+  ),
+  conversationStructureIdleLabel: Schema.String.pipe(
+    Schema.withDecodingDefault(Effect.succeed("")),
   ),
   enableProviderUpdateChecks: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   // Retain the update-era key; recovery now needs an environment-owned opt-in.
@@ -1596,6 +1670,15 @@ export const ServerSettingsPatch = Schema.Struct({
   ),
   // Server settings
   responseStreamingMode: Schema.optionalKey(ResponseStreamingMode),
+  smoothOutputMode: Schema.optionalKey(SmoothOutputMode),
+  smoothOutputLineMode: Schema.optionalKey(SmoothOutputLineMode),
+  smoothMarkdownPreload: Schema.optionalKey(Schema.Boolean),
+  smoothTextFadeDurationMs: Schema.optionalKey(SmoothTextFadeDurationMs),
+  smoothTextYieldDurationMs: Schema.optionalKey(SmoothTextYieldDurationMs),
+  footnotesAutoCollapse: Schema.optionalKey(Schema.Boolean),
+  conversationStructure: Schema.optionalKey(ConversationStructure),
+  conversationStructureThinkingLabel: Schema.optionalKey(Schema.String),
+  conversationStructureIdleLabel: Schema.optionalKey(Schema.String),
   enableProviderUpdateChecks: Schema.optionalKey(Schema.Boolean),
   continueThreadsAfterServerUpdate: Schema.optionalKey(Schema.Boolean),
   enableAgentBrowserAccess: Schema.optionalKey(Schema.Boolean),

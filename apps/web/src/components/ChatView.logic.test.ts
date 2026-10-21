@@ -55,6 +55,7 @@ import {
   codexArtifactTemplatePromptToAppend,
   shouldDockDraftHeroForSubmission,
   shouldReleaseTimelineAnchorForToolActivity,
+  shouldShowWorkingActivity,
   shouldRefocusComposerOnWindowFocus,
   shouldOpenProactivePullRequest,
   shouldRetargetThreadPullRequestPanel,
@@ -1318,6 +1319,80 @@ describe("shouldReleaseTimelineAnchorForToolActivity", () => {
     expect(shouldReleaseTimelineAnchorForToolActivity({ ...input, runningTurnId: null })).toBe(
       false,
     );
+  });
+});
+
+describe("shouldShowWorkingActivity", () => {
+  const runId = RunId.make("current-run");
+  const finishedMessage = { runId, streaming: false };
+
+  it("keeps Thinking when the run settled but its final assistant chunk is still streaming", () => {
+    expect(
+      shouldShowWorkingActivity({
+        isWorking: false,
+        activeRunId: runId,
+        latestRunId: runId,
+        latestAssistantMessage: { ...finishedMessage, streaming: true },
+      }),
+    ).toBe(true);
+  });
+
+  it("hides Thinking once the settled run's final assistant chunk has finished", () => {
+    expect(
+      shouldShowWorkingActivity({
+        isWorking: false,
+        activeRunId: runId,
+        latestRunId: runId,
+        latestAssistantMessage: finishedMessage,
+      }),
+    ).toBe(false);
+  });
+
+  it("hides Thinking after the current run's final assistant output while background work settles", () => {
+    expect(
+      shouldShowWorkingActivity({
+        isWorking: true,
+        activeRunId: null,
+        latestRunId: runId,
+        latestAssistantMessage: finishedMessage,
+      }),
+    ).toBe(false);
+  });
+
+  it("keeps Thinking while the provider run can still continue", () => {
+    expect(
+      shouldShowWorkingActivity({
+        isWorking: true,
+        activeRunId: runId,
+        latestRunId: runId,
+        latestAssistantMessage: finishedMessage,
+      }),
+    ).toBe(true);
+  });
+
+  it("keeps Thinking until the latest assistant message has finished", () => {
+    expect(
+      shouldShowWorkingActivity({
+        isWorking: true,
+        activeRunId: null,
+        latestRunId: runId,
+        latestAssistantMessage: { ...finishedMessage, streaming: true },
+      }),
+    ).toBe(true);
+  });
+
+  it("does not treat an older run's assistant output as the current final output", () => {
+    expect(
+      shouldShowWorkingActivity({
+        isWorking: true,
+        activeRunId: null,
+        latestRunId: runId,
+        latestAssistantMessage: {
+          runId: RunId.make("previous-run"),
+          streaming: false,
+        },
+      }),
+    ).toBe(true);
   });
 });
 

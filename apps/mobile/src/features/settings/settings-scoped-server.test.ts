@@ -1,9 +1,13 @@
 import {
   DEFAULT_SERVER_SETTINGS,
+  ServerSettings as ServerSettingsSchema,
   type EnvironmentId,
   type ProjectId,
   type ServerSettings,
 } from "@t3tools/contracts";
+import { applyServerSettingsPatch } from "@t3tools/shared/serverSettings";
+import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
+import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 
 import type { SettingsTarget } from "./settings-environment-filter";
@@ -18,6 +22,150 @@ const firstId = "first" as EnvironmentId;
 const secondId = "second" as EnvironmentId;
 const firstProject = "first-project" as ProjectId;
 const secondProject = "second-project" as ProjectId;
+const decodeServerSettings = Schema.decodeSync(ServerSettingsSchema);
+const encodeServerSettings = Schema.encodeSync(ServerSettingsSchema);
+
+describe("mobile smooth output prerequisites", () => {
+  it.each([false, true])(
+    "enables the effective restructured layout with smooth output (project=%s)",
+    (projectSelected) => {
+      const environments = [
+        environment(firstId, DEFAULT_SERVER_SETTINGS),
+        environment(secondId, {
+          ...DEFAULT_SERVER_SETTINGS,
+          responseStreamingMode: "paragraph",
+          projectSettingsOverrides: { [secondProject]: { responseStreamingMode: "turn" } },
+        }),
+      ];
+      const targets = resolveMobileSettingsTargets(
+        environments,
+        projectSelected
+          ? [
+              { environmentId: firstId, id: firstProject },
+              { environmentId: secondId, id: secondProject },
+            ]
+          : null,
+      );
+      const writes = planMobileScopedSettingsPatch(targets, projectSelected, {
+        responseStreamingMode: "smooth",
+      });
+      expect(writes).toHaveLength(2);
+      writes.forEach((write, index) => {
+        const original = environments[index]!.serverConfig.settings;
+        const patched = applyServerSettingsPatch(original, write.patch);
+        const saved = decodeServerSettings(encodeServerSettings(patched));
+        const projectId = projectSelected ? targets[index]!.projectId : null;
+        expect(resolveProjectSettings(saved, projectId).settings).toMatchObject({
+          responseStreamingMode: "smooth",
+          conversationStructure: "restructured",
+        });
+        if (projectSelected) {
+          expect(saved.conversationStructure).toBe(original.conversationStructure);
+          expect(saved.responseStreamingMode).toBe(original.responseStreamingMode);
+        }
+      });
+    },
+  );
+
+  it.each([false, true])(
+    "downgrades only each target's effective smooth mode (project=%s)",
+    (projectSelected) => {
+      const environments = [
+        environment(firstId, {
+          ...DEFAULT_SERVER_SETTINGS,
+          conversationStructure: "restructured",
+          responseStreamingMode: projectSelected ? "turn" : "smooth",
+          projectSettingsOverrides: { [firstProject]: { responseStreamingMode: "smooth" } },
+        }),
+        environment(secondId, { ...DEFAULT_SERVER_SETTINGS, responseStreamingMode: "paragraph" }),
+      ];
+      const targets = resolveMobileSettingsTargets(
+        environments,
+        projectSelected
+          ? [
+              { environmentId: firstId, id: firstProject },
+              { environmentId: secondId, id: secondProject },
+            ]
+          : null,
+      );
+      const writes = planMobileScopedSettingsPatch(targets, projectSelected, {
+        conversationStructure: "default",
+      });
+      const saved = writes.map(
+        (write, index) =>
+          resolveProjectSettings(
+            applyServerSettingsPatch(environments[index]!.serverConfig.settings, write.patch),
+            projectSelected ? targets[index]!.projectId : null,
+          ).settings,
+      );
+      expect(saved.map((settings) => settings.responseStreamingMode)).toEqual([
+        "realtime",
+        "paragraph",
+      ]);
+      expect(saved.map((settings) => settings.conversationStructure)).toEqual([
+        "default",
+        "default",
+      ]);
+    },
+  );
+
+  it.each(["turn", "paragraph", "realtime"] as const)(
+    "keeps the layout unchanged when selecting %s",
+    (responseStreamingMode) => {
+      const targets = resolveMobileSettingsTargets(
+        [environment(firstId, DEFAULT_SERVER_SETTINGS)],
+        null,
+      );
+      const writes = planMobileScopedSettingsPatch(targets, false, { responseStreamingMode });
+      expect(applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, writes[0]!.patch)).toMatchObject({
+        conversationStructure: DEFAULT_SERVER_SETTINGS.conversationStructure,
+        responseStreamingMode,
+      });
+    },
+  );
+
+  it("restores inherited output and layout after enabling smooth output on a project", () => {
+    const settings = {
+      ...DEFAULT_SERVER_SETTINGS,
+      responseStreamingMode: "paragraph" as const,
+      projectSettingsOverrides: { [firstProject]: { defaultAutoPull: true } },
+    };
+    const members = [{ environmentId: firstId, id: firstProject }];
+    const targets = resolveMobileSettingsTargets([environment(firstId, settings)], members);
+    const enable = planMobileScopedSettingsPatch(targets, true, {
+      responseStreamingMode: "smooth",
+    });
+    const enabled = applyServerSettingsPatch(settings, enable[0]!.patch);
+    const clear = planMobileScopedSettingsClear(
+      resolveMobileSettingsTargets([environment(firstId, enabled)], members),
+      ["responseStreamingMode", "conversationStructure", "enableAgentBrowserAccess"],
+    );
+    const saved = applyServerSettingsPatch(enabled, clear[0]!.patch);
+    expect(resolveProjectSettings(saved, firstProject).settings).toMatchObject({
+      conversationStructure: "default",
+      responseStreamingMode: "paragraph",
+    });
+    expect(saved.projectSettingsOverrides[firstProject]).toEqual({ defaultAutoPull: true });
+  });
+
+  it.each(["turn", "paragraph", "realtime", "smooth"] as const)(
+    "preserves an explicit %s mode alongside a layout patch",
+    (responseStreamingMode) => {
+      const targets = resolveMobileSettingsTargets(
+        [environment(firstId, DEFAULT_SERVER_SETTINGS)],
+        null,
+      );
+      const writes = planMobileScopedSettingsPatch(targets, false, {
+        conversationStructure: "default",
+        responseStreamingMode,
+      });
+      expect(applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, writes[0]!.patch)).toMatchObject({
+        conversationStructure: "default",
+        responseStreamingMode,
+      });
+    },
+  );
+});
 
 describe("mobile usage-limit settings across environments", () => {
   it.each(["autoResumeLimitedThreads", "snoozeLimitedThreads"] as const)(
@@ -64,6 +212,44 @@ function environment(environmentId: EnvironmentId, settings: ServerSettings): Se
     },
   } as SettingsTarget;
 }
+
+describe("mobile layout reverse path", () => {
+  it("switching back to the default layout also leaves smooth output", () => {
+    const environments = [
+      environment(firstId, {
+        ...DEFAULT_SERVER_SETTINGS,
+        conversationStructure: "restructured",
+        responseStreamingMode: "smooth",
+      }),
+    ];
+    const targets = resolveMobileSettingsTargets(environments, null);
+    const [write] = planMobileScopedSettingsPatch(targets, false, {
+      conversationStructure: "default",
+    });
+    const saved = applyServerSettingsPatch(environments[0]!.serverConfig.settings, write!.patch);
+    expect(saved.conversationStructure).toBe("default");
+    expect(saved.responseStreamingMode).toBe("realtime");
+  });
+
+  it("clearing a project's layout override also clears its now-unusable smooth override", () => {
+    const environments = [
+      environment(firstId, {
+        ...DEFAULT_SERVER_SETTINGS,
+        projectSettingsOverrides: {
+          [firstProject]: {
+            conversationStructure: "restructured",
+            responseStreamingMode: "smooth",
+          },
+        },
+      }),
+    ];
+    const targets = resolveMobileSettingsTargets(environments, [
+      { environmentId: firstId, id: firstProject },
+    ]);
+    const [write] = planMobileScopedSettingsClear(targets, ["conversationStructure"]);
+    expect(write!.patch).toEqual({ projectSettingsOverrides: { [firstProject]: null } });
+  });
+});
 
 describe("mobile project settings scope", () => {
   it("edits each checkout's own override without changing either environment default", () => {

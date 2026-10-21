@@ -80,6 +80,48 @@ function threadState(
 }
 
 describe("createEnvironmentThreadDetailAtoms", () => {
+  it("keeps playback baselines scoped by environment and thread and tolerates absent metadata", () => {
+    const playback = {
+      generation: 3,
+      phase: "synchronized" as const,
+      baselineByItemId: new Map([["body", { runId: "run", text: "first environment" }]]),
+      legacyRunIds: new Set<string>(),
+    };
+    const withPlayback = Atom.make(
+      AsyncResult.success<EnvironmentThreadState>({
+        data: Option.some(v2Projection),
+        status: "live",
+        error: Option.none(),
+        history: EMPTY_THREAD_HISTORY_META,
+        textPlayback: playback,
+      }),
+    );
+    const withoutPlayback = Atom.make(
+      AsyncResult.success<EnvironmentThreadState>({
+        data: Option.some(v2Projection),
+        status: "live",
+        error: Option.none(),
+        history: EMPTY_THREAD_HISTORY_META,
+      }),
+    );
+    const details = createEnvironmentThreadDetailAtoms((environmentId, threadId) =>
+      environmentId === ref.environmentId && threadId === ref.threadId
+        ? withPlayback
+        : withoutPlayback,
+    );
+    const registry = AtomRegistry.make();
+    expect(registry.get(details.textPlaybackAtom(ref))).toBe(playback);
+    expect(
+      registry.get(
+        details.textPlaybackAtom({ ...ref, environmentId: EnvironmentId.make("other") }),
+      ),
+    ).toBeNull();
+    expect(
+      registry.get(details.textPlaybackAtom({ ...ref, threadId: ThreadId.make("other") })),
+    ).toBeNull();
+    registry.dispose();
+  });
+
   it("adds environment scope while preserving the pristine projection", () => {
     const initial: AsyncResult.AsyncResult<EnvironmentThreadState, never> = AsyncResult.success(
       threadState({

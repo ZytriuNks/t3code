@@ -259,6 +259,31 @@ export function shouldReleaseTimelineAnchorForToolActivity(input: {
   });
 }
 
+/** Keep Thinking visible until the active provider run has published its final assistant message. */
+export function shouldShowWorkingActivity(input: {
+  isWorking: boolean;
+  activeRunId: RunId | null;
+  latestRunId: RunId | null;
+  latestAssistantMessage: { runId: RunId | null; streaming: boolean } | null;
+}): boolean {
+  // A run can settle one transport frame before its last assistant chunk
+  // lands. Keep the live row until that output really finishes; closing it
+  // early moves the viewport under a body that is still growing.
+  const latestAssistantStreaming =
+    input.latestRunId !== null &&
+    input.latestAssistantMessage?.runId === input.latestRunId &&
+    input.latestAssistantMessage.streaming;
+
+  if (!input.isWorking) return latestAssistantStreaming;
+
+  const latestAssistantOutputFinished =
+    input.latestRunId !== null &&
+    input.latestAssistantMessage?.runId === input.latestRunId &&
+    !input.latestAssistantMessage.streaming;
+
+  return !(input.activeRunId === null && latestAssistantOutputFinished);
+}
+
 export {
   findRecordedWorktreeSetup,
   resolveVisibleWorktreeSetup,

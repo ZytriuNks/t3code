@@ -1,17 +1,49 @@
 // @vitest-environment jsdom
-import { act, type ComponentProps, type ReactNode } from "react";
+import { act, useLayoutEffect, useMemo, type ComponentProps, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import * as Option from "effect/Option";
-import { EnvironmentId, ThreadId, type ScopedThreadRef } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  NodeId,
+  ProviderThreadId,
+  ProviderTurnId,
+  RunAttemptId,
+  RunId,
+  MessageId,
+  ThreadId,
+  type OrchestrationV2ThreadProjection,
+  type ScopedThreadRef,
+} from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import { createInlineBufferPlugin } from "../markdown-streaming";
+import { makeThreadProjectionFixture } from "../test-fixtures";
+
+const v2Projection = makeThreadProjectionFixture();
 
 const state = vi.hoisted(() => ({
-  projection: null as { text: string } | null,
+  projection: null as
+    | (Partial<OrchestrationV2ThreadProjection> & {
+        text: string;
+        streaming?: boolean;
+      })
+    | null,
   status: "synchronizing" as "cached" | "synchronizing" | "live" | "deleted",
   error: { _tag: "None" } as unknown,
   listHidden: false,
   codePending: false,
   codeOffscreen: false,
+  activity: null as {
+    isWorking: boolean;
+    activeTurnInProgress: boolean;
+    activeTurnStartedAt: string | null;
+    runningRunId: RunId | null;
+    liveFollowEnabled?: boolean;
+    onManualNavigation?: (direction?: -1 | 1) => void;
+    onIsAtEndChange?: (isAtEnd: boolean) => void;
+  } | null,
 }));
 
 vi.mock("~/state/entities", () => ({
@@ -23,7 +55,9 @@ vi.mock("~/state/entities", () => ({
     lineage: { relationshipToParent: null, parentThreadId: null },
   }),
   useThreadProjection: (ref: ScopedThreadRef | null) =>
-    ref === null || state.projection === null ? null : { projection: state.projection },
+    ref === null || state.projection === null
+      ? null
+      : { projection: { ...v2Projection, ...state.projection } },
   useThreadVisibleTurnItems: () => [],
   useProject: () => null,
 }));
@@ -44,11 +78,11 @@ vi.mock("~/hooks/useTheme", () => ({
 }));
 
 vi.mock("~/hooks/useSettings", () => ({
-  useEnvironmentSettings: () => ({ timestampFormat: "locale" }),
-}));
-
-vi.mock("@t3tools/client-runtime/state/thread-execution", () => ({
-  deriveThreadActivityRun: () => null,
+  useEnvironmentSettings: () => ({
+    timestampFormat: "locale",
+    responseStreamingMode: "smooth",
+    conversationStructure: "restructured",
+  }),
 }));
 
 vi.mock("~/session-logic", () => ({
@@ -76,41 +110,62 @@ vi.mock("./SubagentModelInfo", () => ({
 }));
 
 vi.mock("./chat/MessagesTimeline", () => ({
-  MessagesTimeline: (props: {
+  MessagesTimeline: function TestTimeline(props: {
+    isWorking: boolean;
+    activeTurnInProgress: boolean;
+    activeTurnStartedAt: string | null;
+    runningRunId: RunId | null;
+    smoothStreaming: boolean;
     onInitialLayout?: () => void;
     timelineEntries?: Array<{ text?: string }>;
     listRef?: { current: { getScrollableNode: () => HTMLElement } | null };
-  }) => (
-    <div
-      data-testid="timeline"
-      data-timeline-empty={props.timelineEntries?.length ? undefined : "true"}
-    >
+  }) {
+    state.activity = props;
+    // Consume the real Markdown buffer with Timeline's native-message completion
+    // condition. The activity derivation in the panel is not mocked.
+    const buffer = useMemo(() => createInlineBufferPlugin(), []);
+    const plugin = buffer.configure(
+      props.smoothStreaming && Boolean(state.projection?.streaming) && props.isWorking,
+    );
+    useLayoutEffect(() => buffer.commit());
+    return (
       <div
-        data-testid="list-content"
-        style={{ opacity: state.listHidden ? 0 : 1 }}
-        ref={(element) => {
-          if (props.listRef)
-            props.listRef.current = element === null ? null : { getScrollableNode: () => element };
-        }}
+        data-testid="timeline"
+        data-timeline-empty={props.timelineEntries?.length ? undefined : "true"}
       >
-        {props.timelineEntries?.length ? (
-          <div data-timeline-root="true">
-            <span>{props.timelineEntries[0]?.text}</span>
-            {state.codePending ? (
-              <pre data-markdown-code-pending="" data-offscreen={state.codeOffscreen || undefined}>
-                Pending code
-              </pre>
-            ) : null}
-          </div>
-        ) : (
-          <span>Send a message to start the conversation.</span>
-        )}
+        <div
+          data-testid="list-content"
+          style={{ opacity: state.listHidden ? 0 : 1 }}
+          ref={(element) => {
+            if (props.listRef)
+              props.listRef.current =
+                element === null ? null : { getScrollableNode: () => element };
+          }}
+        >
+          {props.timelineEntries?.length ? (
+            <div data-timeline-root="true">
+              <ReactMarkdown remarkPlugins={[remarkGfm, ...(plugin ? [plugin] : [])]}>
+                {props.timelineEntries[0]?.text}
+              </ReactMarkdown>
+              {state.codePending ? (
+                <pre
+                  data-markdown-code-pending=""
+                  data-offscreen={state.codeOffscreen || undefined}
+                >
+                  Pending code
+                </pre>
+              ) : null}
+            </div>
+          ) : (
+            <span>Send a message to start the conversation.</span>
+          )}
+        </div>
+        <button type="button" onClick={props.onInitialLayout}>
+          Finish initial layout
+        </button>
       </div>
-      <button type="button" onClick={props.onInitialLayout}>
-        Finish initial layout
-      </button>
-    </div>
-  ),
+    );
+  },
 }));
 
 vi.mock("@legendapp/list/react", () => ({
@@ -143,6 +198,7 @@ beforeEach(async () => {
   state.listHidden = false;
   state.codePending = false;
   state.codeOffscreen = false;
+  state.activity = null;
   frames.clear();
   resizeChecks.clear();
   let nextFrame = 0;
@@ -248,6 +304,271 @@ async function flushContentFrames() {
   await flushFrame();
   await flushFrame();
 }
+
+const nativeStartedAt = DateTime.makeUnsafe("2026-10-16T01:00:00.000Z");
+const partialLink = "Read [label](https://exa";
+type ProviderTurn = OrchestrationV2ThreadProjection["providerTurns"][number];
+
+function providerTurn(overrides: Partial<ProviderTurn> = {}): ProviderTurn {
+  return {
+    id: ProviderTurnId.make("native-turn"),
+    providerThreadId: ProviderThreadId.make("native-child"),
+    nodeId: NodeId.make("native-root"),
+    runAttemptId: null,
+    nativeTurnRef: null,
+    ordinal: 1,
+    status: "running",
+    startedAt: nativeStartedAt,
+    completedAt: null,
+    ...overrides,
+  };
+}
+
+function nativeProjection(turns: readonly ProviderTurn[] = [providerTurn()]) {
+  return {
+    text: partialLink,
+    streaming: true,
+    thread: {
+      ...v2Projection.thread,
+      activeProviderThreadId: ProviderThreadId.make("native-child"),
+    },
+    providerTurns: turns,
+    messages: [
+      {
+        id: MessageId.make("native-message"),
+        threadId: v2Projection.thread.id,
+        runId: null,
+        nodeId: NodeId.make("native-root"),
+        role: "assistant" as const,
+        text: partialLink,
+        attachments: [],
+        streaming: true,
+        createdAt: nativeStartedAt,
+        updatedAt: nativeStartedAt,
+        createdBy: "agent" as const,
+        creationSource: "provider" as const,
+      },
+    ],
+  };
+}
+
+function markdownBody(container: HTMLElement) {
+  return findElement(container, "[data-timeline-root] p").textContent;
+}
+
+describe("native subagent streaming activity", () => {
+  it.each(["completed", "interrupted", "failed", "cancelled"] as const)(
+    "buffers consecutive native fragments until the turn is %s, then releases the suffix",
+    async (terminalStatus) => {
+      state.status = "live";
+      state.projection = nativeProjection([providerTurn({ status: "pending", startedAt: null })]);
+      const view = await renderPanel("sidebar");
+      expect(markdownBody(view.container)).toBe("Read label");
+      expect(state.activity).toMatchObject({
+        isWorking: true,
+        activeTurnInProgress: true,
+        activeTurnStartedAt: null,
+        runningRunId: null,
+      });
+
+      for (const text of [partialLink, `${partialLink}mple`, `${partialLink}mple.com`]) {
+        state.projection = { ...nativeProjection(), text };
+        await view.update();
+        expect(markdownBody(view.container)).toBe("Read label");
+        expect(state.activity).toMatchObject({
+          isWorking: true,
+          activeTurnInProgress: true,
+          activeTurnStartedAt: DateTime.formatIso(nativeStartedAt),
+          runningRunId: null,
+        });
+      }
+
+      // The turn terminal can arrive before the last message clears streaming.
+      state.projection = {
+        ...state.projection,
+        providerTurns: [providerTurn({ status: terminalStatus, completedAt: nativeStartedAt })],
+      };
+      await view.update();
+      expect(markdownBody(view.container)).toBe(`${partialLink}mple.com`);
+      expect(state.activity).toMatchObject({
+        isWorking: false,
+        activeTurnInProgress: false,
+        activeTurnStartedAt: null,
+        runningRunId: null,
+      });
+      state.projection = { ...state.projection, streaming: false };
+      await view.update();
+      expect(markdownBody(view.container)).toBe(`${partialLink}mple.com`);
+    },
+  );
+
+  it.each(["preparing", "starting", "running", "waiting", "completed"] as const)(
+    "preserves the ordinary application run's %s behavior and identity",
+    async (status) => {
+      const runId = RunId.make("app-run");
+      const startedAt = DateTime.makeUnsafe("2026-10-16T02:00:00.000Z");
+      state.projection = {
+        ...nativeProjection(),
+        runs: [
+          {
+            id: runId,
+            threadId: v2Projection.thread.id,
+            ordinal: 1,
+            providerInstanceId: v2Projection.thread.providerInstanceId,
+            modelSelection: v2Projection.thread.modelSelection,
+            providerThreadId: ProviderThreadId.make("native-child"),
+            userMessageId: MessageId.make("user-message"),
+            rootNodeId: null,
+            activeAttemptId: RunAttemptId.make("app-attempt"),
+            status,
+            requestedAt: startedAt,
+            startedAt,
+            completedAt: status === "completed" ? startedAt : null,
+            checkpointId: null,
+            contextHandoffId: null,
+          },
+        ],
+        providerTurns: [providerTurn({ runAttemptId: RunAttemptId.make("app-attempt") })],
+      };
+      const view = await renderPanel("overlay");
+      const working = status === "preparing" || status === "starting" || status === "running";
+      expect(markdownBody(view.container)).toBe(working ? "Read label" : partialLink);
+      expect(state.activity).toMatchObject({
+        isWorking: working,
+        activeTurnInProgress: working,
+        activeTurnStartedAt: DateTime.formatIso(startedAt),
+        runningRunId: working ? runId : null,
+      });
+      // A historical application run must not hide subsequent native work,
+      // while an application run waiting for input must retain its behavior.
+      if (status === "waiting" || status === "completed") {
+        const nextStartedAt = DateTime.makeUnsafe("2026-10-16T03:00:00.000Z");
+        state.projection = {
+          ...state.projection,
+          providerTurns: [providerTurn({ ordinal: 2, startedAt: nextStartedAt })],
+        };
+        await view.update();
+        expect(markdownBody(view.container)).toBe(
+          status === "completed" ? "Read label" : partialLink,
+        );
+        expect(state.activity).toMatchObject({
+          isWorking: status === "completed",
+          activeTurnStartedAt: DateTime.formatIso(
+            status === "completed" ? nextStartedAt : startedAt,
+          ),
+          runningRunId: null,
+        });
+      }
+    },
+  );
+
+  it.each([false, true])(
+    "uses only the latest turn of the current provider thread, regardless of array order (%s)",
+    async (reverse) => {
+      const turns = [
+        providerTurn({ ordinal: 1 }),
+        providerTurn({ id: ProviderTurnId.make("newer-turn"), ordinal: 2, status: "completed" }),
+        providerTurn({
+          id: ProviderTurnId.make("unrelated-turn"),
+          providerThreadId: ProviderThreadId.make("unrelated-thread"),
+          ordinal: 99,
+        }),
+      ];
+      state.projection = nativeProjection(reverse ? turns.toReversed() : turns);
+      const view = await renderPanel("sidebar");
+      expect(markdownBody(view.container)).toBe(partialLink);
+      state.projection = {
+        ...state.projection,
+        providerTurns: [
+          ...turns,
+          providerTurn({ id: ProviderTurnId.make("current-turn"), ordinal: 3 }),
+        ],
+      };
+      await view.update();
+      expect(markdownBody(view.container)).toBe("Read label");
+      state.projection = {
+        ...state.projection,
+        thread: { ...v2Projection.thread, activeProviderThreadId: null },
+      };
+      await view.update();
+      expect(markdownBody(view.container)).toBe(partialLink);
+    },
+  );
+
+  it("does not revive an old native turn when the current provider thread changes", async () => {
+    state.projection = nativeProjection();
+    const view = await renderPanel("sidebar");
+    expect(markdownBody(view.container)).toBe("Read label");
+    state.projection = {
+      ...state.projection,
+      thread: {
+        ...v2Projection.thread,
+        activeProviderThreadId: ProviderThreadId.make("new-provider-thread"),
+      },
+    };
+    await view.update();
+    expect(markdownBody(view.container)).toBe(partialLink);
+  });
+
+  it("settles a turn with a completion timestamp even if its status still says running", async () => {
+    state.projection = nativeProjection();
+    const view = await renderPanel("sidebar");
+    expect(markdownBody(view.container)).toBe("Read label");
+    state.projection = nativeProjection([providerTurn({ completedAt: nativeStartedAt })]);
+    await view.update();
+    expect(markdownBody(view.container)).toBe(partialLink);
+  });
+});
+
+describe("subagent live follow", () => {
+  it("re-arms when the first scroll after detaching reaches the end", async () => {
+    state.status = "live";
+    state.projection = nativeProjection();
+    const view = await renderPanel("sidebar");
+    const scroller = findElement(view.container, "[data-testid='list-content']");
+    scroller.scrollTop = 100;
+    await act(() => state.activity?.onManualNavigation?.(-1));
+    scroller.scrollTop = 300;
+    scroller.dispatchEvent(new Event("scroll"));
+    await act(() => state.activity?.onIsAtEndChange?.(true));
+    expect(state.activity?.liveFollowEnabled).toBe(true);
+  });
+
+  it("does not re-arm when only an embedded code scroller moves down", async () => {
+    state.status = "live";
+    state.projection = nativeProjection();
+    const view = await renderPanel("sidebar");
+    const scroller = findElement(view.container, "[data-testid='list-content']");
+    const code = document.createElement("pre");
+    scroller.append(code);
+    await act(() => state.activity?.onManualNavigation?.(-1));
+    code.scrollTop = 10;
+    code.dispatchEvent(new Event("scroll"));
+    code.scrollTop = 100;
+    code.dispatchEvent(new Event("scroll"));
+    await act(() => state.activity?.onIsAtEndChange?.(true));
+    expect(state.activity?.liveFollowEnabled).toBe(false);
+  });
+
+  it("leaves follow on reader navigation and re-arms only after scrolling back down to the end", async () => {
+    state.status = "live";
+    state.projection = nativeProjection();
+    const view = await renderPanel("sidebar");
+    expect(state.activity?.liveFollowEnabled).toBe(true);
+    await act(() => state.activity?.onManualNavigation?.(-1));
+    expect(state.activity?.liveFollowEnabled).toBe(false);
+    // An estimated end report without a downward move does not steal the viewport.
+    await act(() => state.activity?.onIsAtEndChange?.(true));
+    expect(state.activity?.liveFollowEnabled).toBe(false);
+    const scroller = findElement(view.container, "[data-testid='list-content']");
+    scroller.scrollTop = 100;
+    scroller.dispatchEvent(new Event("scroll"));
+    scroller.scrollTop = 300;
+    scroller.dispatchEvent(new Event("scroll"));
+    await act(() => state.activity?.onIsAtEndChange?.(true));
+    expect(state.activity?.liveFollowEnabled).toBe(true);
+  });
+});
 
 describe("SubagentConversationPanel", () => {
   it.each(["overlay", "sidebar"] as const)(

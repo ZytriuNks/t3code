@@ -6,7 +6,7 @@ import {
 } from "@t3tools/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { applyServerSettingsPatch } from "@t3tools/shared/serverSettings";
-import { resolveWorktreeCleanup } from "@t3tools/shared/projectSettings";
+import { resolveProjectSettings, resolveWorktreeCleanup } from "@t3tools/shared/projectSettings";
 
 import type { SidebarProjectSnapshot } from "../../sidebarProjectGrouping";
 import {
@@ -100,7 +100,188 @@ const checkout = resolveSettingsScope(
   environments,
 );
 
+describe("conversation structure changes across targets", () => {
+  it("keeps the per-target downgrade when a patch also edits a custom cleanup policy", () => {
+    const selected = [
+      environment("Server", {
+        settings: {
+          conversationStructure: "restructured",
+          responseStreamingMode: "smooth",
+          worktreeCleanup: { mode: "off" },
+        },
+      }),
+    ];
+    const plan = planScopedSettingsPatch(named, selected, {
+      conversationStructure: "default",
+      storageCleanup: { worktreeOnDelete: true },
+    });
+    const saved = applyServerSettingsPatch(
+      selected[0]!.serverConfig!.settings,
+      plan.serverWrites[0]!.patch,
+    );
+    expect(saved).toMatchObject({
+      conversationStructure: "default",
+      responseStreamingMode: "realtime",
+    });
+    expect(resolveWorktreeCleanup(saved, null).worktreeOnDelete).toBe(true);
+  });
+
+  it.each([
+    ["smooth", "turn", "paragraph", "realtime"],
+    ["turn", "smooth", "realtime", "paragraph"],
+  ] as const)(
+    "downgrades only smooth output in an environment batch starting with %s",
+    (...modes) => {
+      const selected = modes.map((responseStreamingMode, index) =>
+        environment(`target-${index}`, {
+          settings: { conversationStructure: "restructured", responseStreamingMode },
+        }),
+      );
+      const scope = resolveSettingsScope({}, [], selected);
+      const plan = planScopedSettingsPatch(scope, selected, { conversationStructure: "default" });
+      const saved = plan.serverWrites.map((write, index) =>
+        applyServerSettingsPatch(selected[index]!.serverConfig!.settings, write.patch),
+      );
+      expect(saved.map((settings) => settings.conversationStructure)).toEqual(
+        modes.map(() => "default"),
+      );
+      expect(saved.map((settings) => settings.responseStreamingMode)).toEqual(
+        modes.map((mode) => (mode === "smooth" ? "realtime" : mode)),
+      );
+    },
+  );
+
+  it.each([project, checkout])("uses each $kind member's effective output mode", (scope) => {
+    const selected = [
+      environment("Server", {
+        settings: {
+          conversationStructure: "restructured",
+          responseStreamingMode: "turn",
+          projectSettingsOverrides: { [projectId]: { responseStreamingMode: "smooth" } },
+        },
+      }),
+      environment("Laptop", {
+        settings: { conversationStructure: "restructured", responseStreamingMode: "paragraph" },
+      }),
+    ];
+    const plan = planScopedSettingsPatch(scope, selected, { conversationStructure: "default" });
+    const saved = plan.serverWrites.map((write) => {
+      const original = selected.find((entry) => entry.environmentId === write.environmentId)!
+        .serverConfig!.settings;
+      const settings = applyServerSettingsPatch(original, write.patch);
+      expect(settings.responseStreamingMode).toBe(original.responseStreamingMode);
+      expect(settings.conversationStructure).toBe("restructured");
+      return settings;
+    });
+    expect(resolveProjectSettings(saved[0]!, projectId).settings).toMatchObject({
+      conversationStructure: "default",
+      responseStreamingMode: "realtime",
+    });
+    if (scope.kind === "project") {
+      expect(resolveProjectSettings(saved[1]!, laptopProjectId).settings).toMatchObject({
+        conversationStructure: "default",
+        responseStreamingMode: "paragraph",
+      });
+    }
+  });
+
+  it.each(["turn", "paragraph", "realtime", "smooth"] as const)(
+    "keeps an explicit %s selection when the structure also changes",
+    (responseStreamingMode) => {
+      const selected = [environment("Server", { settings: { responseStreamingMode: "smooth" } })];
+      for (const scope of [named, checkout]) {
+        const plan = planScopedSettingsPatch(scope, selected, {
+          conversationStructure: "default",
+          responseStreamingMode,
+        });
+        const saved = applyServerSettingsPatch(
+          selected[0]!.serverConfig!.settings,
+          plan.serverWrites[0]!.patch,
+        );
+        expect(
+          resolveProjectSettings(saved, scope.kind === "checkout" ? projectId : null).settings
+            .responseStreamingMode,
+        ).toBe(responseStreamingMode);
+      }
+    },
+  );
+
+  it("preserves project preferences that override an inherited smooth environment", () => {
+    const selected = [
+      environment("Server", {
+        settings: {
+          conversationStructure: "restructured",
+          responseStreamingMode: "smooth",
+          projectSettingsOverrides: { [projectId]: { responseStreamingMode: "paragraph" } },
+        },
+      }),
+    ];
+    const plan = planScopedSettingsPatch(checkout, selected, { conversationStructure: "default" });
+    const saved = applyServerSettingsPatch(
+      selected[0]!.serverConfig!.settings,
+      plan.serverWrites[0]!.patch,
+    );
+    expect(resolveProjectSettings(saved, projectId).settings).toMatchObject({
+      conversationStructure: "default",
+      responseStreamingMode: "paragraph",
+    });
+    expect(saved.responseStreamingMode).toBe("smooth");
+  });
+});
+
 describe("scoped settings targets", () => {
+  it("supports the yield duration as mixed, environment, project, checkout, and multi-target state", () => {
+    const targets = [
+      environment("Laptop", { settings: { smoothTextYieldDurationMs: 300 } }),
+      environment("Server", { settings: { smoothTextYieldDurationMs: 500 } }),
+    ];
+    expect(
+      scopedSettingsAreMixed(resolveScopedSettingsTargets(all, targets), [
+        "smoothTextYieldDurationMs",
+      ]),
+    ).toBe(true);
+
+    const cases = [
+      [named, [targets[1]!], "environment"],
+      [project, targets, "project"],
+      [checkout, [targets[1]!], "checkout"],
+      [all, targets, "multi"],
+    ] as const;
+    for (const [scope, selected, label] of cases) {
+      const plan = planScopedSettingsPatch(scope, selected, { smoothTextYieldDurationMs: 760 });
+      expect(plan.unavailableReason, label).toBeNull();
+      expect(plan.serverWrites, label).toHaveLength(
+        label === "multi" || label === "project" ? 2 : 1,
+      );
+      const saved = plan.serverWrites.map((write) => {
+        const target = selected.find(
+          (candidate) => candidate.environmentId === write.environmentId,
+        )!;
+        return {
+          environmentId: write.environmentId,
+          settings: applyServerSettingsPatch(target.serverConfig!.settings, write.patch),
+        };
+      });
+      if (label === "environment" || label === "multi") {
+        expect(
+          saved.every(({ settings }) => settings.smoothTextYieldDurationMs === 760),
+          label,
+        ).toBe(true);
+      } else {
+        expect(
+          saved.every(
+            ({ environmentId, settings }) =>
+              resolveProjectSettings(
+                settings,
+                environmentId === server.environmentId ? projectId : laptopProjectId,
+              ).settings.smoothTextYieldDurationMs === 760,
+          ),
+          label,
+        ).toBe(true);
+      }
+    }
+  });
+
   it("uses the named environment even when a different primary is available", () => {
     const selected = selectScopedSettingsEnvironments(named, environments, laptop.environmentId);
     expect(selected.environments).toEqual([server]);
@@ -394,6 +575,52 @@ describe("scoped settings writes", () => {
     ).toEqual({ projectSettingsOverrides: { [projectId]: null } });
   });
 
+  it("drops the partner override when inheriting the layout would leave default + smooth", () => {
+    const withOverrides = environment("Server", {
+      settings: {
+        projectSettingsOverrides: {
+          [projectId]: {
+            conversationStructure: "restructured",
+            responseStreamingMode: "smooth",
+            defaultAutoPull: true,
+          },
+        },
+      },
+    });
+    const plan = planScopedSettingsClear(
+      checkout,
+      [laptop, withOverrides],
+      ["conversationStructure"],
+    );
+    const saved = applyServerSettingsPatch(
+      withOverrides.serverConfig!.settings,
+      plan.serverWrites[0]!.patch,
+    );
+    expect(saved.projectSettingsOverrides[projectId]).toEqual({ defaultAutoPull: true });
+    const effective = resolveProjectSettings(saved, projectId).settings;
+    expect(effective.conversationStructure).toBe("default");
+    expect(effective.responseStreamingMode).not.toBe("smooth");
+  });
+
+  it("keeps a smooth override when the environment layout already supports it", () => {
+    const withOverrides = environment("Server", {
+      settings: {
+        conversationStructure: "restructured",
+        projectSettingsOverrides: {
+          [projectId]: { conversationStructure: "restructured", responseStreamingMode: "smooth" },
+        },
+      },
+    });
+    const plan = planScopedSettingsClear(
+      checkout,
+      [laptop, withOverrides],
+      ["conversationStructure"],
+    );
+    expect(plan.serverWrites[0]?.patch).toEqual({
+      projectSettingsOverrides: { [projectId]: { responseStreamingMode: "smooth" } },
+    });
+  });
+
   it("never substitutes an environment-default write for an invalid scope", () => {
     const scope = resolveSettingsScope({ machine: "removed" }, [group], environments);
     const plan = planScopedSettingsPatch(scope, environments, { enableAgentBrowserAccess: false });
@@ -507,6 +734,38 @@ describe("project overrides at environment scope", () => {
         },
       },
     ]);
+  });
+});
+
+describe("project override clears from the environment page", () => {
+  it("applies the layout/output dependency to each named project", () => {
+    const environmentId = EnvironmentId.make("laptop");
+    const fleet = ProjectId.make("fleet");
+    const settings = {
+      ...DEFAULT_SERVER_SETTINGS,
+      projectSettingsOverrides: {
+        [fleet]: {
+          conversationStructure: "restructured" as const,
+          responseStreamingMode: "smooth" as const,
+        },
+      },
+    };
+    const plan = planProjectOverridesClear(
+      [
+        {
+          environmentId,
+          label: "laptop",
+          connection: { phase: "connected" as const },
+          serverConfig: {
+            settings,
+            environment: { capabilities: { projectSettingsOverrides: true } },
+          },
+        },
+      ],
+      [{ environmentId, projectId: fleet }],
+      ["conversationStructure"],
+    );
+    expect(plan.serverWrites[0]?.patch).toEqual({ projectSettingsOverrides: { [fleet]: null } });
   });
 });
 

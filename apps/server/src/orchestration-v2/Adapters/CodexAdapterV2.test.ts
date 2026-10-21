@@ -1624,6 +1624,299 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       };
     });
 
+  it.effect(
+    "retains native sleep, browser calls and every edited file through tool completion",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const nativeThreadId = "native-tool-records";
+          const nativeTurnId = "native-tool-records-turn";
+          const prompt = "Inspect tool records";
+          const sleep = { type: "sleep", id: "sleep-record", durationMs: 6000 };
+          const browser = {
+            type: "mcpToolCall",
+            id: "browser-record",
+            server: "t3-code",
+            tool: "preview_snapshot",
+            arguments: { tabId: "audit-browser" },
+          };
+          const edit = {
+            type: "fileChange",
+            id: "edit-record",
+            changes: [
+              {
+                path: "src/one.ts",
+                kind: { type: "update", move_path: null },
+                diff: "@@\n-old\n+new",
+              },
+              { path: "src/two.ts", kind: { type: "add" }, diff: "+new" },
+            ],
+          };
+          const transcript = makeCodexReplayTranscript({
+            scenario: "native-tool-records",
+            entries: [
+              ...codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt }),
+              ...[sleep, browser, edit].flatMap((item): CodexReplay.CodexAppServerReplayEntry[] => [
+                {
+                  type: "emit_inbound",
+                  label: `started-${item.id}`,
+                  frame: {
+                    method: "item/started",
+                    params: {
+                      threadId: nativeThreadId,
+                      turnId: nativeTurnId,
+                      item: { ...item, ...(item.type === "sleep" ? {} : { status: "inProgress" }) },
+                    },
+                  },
+                },
+                {
+                  type: "emit_inbound",
+                  label: `completed-${item.id}`,
+                  frame: {
+                    method: "item/completed",
+                    params: {
+                      threadId: nativeThreadId,
+                      turnId: nativeTurnId,
+                      item: { ...item, ...(item.type === "sleep" ? {} : { status: "completed" }) },
+                    },
+                  },
+                },
+              ]),
+              {
+                type: "emit_inbound",
+                label: "turn/completed",
+                frame: {
+                  method: "turn/completed",
+                  params: {
+                    threadId: nativeThreadId,
+                    turn: makeCodexReplayTurn({ id: nativeTurnId, status: "completed" }),
+                  },
+                },
+              },
+            ],
+          });
+          const harness = yield* makeCodexReplayHarness(transcript);
+          const now = yield* DateTime.now;
+          yield* harness.runtime.startTurn(
+            makeCodexTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now,
+              attemptId: RunAttemptId.make("attempt-tool-records"),
+              text: prompt,
+            }),
+          );
+          yield* harness.firstTerminal;
+          for (const id of [sleep.id, browser.id, edit.id]) {
+            const records = harness.events.flatMap((event) =>
+              event.type === "turn_item.updated" && event.turnItem.nativeItemRef?.nativeId === id
+                ? [event.turnItem]
+                : [],
+            );
+            assert.deepEqual(
+              records.map((item) => item.status),
+              ["running", "completed"],
+            );
+            assert.equal(records[0]?.id, records[1]?.id);
+            const last = records.at(-1)!;
+            if (id === sleep.id)
+              assert.deepInclude(last, {
+                type: "dynamic_tool",
+                toolName: "clock.sleep",
+                input: { duration_ms: 6000 },
+              });
+            if (id === browser.id)
+              assert.deepInclude(last, {
+                type: "dynamic_tool",
+                toolName: "t3-code.preview_snapshot",
+                input: { tabId: "audit-browser" },
+              });
+            if (id === edit.id)
+              assert.deepInclude(last, {
+                type: "file_change",
+                changes: [
+                  { operation: "update", path: "src/one.ts" },
+                  { operation: "add", path: "src/two.ts" },
+                ],
+              });
+          }
+        }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      ),
+  );
+
+  for (const [turnStatus, emptyCompletion, itemStatus] of [
+    ["interrupted", false, "interrupted"],
+    ["failed", false, "failed"],
+    ["completed", false, "cancelled"],
+    ["completed", true, "completed"],
+  ] as const) {
+    it.effect(
+      `closes file edits on ${turnStatus} turns (empty completion: ${emptyCompletion})`,
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const nativeThreadId = `file-edit-${turnStatus}-${emptyCompletion}`;
+            const nativeTurnId = `${nativeThreadId}-turn`;
+            const prompt = "Edit a file";
+            const edit = {
+              type: "fileChange",
+              id: "unfinished-edit",
+              status: "inProgress",
+              changes: [{ path: "src/file.ts", kind: { type: "add" }, diff: "+new" }],
+            };
+            const transcript = makeCodexReplayTranscript({
+              scenario: nativeThreadId,
+              entries: [
+                ...codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt }),
+                {
+                  type: "emit_inbound",
+                  label: "edit-started",
+                  frame: {
+                    method: "item/started",
+                    params: { threadId: nativeThreadId, turnId: nativeTurnId, item: edit },
+                  },
+                },
+                ...(emptyCompletion
+                  ? [
+                      {
+                        type: "emit_inbound" as const,
+                        label: "edit-completed",
+                        frame: {
+                          method: "item/completed",
+                          params: {
+                            threadId: nativeThreadId,
+                            turnId: nativeTurnId,
+                            item: { ...edit, status: "completed", changes: [] },
+                          },
+                        },
+                      },
+                    ]
+                  : []),
+                {
+                  type: "emit_inbound",
+                  label: "turn/completed",
+                  frame: {
+                    method: "turn/completed",
+                    params: {
+                      threadId: nativeThreadId,
+                      turn: makeCodexReplayTurn({ id: nativeTurnId, status: turnStatus }),
+                    },
+                  },
+                },
+              ],
+            });
+            const harness = yield* makeCodexReplayHarness(transcript);
+            yield* harness.runtime.startTurn(
+              makeCodexTestTurnInput({
+                threadId: harness.threadId,
+                providerThread: harness.providerThread,
+                now: yield* DateTime.now,
+                attemptId: RunAttemptId.make(`attempt-${nativeThreadId}`),
+                text: prompt,
+              }),
+            );
+            yield* harness.firstTerminal;
+            const records = harness.events.flatMap((event) =>
+              event.type === "turn_item.updated" &&
+              event.turnItem.nativeItemRef?.nativeId === edit.id
+                ? [event.turnItem]
+                : [],
+            );
+            assert.deepEqual(
+              records.map((item) => item.status),
+              ["running", itemStatus],
+            );
+            assert.equal(records[0]?.id, records[1]?.id);
+            assert.equal(records[0]?.ordinal, records[1]?.ordinal);
+            assert.deepInclude(records[1], {
+              type: "file_change",
+              fileName: "src/file.ts",
+              diffStr: "+new",
+              changes: [{ operation: "add", path: "src/file.ts" }],
+            });
+            assert.isNotNull(records[1]?.completedAt);
+            const nodeUpdates = harness.events.flatMap((event) =>
+              event.type === "node.updated" && event.node.nativeItemRef?.nativeId === edit.id
+                ? [event.node.status]
+                : [],
+            );
+            assert.deepEqual(nodeUpdates, ["running", itemStatus]);
+            assert.isBelow(
+              harness.events.findIndex(
+                (event) =>
+                  event.type === "turn_item.updated" && event.turnItem.status === itemStatus,
+              ),
+              harness.events.findIndex((event) => event.type === "turn.terminal"),
+            );
+            assert.equal(harness.terminalEvents()[0]?.status, turnStatus);
+            assert.isFalse(yield* harness.hasPendingBackgroundWork);
+          }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+        ),
+    );
+  }
+
+  it.effect("closes a native sleep record when the provider ends before its completion event", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const nativeThreadId = "native-unfinished-sleep";
+        const nativeTurnId = "native-unfinished-sleep-turn";
+        const prompt = "Wait once";
+        const transcript = makeCodexReplayTranscript({
+          scenario: "native-unfinished-sleep",
+          entries: [
+            ...codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt }),
+            {
+              type: "emit_inbound",
+              label: "sleep-started",
+              frame: {
+                method: "item/started",
+                params: {
+                  threadId: nativeThreadId,
+                  turnId: nativeTurnId,
+                  item: { type: "sleep", id: "unfinished-sleep", durationMs: 6000 },
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              label: "turn/completed",
+              frame: {
+                method: "turn/completed",
+                params: {
+                  threadId: nativeThreadId,
+                  turn: makeCodexReplayTurn({ id: nativeTurnId, status: "completed" }),
+                },
+              },
+            },
+          ],
+        });
+        const harness = yield* makeCodexReplayHarness(transcript);
+        const now = yield* DateTime.now;
+        yield* harness.runtime.startTurn(
+          makeCodexTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make("attempt-unfinished-sleep"),
+            text: prompt,
+          }),
+        );
+        yield* harness.firstTerminal;
+        const records = harness.events.flatMap((event) =>
+          event.type === "turn_item.updated" &&
+          event.turnItem.nativeItemRef?.nativeId === "unfinished-sleep"
+            ? [event.turnItem]
+            : [],
+        );
+        assert.deepEqual(
+          records.map((item) => item.status),
+          ["running", "cancelled"],
+        );
+        assert.isFalse(yield* harness.hasPendingBackgroundWork);
+      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+    ),
+  );
+
   for (const response of ["supported", "unsupported", "invalid"] as const) {
     it.effect(`delivers native history with ${response} app-server protocol`, () =>
       Effect.gen(function* () {

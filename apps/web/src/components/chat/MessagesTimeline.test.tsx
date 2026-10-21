@@ -1,34 +1,44 @@
 import {
   ApprovalRequestId,
   CheckpointRef,
+  ConversationStructure,
   EnvironmentId,
   MessageId,
   ProviderInstanceId,
   RunId,
   ThreadId,
+  TurnItemId,
+  type OrchestrationV2ProjectedTurnItem,
 } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
+import { deriveTimelineEntriesFromVisibleTurnItems } from "../../session-logic";
 import type { QueuedComposerMessage } from "../../queuedMessageStore";
 import {
   act,
   createRef,
+  useCallback,
   useLayoutEffect,
+  useState,
   type ReactNode,
   type Ref,
   type ReactElement,
 } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { create, type ReactTestRenderer } from "react-test-renderer";
+import { create, type ReactTestInstance, type ReactTestRenderer } from "react-test-renderer";
 import { shouldUseRestingComposerLayout } from "../composerFooterLayout";
 import { useComposerFocusState } from "./useComposerFocusState";
-import { rememberTimelinePosition } from "./timelineScrollAnchoring";
+import { readTimelinePosition, rememberTimelinePosition } from "./timelineScrollAnchoring";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import type { LegendListRef } from "@legendapp/list/react";
+import type { SmoothScrollHandle } from "../../hooks/useSmoothScroll";
 
 const activityTestState = vi.hoisted(() => ({
   expanded: false,
   expandedRuns: false,
   subagentTooltips: false,
   listOnLoad: null as (() => void) | null,
+  onListLayout: null as (() => void) | null,
+  listDataHistory: [] as Array<{ data: Array<{ id: string }>; extraData: unknown }>,
 }));
 
 // Expose tooltip contents in the renderer without requiring a browser portal.
@@ -86,6 +96,8 @@ beforeEach(() => {
   activityTestState.expanded = false;
   activityTestState.expandedRuns = false;
   activityTestState.listOnLoad = null;
+  activityTestState.onListLayout = null;
+  activityTestState.listDataHistory = [];
 });
 
 vi.mock("@legendapp/list/react", async () => {
@@ -93,6 +105,7 @@ vi.mock("@legendapp/list/react", async () => {
 
   const LegendList = (props: {
     data: Array<{ id: string }>;
+    extraData?: unknown;
     keyExtractor: (item: { id: string }) => string;
     renderItem: (args: { item: { id: string } }) => ReactNode;
     ListHeaderComponent?: ReactNode;
@@ -127,6 +140,8 @@ vi.mock("@legendapp/list/react", async () => {
     ref?: Ref<LegendListRef>;
   }) => {
     activityTestState.listOnLoad = props.onLoad ?? null;
+    activityTestState.listDataHistory.push({ data: props.data, extraData: props.extraData });
+    useLayoutEffect(() => activityTestState.onListLayout?.());
     if (props.anchoredEndSpace) {
       props.anchoredEndSpace.onSizeChanged?.(240);
       props.anchoredEndSpace.onReady?.({ anchorIndex: props.anchoredEndSpace.anchorIndex });
@@ -135,6 +150,8 @@ vi.mock("@legendapp/list/react", async () => {
       <div
         data-testid={legendListTestId}
         data-class-name={props.className}
+        data-timeline-row-count={props.data.length}
+        data-timeline-extra-data={String(props.extraData)}
         data-anchor-index={props.anchoredEndSpace?.anchorIndex}
         data-anchor-max-size={props.anchoredEndSpace?.anchorMaxSize}
         data-anchor-offset={props.anchoredEndSpace?.anchorOffset}
@@ -368,6 +385,661 @@ function buildSnapShotTimelineEntry(previewUrl?: string) {
 }
 
 describe("MessagesTimeline", () => {
+  it.each(
+    (["default", "restructured"] as const).flatMap((structure) =>
+      [false, true].map((priorRun) => [structure, priorRun] as const),
+    ),
+  )(
+    "animates new status space in %s once across optimistic startedAt and label updates (prior run: %s)",
+    async (conversationStructure, priorRun) => {
+      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+      const frames = new Map<number, FrameRequestCallback>();
+      let next = 0;
+      let now = 0;
+      vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+        frames.set(++next, callback);
+        return next;
+      });
+      vi.stubGlobal("cancelAnimationFrame", (id: number) => frames.delete(id));
+      const clock = vi.spyOn(performance, "now").mockImplementation(() => now);
+      const ownerDocument = { createElement: () => ({ style: { height: "" } }) };
+      const nodes = new Map<string, { style: { height: string } }>();
+      const props = {
+        ...buildProps(),
+        conversationStructure,
+        smoothStreaming: true,
+        timelineEntries: [],
+        latestRun: priorRun
+          ? {
+              runId: RunId.make("previous-status-run"),
+              status: "completed" as const,
+              startedAt: MESSAGE_CREATED_AT,
+              completedAt: MESSAGE_CREATED_AT,
+            }
+          : null,
+      };
+      let renderer: ReactTestRenderer | undefined;
+      const render = async (isWorking: boolean, started = false, label = "Thinking") => {
+        const element = (
+          <MessagesTimeline
+            {...props}
+            isWorking={isWorking}
+            conversationStructureThinkingLabel={label}
+            latestRun={
+              started
+                ? {
+                    runId: RunId.make("status-run"),
+                    status: "running",
+                    startedAt: MESSAGE_CREATED_AT,
+                    completedAt: null,
+                  }
+                : props.latestRun
+            }
+          />
+        );
+        await act(() => {
+          if (renderer) renderer.update(element);
+          else
+            renderer = create(element, {
+              createNodeMock: (node) => {
+                const props = node.props as Record<string, unknown>;
+                if (!props["data-timeline-status-height"] && props.className !== "flow-root")
+                  return null;
+                const target = Object.assign(new EventTarget(), {
+                  ownerDocument,
+                  style: { height: "" },
+                  parentElement: null,
+                  isConnected: false,
+                  getBoundingClientRect: () => ({ height: 40 }),
+                });
+                if (typeof props["data-timeline-status-height"] === "string")
+                  nodes.set(props["data-timeline-status-height"], target);
+                return target;
+              },
+            });
+        });
+      };
+      const deliver = async (at: number) => {
+        now = at;
+        const batch = [...frames.values()];
+        frames.clear();
+        await act(() => batch.forEach((callback) => callback(at)));
+      };
+      try {
+        await render(false);
+        await render(true);
+        expect(nodes.size).toBe(2);
+        expect([...nodes.values()].map((node) => node.style.height)).toEqual(["0px", "0px"]);
+        await deliver(50);
+        const middle = [...nodes.values()].map((node) => node.style.height);
+        expect(
+          middle.every((height) => Number.parseFloat(height) > 0 && Number.parseFloat(height) < 40),
+        ).toBe(true);
+        await render(true, true, "Idle");
+        expect([...nodes.values()].map((node) => node.style.height)).toEqual(middle);
+        await deliver(200);
+        expect([...nodes.values()].map((node) => node.style.height)).toEqual(["", ""]);
+        await render(true, true, "Thinking again");
+        expect([...nodes.values()].map((node) => node.style.height)).toEqual(["", ""]);
+      } finally {
+        await act(() => renderer?.unmount());
+        clock.mockRestore();
+      }
+    },
+  );
+  it.each(["default", "restructured"] as const)(
+    "updates streaming text without rebuilding the %s virtual list or historical Markdown",
+    async (conversationStructure) => {
+      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+      const historyText = "**Historical answer** remains unchanged.";
+      const historyEntry = {
+        ...buildAssistantTimelineEntry(historyText),
+        id: "entry-history",
+        message: {
+          ...buildAssistantTimelineEntry(historyText).message,
+          id: MessageId.make("message-history"),
+        },
+      };
+      const streamEntry = (text: string) => ({
+        ...buildAssistantTimelineEntry(text),
+        id: "entry-stream",
+        message: {
+          ...buildAssistantTimelineEntry(text).message,
+          id: MessageId.make("message-stream"),
+          streaming: true,
+        },
+      });
+      const props = {
+        ...buildProps(),
+        routeThreadKey: `environment-local:stable-stream-${conversationStructure}`,
+        conversationStructure,
+        isWorking: true,
+      };
+      const latestData = () =>
+        activityTestState.listDataHistory.findLast(
+          ({ extraData }) =>
+            typeof extraData === "string" && extraData.startsWith(`${props.routeThreadKey}:`),
+        )!.data;
+      let renderer: ReactTestRenderer | undefined;
+      const historyMarkdown = () =>
+        renderer!.root.findByProps({ "data-timeline-row-id": "entry-history" }).findByType("p");
+      const renderedText = (root: ReactTestInstance) =>
+        root
+          .findAll(() => true)
+          .flatMap((node) => node.children.filter((child) => typeof child === "string"))
+          .join("");
+      try {
+        await act(() => {
+          renderer = create(
+            <MessagesTimeline
+              {...props}
+              timelineEntries={[historyEntry, streamEntry("First streamed words")]}
+            />,
+          );
+        });
+        const initialData = latestData();
+        const initialHistoryMarkdown = historyMarkdown();
+        const initialHistoryMarkdownProps = initialHistoryMarkdown.props;
+        expect(renderedText(initialHistoryMarkdown.findByType("strong"))).toContain(
+          "Historical answer",
+        );
+        for (const text of [
+          "First streamed words followed by **formatted text**.",
+          "First streamed words followed by **formatted text** and the final batch.",
+        ]) {
+          await act(() => {
+            renderer!.update(
+              <MessagesTimeline {...props} timelineEntries={[historyEntry, streamEntry(text)]} />,
+            );
+          });
+          const body = renderer!.root.findByProps({ "data-timeline-row-id": "entry-stream" });
+          expect(renderedText(body.findByType("strong"))).toContain("formatted text");
+          if (text.endsWith("final batch.")) {
+            expect(renderedText(body)).toContain("final batch.");
+          }
+          expect(latestData()).toBe(initialData);
+          expect(historyMarkdown()).toBe(initialHistoryMarkdown);
+          expect(historyMarkdown().props).toBe(initialHistoryMarkdownProps);
+        }
+      } finally {
+        await act(() => renderer?.unmount());
+      }
+    },
+  );
+
+  it("refreshes a stable tool group and rebuilds virtual data only when rows enter or leave", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const props = {
+      ...buildProps(),
+      routeThreadKey: "environment-local:stable-tool-group",
+      conversationStructure: "restructured" as const,
+    };
+    const toolEntry = (
+      id: string,
+      command: string,
+      detail: string,
+      toolLifecycleStatus: "completed" | "failed" = "completed",
+    ) => ({
+      id: `entry-${id}`,
+      kind: "work" as const,
+      createdAt: MESSAGE_CREATED_AT,
+      entry: {
+        id,
+        createdAt: MESSAGE_CREATED_AT,
+        label: "Ran command",
+        command,
+        detail,
+        tone: "tool" as const,
+        itemType: "command_execution" as const,
+        toolLifecycleStatus,
+      },
+    });
+    const first = toolEntry("tool-first", "node first.js", "Initial command output");
+    const second = toolEntry("tool-second", "node second.js", "Second command output");
+    const updatedFirst = toolEntry(
+      "tool-first",
+      "node first-updated.js",
+      "Updated command output",
+      "failed",
+    );
+    const third = toolEntry("tool-third", "node third.js", "Third command output");
+    const latestData = () =>
+      activityTestState.listDataHistory.findLast(
+        ({ extraData }) =>
+          typeof extraData === "string" && extraData.startsWith(`${props.routeThreadKey}:`),
+      )!.data;
+    const group = () => renderer!.root.findByProps({ "data-timeline-row-kind": "work-toggle" });
+    const tool = (command: string) =>
+      renderer!.root.find(
+        (node) =>
+          node.type === "div" &&
+          node.props.role === "button" &&
+          String(node.props["aria-label"]).includes(command),
+      );
+    let renderer: ReactTestRenderer | undefined;
+    try {
+      await act(() => {
+        renderer = create(<MessagesTimeline {...props} timelineEntries={[first, second]} />);
+      });
+      const collapsedData = latestData();
+      const groupId = group().props["data-timeline-row-id"];
+      await act(() => group().findByType("button").props.onClick());
+      const expandedData = latestData();
+      expect(expandedData).not.toBe(collapsedData);
+      await act(() => tool("node first.js").props.onClick());
+      expect(JSON.stringify(renderer!.toJSON())).toContain("Initial command output");
+      await act(() => {
+        renderer!.update(
+          <MessagesTimeline {...props} timelineEntries={[updatedFirst, second, third]} />,
+        );
+      });
+      expect(latestData()).toBe(expandedData);
+      expect(group().props["data-timeline-row-id"]).toBe(groupId);
+      expect(JSON.stringify(renderer!.toJSON())).toContain("Updated command output");
+      expect(renderer!.root.findAllByProps({ "aria-label": "Tool call failed" })).toHaveLength(1);
+      for (const command of ["node first-updated.js", "node second.js", "node third.js"]) {
+        expect(tool(command)).toBeDefined();
+      }
+      const answer = {
+        ...buildAssistantTimelineEntry("A new answer after the tools."),
+        id: "entry-new-answer",
+        message: {
+          ...buildAssistantTimelineEntry("A new answer after the tools.").message,
+          id: MessageId.make("message-new-answer"),
+        },
+      };
+      await act(() => {
+        renderer!.update(
+          <MessagesTimeline {...props} timelineEntries={[updatedFirst, second, third, answer]} />,
+        );
+      });
+      const withAnswerData = latestData();
+      expect(withAnswerData).not.toBe(expandedData);
+      expect(JSON.stringify(renderer!.toJSON())).toContain("A new answer after the tools.");
+      await act(() => {
+        renderer!.update(
+          <MessagesTimeline {...props} timelineEntries={[updatedFirst, second, third]} />,
+        );
+      });
+      expect(latestData()).not.toBe(withAnswerData);
+      expect(JSON.stringify(renderer!.toJSON())).not.toContain("A new answer after the tools.");
+      const beforeCollapse = latestData();
+      await act(() => group().findByType("button").props.onClick());
+      expect(latestData()).not.toBe(beforeCollapse);
+      expect(renderer!.root.findAllByProps({ "data-timeline-row-kind": "work" })).toHaveLength(0);
+      await act(() => group().findByType("button").props.onClick());
+      for (const command of ["node first-updated.js", "node second.js", "node third.js"]) {
+        expect(tool(command)).toBeDefined();
+      }
+    } finally {
+      await act(() => renderer?.unmount());
+    }
+  });
+
+  it.each(["live-end", "reading", "cancelled"] as const)(
+    "respects the %s destination when text grows during the restore reveal commit",
+    async (destination) => {
+      const frames = new Map<number, FrameRequestCallback>();
+      let nextFrame = 0;
+      vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+        frames.set(++nextFrame, callback);
+        return nextFrame;
+      });
+      vi.stubGlobal("cancelAnimationFrame", (frame: number) => frames.delete(frame));
+      vi.stubGlobal(
+        "ResizeObserver",
+        class {
+          observe() {}
+          disconnect() {}
+        },
+      );
+      const flushFrame = () =>
+        act(() => {
+          const callbacks = [...frames.values()];
+          frames.clear();
+          callbacks.forEach((callback) => callback(0));
+        });
+      const props = buildProps();
+      props.routeThreadKey = `environment-local:restore-growing-${destination}`;
+      rememberTimelinePosition(props.routeThreadKey, {
+        rowId: destination === "reading" ? "missing-row" : "entry-1",
+        offsetWithinRow: 0,
+        scrollOffset: 300,
+        atEnd: destination !== "reading",
+      });
+      const listeners = new Map<string, Set<(event?: Event) => void>>();
+      const viewport = {
+        scrollTop: 300,
+        scrollHeight: 1600,
+        clientHeight: 300,
+        setAttribute: vi.fn(),
+        removeAttribute: vi.fn(),
+        addEventListener: (type: string, listener: (event?: Event) => void) => {
+          const callbacks = listeners.get(type) ?? new Set();
+          callbacks.add(listener);
+          listeners.set(type, callbacks);
+        },
+        removeEventListener: (type: string, listener: (event?: Event) => void) =>
+          listeners.get(type)?.delete(listener),
+        ownerDocument: { addEventListener: () => {}, removeEventListener: () => {} },
+      };
+      let finishReadingScroll: (() => void) | undefined;
+      props.listRef.current = {
+        getScrollableNode: () => viewport,
+        scrollToEnd: async () => {
+          viewport.scrollTop = viewport.scrollHeight - viewport.clientHeight;
+        },
+        scrollToOffset: async ({ offset }: { offset: number }) => {
+          viewport.scrollTop = offset;
+          if (destination === "reading") {
+            await new Promise<void>((resolve) => (finishReadingScroll = resolve));
+          }
+        },
+      } as unknown as LegendListRef;
+      const smoothScrollRef = createRef<SmoothScrollHandle | null>();
+      let growDuringReveal = false;
+      activityTestState.onListLayout = () => {
+        if (!growDuringReveal) return;
+        growDuringReveal = false;
+        // A child row's layout runs before the parent's new follow controller.
+        viewport.scrollHeight += 24;
+      };
+      const timelineEntries = [buildAssistantTimelineEntry("Streaming response")];
+      function TimelineProbe() {
+        const [liveFollowEnabled, setLiveFollowEnabled] = useState(true);
+        const onManualNavigation = useCallback(() => setLiveFollowEnabled(false), []);
+        return (
+          <MessagesTimeline
+            {...props}
+            smoothStreaming
+            smoothScrollRef={smoothScrollRef}
+            liveFollowEnabled={liveFollowEnabled}
+            onManualNavigation={onManualNavigation}
+            timelineEntries={timelineEntries}
+          />
+        );
+      }
+      let renderer: ReactTestRenderer | null = null;
+      try {
+        await act(() => {
+          renderer = create(<TimelineProbe />);
+        });
+        await act(() => activityTestState.listOnLoad?.());
+        if (destination === "live-end") {
+          await flushFrame();
+          growDuringReveal = true;
+          await flushFrame();
+        } else if (destination === "cancelled") {
+          growDuringReveal = true;
+          await act(() => {
+            viewport.scrollTop -= 8;
+            for (const listener of listeners.get("wheel") ?? []) listener();
+          });
+          await flushFrame();
+        } else {
+          growDuringReveal = true;
+          await act(() => finishReadingScroll?.());
+        }
+        expect(
+          renderer!.root.findByProps({ "data-assistant-citation-viewport": "true" }).props.style
+            ?.visibility,
+        ).not.toBe("hidden");
+        const expectedTop =
+          destination === "live-end" ? 1324 : destination === "reading" ? 300 : 1292;
+        expect(viewport.scrollTop).toBe(expectedTop);
+        expect(smoothScrollRef.current?.isFollowing() ?? false).toBe(destination === "live-end");
+
+        viewport.scrollHeight += 24;
+        await act(() => {
+          for (const listener of listeners.get("t3-smooth-text-layout") ?? [])
+            listener(new CustomEvent("t3-smooth-text-layout", { detail: { delta: 24 } }));
+        });
+        expect(viewport.scrollTop).toBe(destination === "live-end" ? 1348 : expectedTop);
+        expect(smoothScrollRef.current?.isFollowing() ?? false).toBe(destination === "live-end");
+      } finally {
+        await act(() => renderer?.unmount());
+        activityTestState.onListLayout = null;
+      }
+    },
+  );
+
+  it("retains owned follow across a native clamp but cancels the next reader movement", async () => {
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextFrame = 0;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frames.set(++nextFrame, callback);
+      return nextFrame;
+    });
+    vi.stubGlobal("cancelAnimationFrame", (id: number) => frames.delete(id));
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        observe() {}
+        disconnect() {}
+      },
+    );
+    const listeners = new Map<string, Set<() => void>>();
+    const viewport = {
+      scrollTop: 1000,
+      scrollHeight: 1300,
+      clientHeight: 300,
+      setAttribute: vi.fn(),
+      removeAttribute: vi.fn(),
+      addEventListener(type: string, listener: () => void) {
+        const callbacks = listeners.get(type) ?? new Set();
+        callbacks.add(listener);
+        listeners.set(type, callbacks);
+      },
+      removeEventListener: (type: string, listener: () => void) =>
+        listeners.get(type)?.delete(listener),
+      ownerDocument: { addEventListener() {}, removeEventListener() {} },
+    };
+    const props = buildProps();
+    props.routeThreadKey = "environment-local:owned-native-clamp";
+    props.listRef.current = { getScrollableNode: () => viewport } as unknown as LegendListRef;
+    const smoothScrollRef = createRef<SmoothScrollHandle | null>();
+    const onManualNavigation = vi.fn(() => smoothScrollRef.current?.cancel());
+    let renderer: ReactTestRenderer | null = null;
+    try {
+      await act(() => {
+        renderer = create(
+          <MessagesTimeline
+            {...props}
+            smoothStreaming
+            smoothScrollRef={smoothScrollRef}
+            onManualNavigation={onManualNavigation}
+            timelineEntries={[buildAssistantTimelineEntry("Response")]}
+          />,
+        );
+      });
+      const finish = smoothScrollRef.current?.beginLayout();
+      expect(finish).toBeTypeOf("function");
+      await act(() => {
+        viewport.scrollTop--;
+        for (const listener of listeners.get("scroll") ?? []) listener();
+      });
+      expect(onManualNavigation).not.toHaveBeenCalled();
+      await act(() => {
+        finish?.();
+        const batch = [...frames.values()];
+        frames.clear();
+        batch.forEach((callback) => callback(16));
+        for (const listener of listeners.get("scroll") ?? []) listener();
+      });
+      expect(viewport.scrollTop).toBe(1000);
+      expect(smoothScrollRef.current?.isFollowing()).toBe(true);
+      await act(() => {
+        for (const listener of listeners.get("scroll") ?? []) listener();
+      });
+      await act(() => {
+        viewport.scrollTop -= 0.25;
+        for (const listener of listeners.get("scroll") ?? []) listener();
+      });
+      expect(onManualNavigation).toHaveBeenCalledTimes(1);
+      expect(smoothScrollRef.current?.isFollowing()).toBe(false);
+      expect(viewport.scrollTop).toBe(999.75);
+    } finally {
+      await act(() => renderer?.unmount());
+    }
+  });
+
+  it("keeps the saved live edge when leaving before restoration completes", async () => {
+    const props = buildProps();
+    props.routeThreadKey = "environment-local:leave-pending-end-restore";
+    rememberTimelinePosition(props.routeThreadKey, {
+      rowId: "entry-1",
+      offsetWithinRow: 0,
+      scrollOffset: 300,
+      atEnd: true,
+    });
+    const viewport = {
+      scrollTop: 100,
+      scrollHeight: 1600,
+      clientHeight: 300,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      ownerDocument: { addEventListener: () => {}, removeEventListener: () => {} },
+    };
+    let finishScroll!: () => void;
+    const scrollToEnd = vi.fn(() => new Promise<void>((resolve) => (finishScroll = resolve)));
+    const scrollToOffset = vi.fn(async () => {});
+    props.listRef.current = {
+      getScrollableNode: () => viewport,
+      scrollToEnd,
+      scrollToOffset,
+    } as unknown as LegendListRef;
+    let renderer: ReactTestRenderer | null = null;
+    const renderTimeline = () => (
+      <MessagesTimeline {...props} timelineEntries={[buildAssistantTimelineEntry("Response")]} />
+    );
+    try {
+      await act(() => {
+        renderer = create(renderTimeline());
+      });
+      await act(() => renderer!.unmount());
+      expect(readTimelinePosition(props.routeThreadKey)?.atEnd).toBe(true);
+      await act(() => finishScroll());
+      await act(() => {
+        renderer = create(renderTimeline());
+      });
+      expect(scrollToEnd).toHaveBeenCalledTimes(2);
+      expect(scrollToOffset).not.toHaveBeenCalled();
+    } finally {
+      await act(() => renderer?.unmount());
+      await act(() => finishScroll());
+    }
+  });
+
+  it.each([false, true])(
+    "captures the actual edge on leaving without a scroll event, scrollable=%s",
+    async (scrollable) => {
+      const props = buildProps();
+      props.routeThreadKey = `environment-local:leave-without-scroll-${scrollable}`;
+      rememberTimelinePosition(props.routeThreadKey, {
+        rowId: "old-row",
+        offsetWithinRow: 0,
+        scrollOffset: 0,
+        atEnd: false,
+      });
+      const viewport = {
+        scrollTop: 0,
+        scrollHeight: scrollable ? 600 : 300,
+        clientHeight: 300,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+        ownerDocument: { addEventListener: () => {}, removeEventListener: () => {} },
+      };
+      props.listRef.current = {
+        getScrollableNode: () => viewport,
+        scrollToOffset: async () => {},
+      } as unknown as LegendListRef;
+      let renderer: ReactTestRenderer | null = null;
+      try {
+        await act(() => {
+          renderer = create(
+            <MessagesTimeline
+              {...props}
+              timelineEntries={[buildAssistantTimelineEntry("Current response")]}
+            />,
+          );
+        });
+      } finally {
+        await act(() => renderer?.unmount());
+      }
+      expect(readTimelinePosition(props.routeThreadKey)?.atEnd).toBe(!scrollable);
+    },
+  );
+
+  it.each([0, 800])(
+    "restores a saved live edge using measured geometry, old bottom=%s",
+    async (oldBottom) => {
+      const frames = new Map<number, FrameRequestCallback>();
+      let nextFrame = 0;
+      vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+        frames.set(++nextFrame, callback);
+        return nextFrame;
+      });
+      vi.stubGlobal("cancelAnimationFrame", (frame: number) => frames.delete(frame));
+      const flushFrame = () =>
+        act(() => {
+          const callbacks = [...frames.values()];
+          frames.clear();
+          callbacks.forEach((callback) => callback(0));
+        });
+      const props = buildProps();
+      props.routeThreadKey = `environment-local:restore-live-edge-${oldBottom}`;
+      rememberTimelinePosition(props.routeThreadKey, {
+        rowId: "entry-1",
+        offsetWithinRow: 0,
+        scrollOffset: oldBottom,
+        atEnd: true,
+      });
+      const viewport = {
+        scrollTop: oldBottom,
+        scrollHeight: 1600,
+        clientHeight: 300,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+        ownerDocument: { addEventListener: () => {}, removeEventListener: () => {} },
+      };
+      const scrollToEnd = vi.fn(async () => {
+        viewport.scrollTop = 1100;
+      });
+      props.listRef.current = {
+        getScrollableNode: () => viewport,
+        scrollToEnd,
+      } as unknown as LegendListRef;
+      let renderer: ReactTestRenderer | null = null;
+      const viewportStyle = () =>
+        renderer!.root.findByProps({ "data-assistant-citation-viewport": "true" }).props.style;
+      try {
+        await act(() => {
+          renderer = create(
+            <MessagesTimeline
+              {...props}
+              timelineEntries={[buildAssistantTimelineEntry("New content while away")]}
+            />,
+          );
+        });
+        expect(scrollToEnd).toHaveBeenCalled();
+        expect(viewport.scrollTop).toBe(1300);
+        expect(viewportStyle()?.visibility).toBe("hidden");
+        await flushFrame();
+        expect(viewportStyle()?.visibility).toBe("hidden");
+        viewport.scrollHeight = 1800;
+        await act(() => activityTestState.listOnLoad?.());
+        await flushFrame();
+        expect(viewport.scrollTop).toBe(1500);
+        expect(viewportStyle()?.visibility).toBe("hidden");
+        await flushFrame();
+        expect(viewport.scrollTop).toBe(1500);
+        expect(viewportStyle()?.visibility).not.toBe("hidden");
+      } finally {
+        await act(() => renderer?.unmount());
+      }
+    },
+  );
+
   it("signals initial layout after a populated list loads", async () => {
     const onInitialLayout = vi.fn();
     let renderer: ReactTestRenderer | null = null;
@@ -387,6 +1059,154 @@ describe("MessagesTimeline", () => {
         activityTestState.listOnLoad?.();
       });
       expect(onInitialLayout).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(() => renderer?.unmount());
+    }
+  });
+
+  it("reveals a measured reused list at the live edge without another onLoad", async () => {
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextFrame = 0;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frames.set(++nextFrame, callback);
+      return nextFrame;
+    });
+    vi.stubGlobal("cancelAnimationFrame", (frame: number) => frames.delete(frame));
+    const flushFrame = () =>
+      act(() => {
+        const callbacks = [...frames.values()];
+        frames.clear();
+        callbacks.forEach((callback) => callback(0));
+      });
+    const props = buildProps();
+    props.routeThreadKey = "environment-local:restore-reused-live-edge";
+    rememberTimelinePosition(props.routeThreadKey, {
+      rowId: "old-row",
+      offsetWithinRow: 0,
+      scrollOffset: 300,
+      atEnd: true,
+    });
+    const viewport = {
+      scrollTop: 300,
+      scrollHeight: 1600,
+      clientHeight: 300,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      ownerDocument: { addEventListener: () => {}, removeEventListener: () => {} },
+    };
+    let measured = false;
+    const scrollToEnd = vi.fn(async () => {
+      viewport.scrollTop = 1100;
+    });
+    props.listRef.current = {
+      getScrollableNode: () => viewport,
+      scrollToEnd,
+      getState: () => ({
+        indexByKey: () => 0,
+        elementAtIndex: () => (measured ? {} : undefined),
+        sizeAtIndex: () => (measured ? 1500 : undefined),
+      }),
+    } as unknown as LegendListRef;
+    const onInitialLayout = vi.fn();
+    let renderer: ReactTestRenderer | null = null;
+    const visibility = () =>
+      renderer!.root.findByProps({ "data-assistant-citation-viewport": "true" }).props.style
+        ?.visibility;
+    try {
+      await act(() => {
+        renderer = create(
+          <MessagesTimeline
+            {...props}
+            onInitialLayout={onInitialLayout}
+            timelineEntries={[buildAssistantTimelineEntry("Saved response")]}
+          />,
+        );
+      });
+      expect(visibility()).toBe("hidden");
+      measured = true;
+      await flushFrame();
+      expect(visibility()).toBe("hidden");
+      viewport.scrollHeight = 1800;
+      await act(() => {
+        renderer!.update(
+          <MessagesTimeline
+            {...props}
+            onInitialLayout={onInitialLayout}
+            timelineEntries={[buildAssistantTimelineEntry("More output while positioning")]}
+          />,
+        );
+      });
+      await flushFrame();
+      expect(viewport.scrollTop).toBe(1500);
+      expect(visibility()).not.toBe("hidden");
+      expect(scrollToEnd).toHaveBeenCalledTimes(1);
+      expect(onInitialLayout).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(() => renderer?.unmount());
+    }
+  });
+
+  it("reveals the live edge even when its end row never reports a size", async () => {
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextFrame = 0;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frames.set(++nextFrame, callback);
+      return nextFrame;
+    });
+    vi.stubGlobal("cancelAnimationFrame", (frame: number) => frames.delete(frame));
+    let clock = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => clock);
+    const props = buildProps();
+    props.routeThreadKey = "environment-local:restore-unmeasured-live-edge";
+    rememberTimelinePosition(props.routeThreadKey, {
+      rowId: "old-row",
+      offsetWithinRow: 0,
+      scrollOffset: 300,
+      atEnd: true,
+    });
+    const viewport = {
+      scrollTop: 300,
+      scrollHeight: 1600,
+      clientHeight: 300,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      ownerDocument: { addEventListener: () => {}, removeEventListener: () => {} },
+    };
+    props.listRef.current = {
+      getScrollableNode: () => viewport,
+      scrollToEnd: vi.fn(async () => {
+        viewport.scrollTop = 1300;
+      }),
+      getState: () => ({
+        indexByKey: () => 0,
+        elementAtIndex: () => undefined,
+        sizeAtIndex: () => undefined,
+      }),
+    } as unknown as LegendListRef;
+    let renderer: ReactTestRenderer | null = null;
+    const visibility = () =>
+      renderer!.root.findByProps({ "data-assistant-citation-viewport": "true" }).props.style
+        ?.visibility;
+    try {
+      await act(() => {
+        renderer = create(
+          <MessagesTimeline
+            {...props}
+            timelineEntries={[buildAssistantTimelineEntry("Saved response")]}
+          />,
+        );
+      });
+      expect(visibility()).toBe("hidden");
+      for (let frame = 0; frame < 120 && frames.size > 0; frame++) {
+        clock += 1_000 / 60;
+        await act(() => {
+          const callbacks = [...frames.values()];
+          frames.clear();
+          callbacks.forEach((callback) => callback(clock));
+        });
+      }
+      expect(visibility()).not.toBe("hidden");
+      expect(frames.size).toBe(0);
     } finally {
       await act(() => renderer?.unmount());
     }
@@ -1350,8 +2170,8 @@ describe("MessagesTimeline", () => {
 
     expect(markup).toContain('href="https://example.com"');
     expect(markup).toContain('src="https://example.com/image.png"');
-    expect(markup).not.toContain('title="link tip"');
-    expect(markup).not.toContain('title="image tip"');
+    expect(markup).not.toMatch(/\stitle="link tip"/);
+    expect(markup).not.toMatch(/\stitle="image tip"/);
   });
 
   it("renders unsafe user HTML as inert source text", async () => {
@@ -3218,5 +4038,992 @@ describe("MessagesTimeline", () => {
     } finally {
       await act(() => renderer?.unmount());
     }
+  });
+});
+
+describe("restructured live activity layer", () => {
+  const RUN_ID = RunId.make("restructured-run");
+
+  /**
+   * A tool still in flight inside the active run. This is the only shape that
+   * makes the projection emit a `work-live` row, so an `isWorking`-only
+   * fixture would assert nothing about the label.
+   */
+  function buildRunningToolEntries(toolLifecycleStatus: "inProgress" | "completed") {
+    return [
+      buildUserTimelineEntry("Do the thing."),
+      {
+        id: "running-tool-entry",
+        kind: "work" as const,
+        createdAt: MESSAGE_CREATED_AT,
+        entry: {
+          id: "running-tool",
+          runId: RUN_ID,
+          createdAt: MESSAGE_CREATED_AT,
+          label: "Run the build",
+          command: "pnpm build",
+          requestKind: "command" as const,
+          tone: "tool" as const,
+          toolLifecycleStatus,
+        },
+      },
+    ];
+  }
+
+  function renderRunningTool(structure: ConversationStructure | undefined) {
+    return renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        conversationStructure={structure}
+        isWorking
+        runningRunId={RUN_ID}
+        latestRun={{
+          runId: RUN_ID,
+          status: "running",
+          startedAt: MESSAGE_CREATED_AT,
+          completedAt: null,
+        }}
+        timelineEntries={buildRunningToolEntries("inProgress")}
+      />,
+    );
+  }
+
+  it("moves the live label out of the virtual list under the restructured structure", () => {
+    const markup = renderRunningTool("restructured");
+
+    expect(markup).toContain('data-testid="timeline-live-activity-layer"');
+    expect(markup).not.toContain('data-timeline-row-kind="work-live"');
+    expect(markup).not.toContain('data-timeline-row-kind="thinking"');
+  });
+
+  it("keeps the live label inside the virtual list under the default structure", () => {
+    const markup = renderRunningTool("default");
+
+    expect(markup).toContain('data-timeline-row-kind="work-live"');
+    expect(markup).not.toContain('data-testid="timeline-live-activity-layer"');
+  });
+
+  it("keeps the live label inside the virtual list when no structure is set", () => {
+    const markup = renderRunningTool(undefined);
+
+    expect(markup).toContain('data-timeline-row-kind="work-live"');
+    expect(markup).not.toContain('data-testid="timeline-live-activity-layer"');
+  });
+
+  it("renders the same tool label in the live layer as the row it replaces", () => {
+    const defaultMarkup = renderRunningTool("default");
+    const restructuredMarkup = renderRunningTool("restructured");
+
+    // The live layer reuses LiveWorkEntryTimelineRow, so the derived label and the
+    // expansion affordance survive the move instead of being re-computed.
+    for (const markup of [defaultMarkup, restructuredMarkup]) {
+      expect(markup).toContain("Running pnpm");
+      expect(markup).toContain('aria-expanded="false"');
+    }
+  });
+
+  it("keeps the live layer row expandable through its group toggle", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    let renderer: ReactTestRenderer | undefined;
+    try {
+      await act(() => {
+        renderer = create(
+          <MessagesTimeline
+            {...buildProps()}
+            conversationStructure="restructured"
+            isWorking
+            runningRunId={RUN_ID}
+            latestRun={{
+              runId: RUN_ID,
+              status: "running",
+              startedAt: MESSAGE_CREATED_AT,
+              completedAt: null,
+            }}
+            timelineEntries={[
+              ...buildRunningToolEntries("inProgress"),
+              {
+                ...buildAssistantTimelineEntry("More prose after the running tool. ".repeat(50)),
+                id: "later-prose",
+                message: {
+                  ...buildAssistantTimelineEntry("").message,
+                  id: MessageId.make("later-prose"),
+                  runId: RUN_ID,
+                  text: "More prose after the running tool. ".repeat(50),
+                  streaming: true,
+                },
+              },
+            ]}
+          />,
+        );
+      });
+
+      const layer = renderer!.root.findByProps({
+        "data-testid": "timeline-live-activity-layer",
+      });
+      expect(layer).toBeDefined();
+      // The toggle lives inside the live layer, not in a virtualized row.
+      expect(renderer!.root.findAllByProps({ "aria-expanded": false })).toHaveLength(1);
+      expect(
+        renderer!.root.findAll(
+          (node) => node.type === "div" && node.props["data-timeline-row-kind"] === "work-live",
+        ),
+      ).toHaveLength(0);
+
+      await act(() => renderer!.root.findByProps({ "aria-expanded": false }).props.onClick());
+      expect(renderer!.root.findAllByProps({ "aria-expanded": true })).toHaveLength(1);
+      expect(layer.findAllByProps({ "data-tool-group-scroll": true })).toHaveLength(1);
+      expect(layer.findAllByProps({ "data-timeline-row-kind": "work" })).toHaveLength(1);
+    } finally {
+      await act(() => renderer?.unmount());
+    }
+  });
+
+  it("keeps every body tool accessible while the current operation expands in the live layer", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const statuses = ["stopped", "declined", "inProgress", "completed", "failed"] as const;
+    const entries = statuses.map((status) => ({
+      id: `audit-${status}`,
+      kind: "work" as const,
+      createdAt: MESSAGE_CREATED_AT,
+      entry: {
+        id: `audit-${status}`,
+        runId: RUN_ID,
+        createdAt: MESSAGE_CREATED_AT,
+        label: `audit-${status}`,
+        command: `audit-${status}`,
+        detail: `Output from audit-${status}`,
+        itemType: "command_execution" as const,
+        tone: "tool" as const,
+        toolLifecycleStatus: status,
+      },
+    }));
+    const running = buildRunningToolEntries("inProgress")[1]!;
+    const props = {
+      ...buildProps(),
+      conversationStructure: "restructured" as const,
+      isWorking: true,
+      runningRunId: RUN_ID,
+      latestRun: {
+        runId: RUN_ID,
+        status: "running" as const,
+        startedAt: MESSAGE_CREATED_AT,
+        completedAt: null,
+      },
+    };
+    let renderer: ReactTestRenderer | undefined;
+    try {
+      await act(() => {
+        renderer = create(<MessagesTimeline {...props} timelineEntries={[...entries, running]} />);
+      });
+      const body = renderer!.root.findByProps({ "data-timeline-row-kind": "work-toggle" });
+      await act(() => body.findByType("button").props.onClick());
+      for (const status of statuses) {
+        const tool = renderer!.root.findAll(
+          (node) =>
+            node.type === "div" &&
+            node.props.role === "button" &&
+            String(node.props["aria-label"]).includes(`audit-${status}`),
+        );
+        expect(tool).toHaveLength(1);
+        await act(() => tool[0]!.props.onClick());
+        expect(JSON.stringify(renderer!.toJSON())).toContain(`Output from audit-${status}`);
+      }
+      const layer = renderer!.root.findByProps({ "data-testid": "timeline-live-activity-layer" });
+      await act(() => layer.findByType("button").props.onClick());
+      expect(layer.findAllByProps({ "data-tool-group-scroll": true })).toHaveLength(1);
+      expect(
+        layer.findAll(
+          (node) =>
+            node.type === "div" &&
+            node.props.role === "button" &&
+            String(node.props["aria-label"]).includes("audit-"),
+        ),
+      ).toHaveLength(0);
+
+      // When the current operation settles its entry joins the existing body group.
+      const completed = buildRunningToolEntries("completed")[1]!;
+      await act(() =>
+        renderer!.update(
+          <MessagesTimeline
+            {...props}
+            timelineEntries={[
+              ...entries.map((entry) => ({
+                ...entry,
+                entry: {
+                  ...entry.entry,
+                  toolLifecycleStatus:
+                    entry.entry.toolLifecycleStatus === "inProgress"
+                      ? ("completed" as const)
+                      : entry.entry.toolLifecycleStatus,
+                },
+              })),
+              completed,
+            ]}
+          />,
+        ),
+      );
+      expect(
+        renderer!.root.findAllByProps({ "data-timeline-live-row-kind": "work-live" }),
+      ).toHaveLength(0);
+      expect(
+        renderer!.root.findAll(
+          (node) =>
+            node.type === "div" &&
+            node.props.role === "button" &&
+            String(node.props["aria-label"]).includes("pnpm"),
+        ),
+      ).toHaveLength(1);
+      for (const status of statuses) {
+        expect(
+          renderer!.root.findAll(
+            (node) =>
+              node.type === "div" &&
+              node.props.role === "button" &&
+              String(node.props["aria-label"]).includes(`audit-${status}`),
+          ),
+        ).toHaveLength(1);
+      }
+    } finally {
+      await act(() => renderer?.unmount());
+    }
+  });
+
+  it.each([
+    { types: ["dynamic_tool"], runId: RunId.make("run-1") },
+    { types: ["file_change"], runId: RunId.make("run-1") },
+    { types: ["dynamic_tool", "file_change", "file_search"], runId: null },
+    {
+      types: ["command_execution", "file_change", "dynamic_tool", "file_search"],
+      runId: RunId.make("run-1"),
+    },
+  ] as const)(
+    "opens every projected record in a $types group (run=$runId)",
+    async ({ types, runId }) => {
+      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+      const now = DateTime.makeUnsafe(MESSAGE_CREATED_AT);
+      const threadId = ThreadId.make("thread-record-audit");
+      const projectedItems: OrchestrationV2ProjectedTurnItem[] = types.map((type, ordinal) => {
+        const common = {
+          id: TurnItemId.make(`audit-${type}`),
+          threadId,
+          runId,
+          nodeId: null,
+          providerThreadId: null,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal,
+          status: "completed" as const,
+          title: null,
+          startedAt: now,
+          completedAt: now,
+          updatedAt: now,
+        };
+        const item: OrchestrationV2ProjectedTurnItem["item"] =
+          type === "file_change"
+            ? { ...common, type, fileName: "src/audit.ts", additions: 2, deletions: 1 }
+            : type === "dynamic_tool"
+              ? {
+                  ...common,
+                  type,
+                  toolName: "mcp__t3_code__preview_navigate",
+                  input: { url: "https://example.com/record-audit" },
+                }
+              : type === "file_search"
+                ? {
+                    ...common,
+                    type,
+                    pattern: "record-audit",
+                    results: [
+                      { fileName: "src/audit.ts", line: 7, preview: "record-audit search match" },
+                    ],
+                  }
+                : { ...common, type, input: "echo record-audit" };
+        return {
+          position: ordinal,
+          visibility: "local",
+          sourceThreadId: threadId,
+          sourceItemId: item.id,
+          item,
+        };
+      });
+      const timelineEntries = deriveTimelineEntriesFromVisibleTurnItems({
+        visibleTurnItems: projectedItems,
+        optimisticMessages: [],
+      });
+      const onOpenTurnDiff = vi.fn();
+      let renderer: ReactTestRenderer | undefined;
+      try {
+        await act(() => {
+          renderer = create(
+            <MessagesTimeline
+              {...buildProps()}
+              conversationStructure="restructured"
+              timelineEntries={timelineEntries}
+              onOpenTurnDiff={onOpenTurnDiff}
+            />,
+          );
+        });
+        if (runId) {
+          const turn = renderer!.root.findByProps({ "data-timeline-row-kind": "turn-fold" });
+          await act(() => turn.findByType("button").props.onClick());
+        }
+        const group = () => renderer!.root.findByProps({ "data-timeline-row-kind": "work-toggle" });
+        expect(renderer!.root.findAllByProps({ "data-tool-group-scroll": true })).toHaveLength(0);
+        await act(() => group().findByType("button").props.onClick());
+        const calls = () => renderer!.root.findByProps({ "data-tool-group-scroll": true });
+        for (const type of types) {
+          const row = calls().findAll(
+            (node) =>
+              node.type === "div" &&
+              node.props["data-v2-item-type"] === type &&
+              node.props.role === "button",
+          );
+          expect(row).toHaveLength(1);
+          await act(() => row[0]!.props.onClick());
+          const inspector = calls().findByProps({ "data-v2-item-inspector": type });
+          const content = inspector
+            .findAll((node) => typeof node.type === "string")
+            .flatMap((node) => node.children.filter((child) => typeof child === "string"))
+            .join(" ");
+          if (type === "dynamic_tool")
+            expect(content).toContain("https://example.com/record-audit");
+          if (type === "file_search") expect(content).toContain("record-audit search match");
+          if (type === "file_change") {
+            expect(content).toContain("src/audit.ts");
+            if (runId) {
+              await act(() => inspector.findByType("button").props.onClick());
+              expect(onOpenTurnDiff).toHaveBeenCalledWith(runId, "src/audit.ts");
+            }
+          }
+          if (type === "command_execution") expect(content).toContain("echo record-audit");
+        }
+        // Collapsing a batch must preserve the individual disclosures when reopened.
+        await act(() => group().findByType("button").props.onClick());
+        await act(() => group().findByType("button").props.onClick());
+        for (const type of types)
+          expect(calls().findAllByProps({ "data-v2-item-inspector": type })).toHaveLength(1);
+      } finally {
+        await act(() => renderer?.unmount());
+      }
+    },
+  );
+
+  it("moves the thinking row into the live layer when nothing is running", () => {
+    const thinkingMarkup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        conversationStructure="restructured"
+        isWorking
+        timelineEntries={[buildUserTimelineEntry("Hello")]}
+      />,
+    );
+
+    expect(thinkingMarkup).toContain('data-testid="timeline-live-activity-layer"');
+    expect(thinkingMarkup).not.toContain('data-timeline-row-kind="thinking"');
+  });
+
+  it("labels the gap after a finished tool with the idle text", () => {
+    // Same shape as the running-tool fixture, except the tool is done: the live
+    // label empties out and the gap takes over.
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        conversationStructure="restructured"
+        isWorking
+        runningRunId={RUN_ID}
+        latestRun={{
+          runId: RUN_ID,
+          status: "running",
+          startedAt: MESSAGE_CREATED_AT,
+          completedAt: null,
+        }}
+        timelineEntries={buildRunningToolEntries("completed")}
+      />,
+    );
+
+    expect(markup).toContain('data-testid="timeline-live-activity-layer"');
+    expect(markup).toContain("Planning next move");
+    expect(markup).not.toContain("Thinking");
+  });
+
+  it("shows the configured idle text in the same gap", () => {
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        conversationStructure="restructured"
+        conversationStructureIdleLabel="Deciding what to do next"
+        isWorking
+        runningRunId={RUN_ID}
+        latestRun={{
+          runId: RUN_ID,
+          status: "running",
+          startedAt: MESSAGE_CREATED_AT,
+          completedAt: null,
+        }}
+        timelineEntries={buildRunningToolEntries("completed")}
+      />,
+    );
+
+    expect(markup).toContain("Deciding what to do next");
+  });
+
+  it("keeps Thinking in the default structure where a gap would be", () => {
+    // Default keeps the finished tool in the live label, so no gap opens up and
+    // the idle text must never appear on this path.
+    const finishedToolMarkup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        conversationStructure="default"
+        isWorking
+        runningRunId={RUN_ID}
+        latestRun={{
+          runId: RUN_ID,
+          status: "running",
+          startedAt: MESSAGE_CREATED_AT,
+          completedAt: null,
+        }}
+        timelineEntries={buildRunningToolEntries("completed")}
+      />,
+    );
+    expect(finishedToolMarkup).not.toContain("Planning next move");
+    expect(finishedToolMarkup).toContain('data-timeline-row-kind="work-live"');
+
+    // The row default does render still says Thinking.
+    const openingMarkup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        conversationStructure="default"
+        isWorking
+        timelineEntries={[buildUserTimelineEntry("Hello")]}
+      />,
+    );
+    expect(openingMarkup).toContain("Thinking");
+    expect(openingMarkup).not.toContain("Planning next move");
+  });
+
+  it("keeps Thinking at the start of a restructured turn", () => {
+    // No tool has run yet, so the row is real thinking rather than the idle gap
+    // — even though the structure is the one that owns the idle text.
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        conversationStructure="restructured"
+        isWorking
+        timelineEntries={[buildUserTimelineEntry("Hello")]}
+      />,
+    );
+
+    expect(markup).toContain("Thinking");
+    expect(markup).not.toContain("Planning next move");
+  });
+
+  it("uses the configured Thinking text without changing the idle gap text", () => {
+    const thinkingMarkup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        conversationStructure="restructured"
+        conversationStructureThinkingLabel="Working it out"
+        isWorking
+        timelineEntries={[buildUserTimelineEntry("Hello")]}
+      />,
+    );
+    expect(thinkingMarkup).toContain("Working it out");
+    expect(thinkingMarkup).not.toContain(">Thinking<");
+
+    const idleMarkup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        conversationStructure="restructured"
+        conversationStructureThinkingLabel="Working it out"
+        conversationStructureIdleLabel="Deciding what to do next"
+        isWorking
+        runningRunId={RUN_ID}
+        latestRun={{
+          runId: RUN_ID,
+          status: "running",
+          startedAt: MESSAGE_CREATED_AT,
+          completedAt: null,
+        }}
+        timelineEntries={buildRunningToolEntries("completed")}
+      />,
+    );
+    expect(idleMarkup).toContain("Deciding what to do next");
+    expect(idleMarkup).not.toContain("Working it out");
+  });
+
+  it("leaves the list data and extraData consistent with the filtered rows", () => {
+    // LegendList derives scroll offsets from its own data array, so a row
+    // count that disagrees with `data` would misplace every scroll target.
+    const restructuredMarkup = renderRunningTool("restructured");
+
+    // Two rows survive filtering: the user message and the working indicator.
+    expect(restructuredMarkup).toContain('data-timeline-row-kind="message"');
+    expect(restructuredMarkup).toContain('data-timeline-row-kind="working"');
+    expect(restructuredMarkup).toContain('data-timeline-row-count="2"');
+    // extraData carries the same count, so the list refreshes on every change.
+    expect(restructuredMarkup).toContain('data-timeline-extra-data="environment-local:thread-1:2"');
+  });
+
+  it("keeps the default structure's list data and extraData untouched", () => {
+    const defaultMarkup = renderRunningTool("default");
+
+    // Nothing is filtered under "default", so the list keeps all three rows and
+    // extraData still reports the full projection length.
+    expect(defaultMarkup).toContain('data-timeline-row-count="3"');
+    expect(defaultMarkup).toContain('data-timeline-extra-data="environment-local:thread-1:3"');
+  });
+
+  /** Three settled turns, then a tool still in flight in the active run. */
+  function buildMinimapFixtureEntries() {
+    const turn = (index: number) => [
+      {
+        id: `entry-user-${index}`,
+        kind: "message" as const,
+        createdAt: MESSAGE_CREATED_AT,
+        message: {
+          id: MessageId.make(`message-user-${index}`),
+          role: "user" as const,
+          text: `Ask ${index}.`,
+          runId: null,
+          createdAt: MESSAGE_CREATED_AT,
+          updatedAt: MESSAGE_CREATED_AT,
+          streaming: false,
+        },
+      },
+      {
+        id: `entry-assistant-${index}`,
+        kind: "message" as const,
+        createdAt: MESSAGE_CREATED_AT,
+        message: {
+          id: MessageId.make(`message-assistant-${index}`),
+          role: "assistant" as const,
+          text: `Answer ${index}.`,
+          runId: RUN_ID,
+          createdAt: MESSAGE_CREATED_AT,
+          updatedAt: MESSAGE_CREATED_AT,
+          streaming: false,
+        },
+      },
+    ];
+    return [
+      ...turn(1),
+      ...turn(2),
+      // The running turn starts here, so the working indicator is projected
+      // before this message. A user row after that point is the only one whose
+      // index moves once the working and live rows leave the list.
+      {
+        id: "entry-user-3",
+        kind: "message" as const,
+        createdAt: MESSAGE_CREATED_AT,
+        message: {
+          id: MessageId.make("message-user-3"),
+          role: "user" as const,
+          text: "Ask 3.",
+          runId: null,
+          createdAt: MESSAGE_CREATED_AT,
+          updatedAt: MESSAGE_CREATED_AT,
+          streaming: false,
+        },
+      },
+      {
+        id: "running-tool-entry",
+        kind: "work" as const,
+        createdAt: MESSAGE_CREATED_AT,
+        entry: {
+          id: "running-tool",
+          runId: RUN_ID,
+          createdAt: MESSAGE_CREATED_AT,
+          label: "Run the build",
+          command: "pnpm build",
+          requestKind: "command" as const,
+          tone: "tool" as const,
+          toolLifecycleStatus: "inProgress" as const,
+        },
+      },
+      {
+        id: "entry-assistant-3",
+        kind: "message" as const,
+        createdAt: MESSAGE_CREATED_AT,
+        message: {
+          id: MessageId.make("message-assistant-3"),
+          role: "assistant" as const,
+          text: "Answer 3.",
+          runId: RUN_ID,
+          createdAt: MESSAGE_CREATED_AT,
+          updatedAt: MESSAGE_CREATED_AT,
+          streaming: false,
+        },
+      },
+      // A user message after the working indicator: this is the only row whose
+      // index differs between the unfiltered projection and the list the
+      // restructured structure actually hands to LegendList.
+      {
+        id: "entry-user-4",
+        kind: "message" as const,
+        createdAt: MESSAGE_CREATED_AT,
+        message: {
+          id: MessageId.make("message-user-4"),
+          role: "user" as const,
+          text: "Ask 4.",
+          runId: null,
+          createdAt: MESSAGE_CREATED_AT,
+          updatedAt: MESSAGE_CREATED_AT,
+          streaming: false,
+        },
+      },
+    ];
+  }
+
+  /** The minimap rail's single jump button; re-found so props stay fresh. */
+  function findMinimapJumpButton(renderer: ReactTestRenderer) {
+    return renderer.root.find(
+      (node) =>
+        node.type === "button" &&
+        typeof node.props["aria-label"] === "string" &&
+        node.props["aria-label"].startsWith("Jump to message:"),
+    );
+  }
+
+  it.each(["default", "restructured"] as const)(
+    "reuses %s minimap strips while hovered previews stay current and new turns remain navigable",
+    async (conversationStructure) => {
+      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+      const scrollToIndex = vi.fn(async () => {});
+      const props = {
+        ...buildProps(),
+        routeThreadKey: `environment-local:stable-minimap-${conversationStructure}`,
+        conversationStructure,
+        isWorking: true,
+        runningRunId: RUN_ID,
+        latestRun: {
+          runId: RUN_ID,
+          status: "running" as const,
+          startedAt: MESSAGE_CREATED_AT,
+          completedAt: null,
+        },
+      };
+      props.listRef.current = {
+        getState: () => null,
+        getScrollableNode: () => null,
+        scrollToIndex,
+        scrollToOffset: async () => {},
+        scrollToEnd: async () => {},
+      } as unknown as LegendListRef;
+      const initialEntries = buildMinimapFixtureEntries();
+      const answer = (index: number, text: string) => ({
+        ...buildAssistantTimelineEntry(text),
+        id: `entry-assistant-${index}`,
+        message: {
+          ...buildAssistantTimelineEntry(text).message,
+          id: MessageId.make(`message-assistant-${index}`),
+          runId: RUN_ID,
+          streaming: true,
+        },
+      });
+      const strips = () =>
+        renderer!.root.findAll(
+          (node) => node.type === "span" && node.props["data-minimap-strip"] === true,
+        );
+      const previewText = () =>
+        renderer!.root
+          .findByProps({ "data-minimap-preview": true })
+          .findAll(() => true)
+          .flatMap((node) => node.children.filter((child) => typeof child === "string"))
+          .join("");
+      const latestData = () =>
+        activityTestState.listDataHistory.findLast(
+          ({ extraData }) =>
+            typeof extraData === "string" && extraData.startsWith(`${props.routeThreadKey}:`),
+        )!.data;
+      let renderer: ReactTestRenderer | undefined;
+      try {
+        await act(() => {
+          renderer = create(
+            <MessagesTimeline
+              {...props}
+              timelineEntries={[...initialEntries, answer(4, "Initial answer for the last turn.")]}
+            />,
+          );
+        });
+        await act(() =>
+          findMinimapJumpButton(renderer!).props.onMouseMove({
+            clientY: 399,
+            currentTarget: { getBoundingClientRect: () => ({ top: 0, height: 400 }) },
+          }),
+        );
+        expect(previewText()).toContain("Ask 4.");
+        expect(previewText()).toContain("Initial answer for the last turn.");
+        const initialStrips = strips();
+        const initialStripProps = initialStrips.map((strip) => strip.props);
+        expect(initialStrips).toHaveLength(4);
+        for (const text of [
+          "The last answer now has its first batch.",
+          "The last answer now has its first batch and a second batch.",
+          "The last answer now has its first batch and a second batch followed by the final batch.",
+        ]) {
+          await act(() => {
+            renderer!.update(
+              <MessagesTimeline
+                {...props}
+                timelineEntries={[...initialEntries, answer(4, text)]}
+              />,
+            );
+          });
+          expect(previewText()).toContain(text);
+          for (const [index, strip] of strips().entries()) {
+            expect(strip).toBe(initialStrips[index]);
+            expect(strip.props).toBe(initialStripProps[index]);
+          }
+        }
+        const updatedEntries = initialEntries.map((entry) =>
+          entry.id === "entry-user-4" && entry.kind === "message"
+            ? { ...entry, message: { ...entry.message, text: "Updated question for turn four." } }
+            : entry,
+        );
+        await act(() => {
+          renderer!.update(
+            <MessagesTimeline
+              {...props}
+              timelineEntries={[
+                ...updatedEntries,
+                answer(4, "Current answer to the updated question."),
+              ]}
+            />,
+          );
+        });
+        expect(previewText()).toContain("Updated question for turn four.");
+        expect(previewText()).toContain("Current answer to the updated question.");
+        expect(findMinimapJumpButton(renderer!).props["aria-label"]).toBe(
+          "Jump to message: Updated question for turn four.",
+        );
+        for (const [index, strip] of strips().entries()) {
+          expect(strip).toBe(initialStrips[index]);
+          expect(strip.props).toBe(initialStripProps[index]);
+        }
+        const nextUser = {
+          ...buildUserTimelineEntry("Question for the new fifth turn."),
+          id: "entry-user-5",
+          message: {
+            ...buildUserTimelineEntry("Question for the new fifth turn.").message,
+            id: MessageId.make("message-user-5"),
+          },
+        };
+        await act(() => {
+          renderer!.update(
+            <MessagesTimeline
+              {...props}
+              timelineEntries={[
+                ...updatedEntries,
+                answer(4, "Current answer to the updated question."),
+                nextUser,
+                answer(5, "Answer for the new fifth turn."),
+              ]}
+            />,
+          );
+        });
+        expect(strips()).toHaveLength(5);
+        await act(() =>
+          findMinimapJumpButton(renderer!).props.onKeyDown({
+            key: "End",
+            preventDefault: () => {},
+          }),
+        );
+        expect(previewText()).toContain("Question for the new fifth turn.");
+        expect(previewText()).toContain("Answer for the new fifth turn.");
+        await act(() =>
+          findMinimapJumpButton(renderer!).props.onKeyDown({
+            key: "Enter",
+            preventDefault: () => {},
+          }),
+        );
+        const index = latestData().findIndex((row) => row.id === "entry-user-5");
+        expect(index).toBeGreaterThan(0);
+        expect(scrollToIndex).toHaveBeenCalledExactlyOnceWith({
+          index,
+          animated: true,
+          viewOffset: 24,
+        });
+      } finally {
+        await act(() => renderer?.unmount());
+      }
+    },
+  );
+
+  it("scrolls the list to the row a minimap item names once the live label left", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const scrollToIndexRequests: Array<{ index: number; animated: boolean; viewOffset: number }> =
+      [];
+    const props = buildProps();
+    props.listRef.current = {
+      getState: () => null,
+      getScrollableNode: () => null,
+      scrollToIndex: async (request: { index: number; animated: boolean; viewOffset: number }) => {
+        scrollToIndexRequests.push(request);
+      },
+      scrollToOffset: async () => {},
+      scrollToEnd: async () => {},
+    } as unknown as LegendListRef;
+
+    let renderer: ReactTestRenderer | undefined;
+    try {
+      await act(() => {
+        renderer = create(
+          <MessagesTimeline
+            {...props}
+            conversationStructure="restructured"
+            isWorking
+            runningRunId={RUN_ID}
+            latestRun={{
+              runId: RUN_ID,
+              status: "running",
+              startedAt: MESSAGE_CREATED_AT,
+              completedAt: null,
+            }}
+            timelineEntries={buildMinimapFixtureEntries()}
+          />,
+        );
+      });
+
+      // The live label left the list, so the list holds one row fewer than the
+      // projection. Everything the minimap can name is still in it.
+      const list = renderer!.root.find(
+        (node) => Array.isArray(node.props.data) && typeof node.props.keyExtractor === "function",
+      );
+      expect(list.props.data).toHaveLength(8);
+
+      // "Ask 4." comes after the working indicator in the projection, so its
+      // index in the filtered list is one lower than in the projection. An
+      // index derived from the unfiltered rows would name a row the list no
+      // longer holds, and both assertions below fail.
+      const noop = () => {};
+      await act(() => findMinimapJumpButton(renderer!).props.onFocus());
+      for (let step = 0; step < 3; step += 1) {
+        await act(() =>
+          findMinimapJumpButton(renderer!).props.onKeyDown({
+            key: "ArrowDown",
+            preventDefault: noop,
+          }),
+        );
+      }
+      await act(() =>
+        findMinimapJumpButton(renderer!).props.onKeyDown({ key: "Enter", preventDefault: noop }),
+      );
+
+      expect(scrollToIndexRequests).toEqual([{ index: 6, animated: true, viewOffset: 24 }]);
+      expect(list.props.data[6]).toMatchObject({
+        kind: "message",
+        message: { text: "Ask 4." },
+      });
+    } finally {
+      await act(() => renderer?.unmount());
+    }
+  });
+
+  describe("live label placement", () => {
+    const COMPOSER_INSET = 96;
+
+    function buildLiveLabelProps() {
+      return {
+        ...buildProps(),
+        contentInsetEndAdjustment: COMPOSER_INSET,
+        conversationStructure: "restructured" as const,
+        isWorking: true,
+        runningRunId: RUN_ID,
+        latestRun: {
+          runId: RUN_ID,
+          status: "running" as const,
+          startedAt: MESSAGE_CREATED_AT,
+          completedAt: null,
+        },
+        timelineEntries: buildRunningToolEntries("inProgress"),
+      };
+    }
+
+    /** The footer's own block: the label and the reservations below it. */
+    function findFooterBlock(liveLabel: ReactTestInstance) {
+      const footer = liveLabel.parent;
+      expect(footer?.props["aria-hidden"]).not.toBe(true);
+      return footer!;
+    }
+
+    async function withLiveLabelRenderer(
+      node: Parameters<typeof create>[0],
+      run: (fixture: {
+        renderer: ReactTestRenderer;
+        liveLabel: ReactTestInstance;
+      }) => Promise<void>,
+    ) {
+      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+      let renderer: ReactTestRenderer | undefined;
+      try {
+        await act(() => {
+          renderer = create(node);
+        });
+        const liveLabel = renderer!.root.findByProps({
+          "data-testid": "timeline-live-activity-layer",
+        });
+        await run({ renderer: renderer!, liveLabel });
+      } finally {
+        await act(() => renderer?.unmount());
+      }
+    }
+
+    it("renders the live label in the list footer, not beside the scroll container", async () => {
+      await withLiveLabelRenderer(
+        <MessagesTimeline {...buildLiveLabelProps()} />,
+        async (fixture) => {
+          // Inside the footer the label is ordinary content: it travels with the
+          // body, so it cannot move against the text or be covered by the composer.
+          expect(String(fixture.liveLabel.props.className).split(" ")).not.toContain("absolute");
+          const footer = findFooterBlock(fixture.liveLabel);
+          // The label's own parent is the footer block, so nothing sits between
+          // them that could offset it away from the end of the content.
+          expect(footer.children).toContain(fixture.liveLabel);
+          // And that footer block is rendered inside LegendList's scroll container.
+          expect(
+            fixture.renderer.root
+              .findByProps({ "data-testid": "legend-list" })
+              .findAllByProps({ "data-testid": "timeline-live-activity-layer" }),
+          ).toHaveLength(1);
+        },
+      );
+    });
+
+    it("stacks the live label above the composer inset reservation", async () => {
+      await withLiveLabelRenderer(
+        <MessagesTimeline {...buildLiveLabelProps()} />,
+        async (fixture) => {
+          const footer = findFooterBlock(fixture.liveLabel);
+          const children = footer.children.filter(
+            (child): child is ReactTestInstance => typeof child !== "string",
+          );
+          const insetIndex = children.findIndex(
+            (child) =>
+              (child.props as { style?: { height?: number } }).style?.height === COMPOSER_INSET,
+          );
+
+          expect(insetIndex).toBeGreaterThan(children.indexOf(fixture.liveLabel));
+        },
+      );
+    });
+
+    it("keeps the fallback footnote host accessible and the composer reservation when no live label is rendered", () => {
+      const markup = renderToStaticMarkup(
+        <MessagesTimeline
+          {...buildProps()}
+          contentInsetEndAdjustment={96}
+          timelineEntries={[buildUserTimelineEntry("Hello")]}
+        />,
+      );
+
+      // The fallback host can contain footnotes while the Thinking host unmounts.
+      expect(markup).toContain('data-stream-footnote-host=""');
+      expect(markup).not.toContain('<div aria-hidden="true"><div class="mx-auto');
+      expect(markup).toContain(
+        '<div style="height:96px"></div><div class="h-3 sm:h-4"></div></div>',
+      );
+      expect(markup).not.toContain('data-testid="timeline-live-activity-layer"');
+    });
   });
 });

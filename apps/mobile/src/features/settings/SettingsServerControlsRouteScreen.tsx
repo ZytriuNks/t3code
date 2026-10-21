@@ -3,6 +3,7 @@ import { SettingsRow } from "./components/SettingsRow";
 import { ScreenScrollView as ScrollView } from "../../components/ScreenScrollView";
 import { AppText as Text } from "../../components/AppText";
 import {
+  type ConversationStructure,
   type ResponseStreamingMode,
   type ServerSettings,
   type ServerSettingsPatch,
@@ -48,7 +49,21 @@ const PAGE_TITLES: Record<SettingsPage, string> = {
 const PAGE_PROJECT_KEYS: Record<SettingsPage, readonly ProjectScopedServerSettingKey[]> = {
   "new-threads": ["defaultThreadEnvMode", "worktreeSubmodules", "defaultRuntimeMode"],
   "source-control": ["defaultAutoPull", "newWorktreesStartFromOrigin"],
-  "agent-behavior": ["responseStreamingMode", "enableAgentBrowserAccess"],
+  // Smooth-output and layout tuning is edited on web/desktop, but "Use defaults"
+  // still has to clear it so a project fully follows its environment again.
+  "agent-behavior": [
+    "responseStreamingMode",
+    "conversationStructure",
+    "conversationStructureThinkingLabel",
+    "conversationStructureIdleLabel",
+    "smoothOutputMode",
+    "smoothOutputLineMode",
+    "smoothMarkdownPreload",
+    "smoothTextFadeDurationMs",
+    "smoothTextYieldDurationMs",
+    "footnotesAutoCollapse",
+    "enableAgentBrowserAccess",
+  ],
   maintenance: ["continueThreadsAfterServerUpdate"],
 };
 
@@ -109,6 +124,34 @@ const STREAMING_CHOICES: ReadonlyArray<{
     mode: "paragraph",
     label: "Finished paragraphs",
     description: "Show each paragraph or code block as it completes.",
+  },
+  {
+    mode: "realtime",
+    label: "Real-time output",
+    description: "Show text as it is generated, with more frequent message updates.",
+  },
+  {
+    mode: "smooth",
+    label: "Smooth output",
+    description: "New text appears smoothly on web and desktop; mobile shows it as it arrives.",
+  },
+];
+
+const CONVERSATION_STRUCTURE_CHOICES: ReadonlyArray<{
+  readonly mode: ConversationStructure;
+  readonly label: string;
+  readonly description: string;
+}> = [
+  {
+    mode: "default",
+    label: "Current layout",
+    description: "Keep live activity and tool calls in the timeline as they are today.",
+  },
+  {
+    mode: "restructured",
+    label: "Restructured",
+    description:
+      "One live activity label; finished tools are archived. Required for smooth output.",
   },
 ];
 
@@ -359,6 +402,26 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
                         separated={index > 0}
                         disabled={disabledFor("responseStreamingMode")}
                         onPress={() => write({ responseStreamingMode: choice.mode })}
+                      />
+                    ))}
+                  </SettingsSection>
+                  <SettingsSection
+                    title="Conversation structure"
+                    trailing={
+                      pendingWrites === 0 && uniform("conversationStructure") === null ? (
+                        <MixedValuesLabel projectSelected={projectSelected} />
+                      ) : null
+                    }
+                  >
+                    {CONVERSATION_STRUCTURE_CHOICES.map((choice, index) => (
+                      <SettingsChoiceRow
+                        key={choice.mode}
+                        label={choice.label}
+                        description={choice.description}
+                        selected={uniform("conversationStructure") === choice.mode}
+                        separated={index > 0}
+                        disabled={disabledFor("conversationStructure")}
+                        onPress={() => write({ conversationStructure: choice.mode })}
                       />
                     ))}
                   </SettingsSection>

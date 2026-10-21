@@ -396,11 +396,43 @@ const SETTINGS_SEARCH_ITEM_DEFINITIONS = [
     searchTerms: ["timestamp clock locale system browser os 12 hour 24 hour"],
   },
   {
+    id: "footnotes-auto-collapse",
+    title: "Automatically collapse footnotes",
+    to: "/settings/general",
+    scope: "project-defaults",
+    searchTerms: ["markdown footnote references collapse expand 脚注 自动 折叠 展开"],
+  },
+  {
     id: "response-streaming",
     title: "Response streaming",
     to: "/settings/general",
     scope: "project-defaults",
-    searchTerms: ["output token paragraph buffered wait turn legacy"],
+    searchTerms: [
+      "output smooth realtime real-time incremental token character granularity paragraph buffered wait turn line parallel adaptive handoff markdown preload fade duration 淡入 时长 ms md 预加载 格式 缓存 逐字符 逐tok 粒度 多行 并行 动态 衔接",
+    ],
+  },
+  {
+    id: "conversation-thinking-label",
+    title: "Thinking label",
+    to: "/settings/general",
+    scope: "project-defaults",
+    searchTerms: ["thinking label activity text 文案 思考 标签"],
+  },
+  {
+    id: "conversation-idle-label",
+    title: "After-tool waiting label",
+    to: "/settings/general",
+    scope: "project-defaults",
+    searchTerms: ["after tool waiting idle planning label text 工具 等待 空闲 文案"],
+  },
+  {
+    id: "conversation-structure",
+    title: "Conversation structure",
+    to: "/settings/general",
+    scope: "project-defaults",
+    searchTerms: [
+      "conversation structure chat message timeline live activity label tools archive restructured idle planning",
+    ],
   },
   {
     id: "hide-whitespace-changes",

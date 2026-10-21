@@ -79,6 +79,15 @@ describe("searchSettings", () => {
     },
   );
 
+  it.each(["conversation structure", "对话 结构", "activity label", "活动 标签"])(
+    "finds the conversation structure setting for %s",
+    (query) => {
+      expect(searchSettings(query, SETTINGS_SEARCH_ITEMS, zh).map((item) => item.id)).toContain(
+        "conversation-structure",
+      );
+    },
+  );
+
   it("gives localized catalog items stable typed message keys", () => {
     for (const item of SETTINGS_SEARCH_ITEMS) {
       if (!item.titleKey) continue;
@@ -113,6 +122,22 @@ describe("searchSettings", () => {
 
   it.each(["send shortcut", "multiline", "new line"])("finds Send shortcut for %s", (query) => {
     expect(searchSettings(query).map((item) => item.id)).toContain("send-shortcut");
+  });
+
+  it.each([
+    "real-time output",
+    "realtime",
+    "incremental output",
+    "smooth output",
+    "平滑输出",
+    "实时输出",
+    "增量 输出",
+    "让位 动画 时长",
+  ])("finds response streaming for %s", (query) => {
+    expect(searchSettings(query, SETTINGS_SEARCH_ITEMS, zh)[0]).toMatchObject({
+      id: "response-streaming",
+      to: "/settings/general",
+    });
   });
 
   it.each(["thread status dots", "对话 状态 圆点"])(

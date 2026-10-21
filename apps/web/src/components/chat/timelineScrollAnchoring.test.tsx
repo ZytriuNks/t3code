@@ -40,6 +40,12 @@ describe("timelineContentOverflowsViewport", () => {
     expect(timelineContentOverflowsViewport(overflows, inset)).toBe(true);
   });
 
+  it("includes live activity below the virtualized rows in overflow detection", () => {
+    const state = buildState({ positions: [0, 200], sizes: [200, 325], scrollLength: 700 });
+    expect(timelineContentOverflowsViewport(state, inset)).toBe(false);
+    expect(timelineContentOverflowsViewport(state, { ...inset, footerHeight: 52 })).toBe(true);
+  });
+
   it("treats an empty or unmeasured list as fitting", () => {
     expect(timelineContentOverflowsViewport(undefined, inset)).toBe(false);
     expect(
@@ -61,6 +67,22 @@ describe("timelineContentOverflowsViewport", () => {
 });
 
 describe("timeline scroll anchoring", () => {
+  it("releases framing as soon as Thinking and its bottom gap fill the viewport", () => {
+    const measure = (bodyBottom: number) =>
+      getAnchoredTurnMetrics({
+        state: buildState({ positions: [0, 200], sizes: [200, bodyBottom - 200] }),
+        anchorIndex: 0,
+        composerOverlayHeight: 100,
+        anchorOffset: 24,
+        footerHeight: 52,
+      });
+
+    expect(measure(523.5)?.overflowsUsableViewport).toBe(false);
+    expect(measure(524)?.overflowsUsableViewport).toBe(true);
+    expect(measure(524)?.scrollDeltaToRevealEnd).toBe(0);
+    expect(measure(525)?.scrollDeltaToRevealEnd).toBe(1);
+  });
+
   it("measures row bottoms from LegendList row position and size", () => {
     const state = buildState({
       positions: [0, 120],
