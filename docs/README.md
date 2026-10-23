@@ -2,6 +2,7 @@
 
 ## Using T3 Code
 
+- [Fork features and customizations (简体中文)](./fork-features.md)
 - [Install T3 Code](./user/install.md)
 - [Messages and context](./user/composer.md)
 - [Working with threads](./user/thread-sidebar.md)
