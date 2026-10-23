@@ -3,12 +3,12 @@
 本文按时间倒序记录 [ZytriuNks/t3code](https://github.com/ZytriuNks/t3code) 自行开发的功能、定制和用户可感知的修复。
 
 - 核对日期：2026-10-24。
-- 源码基准：fork [`fd739b1b59`](https://github.com/ZytriuNks/t3code/commit/fd739b1b59) 与上游 [v0.1.0](https://github.com/pingdotgg/t3code/commit/81493efb71e8e8244f95d3e9f71d8369654ab151) 的同步候选；本轮新增内容在推入 fork `main` 前标注“待合并”。
+- 源码基准：fork `main` 的 [v0.1.0 同步提交 `b64fa2c5b2`](https://github.com/ZytriuNks/t3code/commit/b64fa2c5b23d9fb764df141076a3d98b1b97b799)，已包含上游 [v0.1.0](https://github.com/pingdotgg/t3code/commit/81493efb71e8e8244f95d3e9f71d8369654ab151)。
 - 收录范围：只记录 fork 自身的增量。同步上游主分支或开发分支得到的功能不列入，包括 Orchestration V2、Pi 原生接入、ACP Registry、Cursor SDK、定时任务、线程交接及其配套能力；若 fork 对它们另作改进，只记录这部分改进。
 - 日期口径：标题日期为功能或改进合入 fork `main` 的日期，依据主线合并记录、squash 提交或直接提交的北京时间核对；同日按合入顺序倒排。条目中的“新增日期”指首次写入本文的日期，与功能合入日期分开。
 - 安装包范围：以下记录说明源码已包含的功能；具体安装包是否包含，取决于其源码提交。Web、桌面和原生移动端分别标注。
 
-## 2026-10-23｜从只读子代理会话新建续接草稿（待合并）
+## 2026-10-24｜从只读子代理会话新建续接草稿
 
 新增日期：2026-10-24。类型：会话操作增强。适用：Web、桌面、原生移动端。
 
@@ -16,7 +16,7 @@
 
 新草稿不继承原生供应商会话，不自动发送或调用供应商；用户须补充消息后自行发送，目标供应商如何使用线程引用仍取决于其支持能力。详见[线程使用指南](./user/thread-sidebar.md)。
 
-来源：本轮 fork 同步候选的独立续接操作；不将上游已有的原生子代理或线程交接能力计作新增。
+来源：[v0.1.0 同步提交](https://github.com/ZytriuNks/t3code/commit/b64fa2c5b23d9fb764df141076a3d98b1b97b799) 中的 fork 独立续接操作；不将上游已有的原生子代理或线程交接能力计作新增。
 
 ## 2026-10-22｜对话结构与活动提示
 
@@ -198,7 +198,7 @@ Alpha、Experimental 增加阶段标签，并接入 **设置 → 外观 → 环�
 
 仓库配套提供分阶段构建、安装及身份核对说明与脚本。不同阶段的会话不会自动同步。详见[构建与安装指南](./operations/fork-build-and-install.md)。
 
-本轮 v0.1.0 同步候选将 Alpha 的显示名称改为 Beta，保留原有持久化和安装身份；Experimental 与 Dev 仍分别隔离。历史条目的 Alpha 名称反映当时合入的行为，不代表创建了第四套数据目录。
+v0.1.0 同步后，Alpha 的显示名称改为 Beta，保留原有持久化和安装身份；Experimental 与 Dev 仍分别隔离。历史条目的 Alpha 名称反映当时合入的行为，不代表创建了第四套数据目录。
 
 来源：[PR #10](https://github.com/ZytriuNks/t3code/pull/10)。
 
