@@ -21,7 +21,7 @@ import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
-import { AsyncResult, Atom } from "effect/unstable/reactivity";
+import { AsyncResult, Atom } from "effect/reactivity";
 
 import {
   createAtomCommandScheduler,
@@ -33,10 +33,10 @@ import {
   createRuntimeCommand,
   scheduleAtomCommandEffect,
 } from "./runtime.ts";
-import { EnvironmentRegistry } from "../connection/registry.ts";
-import { EnvironmentSupervisor } from "../connection/supervisor.ts";
+import * as EnvironmentRegistry from "../connection/registry.ts";
+import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import { safeErrorLogAttributes } from "../errors/safeLog.ts";
-import { EnvironmentCacheStore } from "../platform/persistence.ts";
+import * as Persistence from "../platform/persistence.ts";
 import { runCachePersistence } from "./cachePersistence.ts";
 import {
   isRpcClientError,
@@ -84,7 +84,8 @@ const IDLE_SERVER_UPDATE_STATE: ServerUpdateState = { status: "idle" };
 const EMPTY_SERVER_UPDATE_STATE_ATOM = Atom.make<ServerUpdateState>(IDLE_SERVER_UPDATE_STATE).pipe(
   Atom.withLabel("environment-data:server:update-state:empty"),
 );
-const serverUpdateStateAtom = Atom.family((environmentId: EnvironmentId) =>
+/** Shared with the outdated-host update, which reports through the same state. */
+export const serverUpdateStateAtom = Atom.family((environmentId: EnvironmentId) =>
   Atom.make<ServerUpdateState>(IDLE_SERVER_UPDATE_STATE).pipe(
     Atom.withLabel(`environment-data:server:update-state:${environmentId}`),
   ),
@@ -126,9 +127,9 @@ export class ServerUpdateTerminalError extends Schema.TaggedError<ServerUpdateTe
   }
 }
 
-// Covers the 120-second trial deadline and a final restart of the previous
-// version when the trial rolls back.
-const SERVER_UPDATE_RESUME_TIMEOUT = Duration.minutes(4);
+// Covers the service launcher's 30-minute trial deadline (PREPARED_TIMEOUT_MS)
+// and a final restart of the previous version when the trial rolls back.
+const SERVER_UPDATE_RESUME_TIMEOUT = Duration.minutes(32);
 
 export function matchesServerUpdateReadyEvent(
   result: ServerSelfUpdateResult,
@@ -178,9 +179,9 @@ export function validateServerUpdateReadyEvent(
  * Keeps reconnect attempts ~1s apart for the whole update restart.
  *
  * A restart takes the server down for ~15 seconds, but the supervisor's normal
- * backoff ladder (1/2/4/8/16s) assumes an unexpected failure and lands attempts
- * at ~3, 5, 9, 17 and 33 seconds — so a 15-second restart is observed as a
- * 33-second "Resuming". Nudging on every backoff entry (not just the first)
+ * backoff assumes an unexpected failure and doubles its delay after each failed
+ * attempt, so a 15-second restart can be observed as a ~30-second "Resuming".
+ * Nudging on every backoff entry (not just the first)
  * holds the retry cadence flat until the server answers again. The sleep before
  * each nudge is the pacer: a connection that fails instantly re-enters backoff
  * immediately and would otherwise spin a tight retry loop.
@@ -282,6 +283,11 @@ export const waitForDesktopUpdateTarget = Effect.fn("waitForDesktopUpdateTarget"
   });
 });
 
+/**
+ * "resuming" means the server has its update and restarts without this
+ * client. A desktop app update is not there yet when its prepare step
+ * completes: the client still has to commit it, so it stays "installing".
+ */
 export function serverUpdateStateForProgressEvent(
   fromVersion: string,
   targetVersion: string,
@@ -289,7 +295,12 @@ export function serverUpdateStateForProgressEvent(
 ): Extract<ServerUpdateState, { status: "running" }> {
   return {
     status: "running",
-    stage: event.type === "complete" ? "resuming" : event.stage,
+    stage:
+      event.type !== "complete"
+        ? event.stage
+        : event.result.method === "desktop-app" && event.result.desktopUpdateToken !== undefined
+          ? "installing"
+          : "resuming",
     fromVersion,
     targetVersion,
   };
@@ -307,7 +318,7 @@ export function serverUpdateStateForServerVersion(
     : IDLE_SERVER_UPDATE_STATE;
 }
 
-function serverUpdateFailureMessage(error: unknown): string {
+export function serverUpdateFailureMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Server update failed.";
 }
 
@@ -366,8 +377,8 @@ export interface ServerConfigSubscriptionOptions {
 
 export const makeEnvironmentServerConfigState = Effect.fn("EnvironmentServerConfigState.make")(
   function* (subscription: ServerConfigSubscriptionOptions) {
-    const supervisor = yield* EnvironmentSupervisor;
-    const cache = yield* EnvironmentCacheStore;
+    const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
+    const cache = yield* Persistence.EnvironmentCacheStore;
     const environmentId = supervisor.target.environmentId;
     const cachedConfig = yield* cache.loadServerConfig(environmentId).pipe(
       Effect.catch((error) =>
@@ -510,7 +521,7 @@ export function resolveServerWelcomeState(
 
 export const makeEnvironmentServerWelcomeState = Effect.fn("EnvironmentServerWelcomeState.make")(
   function* () {
-    const supervisor = yield* EnvironmentSupervisor;
+    const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
     const initialSession = Option.getOrNull(yield* SubscriptionRef.get(supervisor.session));
     const state = yield* SubscriptionRef.make<EnvironmentServerWelcomeState>({
       currentSession: initialSession,
@@ -609,7 +620,10 @@ export function resolveServerConfigValue(
 }
 
 export function createServerEnvironmentAtoms<R, E>(
-  runtime: Atom.AtomRuntime<EnvironmentRegistry | EnvironmentCacheStore | R, E>,
+  runtime: Atom.AtomRuntime<
+    EnvironmentRegistry.EnvironmentRegistry | Persistence.EnvironmentCacheStore | R,
+    E
+  >,
   options: {
     readonly initialConfigValueAtom: (
       environmentId: EnvironmentId,
@@ -678,7 +692,7 @@ export function createServerEnvironmentAtoms<R, E>(
   const updateStateAtom = (environmentId: EnvironmentId | null) =>
     environmentId === null ? EMPTY_SERVER_UPDATE_STATE_ATOM : updateStateValueAtom(environmentId);
   const updateServer = createRuntimeCommand<
-    EnvironmentRegistry | EnvironmentCacheStore | R,
+    EnvironmentRegistry.EnvironmentRegistry | Persistence.EnvironmentCacheStore | R,
     E,
     ServerUpdateTarget,
     ServerSelfUpdateResult,
@@ -703,7 +717,7 @@ export function createServerEnvironmentAtoms<R, E>(
       });
 
       return Effect.gen(function* () {
-        const environmentRegistry = yield* EnvironmentRegistry;
+        const environmentRegistry = yield* EnvironmentRegistry.EnvironmentRegistry;
         const desktopCommitStarting = yield* Deferred.make<void>();
         const desktopReconnectObserverArmed = yield* Deferred.make<void>();
         const desktopReconnected = yield* Deferred.make<void>();
@@ -749,11 +763,13 @@ export function createServerEnvironmentAtoms<R, E>(
                     .pipe(
                       Stream.runForEach((event) =>
                         Effect.sync(() => {
-                          currentStage = event.type === "complete" ? "resuming" : event.stage;
-                          atomRegistry.set(
-                            stateAtom,
-                            serverUpdateStateForProgressEvent(fromVersion, targetVersion, event),
+                          const state = serverUpdateStateForProgressEvent(
+                            fromVersion,
+                            targetVersion,
+                            event,
                           );
+                          currentStage = state.stage;
+                          atomRegistry.set(stateAtom, state);
                         }).pipe(
                           Effect.andThen(
                             event.type === "complete"
@@ -932,12 +948,17 @@ export function createServerEnvironmentAtoms<R, E>(
     }).pipe(Atom.withLabel(`environment-data:server:usage-prices:${environmentId}`)),
   );
   const usageScanSettingsAtom = Atom.family((environmentId: EnvironmentId) =>
-    Atom.make((get) =>
-      JSON.stringify([
+    Atom.make((get) => {
+      const settings = get(settingsValueAtom(environmentId));
+      const aliases = settings?.usageModelAliases ?? {};
+      return JSON.stringify([
         get(usagePricesAtom(environmentId)),
-        get(settingsValueAtom(environmentId))?.cursorKeychainUsageEnabled ?? false,
-      ]),
-    ).pipe(Atom.withLabel(`environment-data:server:usage-scan-settings:${environmentId}`)),
+        Object.keys(aliases)
+          .sort()
+          .map((model) => [model, aliases[model]]),
+        settings?.cursorKeychainUsageEnabled ?? false,
+      ]);
+    }).pipe(Atom.withLabel(`environment-data:server:usage-scan-settings:${environmentId}`)),
   );
   const providersValueAtom = Atom.family((environmentId: EnvironmentId) =>
     Atom.make((get) => get(configValueAtom(environmentId))?.providers ?? null).pipe(
@@ -974,6 +995,16 @@ export function createServerEnvironmentAtoms<R, E>(
 
   return {
     configValueAtom,
+    runStorageCleanup: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:run-storage-cleanup",
+      tag: WS_METHODS.serverRunStorageCleanup,
+      concurrency: { mode: "singleFlight", key: ({ environmentId }) => environmentId },
+    }),
+    storageCleanupReport: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+      label: "environment-data:server:storage-cleanup-report",
+      tag: WS_METHODS.serverGetStorageCleanupReport,
+      idleTtlMs: 0,
+    }),
     updateStateAtom,
     settingsValueAtom,
     providersValueAtom,
@@ -1067,10 +1098,48 @@ export function createServerEnvironmentAtoms<R, E>(
       label: "environment-data:server:process-resource-history",
       tag: WS_METHODS.serverGetProcessResourceHistory,
     }),
+    scheduledTaskWebhookDeliveries: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:server:scheduled-task:webhook-deliveries",
+      tag: WS_METHODS.scheduledTasksListWebhookDeliveries,
+    }),
+    scheduledTaskWebhookDelivery: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:server:scheduled-task:webhook-delivery",
+      tag: WS_METHODS.scheduledTasksGetWebhookDelivery,
+    }),
     /** Live scheduled-task list: snapshot on subscribe, fresh list after every server-side change. */
     scheduledTasksLive: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
       label: "environment-data:server:scheduled-tasks:live",
       tag: WS_METHODS.scheduledTasksSubscribe,
+    }),
+    // A cold transcript scan is measured in seconds, so keep the result around
+    // long enough that switching windows or re-rendering does not rescan.
+    // Slow sources answer from cache first: that summary stays on screen, with
+    // the query waiting, until one `awaitRefresh` request replaces it.
+    usageSummary: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:server:usage-summary",
+      tag: WS_METHODS.serverGetUsageSummary,
+      staleTimeMs: 60_000,
+      refreshTrigger: ({ environmentId }) => usageScanSettingsAtom(environmentId),
+      execute: (input, emit) =>
+        request(WS_METHODS.serverGetUsageSummary, input).pipe(
+          Effect.flatMap((summary) =>
+            summary.sources.some((source) => source.refreshing === true)
+              ? emit(summary).pipe(
+                  Effect.andThen(
+                    request(WS_METHODS.serverGetUsageSummary, { ...input, awaitRefresh: true }),
+                  ),
+                  // The cached summary is still the best data, and a failure
+                  // would read as the environment not reporting usage at all.
+                  Effect.catch((error) =>
+                    Effect.logWarning("Could not refresh slow usage sources.").pipe(
+                      Effect.annotateLogs({ ...safeErrorLogAttributes(error) }),
+                      Effect.as(summary),
+                    ),
+                  ),
+                )
+              : Effect.succeed(summary),
+          ),
+        ),
     }),
     resourceTelemetry: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
       label: "environment-data:server:resource-telemetry",
@@ -1082,13 +1151,13 @@ export function createServerEnvironmentAtoms<R, E>(
       tag: WS_METHODS.serverGetResourceTelemetryHistory,
       staleTimeMs: 5_000,
     }),
-    // A cold transcript scan is measured in seconds, so keep the result around
-    // long enough that switching windows or re-rendering does not rescan.
-    usageSummary: createEnvironmentRpcQueryAtomFamily(runtime, {
-      label: "environment-data:server:usage-summary",
-      tag: WS_METHODS.serverGetUsageSummary,
-      staleTimeMs: 60_000,
-      refreshTrigger: ({ environmentId }) => usageScanSettingsAtom(environmentId),
+    searchAcpRegistry: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:server:acp-registry:search",
+      tag: WS_METHODS.serverSearchAcpRegistry,
+      // Each submitted search refreshes the server-side registry. Dropping an
+      // abandoned query immediately also interrupts stale in-flight requests.
+      staleTimeMs: 0,
+      idleTtlMs: 0,
     }),
     configProjection,
     welcome,
@@ -1152,10 +1221,6 @@ export function createServerEnvironmentAtoms<R, E>(
     // environment-serial scheduler. The named boundary keeps clients on the
     // atomic map-entry payload instead of rebuilding a stale whole map.
     mutateProviderInstance: updateSettings,
-    searchAcpRegistry: createEnvironmentRpcQueryAtomFamily(runtime, {
-      label: "environment-data:server:acp-registry:search",
-      tag: WS_METHODS.serverSearchAcpRegistry,
-    }),
     prepareAcpRegistryAgent: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:acp-registry:prepare",
       tag: WS_METHODS.serverPrepareAcpRegistryAgent,
@@ -1272,6 +1337,23 @@ export function createServerEnvironmentAtoms<R, E>(
       label: "environment-data:server:scheduled-task:run-now",
       tag: WS_METHODS.scheduledTasksRunNow,
     }),
+    rotateScheduledTaskWebhookToken: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:scheduled-task:rotate-webhook-token",
+      tag: WS_METHODS.scheduledTasksRotateWebhookToken,
+      scheduler: configScheduler,
+      concurrency: configConcurrency,
+    }),
+    // Off the config lane: answering a card must not queue behind settings
+    // edits. One answer per card at a time.
+    answerSecretRequest: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:secrets:answer-request",
+      tag: WS_METHODS.secretsAnswerRequest,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.threadId, input.turnItemId]),
+      },
+    }),
     refreshUsageRates: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:refresh-usage-rates",
       tag: WS_METHODS.serverRefreshUsageRates,
@@ -1279,6 +1361,10 @@ export function createServerEnvironmentAtoms<R, E>(
         mode: "singleFlight",
         key: ({ environmentId }) => environmentId,
       },
+    }),
+    checkOtlpEndpoint: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:check-otlp-endpoint",
+      tag: WS_METHODS.serverCheckOtlpEndpoint,
     }),
     retryResourceTelemetry: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:retry-resource-telemetry",

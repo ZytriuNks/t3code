@@ -1,10 +1,15 @@
-import { ScrollFrame } from "~/components/ui/scroll-frame";
+import { ThreadFindTimelineContext } from "./ThreadFindProvider";
+import { shouldPreserveAssistantLineBreaks } from "@t3tools/shared/markdownPipeline";
+import { MarkdownFindContext, useFindRevealRef } from "./markdownFindContext";
+import { useChatCanvas } from "./ChatCanvasContext";
 import { WorkLogBlock, WorkLogButton, WorkLogDetails, WorkLogList, WorkLogRow } from "./WorkLog";
+import { PullRequestGlyph } from "../pullRequest/pullRequestIcons";
+import type { WorktreeSetupSnapshot } from "@t3tools/contracts";
+import { ScrollFrame } from "~/components/ui/scroll-frame";
 import type {
   ConversationStructure,
   SmoothOutputMode,
   SmoothOutputLineMode,
-  WorktreeSetupSnapshot,
 } from "@t3tools/contracts";
 import type { ThreadTextPlaybackState } from "@t3tools/client-runtime/state/threads";
 import type { SmoothTextResumeInput } from "../../lib/smoothTextPlayback";
@@ -23,6 +28,7 @@ import {
 } from "./timelineMinimapItems";
 import {
   COMPOSER_CONTEXT_KINDS,
+  ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE,
   type AssistantCitation,
   type EnvironmentId,
   type MessageId,
@@ -31,9 +37,9 @@ import {
   type ScopedThreadRef,
   type ServerProvider,
   type ServerProviderSkill,
-  type ProviderTurnId,
   type RunId,
-  type ThreadId,
+  ThreadId,
+  type ProviderTurnId,
   type ToolActivityIcon,
 } from "@t3tools/contracts";
 import { parseScopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
@@ -42,28 +48,34 @@ import { environmentThreadDetails } from "../../state/threads";
 import { resolveUserMessagePresentation } from "@t3tools/client-runtime/user-message";
 import { Link } from "@tanstack/react-router";
 import { canForkProjectedAssistantItem } from "@t3tools/client-runtime/state/thread-workflows";
+import { notificationChildThreadId } from "@t3tools/client-runtime/state/thread-execution";
 import { replaceComposerContextReferences } from "@t3tools/shared/composerContextReferences";
 import {
+  liveThoughtLine,
   resolveWorkEntryToolPresentation,
   resolveViewedImageAsset,
   workEntryViewedImagePath,
 } from "@t3tools/client-runtime/work-log/presentation";
 import { resolveWorkGroupScrollAnchor } from "@t3tools/client-runtime/work-log/scroll-anchor";
+import {
+  turnItemHasDetail,
+  turnItemNeedsDetailFetch,
+} from "@t3tools/client-runtime/work-log/item-detail";
 import { formatAttachmentSize } from "@t3tools/client-runtime/state/attachments";
 import {
   subagentGroupSummary,
   summarizeSubagentStatuses,
 } from "@t3tools/client-runtime/state/subagent-display";
+import { observeResize } from "~/lib/observeResize";
 
 const NOOP_USE_ARTIFACT_TEMPLATE = () => {};
 const NOOP_OPEN_ATTACHMENT = (_attachment: ChatFileAttachment) => {};
-const NOOP_QUEUE_MESSAGE_ACTION = (_id: string) => {};
-const EMPTY_QUEUED_MESSAGES: ReadonlyArray<QueuedComposerMessage> = [];
 
 import { resolveChatListAnchoredEndSpace } from "@t3tools/shared/chatList";
 import { toolActivityFaviconUrl } from "@t3tools/shared/favicon";
 import { formatDuration } from "@t3tools/shared/orchestrationTiming";
 import { getProjectFaviconCacheKey } from "@t3tools/shared/projectFavicon";
+import { claudeSkillInvocation, isJavaScriptReplTool } from "@t3tools/shared/toolActivity";
 import { observeVisibleAnimation } from "../../lib/visibleAnimation";
 import { StreamingFootnoteHost, StreamingFootnoteProvider } from "./StreamingMarkdownFootnotes";
 import {
@@ -71,6 +83,7 @@ import {
   memo,
   use,
   useCallback,
+  useContext,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -96,7 +109,7 @@ import {
   workEntrySignalsSevereFailure,
   workLogEntryIsToolLike,
 } from "../../session-logic";
-import type { CodexArtifactTemplate } from "@t3tools/client-runtime/codex-artifact-templates";
+import type { CodexArtifactTemplate } from "@t3tools/shared/codexArtifactTemplates";
 import {
   type ChatMessage,
   type ChatFileAttachment,
@@ -120,14 +133,12 @@ import { T3Wordmark } from "../T3Wordmark";
 import { ThreadContextChip } from "../ThreadContextChip";
 import {
   BotIcon,
-  ArrowUpIcon,
   BrainIcon,
   CheckIcon,
   ChevronDownIcon,
   ChevronRightIcon,
   ChevronUpIcon,
   CircleAlertIcon,
-  ClockIcon,
   DownloadIcon,
   EyeIcon,
   GitForkIcon,
@@ -146,15 +157,19 @@ import {
   Undo2Icon,
   HammerIcon,
   WrenchIcon,
+  Code2Icon,
   XIcon,
   ZapIcon,
+  RotateCcwIcon,
 } from "lucide-react";
+import { ChevronDown, ChevronRight, Link as LinkIconNode } from "lucide";
 import type {
   ComposerContextId,
   ComposerContextRecord,
   KnownComposerContextRecord,
 } from "@t3tools/contracts";
 import { Button, InlineButton } from "../ui/button";
+import { MorphIcon } from "~/components/MorphIcon";
 import { useAssetUrlRefresh, useAssetUrls, useAssetUrlState } from "../../assets/assetUrls";
 import { MediaVideoPlayer } from "../media/MediaVideoPlayer";
 import { getVirtualizedScrollFadeClassName } from "../ui/scroll-area";
@@ -169,6 +184,8 @@ import {
   SnapShotAttachmentDetails,
 } from "./SnapShotAttachmentDetails";
 import { ProposedPlanCard } from "./ProposedPlanCard";
+import { HtmlRenderFrame } from "./HtmlRenderFrame";
+import { McpAppFrame } from "./McpAppFrame";
 import { ChangedFilesCard } from "./ChangedFilesTree";
 import { useFileContextMenuHandler } from "../../fileContextMenu";
 import { useProject, useThreadShell } from "../../state/entities";
@@ -179,11 +196,11 @@ import {
   timelineContentOverflowsViewport,
 } from "./timelineScrollAnchoring";
 import { MessageCopyButton } from "./MessageCopyButton";
+import { promptLinkFor } from "../promptLinks/copyPromptLink";
 import { PierreEntryIcon } from "./PierreEntryIcon";
-import { inferEntryKindFromPath } from "../../pierre-icons";
+import { WorkspaceEntryIcon, WorkspaceEntryTooltip } from "./WorkspaceEntryIcon";
 import { AssistantSelectionToolbar } from "./AssistantSelectionToolbar";
 import type { AssistantCitationSourceAnchor } from "~/lib/assistantTextSelection";
-import type { QueuedComposerMessage } from "../../queuedMessageStore";
 import {
   AssistantCitationSource,
   type AssistantCitationRequest,
@@ -210,10 +227,15 @@ import {
   resolveTimelineMinimapNavigationInteractive,
   resolveTimelineMinimapTopPercent,
   resolveWorkGroupScrollIndex,
+  shouldCollapseUserMessage,
   shouldFollowWorkGroupAppend,
-  shouldPreserveAssistantLineBreaks,
+  timelineTurnFoldRunIdsByEntryId,
+  threadReadLabelPrefix,
+  threadReadTargetId,
+  threadReadTargetTitle,
   toolGroupAction,
   workEntryDisplayLabel,
+  workEntryReadOutput,
   workEntryIsVisibleInGroup,
   worktreeSetupAgentStarted,
   type StableMessagesTimelineRowsState,
@@ -222,10 +244,14 @@ import {
   type TimelineLatestRun,
   type WorkGroupScrollAnchor,
 } from "./MessagesTimeline.logic";
+import { type ThreadFindMatch } from "./threadFind";
+import { useThreadFindNavigation } from "./useThreadFindNavigation";
+import { readThreadFindPosition } from "./threadFindPosition";
+import type { ThreadFindPositionReader } from "./threadFind";
 import { TerminalContextInlineChip } from "./TerminalContextInlineChip";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { Spinner } from "../ui/spinner";
-import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { Tooltip, TooltipPopup, TooltipTrigger, TooltipScrollDismissArea } from "../ui/tooltip";
 import { WorktreeSetupCard } from "./WorktreeSetupCard";
 import {
   ContextChipPopover as UserMessageContextPopover,
@@ -284,30 +310,31 @@ import {
   formatDayAwareTimestamp,
   formatUpcomingTimestamp,
 } from "../../timestampFormat";
-import type { AppLanguage } from "../../i18n/locale";
-import { useI18n } from "../../i18n/I18nProvider";
-import { V2ItemInspector } from "./V2ItemInspector";
+import { FetchedToolOutput, V2ItemInspector } from "./V2ItemInspector";
 import { useV2ItemSupport } from "../../state/v2ItemSupport";
 import { Collapsible, CollapsibleTrigger, CollapsiblePanel } from "../ui/collapsible";
 import {
   isV2LifecycleItem,
   SubagentAvatar,
   SubagentElapsed,
+  SubagentNotificationLink,
   V2LifecycleRow,
   type HandoffTimelineRun,
 } from "./V2LifecycleRow";
+import { SecretRequestCard } from "./SecretRequestCard";
 import { TimelineSystemDivider } from "./TimelineSystemDivider";
+import type { AppLanguage } from "../../i18n/locale";
+import { useI18n } from "../../i18n/I18nProvider";
 
 import { SkillChipIcon, SkillInlineText } from "./SkillInlineText";
 import * as DateTime from "effect/DateTime";
 import { formatWorkspaceRelativePath } from "../../filePathDisplay";
+import { forwardWheelToTimeline } from "./timelineMinimapWheel";
 import {
   buildReviewCommentRenderablePatch,
   formatReviewCommentFence,
   type ReviewCommentContext,
 } from "../../reviewCommentContext";
-import { PullRequestGlyph } from "~/components/pullRequest/pullRequestIcons";
-import { ComputerUseAppIcon } from "~/components/Icons";
 
 // ---------------------------------------------------------------------------
 // Context — shared state consumed by every row component via Context.
@@ -355,7 +382,16 @@ interface TimelineRowSharedState {
   activeThreadEnvironmentId: EnvironmentId;
   onRevertToTurnCount: (targetTurnCount: number, messageId: MessageId) => void;
   onUseArtifactTemplate: (template: CodexArtifactTemplate) => void;
+  /** Sends text an MCP App asked to post, after the user approved it. */
+  onSendAppMessage: ((text: string) => Promise<void>) | undefined;
+  /**
+   * An MCP App row entering or leaving full screen. The row stays rendered
+   * and the list stops following new output meanwhile, so the app is not
+   * virtualized away while the reader is using it.
+   */
+  onAppFullscreenChange: (rowId: string, fullscreen: boolean) => void;
   onRunShellCommand: ((command: string) => void) | undefined;
+  findActive: boolean;
   onImageExpand: (preview: ExpandedImagePreview) => void;
   displayThreadKey?: string;
   onOpenTurnDiff: (runId: RunId, filePath?: string) => void;
@@ -376,10 +412,10 @@ interface TimelineRowSharedState {
   onToggleWorkGroup: (groupId: string, anchorKey: string) => void;
   onToggleWorkEntry: (anchorKey: string, collapsed: boolean) => void;
   onCancelWorktreeSetup: (() => void) | null;
+  retryableWorkspacePreparationRunIds: ReadonlySet<RunId>;
+  onRetryWorkspacePreparation: ((runId: RunId) => void) | null;
   onWorktreeSetupWorkLocally: (() => void) | null;
   onOpenWorktreeSetupTerminal: ((terminalId: string) => void) | null;
-  onSteerQueuedMessage: (id: string) => void;
-  onRemoveQueuedMessage: (id: string) => void;
   workGroupViewState: WorkGroupViewState;
 }
 
@@ -388,6 +424,7 @@ interface TimelineRowActivityState {
   isCompacting: boolean;
   isRevertingCheckpoint: boolean;
   activeTurnInProgress: boolean;
+  awaitingUser: boolean;
   isPreparingWorktree: boolean;
   latestRunId: RunId | null;
   latestRunStatus: TimelineLatestRun["status"] | null;
@@ -424,33 +461,6 @@ const TIMELINE_LIST_HEADER = <div className="h-3 sm:h-4" />;
 const TIMELINE_LIST_FADE_HEADER = (
   <div className="h-[var(--workspace-titlebar-scroll-fade-height)]" />
 );
-
-// Header row shown when older turns exist beyond the loaded window. Plain
-// button, no spinner animation; the label change is the loading indicator.
-function TimelineLoadEarlierHeader({
-  loading,
-  onLoadEarlier,
-  fade,
-}: {
-  loading: boolean;
-  onLoadEarlier: () => void;
-  fade: boolean;
-}) {
-  return (
-    <div className={fade ? "pt-(--workspace-titlebar-scroll-fade-height)" : "pt-3 sm:pt-4"}>
-      <div className="mx-auto w-full max-w-(--chat-max-width) pb-2">
-        <button
-          type="button"
-          onClick={onLoadEarlier}
-          disabled={loading}
-          className="w-full py-1.5 text-xs text-muted-foreground/60 hover:text-foreground disabled:cursor-default"
-        >
-          {loading ? "Loading earlier turns…" : "Load earlier turns"}
-        </button>
-      </div>
-    </div>
-  );
-}
 function TimelineTailAnchor({
   children,
   className,
@@ -482,7 +492,9 @@ const TimelineListFooter = memo(
     composerInset,
     liveActivityRows,
     footerRef,
+    children,
   }: {
+    readonly children?: ReactNode;
     readonly composerInset: number;
     readonly liveActivityRows: ReadonlyArray<TimelineLiveActivityRow>;
     readonly footerRef: React.RefObject<HTMLDivElement | null>;
@@ -491,7 +503,7 @@ const TimelineListFooter = memo(
       <div ref={footerRef}>
         <TimelineTailAnchor
           kind="footnotes"
-          className="mx-auto w-full min-w-0 max-w-(--chat-max-width)"
+          className="mx-auto w-full min-w-0 max-w-(--chat-content-max-width)"
         >
           <StreamingFootnoteHost fallback />
         </TimelineTailAnchor>
@@ -499,7 +511,7 @@ const TimelineListFooter = memo(
           <div
             data-testid="timeline-live-activity-layer"
             className={cn(
-              "mx-auto w-full min-w-0 max-w-(--chat-max-width)",
+              "mx-auto w-full min-w-0 max-w-(--chat-content-max-width)",
               liveActivityRows.at(-1)?.kind !== "thinking" && "pb-2",
             )}
           >
@@ -516,6 +528,7 @@ const TimelineListFooter = memo(
             ))}
           </div>
         ) : null}
+        {children}
         <div style={{ height: composerInset }} />
         <div className="h-3 sm:h-4" />
       </div>
@@ -524,6 +537,7 @@ const TimelineListFooter = memo(
   // Streaming text rebuilds the live row array on every fragment while its
   // stable rows stay the same objects. Compare them so the footer skips that.
   (previous, next) =>
+    previous.children === next.children &&
     previous.composerInset === next.composerInset &&
     previous.footerRef === next.footerRef &&
     previous.liveActivityRows.length === next.liveActivityRows.length &&
@@ -561,6 +575,7 @@ const TIMELINE_MAINTAIN_SCROLL_AT_END_RESTRUCTURED = {
   },
 } as const satisfies MaintainScrollAtEndOptions;
 const EMPTY_TIMELINE_RUNS: ReadonlyArray<HandoffTimelineRun> = [];
+const EMPTY_RUN_IDS: ReadonlySet<RunId> = new Set();
 // Streamed text lands a paragraph at a time. A smooth scroll to the end
 // turns each landing into a short glide instead of a jump. Thread switches
 // and layout settles keep the instant variant so nothing visibly travels.
@@ -581,7 +596,7 @@ export interface MessagesTimelineHistoryControls {
   readonly hasMoreHistory: boolean;
   readonly loading: boolean;
   readonly error: string | null;
-  readonly onLoadEarlier: () => void;
+  readonly onLoadEarlier: (throughEntryId?: string) => void;
 }
 
 interface MessagesTimelineProps {
@@ -608,6 +623,8 @@ interface MessagesTimelineProps {
     sourceAnchor: AssistantCitationSourceAnchor,
   ) => boolean;
   isWorking: boolean;
+  /** The live work belongs to a runless root turn (a provider-native subagent). */
+  runlessWorkActive?: boolean;
   activeTurnInProgress: boolean;
   activeTurnStartedAt?: string | null;
   /**
@@ -620,14 +637,18 @@ interface MessagesTimelineProps {
   /** Text shown while the agent is thinking before any tool runs. */
   conversationStructureThinkingLabel?: string | undefined;
   worktreeSetup?: WorktreeSetupSnapshot | null;
-  queuedMessages?: ReadonlyArray<QueuedComposerMessage>;
-  onSteerQueuedMessage?: (id: string) => void;
-  onRemoveQueuedMessage?: (id: string) => void;
   onCancelWorktreeSetup?: () => void;
+  /** Runs whose failed workspace preparation can be retried, keyed by run id. */
+  retryableWorkspacePreparationRunIds?: ReadonlySet<RunId>;
+  onRetryWorkspacePreparation?: (runId: RunId) => void;
   onWorktreeSetupWorkLocally?: () => void;
   onOpenWorktreeSetupTerminal?: (terminalId: string) => void;
   isPreparingWorktree?: boolean;
   isCompacting?: boolean;
+  /** The agent waits on an approval or an answer from the user. */
+  awaitingUser?: boolean;
+  /** Thread state shown after the last message, such as a settled or snoozed line. */
+  footer?: ReactNode;
 
   listRef: React.RefObject<LegendListRef | null>;
   timelineEntries: ReadonlyArray<TimelineEntry>;
@@ -638,6 +659,8 @@ interface MessagesTimelineProps {
   turnDiffSummaries: ReadonlyArray<TurnDiffSummary>;
   routeThreadKey: string;
   displayThreadKey?: string;
+  /** The rows are a held snapshot of the previous thread while the next one loads. */
+  paintOnly?: boolean;
   onOpenTurnDiff: (runId: RunId, filePath?: string) => void;
   onOpenThread: (threadId: OrchestrationV2TurnItem["threadId"]) => void;
   parentThreadLink?: {
@@ -655,6 +678,7 @@ interface MessagesTimelineProps {
   supportsConversationRollback: boolean;
   onRevertToTurnCount: (targetTurnCount: number, messageId: MessageId) => void;
   onUseArtifactTemplate?: (template: CodexArtifactTemplate) => void;
+  onSendAppMessage?: (text: string) => Promise<void>;
   onRunShellCommand?: (command: string) => void;
   isRevertingCheckpoint: boolean;
   onImageExpand: (preview: ExpandedImagePreview) => void;
@@ -688,19 +712,41 @@ interface MessagesTimelineProps {
   onContentOverflowChange?: (overflows: boolean, liveFooterHeight: number) => void;
   onToolOutputCollapsedAtEnd?: () => void;
   onManualNavigation: (direction?: -1 | 1) => void;
-  cancelPositionRestoreRef?: React.RefObject<(() => void) | null>;
+  findOpen?: boolean;
+  cancelPositionRestoreRef?: React.RefObject<(() => void) | null> | undefined;
   hideEmptyPlaceholder?: boolean;
   topFadeEnabled?: boolean;
-  historyControls?: MessagesTimelineHistoryControls;
+  historyControls?: MessagesTimelineHistoryControls | undefined;
   /** Non-null when older turns exist beyond the loaded window. */
   loadEarlier?: CitationHistoryPage | null;
+  findPositionReaderRef?: React.RefObject<ThreadFindPositionReader | null>;
+  findExpanded?: boolean;
+  findQuery?: string;
+  activeFindMatch?: ThreadFindMatch | null;
+  findNavigationId?: number;
 }
 
 // ---------------------------------------------------------------------------
 // MessagesTimeline — list owner
 // ---------------------------------------------------------------------------
 
-export const MessagesTimeline = memo(function MessagesTimeline({
+export function MessagesTimeline(props: MessagesTimelineProps) {
+  const find = useContext(ThreadFindTimelineContext);
+  const findOpen = find?.findOpen ?? props.findOpen;
+  const { onManualNavigation } = props;
+  useEffect(() => {
+    if (findOpen) onManualNavigation();
+  }, [findOpen, onManualNavigation]);
+  return (
+    <ConversationTimeline
+      {...props}
+      {...find}
+      liveFollowEnabled={!findOpen && props.liveFollowEnabled}
+    />
+  );
+}
+
+const ConversationTimeline = memo(function ConversationTimeline({
   textPlayback = null,
   textPlaybackNavigation,
   smoothStreaming = false,
@@ -717,28 +763,36 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   citationHistoryLoading = false,
   onCiteAssistantText,
   isWorking,
+  runlessWorkActive = false,
   activeTurnInProgress,
   activeTurnStartedAt = null,
   conversationStructure,
   conversationStructureIdleLabel = "",
   conversationStructureThinkingLabel = "",
   worktreeSetup = null,
-  queuedMessages = EMPTY_QUEUED_MESSAGES,
-  onSteerQueuedMessage = NOOP_QUEUE_MESSAGE_ACTION,
-  onRemoveQueuedMessage = NOOP_QUEUE_MESSAGE_ACTION,
+  footer = null,
   onCancelWorktreeSetup,
+  retryableWorkspacePreparationRunIds = EMPTY_RUN_IDS,
+  onRetryWorkspacePreparation,
   onWorktreeSetupWorkLocally,
   onOpenWorktreeSetupTerminal,
   isPreparingWorktree = false,
   isCompacting = false,
+  awaitingUser = false,
   listRef,
   timelineEntries,
+  findExpanded = false,
+  findQuery = "",
+  activeFindMatch = null,
+  findNavigationId = 0,
+  findPositionReaderRef,
   latestRun,
   runningRunId = null,
   activeProviderTurnId = null,
   turnDiffSummaries,
   routeThreadKey,
   displayThreadKey,
+  paintOnly = false,
   onOpenTurnDiff,
   onOpenThread,
   parentThreadLink = null,
@@ -747,6 +801,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   supportsConversationRollback,
   onRevertToTurnCount,
   onUseArtifactTemplate = NOOP_USE_ARTIFACT_TEMPLATE,
+  onSendAppMessage,
   onRunShellCommand,
   isRevertingCheckpoint,
   onImageExpand,
@@ -880,7 +935,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   const previousLatestRunRef = useRef(latestRun);
   // The list stays mounted across thread switches. Its first end pins on the
   // new thread must snap, not glide, even if that thread is mid-turn.
-  const [settlingListIdentity, setSettlingListIdentity] = useState<string | null>(null);
+  const [settlingListIdentity, setSettlingListIdentity] = useState<string | null>(listIdentityKey);
   let paintedExpandedRunIds = expandedRunIds;
   let paintedExpandedWorkGroupIds = expandedWorkGroupIds;
   let paintedExpandedAttemptIds = expandedAttemptIds;
@@ -916,6 +971,9 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   const disclosureAnchorKeyRef = useRef<string | null>(null);
   const disclosureSettleFrameRef = useRef<number | null>(null);
   const disclosureSettleSecondFrameRef = useRef<number | null>(null);
+  const normalizedFindQuery = findQuery.trim();
+  const findActive = findExpanded;
+
   useEffect(() => {
     return () => {
       if (disclosureSettleFrameRef.current !== null) {
@@ -942,34 +1000,59 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     };
   }, [settlingListIdentity]);
 
+  // A toggle made at the end keeps the end in view while rows re-measure.
+  // Anywhere else, the toggled row holds its place.
+  const disclosurePinsEndRef = useRef(false);
+  const disclosureCollapsedRef = useRef(false);
+  const pinDisclosureToEnd = useCallback(() => {
+    if (!disclosurePinsEndRef.current) return;
+    const element = listRef.current?.getScrollableNode();
+    if (element) element.scrollTop = element.scrollHeight;
+  }, [listRef]);
+
+  // Settles two frames after the last toggle, or after the last row resize
+  // while pinned to the end, since tool output can render a few frames late.
+  const scheduleDisclosureSettle = useCallback(() => {
+    if (disclosureSettleFrameRef.current !== null) {
+      cancelAnimationFrame(disclosureSettleFrameRef.current);
+    }
+    if (disclosureSettleSecondFrameRef.current !== null) {
+      cancelAnimationFrame(disclosureSettleSecondFrameRef.current);
+    }
+    disclosureSettleFrameRef.current = requestAnimationFrame(() => {
+      pinDisclosureToEnd();
+      disclosureSettleSecondFrameRef.current = requestAnimationFrame(() => {
+        pinDisclosureToEnd();
+        disclosurePinsEndRef.current = false;
+        disclosureAnchorKeyRef.current = null;
+        setDisclosureToggleSettling(false);
+        disclosureSettleFrameRef.current = null;
+        disclosureSettleSecondFrameRef.current = null;
+        // Wait for row measurement and the disclosure click's blur check.
+        // Closing output can reveal the end without a scroll event.
+        if (
+          disclosureCollapsedRef.current &&
+          resolveTimelineIsAtEnd(listRef.current?.getState()) === true
+        ) {
+          onToolOutputCollapsedAtEnd?.();
+        }
+      });
+    });
+  }, [listRef, onToolOutputCollapsedAtEnd, pinDisclosureToEnd]);
+
   const suspendEndScrollMaintenanceForDisclosure = useCallback(
     (anchorKey: string, collapsed = false) => {
       disclosureAnchorKeyRef.current = anchorKey;
+      disclosureCollapsedRef.current = collapsed;
+      disclosurePinsEndRef.current = resolveTimelineIsAtEnd(listRef.current?.getState()) === true;
       setDisclosureToggleSettling(true);
-      if (disclosureSettleFrameRef.current !== null) {
-        cancelAnimationFrame(disclosureSettleFrameRef.current);
-      }
-      if (disclosureSettleSecondFrameRef.current !== null) {
-        cancelAnimationFrame(disclosureSettleSecondFrameRef.current);
-      }
-      disclosureSettleFrameRef.current = requestAnimationFrame(() => {
-        disclosureSettleSecondFrameRef.current = requestAnimationFrame(() => {
-          disclosureAnchorKeyRef.current = null;
-          setDisclosureToggleSettling(false);
-          disclosureSettleFrameRef.current = null;
-          disclosureSettleSecondFrameRef.current = null;
-          // Wait for row measurement and the disclosure click's blur check.
-          // Closing output can reveal the end without a scroll event.
-          if (collapsed && resolveTimelineIsAtEnd(listRef.current?.getState()) === true) {
-            onToolOutputCollapsedAtEnd?.();
-          }
-        });
-      });
+      scheduleDisclosureSettle();
     },
-    [listRef, onToolOutputCollapsedAtEnd],
+    [listRef, scheduleDisclosureSettle],
   );
 
   const shouldRestoreVisibleContentPosition = useCallback((row: MessagesTimelineRow) => {
+    if (disclosurePinsEndRef.current) return false;
     const disclosureAnchorKey = disclosureAnchorKeyRef.current;
     return disclosureAnchorKey === null || row.id === disclosureAnchorKey;
   }, []);
@@ -1049,6 +1132,54 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     });
   }, [latestRun]);
 
+  // Find the fold that hides the match: imported turns have no run id but still
+  // fold under a synthetic key, so the match's own run id cannot open them.
+  const findFoldRunIds = useMemo(
+    () =>
+      findActive
+        ? timelineTurnFoldRunIdsByEntryId({
+            timelineEntries,
+            latestRun,
+            runningRunId,
+            isWorking,
+            runlessWorkActive,
+          })
+        : null,
+    [findActive, timelineEntries, latestRun, runningRunId, isWorking, runlessWorkActive],
+  );
+  const activeFindRunId = activeFindMatch
+    ? findFoldRunIds?.get(activeFindMatch.entryId)
+    : undefined;
+  useEffect(() => {
+    if (!activeFindRunId) return;
+    setExpandedRunIds((previous) =>
+      previous.has(activeFindRunId) ? previous : new Set(previous).add(activeFindRunId),
+    );
+  }, [activeFindRunId]);
+  const visibleExpandedRunIds = useMemo(() => {
+    if (!activeFindRunId || paintedExpandedRunIds.has(activeFindRunId)) {
+      return paintedExpandedRunIds;
+    }
+    return new Set(paintedExpandedRunIds).add(activeFindRunId);
+  }, [activeFindRunId, paintedExpandedRunIds]);
+
+  const activeFindAttemptId = activeFindMatch
+    ? timelineEntries.find((entry) => entry.id === activeFindMatch.entryId)?.attempt?.id
+    : undefined;
+  useEffect(() => {
+    if (!activeFindAttemptId) return;
+    setExpandedAttemptIds((previous) =>
+      previous.has(activeFindAttemptId) ? previous : new Set(previous).add(activeFindAttemptId),
+    );
+  }, [activeFindAttemptId]);
+  const visibleExpandedAttemptIds = useMemo(
+    () =>
+      activeFindAttemptId && !paintedExpandedAttemptIds.has(activeFindAttemptId)
+        ? new Set(paintedExpandedAttemptIds).add(activeFindAttemptId)
+        : paintedExpandedAttemptIds,
+    [activeFindAttemptId, paintedExpandedAttemptIds],
+  );
+
   const rowsProjectionRef = useRef<{
     readonly threadKey: string;
     readonly workspaceRoot: string | undefined;
@@ -1059,14 +1190,14 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     const projection = deriveMessagesTimelineRowsWithState(
       {
         timelineEntries,
-        queuedMessages,
+        activeProviderTurnId,
         latestRun,
         runningRunId,
-        activeProviderTurnId,
-        expandedRunIds,
-        expandedAttemptIds,
+        expandedRunIds: visibleExpandedRunIds,
+        expandedAttemptIds: visibleExpandedAttemptIds,
         expandedWorkGroupIds,
         isWorking,
+        runlessWorkActive,
         activeTurnStartedAt,
         conversationStructure,
         turnDiffSummaries,
@@ -1084,14 +1215,14 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     listIdentityKey,
     workspaceRoot,
     timelineEntries,
-    queuedMessages,
+    activeProviderTurnId,
     latestRun,
     runningRunId,
-    activeProviderTurnId,
-    expandedRunIds,
-    expandedAttemptIds,
+    visibleExpandedRunIds,
+    visibleExpandedAttemptIds,
     expandedWorkGroupIds,
     isWorking,
+    runlessWorkActive,
     activeTurnStartedAt,
     conversationStructure,
     turnDiffSummaries,
@@ -1437,8 +1568,32 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     restoringThreadPosition,
     signalInitialLayout,
   ]);
+  const [findListReady, setFindListReady] = useState(false);
+  const handleListLoad = useCallback(() => {
+    onTimelineLoad();
+    setFindListReady(true);
+  }, [onTimelineLoad]);
   const [minimapHasPersistentGutter, setMinimapHasPersistentGutter] = useState(false);
-  const alwaysRender = citationAlwaysRender ?? restoringAlwaysRender;
+  const [fullscreenAppRowId, setFullscreenAppRowId] = useState<string | null>(null);
+  // Only the row that holds the pin can release it.
+  const onAppFullscreenChange = useCallback((rowId: string, fullscreen: boolean) => {
+    setFullscreenAppRowId((current) => (fullscreen ? rowId : current === rowId ? null : current));
+  }, []);
+  // Every pin holds at once, so navigating to a citation or restoring a
+  // position never drops a full-screen app's row. The app is pinned by key,
+  // which stays right as earlier rows load in.
+  const alwaysRender = useMemo(() => {
+    const indices = restoringAlwaysRender?.indices ?? [];
+    const keys = [
+      ...(citationAlwaysRender?.keys ?? []),
+      ...(fullscreenAppRowId === null ? [] : [fullscreenAppRowId]),
+    ];
+    if (indices.length === 0 && keys.length === 0) return undefined;
+    return {
+      ...(indices.length === 0 ? {} : { indices }),
+      ...(keys.length === 0 ? {} : { keys }),
+    };
+  }, [citationAlwaysRender, restoringAlwaysRender, fullscreenAppRowId]);
   const [minimapHitStripWidth, setMinimapHitStripWidth] = useState(0);
   const [minimapCurrentIndex, setMinimapCurrentIndex] = useState<number | null>(null);
   const handleAnchorReady = useCallback(
@@ -1484,9 +1639,11 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         composerInset={anchoredEndSpace ? 0 : contentInsetEndAdjustment}
         liveActivityRows={liveActivityRows}
         footerRef={timelineFooterRef}
-      />
+      >
+        {footer}
+      </TimelineListFooter>
     ),
-    [anchoredEndSpace, contentInsetEndAdjustment, liveActivityRows],
+    [anchoredEndSpace, contentInsetEndAdjustment, liveActivityRows, footer],
   );
 
   const localSmoothScrollRef = useRef<SmoothScrollHandle | null>(null);
@@ -1501,13 +1658,24 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       const position = readTimelinePosition(listIdentityKey);
       const element = listRef.current?.getScrollableNode();
       if (!position || !element) return;
-      rememberTimelinePosition(listIdentityKey, {
-        ...position,
-        scrollOffset: element.scrollTop,
-        atEnd: smoothFollowControl.current?.isFollowing() || resolveTimelineDomIsAtEnd(element),
-      });
+      rememberTimelinePosition(
+        listIdentityKey,
+        {
+          ...position,
+          scrollOffset: element.scrollTop,
+          atEnd: smoothFollowControl.current?.isFollowing() || resolveTimelineDomIsAtEnd(element),
+        },
+        liveFollowEnabled && !anchoredEndSpace,
+      );
     },
-    [listIdentityKey, listRef, restoringThreadPosition, smoothFollowControl],
+    [
+      listIdentityKey,
+      listRef,
+      restoringThreadPosition,
+      smoothFollowControl,
+      liveFollowEnabled,
+      anchoredEndSpace,
+    ],
   );
   const [smoothFollowing, setSmoothFollowing] = useState(false);
   const smoothFollowEnabled =
@@ -1605,9 +1773,19 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     (info: { itemKey: string; size: number }) => {
       listLayout.itemSizeChanged(layoutRef.current, info);
       requestSmoothFollow();
+      if (disclosurePinsEndRef.current) {
+        queueMicrotask(pinDisclosureToEnd);
+        scheduleDisclosureSettle();
+      }
       reportContentOverflow();
     },
-    [listLayout, reportContentOverflow, requestSmoothFollow],
+    [
+      pinDisclosureToEnd,
+      reportContentOverflow,
+      scheduleDisclosureSettle,
+      listLayout,
+      requestSmoothFollow,
+    ],
   );
   useEffect(() => cancelContentOverflowFrame, [cancelContentOverflowFrame]);
   // The list's own layout effects have already run here, so estimated row
@@ -1631,12 +1809,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   useLayoutEffect(() => {
     const footer = timelineFooterRef.current;
     if (!footer || liveActivityRows.length === 0) return;
-    const observer = new ResizeObserver(() => {
+    return observeResize(footer, () => {
       requestTimelineLayout();
       reportContentOverflow();
     });
-    observer.observe(footer);
-    return () => observer.disconnect();
   }, [liveActivityRows.length, reportContentOverflow, requestTimelineLayout]);
 
   const liveFooterStyle = useMemo(() => {
@@ -1743,26 +1919,28 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         ? nativeIsAtEnd
         : resolveTimelineIsAtEnd(state);
     const position = state?.data?.length ? resolveWorkGroupScrollAnchor(state) : undefined;
-    if (position && state && isAtEnd !== undefined) {
+    if (position && state && isAtEnd !== undefined && !paintOnly) {
       const index = state.indexByKey(position.rowId);
       const row = index === undefined ? undefined : state.elementAtIndex(index);
       const element = listRef.current?.getScrollableNode();
       if (row && element) {
-        rememberTimelinePosition(listIdentityKey, {
-          ...position,
-          // DOM geometry includes the header and the virtualizer's layout adjustment.
-          offsetWithinRow: element.getBoundingClientRect().top - row.getBoundingClientRect().top,
-          scrollOffset: element.scrollTop,
-          // A live-follow animation can lag behind the measured end without
-          // turning this thread into a saved history-reading position.
-          atEnd: smoothFollowControl.current?.isFollowing() || isAtEnd,
-          disclosures: {
-            runs: paintedExpandedRunIds,
-            workGroups: paintedExpandedWorkGroupIds,
-            attempts: paintedExpandedAttemptIds,
-            workGroupState: workGroupViewState,
+        rememberTimelinePosition(
+          listIdentityKey,
+          {
+            ...position,
+            // DOM geometry includes the header and the virtualizer's layout adjustment.
+            offsetWithinRow: element.getBoundingClientRect().top - row.getBoundingClientRect().top,
+            scrollOffset: element.scrollTop,
+            atEnd: smoothFollowControl.current?.isFollowing() || isAtEnd,
+            disclosures: {
+              runs: paintedExpandedRunIds,
+              workGroups: paintedExpandedWorkGroupIds,
+              attempts: paintedExpandedAttemptIds,
+              workGroupState: workGroupViewState,
+            },
           },
-        });
+          liveFollowEnabled && !anchoredEndSpace,
+        );
       }
     }
     if (isAtEnd !== undefined && !citationPositioning) {
@@ -1809,6 +1987,9 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     workGroupViewState,
     structuralRows,
     listIdentityKey,
+    liveFollowEnabled,
+    anchoredEndSpace,
+    paintOnly,
     restoringThreadPosition,
     listRef,
     minimapItems,
@@ -1823,6 +2004,13 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     const frame = requestAnimationFrame(handleScroll);
     return () => cancelAnimationFrame(frame);
   }, [handleScroll, rows.length]);
+
+  const savedLiveFollowEnabledRef = useRef(liveFollowEnabled);
+  useLayoutEffect(() => {
+    const wasFollowing = savedLiveFollowEnabledRef.current;
+    savedLiveFollowEnabledRef.current = liveFollowEnabled;
+    if (wasFollowing && !liveFollowEnabled) handleScroll();
+  }, [handleScroll, liveFollowEnabled]);
 
   // Step triangles at the ends of the overlay scrollbar. A click eases ~30% of
   // the viewport; the overlay advances scrollTop continuously for a hold.
@@ -1865,12 +2053,11 @@ export const MessagesTimeline = memo(function MessagesTimeline({
 
     const frame = requestAnimationFrame(measure);
 
-    const observer = new ResizeObserver(measure);
-    observer.observe(timelineViewportElement);
+    const stopObserving = observeResize(timelineViewportElement, measure);
 
     return () => {
       cancelAnimationFrame(frame);
-      observer.disconnect();
+      stopObserving();
     };
   }, [timelineViewportElement, rows.length, reportContentOverflow, chatWidth]);
 
@@ -1909,10 +2096,13 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       runs,
       activeThreadEnvironmentId,
       onRevertToTurnCount,
-      onUseArtifactTemplate,
       onRunShellCommand,
+      findActive,
       onImageExpand,
       onFileOpen,
+      onUseArtifactTemplate,
+      onSendAppMessage,
+      onAppFullscreenChange,
       onFileDownload,
       openPullRequest,
       onOpenTurnDiff,
@@ -1924,10 +2114,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onToggleWorkGroup,
       onToggleWorkEntry: suspendEndScrollMaintenanceForDisclosure,
       onCancelWorktreeSetup: onCancelWorktreeSetup ?? null,
+      retryableWorkspacePreparationRunIds,
+      onRetryWorkspacePreparation: onRetryWorkspacePreparation ?? null,
       onWorktreeSetupWorkLocally: onWorktreeSetupWorkLocally ?? null,
       onOpenWorktreeSetupTerminal: onOpenWorktreeSetupTerminal ?? null,
-      onSteerQueuedMessage,
-      onRemoveQueuedMessage,
       workGroupViewState,
     }),
     [
@@ -1962,11 +2152,13 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       runs,
       activeThreadEnvironmentId,
       onRevertToTurnCount,
-      onUseArtifactTemplate,
       onRunShellCommand,
+      findActive,
       onImageExpand,
       onFileOpen,
       onUseArtifactTemplate,
+      onSendAppMessage,
+      onAppFullscreenChange,
       onFileDownload,
       openPullRequest,
       onOpenTurnDiff,
@@ -1978,10 +2170,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onToggleWorkGroup,
       suspendEndScrollMaintenanceForDisclosure,
       onCancelWorktreeSetup,
+      retryableWorkspacePreparationRunIds,
+      onRetryWorkspacePreparation,
       onWorktreeSetupWorkLocally,
       onOpenWorktreeSetupTerminal,
-      onSteerQueuedMessage,
-      onRemoveQueuedMessage,
       workGroupViewState,
     ],
   );
@@ -2001,6 +2193,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       isRevertingCheckpoint,
       backgroundWorktreeSetup,
       activeTurnInProgress,
+      awaitingUser,
       isPreparingWorktree,
       latestRunId: latestRun?.runId ?? null,
       latestRunStatus: latestRun?.status ?? null,
@@ -2008,6 +2201,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       conversationStructureThinkingLabel,
     }),
     [
+      awaitingUser,
       compactionAwaitingRow,
       backgroundWorktreeSetup,
       activeTurnInProgress,
@@ -2050,6 +2244,96 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     );
   }, [historyControls, onOpenThread, parentThreadLink, topFadeEnabled]);
 
+  const canvas = useChatCanvas();
+  const registerTimeline = canvas?.registerTimeline;
+  const setTimelineList = useCallback(
+    (list: LegendListRef | null) => {
+      listRef.current = list;
+      registerTimeline?.(list?.getScrollableNode() ?? null);
+    },
+    [listRef, registerTimeline],
+  );
+
+  useLayoutEffect(() => {
+    if (!findPositionReaderRef || !timelineViewportElement) return;
+    const read: ThreadFindPositionReader = (query) => {
+      // Imported turns fold under a synthetic key, so match folds by key, not run id.
+      const foldRunIds =
+        findFoldRunIds ??
+        timelineTurnFoldRunIdsByEntryId({
+          timelineEntries,
+          latestRun,
+          runningRunId,
+          isWorking,
+          runlessWorkActive,
+        });
+      const entryById = new Map(timelineEntries.map((entry) => [entry.id, entry]));
+      return readThreadFindPosition(
+        timelineViewportElement,
+        query,
+        (rowId) => {
+          const rowIndex = rows.findIndex((row) => row.id === rowId);
+          for (const row of rows.slice(Math.max(0, rowIndex))) {
+            // Ordinary rows map to one entry by id; only folds need a scan.
+            if (row.kind !== "turn-fold" && row.kind !== "attempt-fold") {
+              const entry = entryById.get(row.kind === "assistant-meta" ? row.message.id : row.id);
+              if (entry && (entry.kind === "message" || entry.kind === "proposed-plan"))
+                return entry.id;
+              continue;
+            }
+            const entry = timelineEntries.find((entry) => {
+              const runId =
+                row.kind === "turn-fold"
+                  ? foldRunIds.get(entry.id)
+                  : entry.kind === "message"
+                    ? entry.message.runId
+                    : entry.kind === "proposed-plan"
+                      ? entry.proposedPlan.runId
+                      : null;
+              return (
+                runId === row.runId &&
+                (entry.kind !== "message" || entry.message.role === "assistant") &&
+                (row.kind !== "attempt-fold" || entry.attempt?.id === row.attemptId)
+              );
+            });
+            if (entry && (entry.kind === "message" || entry.kind === "proposed-plan"))
+              return entry.id;
+          }
+          return undefined;
+        },
+        contentInsetEndAdjustment,
+      );
+    };
+    findPositionReaderRef.current = read;
+    return () => {
+      if (findPositionReaderRef.current === read) findPositionReaderRef.current = null;
+    };
+  }, [
+    contentInsetEndAdjustment,
+    findFoldRunIds,
+    findPositionReaderRef,
+    isWorking,
+    latestRun,
+    rows,
+    runlessWorkActive,
+    runningRunId,
+    timelineEntries,
+    timelineViewportElement,
+  ]);
+
+  useThreadFindNavigation({
+    listReady: findListReady,
+    historyControls,
+    entries: timelineEntries,
+    container: timelineViewportElement,
+    query: normalizedFindQuery,
+    match: activeFindMatch,
+    navigationId: findNavigationId,
+    rowIndex: activeFindMatch ? rows.findIndex((row) => row.id === activeFindMatch.entryId) : -1,
+    listRef,
+    contentInsetEndAdjustment,
+  });
+
   // Stable renderItem — no closure deps. Row components read shared state
   // from TimelineRowCtx, which propagates through LegendList's memo.
   const renderItem = useCallback(
@@ -2057,11 +2341,21 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     [],
   );
 
+  const forwardMinimapWheel = useCallback(
+    (event: WheelEvent) => {
+      const scrollNode = listRef.current?.getScrollableNode();
+      if (scrollNode) forwardWheelToTimeline(event, scrollNode);
+    },
+    [listRef],
+  );
+
   if (
     rows.length === 0 &&
     !isWorking &&
     parentThreadLink === null &&
-    historyControls === undefined
+    historyControls === undefined &&
+    // A status line (settled, snoozed) still needs the list, whose footer renders it.
+    footer === null
   ) {
     if (hideEmptyPlaceholder) {
       // Occupy the pane with the theme surface so a thread switch cannot
@@ -2075,7 +2369,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       );
     }
     return (
-      <div className="flex h-full items-center justify-center" data-timeline-empty="true">
+      <div
+        className="flex h-full items-center justify-center ps-(--chat-lane-inset-start) pe-(--chat-lane-inset-end)"
+        style={{ paddingBottom: contentInsetEndAdjustment }}
+      >
         <p className="text-sm text-muted-foreground/30">
           Send a message to start the conversation.
         </p>
@@ -2084,107 +2381,112 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   }
 
   return (
-    <StreamingFootnoteProvider>
-      <SmoothScrollLayoutBoundary controlRef={smoothFollowControl}>
-        <TimelineRowCtx value={sharedState}>
-          <TimelineRowActivityCtx value={activityState}>
-            <TimelineRowDataCtx value={rowData}>
-              <div
-                ref={setTimelineViewportElement}
-                className="relative h-full min-h-0"
-                style={restoringThreadPosition ? { visibility: "hidden" } : undefined}
-                data-assistant-citation-viewport="true"
-                data-timeline-empty={rows.length === 0 ? "true" : undefined}
-              >
-                {onCiteAssistantText && citationThreadRef ? (
-                  <AssistantSelectionToolbar
-                    viewport={timelineViewportElement}
-                    threadRef={citationThreadRef}
-                    onCite={onCiteAssistantText}
+    <MarkdownFindContext value={findActive}>
+      <StreamingFootnoteProvider>
+        <SmoothScrollLayoutBoundary controlRef={smoothFollowControl}>
+          <TimelineRowCtx value={sharedState}>
+            <TimelineRowActivityCtx value={activityState}>
+              <TimelineRowDataCtx value={rowData}>
+                <TooltipScrollDismissArea
+                  ref={setTimelineViewportElement}
+                  className="relative h-full min-h-0"
+                  style={restoringThreadPosition ? { visibility: "hidden" } : undefined}
+                  data-assistant-citation-viewport="true"
+                  data-timeline-empty={rows.length === 0 ? "true" : undefined}
+                >
+                  {onCiteAssistantText && citationThreadRef ? (
+                    <AssistantSelectionToolbar
+                      viewport={timelineViewportElement}
+                      threadRef={citationThreadRef}
+                      onCite={onCiteAssistantText}
+                    />
+                  ) : null}
+                  <LegendList<MessagesTimelineRow>
+                    ref={setTimelineList}
+                    data={structuralRows}
+                    extraData={`${listIdentityKey}:${listRows.length}`}
+                    keyExtractor={keyExtractor}
+                    getItemType={getItemType}
+                    renderItem={renderItem}
+                    estimatedItemSize={90}
+                    initialScrollAtEnd={
+                      !findActive && citationRequest === null && rememberedPosition?.atEnd !== false
+                    }
+                    // Legend needs a data refresh to mount new pins without a scroll event.
+                    dataVersion={readyCitationRequest?.key ?? listIdentityKey}
+                    {...(alwaysRender ? { alwaysRender } : {})}
+                    onLoad={handleListLoad}
+                    {...(anchoredEndSpace ? { anchoredEndSpace } : {})}
+                    contentInsetEndAdjustment={anchoredEndSpace ? contentInsetEndAdjustment : 0}
+                    maintainScrollAtEnd={
+                      smoothStreaming ||
+                      fullscreenAppRowId !== null ||
+                      citationPositioning ||
+                      (restoringThreadPosition && rememberedPosition?.atEnd === false) ||
+                      anchoredEndSpace ||
+                      !liveFollowEnabled ||
+                      disclosureToggleSettling
+                        ? false
+                        : isWorking && !prefersReducedMotion && settlingListIdentity === null
+                          ? conversationStructure === "restructured"
+                            ? TIMELINE_MAINTAIN_SCROLL_AT_END_SMOOTH_RESTRUCTURED
+                            : TIMELINE_MAINTAIN_SCROLL_AT_END_SMOOTH
+                          : conversationStructure === "restructured"
+                            ? TIMELINE_MAINTAIN_SCROLL_AT_END_RESTRUCTURED
+                            : TIMELINE_MAINTAIN_SCROLL_AT_END
+                    }
+                    maintainVisibleContentPosition={
+                      shouldMaintainVisibleTimelineContent({
+                        smoothStreaming,
+                        liveFollowEnabled,
+                      }) &&
+                      !findActive &&
+                      !citationPositioning &&
+                      !(restoringThreadPosition && rememberedPosition?.atEnd === false)
+                        ? maintainVisibleContentPosition
+                        : false
+                    }
+                    // The restructured footer must only pull the viewport upward when
+                    // it is exactly at the native bottom; a sub-pixel upward gesture
+                    // belongs to the reader and lets Thinking move down with content.
+                    maintainScrollAtEndThreshold={
+                      conversationStructure === "restructured" ? 0 : liveFollowEnabled ? 1 : 0
+                    }
+                    onScroll={handleScroll}
+                    onItemSizeChanged={handleItemSizeChanged}
+                    className={cn(
+                      "messages-timeline-scroll h-full min-h-0 overflow-x-hidden overscroll-y-contain [overflow-anchor:none] [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
+                      topFadeEnabled && "topbar-scroll-fade",
+                    )}
+                    ListHeaderComponent={listHeader}
+                    ListFooterComponent={timelineListFooter}
+                    ListFooterComponentStyle={liveFooterStyle}
                   />
-                ) : null}
-                <LegendList<MessagesTimelineRow>
-                  ref={listRef}
-                  data={structuralRows}
-                  extraData={`${listIdentityKey}:${listRows.length}`}
-                  keyExtractor={keyExtractor}
-                  getItemType={getItemType}
-                  renderItem={renderItem}
-                  estimatedItemSize={90}
-                  initialScrollAtEnd={
-                    citationRequest === null && rememberedPosition?.atEnd !== false
-                  }
-                  // Legend needs a data refresh to mount new pins without a scroll event.
-                  dataVersion={readyCitationRequest?.key ?? listIdentityKey}
-                  {...(alwaysRender ? { alwaysRender } : {})}
-                  onLoad={onTimelineLoad}
-                  {...(anchoredEndSpace ? { anchoredEndSpace } : {})}
-                  contentInsetEndAdjustment={anchoredEndSpace ? contentInsetEndAdjustment : 0}
-                  maintainScrollAtEnd={
-                    smoothStreaming ||
-                    citationPositioning ||
-                    (restoringThreadPosition && rememberedPosition?.atEnd === false) ||
-                    anchoredEndSpace ||
-                    !liveFollowEnabled ||
-                    disclosureToggleSettling
-                      ? false
-                      : isWorking && !prefersReducedMotion && settlingListIdentity === null
-                        ? conversationStructure === "restructured"
-                          ? TIMELINE_MAINTAIN_SCROLL_AT_END_SMOOTH_RESTRUCTURED
-                          : TIMELINE_MAINTAIN_SCROLL_AT_END_SMOOTH
-                        : conversationStructure === "restructured"
-                          ? TIMELINE_MAINTAIN_SCROLL_AT_END_RESTRUCTURED
-                          : TIMELINE_MAINTAIN_SCROLL_AT_END
-                  }
-                  maintainVisibleContentPosition={
-                    shouldMaintainVisibleTimelineContent({
-                      smoothStreaming,
-                      liveFollowEnabled,
-                    }) &&
-                    !citationPositioning &&
-                    !(restoringThreadPosition && rememberedPosition?.atEnd === false)
-                      ? maintainVisibleContentPosition
-                      : false
-                  }
-                  // The restructured footer must only pull the viewport upward when
-                  // it is exactly at the native bottom; a sub-pixel upward gesture
-                  // belongs to the reader and lets Thinking move down with content.
-                  maintainScrollAtEndThreshold={
-                    conversationStructure === "restructured" ? 0 : liveFollowEnabled ? 1 : 0
-                  }
-                  onScroll={handleScroll}
-                  onItemSizeChanged={handleItemSizeChanged}
-                  className={cn(
-                    "h-full min-h-0 overflow-x-hidden overscroll-y-contain px-3 [overflow-anchor:none] sm:px-5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
-                    topFadeEnabled && "topbar-scroll-fade",
-                  )}
-                  ListHeaderComponent={listHeader}
-                  ListFooterComponent={timelineListFooter}
-                  ListFooterComponentStyle={liveFooterStyle}
-                />
-                <OverlayScrollbar
-                  scrollable={timelineScrollableNode}
-                  triangles
-                  onStep={handleScrollbarStep}
-                  onScrollStart={onManualNavigation}
-                />
-                <TimelineMinimap
-                  items={minimapItems}
-                  rows={structuralRows}
-                  hasPersistentGutter={minimapHasPersistentGutter}
-                  hitStripWidth={minimapHitStripWidth}
-                  currentIndex={minimapCurrentIndex}
-                  stripMap={minimapStripMap}
-                  onSelect={onSelectMinimapItem}
-                />
-              </div>
-            </TimelineRowDataCtx>
-          </TimelineRowActivityCtx>
-        </TimelineRowCtx>
-      </SmoothScrollLayoutBoundary>
-      <TimelineListLayoutCommit observer={listLayout} layoutRef={layoutRef} />
-      <TimelineLayoutCommit layoutRef={layoutRef} requestRef={layoutCommitRef} />
-    </StreamingFootnoteProvider>
+                  <OverlayScrollbar
+                    scrollable={timelineScrollableNode}
+                    triangles
+                    onStep={handleScrollbarStep}
+                    onScrollStart={onManualNavigation}
+                  />
+                  <TimelineMinimap
+                    onWheel={forwardMinimapWheel}
+                    items={minimapItems}
+                    rows={structuralRows}
+                    hasPersistentGutter={minimapHasPersistentGutter}
+                    hitStripWidth={minimapHitStripWidth}
+                    currentIndex={minimapCurrentIndex}
+                    stripMap={minimapStripMap}
+                    onSelect={onSelectMinimapItem}
+                  />
+                </TooltipScrollDismissArea>
+              </TimelineRowDataCtx>
+            </TimelineRowActivityCtx>
+          </TimelineRowCtx>
+        </SmoothScrollLayoutBoundary>
+        <TimelineListLayoutCommit observer={listLayout} layoutRef={layoutRef} />
+        <TimelineLayoutCommit layoutRef={layoutRef} requestRef={layoutCommitRef} />
+      </StreamingFootnoteProvider>
+    </MarkdownFindContext>
   );
 });
 
@@ -2200,7 +2502,7 @@ function TimelineHistoryControl(props: MessagesTimelineHistoryControls) {
             type="button"
             disabled={props.loading}
             aria-label="Load earlier turns"
-            onClick={props.onLoadEarlier}
+            onClick={() => props.onLoadEarlier()}
             className="w-full py-1.5 text-xs text-muted-foreground/60 hover:text-foreground disabled:cursor-default"
           >
             {props.loading ? "Loading earlier turns…" : "Load earlier turns"}
@@ -2246,6 +2548,24 @@ function timelineMinimapEventTargetsPreview(target: EventTarget): boolean {
   return target instanceof Element && target.closest("[data-minimap-preview]") !== null;
 }
 
+// Calls `onRelease` once no mouse button is held. A release outside the window
+// can skip `mouseup`, so the next button-free `mousemove` also counts. Returns a
+// function that stops listening.
+function onMouseButtonsReleased(onRelease: () => void): () => void {
+  const check = (event: globalThis.MouseEvent) => {
+    if (event.buttons !== 0) return;
+    stop();
+    onRelease();
+  };
+  const stop = () => {
+    window.removeEventListener("mouseup", check);
+    window.removeEventListener("mousemove", check);
+  };
+  window.addEventListener("mouseup", check);
+  window.addEventListener("mousemove", check);
+  return stop;
+}
+
 const TimelineMinimap = memo(function TimelineMinimap({
   hasPersistentGutter,
   hitStripWidth,
@@ -2253,6 +2573,7 @@ const TimelineMinimap = memo(function TimelineMinimap({
   items,
   rows,
   stripMap,
+  onWheel,
   onSelect,
 }: {
   hasPersistentGutter: boolean;
@@ -2261,14 +2582,36 @@ const TimelineMinimap = memo(function TimelineMinimap({
   items: ReadonlyArray<TimelineMinimapItem>;
   rows: ReadonlyArray<MessagesTimelineRow>;
   stripMap: Map<string, HTMLSpanElement>;
+  onWheel: (event: WheelEvent) => void;
   onSelect: (item: TimelineMinimapItem) => void;
 }) {
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
+  const wheelTargetRef = useCallback(
+    (node: HTMLDivElement | null) => {
+      if (!node) return;
+      node.addEventListener("wheel", onWheel, { passive: false });
+      return () => node.removeEventListener("wheel", onWheel);
+    },
+    [onWheel],
+  );
+
+  // A held drag that started on the minimap (the strip or its turn buttons) is a
+  // scrub; one that started anywhere else is a text selection. While a selection
+  // crosses the minimap, the minimap lets the pointer through so the selection
+  // keeps following the text underneath, until the button is released.
+  const pressedOnStripRef = useRef(false);
+  const [passThrough, setPassThrough] = useState(false);
+
+  useEffect(() => {
+    if (!passThrough) return;
+    return onMouseButtonsReleased(() => setPassThrough(false));
+  }, [passThrough]);
 
   const resolvedActiveIndex =
     activeIndex !== null && activeIndex < items.length ? activeIndex : null;
   const activeItem = resolvedActiveIndex === null ? null : (items[resolvedActiveIndex] ?? null);
-  const navigationInteractive = resolveTimelineMinimapNavigationInteractive(hitStripWidth);
+  const navigationInteractive =
+    resolveTimelineMinimapNavigationInteractive(hitStripWidth) && !passThrough;
   const activeTopPercent =
     resolvedActiveIndex === null
       ? 0
@@ -2332,6 +2675,7 @@ const TimelineMinimap = memo(function TimelineMinimap({
       )}
       data-testid="timeline-minimap"
       data-persistent-gutter={hasPersistentGutter ? "true" : "false"}
+      ref={wheelTargetRef}
     >
       <div className="relative h-full w-full select-none">
         <div
@@ -2339,8 +2683,18 @@ const TimelineMinimap = memo(function TimelineMinimap({
             "absolute top-1/2 left-3 -translate-y-1/2",
             // The strip is width-capped to the side gutter so it never overlays
             // the centered content column; with no usable gutter it goes inert.
-            hitStripWidth > 0 ? "pointer-events-auto" : "pointer-events-none",
+            hitStripWidth > 0 && !passThrough ? "pointer-events-auto" : "pointer-events-none",
           )}
+          onMouseDown={() => {
+            if (pressedOnStripRef.current) return;
+            pressedOnStripRef.current = true;
+            onMouseButtonsReleased(() => {
+              pressedOnStripRef.current = false;
+            });
+          }}
+          onMouseMove={(event) => {
+            if (event.buttons !== 0 && !pressedOnStripRef.current) setPassThrough(true);
+          }}
           style={{
             height: resolveTimelineMinimapHeightStyle(items.length),
             width: resolveTimelineMinimapInteractiveWidth(hitStripWidth, activeItem !== null),
@@ -2356,7 +2710,7 @@ const TimelineMinimap = memo(function TimelineMinimap({
           />
           <TimelineMinimapJumpButton
             item={activeItem}
-            className="absolute inset-y-0 left-0 w-full cursor-pointer bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/70"
+            className="absolute inset-y-0 left-0 w-full cursor-pointer bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
             onBlur={() => setActiveIndex(null)}
             onClick={(event) => {
               if (timelineMinimapEventTargetsPreview(event.target)) {
@@ -2391,7 +2745,10 @@ const TimelineMinimap = memo(function TimelineMinimap({
               }
             }}
             onMouseLeave={() => setActiveIndex(null)}
-            onMouseMove={updateActiveIndexFromPointer}
+            onMouseMove={(event) => {
+              if (event.buttons !== 0 && !pressedOnStripRef.current) return;
+              updateActiveIndexFromPointer(event);
+            }}
             onMouseDown={(event) => {
               if (timelineMinimapEventTargetsPreview(event.target)) {
                 return;
@@ -2416,7 +2773,8 @@ const TimelineMinimap = memo(function TimelineMinimap({
                 <span
                   aria-hidden="true"
                   className={cn(
-                    "pointer-events-none absolute left-0 h-0.5 -translate-y-1/2 rounded-full bg-muted-foreground/35 transition-[width,background-color] duration-150 data-[in-view=true]:bg-foreground/90",
+                    "group/strip pointer-events-none absolute left-0 h-0.5 w-6 origin-left -translate-y-1/2 rounded-full transition-transform duration-150",
+                    activeDistance === 0 ? "bg-muted-foreground/75" : "bg-muted-foreground/35",
                     activeDistance === 0
                       ? "scale-x-100"
                       : activeDistance === 1
@@ -2589,7 +2947,7 @@ const TimelineVirtualRow = memo(function TimelineVirtualRow({ id }: { id: string
   if (!row) return null;
   return (
     <div
-      className="mx-auto w-full min-w-0 max-w-(--chat-max-width) overflow-x-clip"
+      className="mx-auto w-full min-w-0 max-w-(--chat-content-max-width) overflow-x-clip"
       data-timeline-root="true"
     >
       <TimelineRowContent row={row} />
@@ -2606,7 +2964,8 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
     row.kind === "work-toggle" ||
     row.kind === "thinking";
   const isExpandedToolGroupHeader =
-    (row.kind === "work-toggle" && row.expanded) || (row.kind === "work-live" && row.expanded);
+    (row.kind === "work-toggle" || row.kind === "work-live" || row.kind === "thinking") &&
+    row.expanded === true;
 
   return (
     <div
@@ -2623,6 +2982,8 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
                   !row.reserveAssistantMeta) ||
                 row.kind === "worktree-setup" ||
                 row.kind === "event" ||
+                row.kind === "html-render" ||
+                row.kind === "mcp-app" ||
                 row.kind === "attempt-fold"
               ? "pb-2"
               : "pb-4",
@@ -2666,12 +3027,13 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
       {row.kind === "attempt-fold" ? <AttemptFoldTimelineRow row={row} /> : null}
       {row.kind === "context-compaction" ? <ContextCompactionTimelineRow row={row} /> : null}
       {row.kind === "message" && row.message.role === "user" ? <UserTimelineRow row={row} /> : null}
-      {row.kind === "queued-message" ? <QueuedMessageTimelineRow row={row} /> : null}
       {row.kind === "message" && row.message.role === "assistant" ? (
         <AssistantTimelineRow row={row} />
       ) : null}
       {row.kind === "assistant-meta" ? <AssistantMetaTimelineRow row={row} /> : null}
       {row.kind === "proposed-plan" ? <ProposedPlanTimelineRow row={row} /> : null}
+      {row.kind === "html-render" ? <HtmlRenderTimelineRow row={row} /> : null}
+      {row.kind === "mcp-app" ? <McpAppTimelineRow row={row} /> : null}
       {row.kind === "working" ? <WorkingTimelineRow row={row} /> : null}
       {row.kind === "worktree-setup" ? <WorktreeSetupTimelineRow row={row} /> : null}
       {row.kind === "event" ? <V2EventTimelineRow row={row} /> : null}
@@ -2704,121 +3066,6 @@ function WorktreeSetupTimelineRow({
   );
 }
 
-/** 正在运行的轮次结束前，本地队列消息仍需可见、可立即发送或撤回。 */
-function QueuedMessageTimelineRow({
-  row,
-}: {
-  row: Extract<TimelineRow, { kind: "queued-message" }>;
-}) {
-  const ctx = use(TimelineRowCtx);
-  const { queuedMessage } = row;
-  const isZh = ctx.language === "zh-CN";
-  const attachmentCount = queuedMessage.images.length + queuedMessage.files.length;
-  const contextCount =
-    queuedMessage.terminalContexts.length +
-    queuedMessage.threadContexts.length +
-    queuedMessage.previewAnnotations.length +
-    queuedMessage.reviewComments.length;
-  const text = queuedMessage.prompt.trim();
-  const sending = queuedMessage.sending !== undefined;
-  const statusLabel = sending
-    ? isZh
-      ? "正在发送给智能体"
-      : "Sending to the agent"
-    : queuedMessage.holdUntilUserAction
-      ? isZh
-        ? "等待立即发送"
-        : "Waits for Send now"
-      : row.isNext
-        ? isZh
-          ? "下次工具调用后或本轮结束时发送"
-          : "Sends after the next tool call or when the turn ends"
-        : isZh
-          ? "排在前面的消息发送后发送"
-          : "Sends after the messages above it";
-  const sendNowLabel = isZh ? "立即发送" : "Send now";
-  const cancelLabel = isZh ? "取消并返回编辑器" : "Cancel and return to the composer";
-
-  return (
-    <div className="flex flex-col items-end" data-queued-message-id={queuedMessage.id}>
-      <div className="max-w-full rounded-2xl border border-dashed border-border p-3 text-message-foreground/80 sm:max-w-2xl">
-        {text.length > 0 ? (
-          <UserMessageBody text={text} skills={ctx.skills} markdownCwd={ctx.markdownCwd} />
-        ) : null}
-        {attachmentCount > 0 || contextCount > 0 ? (
-          <div className={cn("text-secondary-label text-xs", text.length > 0 && "mt-1.5")}>
-            {[
-              attachmentCount > 0
-                ? isZh
-                  ? `${attachmentCount} 个附件`
-                  : `${attachmentCount} attachment${attachmentCount === 1 ? "" : "s"}`
-                : null,
-              contextCount > 0
-                ? isZh
-                  ? `${contextCount} 个上下文项`
-                  : `${contextCount} context item${contextCount === 1 ? "" : "s"}`
-                : null,
-            ]
-              .filter(Boolean)
-              .join(isZh ? "、" : ", ")}
-          </div>
-        ) : null}
-        <div
-          className="mt-2 flex items-center gap-4 text-secondary-label text-xs"
-          data-scroll-anchor-ignore
-        >
-          <Tooltip>
-            <TooltipTrigger
-              render={<span className="inline-flex h-6 items-center gap-1" />}
-              aria-label={`${sending ? (isZh ? "发送中" : "Sending") : isZh ? "已排队" : "Queued"}. ${statusLabel}.`}
-            >
-              <ClockIcon className="size-3.5" aria-hidden />
-              {sending ? (isZh ? "发送中" : "Sending") : isZh ? "已排队" : "Queued"}
-            </TooltipTrigger>
-            <TooltipPopup side="bottom">{statusLabel}</TooltipPopup>
-          </Tooltip>
-          <div className={cn("ml-auto flex items-center gap-0.5", sending && "invisible")}>
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <Button
-                    type="button"
-                    size="icon-xs"
-                    variant="ghost-muted"
-                    onPointerDown={(event) => event.preventDefault()}
-                    onClick={() => ctx.onSteerQueuedMessage(queuedMessage.id)}
-                    aria-label={sendNowLabel}
-                  />
-                }
-              >
-                <ArrowUpIcon className="size-3.5" aria-hidden />
-              </TooltipTrigger>
-              <TooltipPopup side="bottom">{sendNowLabel}</TooltipPopup>
-            </Tooltip>
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <Button
-                    type="button"
-                    size="icon-xs"
-                    variant="ghost-muted"
-                    onPointerDown={(event) => event.preventDefault()}
-                    onClick={() => ctx.onRemoveQueuedMessage(queuedMessage.id)}
-                    aria-label={cancelLabel}
-                  />
-                }
-              >
-                <XIcon className="size-3.5" aria-hidden />
-              </TooltipTrigger>
-              <TooltipPopup side="bottom">{cancelLabel}</TooltipPopup>
-            </Tooltip>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 function ContextCompactionTimelineRow({
   row,
 }: {
@@ -2828,7 +3075,7 @@ function ContextCompactionTimelineRow({
     <div
       role="separator"
       aria-label={row.label}
-      className="mx-auto flex w-full max-w-(--chat-max-width) items-center gap-3 py-1 text-muted-foreground text-xs"
+      className="mx-auto flex w-full max-w-(--chat-content-max-width) items-center gap-3 py-1 text-muted-foreground text-xs"
     >
       <span className="h-px flex-1 bg-border/70" />
       <span
@@ -2965,6 +3212,12 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
         .map((record) => record.contextId),
     [resolvedContext.records],
   );
+  // Chips read as their labels outside a draft, so a shared link carries the prose alone.
+  const plainText = useMemo(
+    () => replaceComposerContextReferences(resolvedContext.text, (reference) => reference.label),
+    [resolvedContext.text],
+  );
+  const promptLink = useMemo(() => promptLinkFor(plainText), [plainText]);
   const contextClipboardFragment =
     resolvedContext.records.length === 0
       ? null
@@ -3036,21 +3289,23 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
             ? (userFiles.find((file) => file.id === record.attachmentId) ?? null)
             : null;
       return (
-        <UserMessageContextReferenceChip
-          reference={reference}
-          record={record}
-          annotationImage={annotationImage}
-          attachment={attachment}
-          onExpandImage={(image) => {
-            const preview = buildExpandedImagePreview(userImages, image.id);
-            if (preview) onImageExpand(preview);
-          }}
-          onOpenFile={onFileOpen}
-          onExpandVideo={(file) => {
-            const preview = buildAttachmentVideoPreview(ctx.activeThreadEnvironmentId, file);
-            if (preview) onImageExpand(preview);
-          }}
-        />
+        <span data-thread-find-ignore>
+          <UserMessageContextReferenceChip
+            reference={reference}
+            record={record}
+            annotationImage={annotationImage}
+            attachment={attachment}
+            onExpandImage={(image) => {
+              const preview = buildExpandedImagePreview(userImages, image.id);
+              if (preview) onImageExpand(preview);
+            }}
+            onOpenFile={onFileOpen}
+            onExpandVideo={(file) => {
+              const preview = buildAttachmentVideoPreview(ctx.activeThreadEnvironmentId, file);
+              if (preview) onImageExpand(preview);
+            }}
+          />
+        </span>
       );
     },
     [
@@ -3067,7 +3322,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
 
   return (
     <div ref={sendMotionRef} className="group flex flex-col items-end gap-1">
-      {userMessage.isAutomation ? (
+      {userMessage.attribution === "automation" ? (
         <p
           className="me-1 text-2xs text-muted-foreground/70"
           data-user-message-attribution="automation"
@@ -3087,7 +3342,14 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
             "Sent by automation"
           )}
         </p>
-      ) : row.message.createdBy === "agent" ? (
+      ) : userMessage.attribution === "t3code" ? (
+        <p
+          className="me-1 text-2xs text-muted-foreground/70"
+          data-user-message-attribution="t3code"
+        >
+          Sent by T3 Code
+        </p>
+      ) : userMessage.attribution === "agent" ? (
         <p className="me-1 text-2xs text-muted-foreground/70" data-user-message-attribution="agent">
           {senderThreadId ? (
             <InlineButton
@@ -3137,7 +3399,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
                     />
                   </button>
                 ) : (
-                  <div className="flex min-h-[72px] items-center justify-center px-2 py-3 text-center text-secondary-label text-2xs">
+                  <div className="flex min-h-[72px] items-center justify-center px-2 py-3 text-center text-2xs text-muted-foreground/70">
                     {image.name}
                   </div>
                 )}
@@ -3167,7 +3429,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
                       type="button"
                       aria-label={`Preview ${file.name}`}
                       onClick={() => ctx.onFileOpen(file)}
-                      className="focus-visible:ring-ring/70 flex min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-md py-1 text-left text-sm hover:underline focus-visible:ring-2 focus-visible:outline-none focus-visible:ring-inset"
+                      className="focus-visible:ring-ring/70 flex min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-md py-1 text-left text-sm hover:underline focus-visible:ring-2 focus-visible:ring-inset focus-visible:outline-none"
                     >
                       {fileIdentity}
                       <EyeIcon className="size-4 shrink-0" />
@@ -3250,19 +3512,20 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
             {resolvedContext.text && (
               <MessageCopyButton
                 // Structured paste needs the canonical links to retain their positions.
-                text={
-                  contextClipboardFragment
-                    ? resolvedContext.text
-                    : replaceComposerContextReferences(
-                        resolvedContext.text,
-                        (reference) => reference.label,
-                      )
-                }
+                text={contextClipboardFragment ? resolvedContext.text : plainText}
                 {...(contextClipboardFragment
                   ? {
                       extraFlavors: { [COMPOSER_CONTEXT_CLIPBOARD_MIME]: contextClipboardFragment },
                     }
                   : {})}
+                variant="ghost"
+              />
+            )}
+            {promptLink !== null && (
+              <MessageCopyButton
+                text={promptLink}
+                label="Copy prompt link"
+                icon={LinkIconNode}
                 variant="ghost"
               />
             )}
@@ -3281,7 +3544,7 @@ function UserMessageIntentMarker({
   const presentation =
     intent === "queued_turn"
       ? {
-          label: "Queued",
+          label: "From queue",
           icon: null,
         }
       : intent === "promoted_queued_to_steer"
@@ -3309,7 +3572,7 @@ function UserMessageIntentMarker({
       </TooltipTrigger>
       <TooltipPopup side="top">
         {intent === "queued_turn"
-          ? "Queued behind the active turn"
+          ? "Queued while the agent was busy"
           : intent === "promoted_queued_to_steer"
             ? "Originally queued, then promoted to steer the active turn"
             : "Steered the active turn"}
@@ -3413,7 +3676,6 @@ function TimelineRowTimestamp({
 
 function TurnFoldTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "turn-fold" }> }) {
   const ctx = use(TimelineRowCtx);
-  const Icon = row.expanded ? ChevronDownIcon : ChevronRightIcon;
 
   return (
     <div className="group/timeline-row relative flex items-center gap-1 border-b border-border/60 pb-2 pe-0.5 pt-1">
@@ -3425,7 +3687,7 @@ function TurnFoldTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "turn-
         className="flex cursor-pointer select-none items-center gap-1 rounded-md px-1 text-sm leading-relaxed text-muted-foreground tabular-nums transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
       >
         <span>{row.label}</span>
-        <Icon className="size-3.5" />
+        <MorphIcon className="size-3.5" icon={row.expanded ? ChevronDown : ChevronRight} />
       </button>
       <TimelineRowTimestamp
         createdAt={row.createdAt}
@@ -3438,7 +3700,6 @@ function TurnFoldTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "turn-
 
 function AttemptFoldTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "attempt-fold" }> }) {
   const ctx = use(TimelineRowCtx);
-  const Icon = row.expanded ? ChevronDownIcon : ChevronRightIcon;
 
   return (
     <button
@@ -3449,9 +3710,12 @@ function AttemptFoldTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "at
       onClick={() => ctx.onToggleAttemptFold(row.attemptId)}
       className="flex w-full cursor-pointer select-none items-center gap-2 rounded-md border border-border/60 bg-muted/20 px-2.5 py-2 text-left transition-colors hover:bg-muted/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
     >
-      <Icon className="size-3.5 shrink-0 text-muted-foreground" />
+      <MorphIcon
+        className="size-3.5 shrink-0 text-muted-foreground"
+        icon={row.expanded ? ChevronDown : ChevronRight}
+      />
       <span className="text-xs font-medium text-foreground/80">{row.label}</span>
-      <span className="text-2xs text-muted-foreground">Partial output retained</span>
+      <span className="text-2xs text-muted-foreground">Cut off by a steer</span>
     </button>
   );
 }
@@ -3569,49 +3833,51 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
     <>
       <div className="relative min-w-0 px-1 py-0.5">
         <MessageAuthorHeading>T3 Code</MessageAuthorHeading>
-        <AssistantCitationSource
-          messageId={row.message.id}
-          {...(ctx.threadRef ? { threadRef: ctx.threadRef } : {})}
-          itemKey={row.id}
-          request={ctx.citationRequest}
-          listRef={ctx.listRef}
-        >
-          <ChatMarkdown
-            key={ctx.displayThreadKey ?? ctx.routeThreadKey}
-            text={messageText}
-            cwd={ctx.markdownCwd}
-            threadRef={ctx.threadRef ?? undefined}
-            isStreaming={Boolean(row.message.streaming)}
-            smoothStreaming={ctx.smoothStreaming}
-            smoothOutputMode={ctx.smoothOutputMode}
-            smoothOutputLineMode={ctx.smoothOutputLineMode}
-            smoothMarkdownPreload={ctx.smoothMarkdownPreload}
-            smoothTextFadeDurationMs={ctx.smoothTextFadeDurationMs}
-            smoothTextYieldDurationMs={ctx.smoothTextYieldDurationMs}
-            footnotesAutoCollapse={ctx.footnotesAutoCollapse}
-            registerFootnoteTail={
-              row.message.id === ctx.tailMessageId ? ctx.registerTailAnchor : undefined
-            }
-            smoothTextResume={playbackResume}
-            smoothComplete={resolveSmoothComplete({
-              smoothStreaming: ctx.smoothStreaming,
-              messageRunId: row.message.runId,
-              messageStreaming: row.message.streaming,
-              itemType: row.projectedItem?.item.type ?? null,
-              itemStatus: row.projectedItem?.item.status ?? null,
-              latestRunId: activity.latestRunId,
-              latestRunStatus: activity.latestRunStatus,
-              isWorking: activity.isWorking,
-            })}
-            claimInitialSmoothText={claimInitialSmoothText}
-            lineBreaks={shouldPreserveAssistantLineBreaks(messageText)}
-            skills={ctx.skills}
-            headingLevelOffset={MESSAGE_HEADING_LEVEL}
-            onUseArtifactTemplate={ctx.onUseArtifactTemplate}
-            onRunShellCommand={ctx.onRunShellCommand}
-            onImageExpand={ctx.onImageExpand}
-          />
-        </AssistantCitationSource>
+        <div data-thread-find-text="true">
+          <AssistantCitationSource
+            messageId={row.message.id}
+            {...(ctx.threadRef ? { threadRef: ctx.threadRef } : {})}
+            itemKey={row.id}
+            request={ctx.citationRequest}
+            listRef={ctx.listRef}
+          >
+            <ChatMarkdown
+              key={ctx.displayThreadKey ?? ctx.routeThreadKey}
+              text={messageText}
+              cwd={ctx.markdownCwd}
+              threadRef={ctx.threadRef ?? undefined}
+              isStreaming={Boolean(row.message.streaming)}
+              smoothStreaming={ctx.smoothStreaming}
+              smoothOutputMode={ctx.smoothOutputMode}
+              smoothOutputLineMode={ctx.smoothOutputLineMode}
+              smoothMarkdownPreload={ctx.smoothMarkdownPreload}
+              smoothTextFadeDurationMs={ctx.smoothTextFadeDurationMs}
+              smoothTextYieldDurationMs={ctx.smoothTextYieldDurationMs}
+              footnotesAutoCollapse={ctx.footnotesAutoCollapse}
+              registerFootnoteTail={
+                row.message.id === ctx.tailMessageId ? ctx.registerTailAnchor : undefined
+              }
+              smoothTextResume={playbackResume}
+              smoothComplete={resolveSmoothComplete({
+                smoothStreaming: ctx.smoothStreaming,
+                messageRunId: row.message.runId,
+                messageStreaming: row.message.streaming,
+                itemType: row.projectedItem?.item.type ?? null,
+                itemStatus: row.projectedItem?.item.status ?? null,
+                latestRunId: activity.latestRunId,
+                latestRunStatus: activity.latestRunStatus,
+                isWorking: activity.isWorking,
+              })}
+              claimInitialSmoothText={claimInitialSmoothText}
+              lineBreaks={shouldPreserveAssistantLineBreaks(messageText)}
+              skills={ctx.skills}
+              headingLevelOffset={MESSAGE_HEADING_LEVEL}
+              onUseArtifactTemplate={ctx.onUseArtifactTemplate}
+              onRunShellCommand={ctx.onRunShellCommand}
+              onImageExpand={ctx.onImageExpand}
+            />
+          </AssistantCitationSource>
+        </div>
         <AssistantChangedFilesSection
           turnSummary={row.assistantTurnDiffSummary}
           routeThreadKey={ctx.routeThreadKey}
@@ -3805,6 +4071,52 @@ function ProposedPlanTimelineRow({
         threadRef={ctx.threadRef ?? undefined}
         cwd={ctx.markdownCwd}
         workspaceRoot={ctx.workspaceRoot}
+        findActive={ctx.findActive}
+      />
+    </div>
+  );
+}
+
+function HtmlRenderTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "html-render" }> }) {
+  const ctx = use(TimelineRowCtx);
+  const { onAppFullscreenChange } = ctx;
+  const onFullscreenChange = useCallback(
+    (fullscreen: boolean) => onAppFullscreenChange(row.id, fullscreen),
+    [onAppFullscreenChange, row.id],
+  );
+
+  return (
+    <div className="min-w-0 px-1">
+      <HtmlRenderFrame
+        // A recycled row must not keep another page's frozen frame.
+        key={row.htmlRender.attachmentId}
+        environmentId={ctx.activeThreadEnvironmentId}
+        htmlRender={row.htmlRender}
+        threadRef={ctx.threadRef ?? undefined}
+        onFullscreenChange={onFullscreenChange}
+      />
+    </div>
+  );
+}
+
+function McpAppTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mcp-app" }> }) {
+  const ctx = use(TimelineRowCtx);
+  const { awaitingUser } = use(TimelineRowActivityCtx);
+
+  return (
+    <div className="min-w-0 px-1">
+      <McpAppFrame
+        // A recycled row must not keep another app's live document.
+        key={row.mcpApp.attachmentId}
+        environmentId={ctx.activeThreadEnvironmentId}
+        threadId={row.sourceThreadId}
+        conversationThreadId={ctx.threadRef?.threadId ?? row.sourceThreadId}
+        itemId={row.itemId}
+        revision={row.revision}
+        app={row.mcpApp}
+        onSendMessage={ctx.onSendAppMessage}
+        awaitingUser={awaitingUser}
+        onFullscreenChange={(fullscreen) => ctx.onAppFullscreenChange(row.id, fullscreen)}
       />
     </div>
   );
@@ -3896,8 +4208,17 @@ function v2EventPresentation(item: OrchestrationV2TurnItem): {
 function V2EventTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "event" }> }) {
   const ctx = use(TimelineRowCtx);
   const { item, visibility, sourceThreadId } = row.projectedItem;
-  if (item.type === "subagent") {
+  if (item.type === "subagent" && (row.subagents?.length ?? 1) > 1) {
     return <V2SubagentGroup key={row.id} row={row} />;
+  }
+  if (item.type === "secret_request") {
+    return (
+      <SecretRequestCard
+        environmentId={ctx.activeThreadEnvironmentId}
+        item={item}
+        visibility={visibility}
+      />
+    );
   }
   if (isV2LifecycleItem(item)) {
     return (
@@ -3988,6 +4309,7 @@ function V2EventTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "event"
               onOpenThread={ctx.onOpenThread}
               onOpenTurnDiff={ctx.onOpenTurnDiff}
               onRollbackCheckpoint={ctx.onRollbackCheckpoint}
+              onImageExpand={ctx.onImageExpand}
             />
           </div>
         </div>
@@ -4062,6 +4384,7 @@ function V2EventTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "event"
               onOpenThread={ctx.onOpenThread}
               onOpenTurnDiff={ctx.onOpenTurnDiff}
               onRollbackCheckpoint={ctx.onRollbackCheckpoint}
+              onImageExpand={ctx.onImageExpand}
             />
           </div>
         </div>
@@ -4185,7 +4508,7 @@ const V2SubagentGroup = memo(function V2SubagentGroup({
               {statusSummary}
             </span>
           </span>
-          <span className="shrink-0 font-mono text-3xs text-muted-foreground">
+          <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
             <SubagentElapsed agent={subagentGroupTiming(agents)} />
           </span>
           <ChevronDownIcon
@@ -4196,7 +4519,8 @@ const V2SubagentGroup = memo(function V2SubagentGroup({
             )}
           />
         </CollapsibleTrigger>
-        <CollapsiblePanel>
+        {/* Virtualized rows must settle before disclosure scroll anchoring resumes. */}
+        <CollapsiblePanel animate={false}>
           {expanded ? (
             <div className="mt-1 mb-1 rounded-lg border border-border/60 bg-card/30 p-1">
               {members.map((item) => (
@@ -4418,10 +4742,7 @@ function ShortWorkGroupEntries({
     const viewport = viewportRef.current;
     const content = contentRef.current;
     if (!viewport || !content) return;
-    const observer = new ResizeObserver(rememberScroll);
-    observer.observe(viewport);
-    observer.observe(content);
-    return () => observer.disconnect();
+    return observeResize([viewport, content], rememberScroll);
   }, [rememberScroll]);
   useLayoutEffect(() => {
     const viewport = viewportRef.current;
@@ -4464,6 +4785,8 @@ function ShortWorkGroupEntries({
   );
 }
 
+const compactWorkEntryHeight = 24;
+
 function VirtualizedWorkGroupEntries({
   anchorKey,
   disclosureAnchorKey,
@@ -4481,6 +4804,7 @@ function VirtualizedWorkGroupEntries({
   );
   const [restoringPosition, setRestoringPosition] = useState(initialScrollIndex !== undefined);
   const listRef = useRef<LegendListRef>(null);
+  const [expandedContentHeight, setExpandedContentHeight] = useState(0);
   const [fades, setFades] = useState({ top: false, bottom: false, viewportHeight: 0 });
   const [appendState, setAppendState] = useState({ entries, follow: false });
   // Capture the pre-change edge once per incoming array, before new layout
@@ -4550,10 +4874,8 @@ function VirtualizedWorkGroupEntries({
     const element = listRef.current?.getScrollableNode();
     if (!element) return;
     updateScrollFades();
-    const observer = new ResizeObserver(updateScrollFades);
-    observer.observe(element);
-    if (element.firstElementChild) observer.observe(element.firstElementChild);
-    return () => observer.disconnect();
+    const content = element.firstElementChild;
+    return observeResize(content ? [element, content] : element, updateScrollFades);
   }, [updateScrollFades]);
 
   const renderEntry = useCallback(
@@ -4562,6 +4884,22 @@ function VirtualizedWorkGroupEntries({
     ),
     [workspaceRoot],
   );
+
+  const updateExpandedContentHeight = useCallback(() => {
+    const state = listRef.current?.getState();
+    let height = 0;
+    for (const entryId of viewState.expandedEntries) {
+      if (state?.indexByKey(entryId) === undefined) continue;
+      // Each open row adds room for its details, including while scrolled out of view.
+      height += Math.max(
+        0,
+        (state.sizes.get(entryId) ?? compactWorkEntryHeight) - compactWorkEntryHeight,
+      );
+    }
+    setExpandedContentHeight(height);
+  }, [viewState]);
+
+  useLayoutEffect(updateExpandedContentHeight, [entries, updateExpandedContentHeight]);
 
   return (
     <WorkGroupViewCtx value={groupView}>
@@ -4573,10 +4911,9 @@ function VirtualizedWorkGroupEntries({
             extraData={workspaceRoot}
             keyExtractor={workEntryKey}
             renderItem={renderEntry}
-            estimatedItemSize={24}
+            estimatedItemSize={compactWorkEntryHeight}
             drawDistance={240}
             recycleItems
-            contentContainerClassName="pr-3"
             {...(initialScrollIndex ? { initialScrollIndex } : {})}
             maintainScrollAtEnd={
               appendState.follow ? { animated: false, on: { dataChange: true } } : false
@@ -4591,12 +4928,14 @@ function VirtualizedWorkGroupEntries({
             onLoad={handleLoad}
             onScroll={handleScroll}
             onLayout={updateScrollFades}
+            onItemSizeChanged={updateExpandedContentHeight}
             tabIndex={0}
             role="region"
             aria-label="Tool calls"
             data-tool-group-scroll
+            style={{ maxHeight: `calc(min(18rem, 50dvh) + ${expandedContentHeight}px)` }}
             className={cn(
-              "scrollbar-gutter-stable max-h-[min(18rem,50dvh)] scroll-py-6 overflow-x-hidden rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70",
+              "scrollbar-gutter-stable scroll-py-6 overflow-x-hidden rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70",
               getVirtualizedScrollFadeClassName(fades),
             )}
           />
@@ -4623,13 +4962,9 @@ function ActivityShimmerOverlay({ children }: { children: ReactNode }) {
 
 const failedToolIconClassName = "text-tool-error-icon/40";
 
-/** Image icons and the gradient computer-use mark cannot take a currentColor
- *  tint, so failed rows using them get a trailing x instead. */
-function toolIconAcceptsTint(
-  iconName: WorkEntryIconName,
-  toolIcon: ToolActivityIcon | undefined,
-): boolean {
-  return toolIcon === undefined && iconName !== "computer";
+/** Image icons cannot take a currentColor tint, so failed rows get a trailing x. */
+function toolIconAcceptsTint(toolIcon: ToolActivityIcon | undefined): boolean {
+  return toolIcon === undefined;
 }
 
 function WorkingTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "working" }> }) {
@@ -4743,11 +5078,24 @@ function ThinkingTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "think
       ? conversationStructureIdleLabel || t("chat.liveActivity.idleDefault")
       : conversationStructureThinkingLabel || t("chat.liveActivity.thinkingDefault");
   // Reserve the activity row during setup so the handoff keeps the same height.
-  const status =
+  const activity =
     isPreparingWorktree || isCompacting ? (
       <WorkLogRow label="" />
     ) : (
       <LiveActivityRow label={label} iconName="brain" active shimmer />
+    );
+  const status =
+    row.groupId !== undefined && !isPreparingWorktree && !isCompacting ? (
+      <button
+        type="button"
+        className="group/live-work flex min-h-6 w-full max-w-full cursor-pointer items-center rounded-md text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
+        aria-expanded={row.expanded === true}
+        onClick={() => ctx.onToggleWorkGroup(row.groupId!, row.id)}
+      >
+        {activity}
+      </button>
+    ) : (
+      activity
     );
   return (
     <TimelineTailAnchor>
@@ -4825,16 +5173,21 @@ function LiveActivityContent({
   highlighted?: boolean;
 }) {
   const showTrailingFailureMark =
-    failed && iconName !== undefined && !toolIconAcceptsTint(iconName, toolIcon);
+    failed && iconName !== undefined && !toolIconAcceptsTint(toolIcon);
 
   return (
     <WorkLogRow
       icon={
         iconName ? (
           <span
-            className={
-              failed ? failedToolIconClassName : highlighted ? "text-foreground" : "text-icon-muted"
-            }
+            className={cn(
+              "flex size-4 items-center justify-center",
+              failed
+                ? failedToolIconClassName
+                : highlighted
+                  ? "text-foreground"
+                  : "text-icon-muted",
+            )}
             role={announceFailure ? "img" : undefined}
             aria-label={announceFailure ? "Tool call failed" : undefined}
           >
@@ -4867,25 +5220,108 @@ function LiveActivityContent({
   );
 }
 
+/** The thread a `t3_thread_read` call targets, titled from live shell state so renames show. */
+function useThreadReadTarget(entry: TimelineWorkEntry, environmentId: EnvironmentId) {
+  const rawThreadId = threadReadTargetId(entry);
+  const threadId = rawThreadId === null ? null : ThreadId.make(rawThreadId);
+  const shell = useThreadShell(threadId ? scopeThreadRef(environmentId, threadId) : null);
+  const title = threadReadTargetTitle(shell);
+  return threadId && title ? { threadId, title } : null;
+}
+
+function threadReadLabel(label: string, target: ReturnType<typeof useThreadReadTarget>) {
+  const prefix = target && threadReadLabelPrefix(label);
+  return prefix ? { ...target, prefix, text: `${prefix} “${target.title}”` } : null;
+}
+
+/** Only settled rows link the title; the live row is itself a button. */
+function ThreadReadLabel({
+  label,
+  environmentId,
+  linked,
+}: {
+  label: NonNullable<ReturnType<typeof threadReadLabel>>;
+  environmentId: EnvironmentId;
+  linked: boolean;
+}) {
+  return (
+    <span className="flex min-w-0">
+      <span className="shrink-0">{label.prefix} “</span>
+      {linked ? (
+        <Link
+          to="/$environmentId/$threadId"
+          params={{ environmentId, threadId: label.threadId }}
+          className="min-w-0 truncate rounded-sm text-foreground underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-ring"
+          onClick={stopRowToggle}
+          onKeyDown={stopRowToggle}
+        >
+          {label.title}
+        </Link>
+      ) : (
+        <span className="min-w-0 truncate">{label.title}</span>
+      )}
+      <span className="shrink-0">”</span>
+    </span>
+  );
+}
+
 function LiveWorkEntryTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "work-live" }> }) {
   const ctx = use(TimelineRowCtx);
+  const threadTarget = useThreadReadTarget(row.entry, ctx.activeThreadEnvironmentId);
   const questionHeading = row.entry.questionAnswer
     ? getQuestionTextPreview(row.entry.questionAnswer)
     : "";
   const label = questionHeading || liveWorkEntryLabel(row.entry, ctx.workspaceRoot, row.active);
+  const threadLabel = threadReadLabel(label, threadTarget);
+
   const failed = workEntryDisplayIndicatesToolFailure(row.entry);
+  // The expanded group already lists the thought, so the preview steps aside.
+  const thoughtLine = row.thought && !row.expanded ? liveThoughtLine(row.thought.detail ?? "") : "";
+  // While the thought itself streams, the status line just says Thinking.
+  const thoughtIsStatus = thoughtLine !== "" && row.entry === row.thought;
 
   return (
     <button
       type="button"
-      className="group/live-work flex min-h-6 w-full max-w-full cursor-pointer items-center rounded-md text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
-      aria-label={failed ? `${label}, tool call failed` : undefined}
+      className={cn(
+        "group/live-work flex w-full max-w-full cursor-pointer rounded-md text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70",
+        thoughtLine ? "flex-col items-start" : "min-h-6 items-center",
+      )}
+      aria-label={
+        failed
+          ? `${thoughtLine ? `${thoughtLine} ` : ""}${threadLabel?.text ?? label}, tool call failed`
+          : undefined
+      }
       aria-expanded={row.expanded}
       onClick={() => ctx.onToggleWorkGroup(row.groupId, row.id)}
     >
+      {thoughtLine ? (
+        // The latest thought's first sentence sits above the status line as an
+        // ordinary work-log row, so a finding never hides behind the next tool call.
+        <WorkLogRow
+          icon={
+            <span className="flex size-4 items-center justify-center text-icon-muted">
+              <ToolActivityIconView
+                icon={undefined}
+                fallbackName="brain"
+                className="block size-4 shrink-0 stroke-2"
+                muted
+              />
+            </span>
+          }
+          label={<span className="line-clamp-4">{thoughtLine}</span>}
+          wrapLabel
+        />
+      ) : null}
       <LiveActivityRow
         label={
-          row.entry.questionAnswer && hasQuestionAnswer(row.entry.questionAnswer) ? (
+          thoughtIsStatus ? (
+            row.active ? (
+              "Thinking"
+            ) : (
+              "Thought"
+            )
+          ) : row.entry.questionAnswer && hasQuestionAnswer(row.entry.questionAnswer) ? (
             <span className="flex min-w-0 gap-1.5">
               <span className="min-w-0 truncate">{label}</span>
               <span className="min-w-0 truncate text-foreground">
@@ -4901,6 +5337,12 @@ function LiveWorkEntryTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "
             >
               {row.entry.detail ?? label}
             </ReactMarkdown>
+          ) : threadLabel ? (
+            <ThreadReadLabel
+              label={threadLabel}
+              environmentId={ctx.activeThreadEnvironmentId}
+              linked={false}
+            />
           ) : (
             label
           )
@@ -4922,6 +5364,8 @@ function toolGroupSummaryIconName(
     case "link-pr":
     case "unlink-pr":
     case "list-prs":
+    case "watch-pr":
+    case "unwatch-pr":
       return "pull-request";
     case "read":
       return "eye";
@@ -4996,7 +5440,7 @@ function WorkGroupHeader(props: {
         <ToolActivityIconView
           icon={props.toolIcon}
           fallbackName={props.iconName}
-          className="size-4 shrink-0 stroke-2"
+          className="size-4 shrink-0 stroke-2 text-icon-muted"
           muted
         />
       }
@@ -5123,16 +5567,23 @@ function UserMessageMentionChip(props: {
                 useRightPanelStore.getState().openFile(ctx.threadRef, props.record.path);
             }}
           >
-            <PierreEntryIcon
-              pathValue={props.record.path}
-              kind={inferEntryKindFromPath(props.record.path)}
+            <WorkspaceEntryIcon
+              path={props.record.path}
+              environmentId={ctx.activeThreadEnvironmentId}
+              cwd={ctx.workspaceRoot}
               theme={ctx.resolvedTheme}
             />
             <ContextChipLabel>{props.record.label}</ContextChipLabel>
           </ContextChip>
         }
       />
-      <TooltipPopup>{props.record.path}</TooltipPopup>
+      <TooltipPopup>
+        <WorkspaceEntryTooltip
+          path={props.record.path}
+          environmentId={ctx.activeThreadEnvironmentId}
+          cwd={ctx.workspaceRoot}
+        />
+      </TooltipPopup>
     </Tooltip>
   );
 }
@@ -5574,21 +6025,8 @@ function UserMessageContextReferenceChip(props: {
   });
 }
 
-const MAX_COLLAPSED_USER_MESSAGE_LINES = 8;
-const MAX_COLLAPSED_USER_MESSAGE_LENGTH = 600;
 const COLLAPSED_USER_MESSAGE_FADE_HEIGHT_REM = 1.75;
 const COLLAPSED_USER_MESSAGE_FADE_MASK = `linear-gradient(to bottom, black calc(100% - ${COLLAPSED_USER_MESSAGE_FADE_HEIGHT_REM}rem), transparent)`;
-
-function shouldCollapseUserMessage(text: string): boolean {
-  if (text.trim().length === 0) {
-    return false;
-  }
-
-  return (
-    text.length > MAX_COLLAPSED_USER_MESSAGE_LENGTH ||
-    text.split("\n").length > MAX_COLLAPSED_USER_MESSAGE_LINES
-  );
-}
 
 const CollapsibleUserMessageBody = memo(function CollapsibleUserMessageBody(props: {
   text: string;
@@ -5598,16 +6036,23 @@ const CollapsibleUserMessageBody = memo(function CollapsibleUserMessageBody(prop
   footer?: ReactNode;
 }) {
   const [expanded, setExpanded] = useState(false);
+  // Find opens the body only when it selects a match in the clipped part.
+  const revealForFind = useCallback(() => setExpanded(true), []);
+  const findRevealRef = useFindRevealRef(revealForFind);
   const hasVisibleBody = props.text.trim().length > 0;
   const canCollapse = hasVisibleBody && shouldCollapseUserMessage(props.text);
   const isCollapsed = canCollapse && !expanded;
+  const showCollapseControl = canCollapse;
 
   return (
     <div>
       {hasVisibleBody ? (
         <div
+          ref={findRevealRef}
           className={cn("relative", isCollapsed && "max-h-44 overflow-hidden")}
           data-user-message-body="true"
+          data-thread-find-text="true"
+          data-thread-find-fold={isCollapsed ? "" : undefined}
           data-user-message-collapsed={isCollapsed ? "true" : "false"}
           data-user-message-collapsible={canCollapse ? "true" : "false"}
           data-user-message-fade={isCollapsed ? "true" : "false"}
@@ -5628,15 +6073,15 @@ const CollapsibleUserMessageBody = memo(function CollapsibleUserMessageBody(prop
           />
         </div>
       ) : null}
-      {canCollapse || props.footer ? (
+      {showCollapseControl || props.footer ? (
         <div
           className={cn(
             "mt-1.5 flex items-center gap-2",
-            canCollapse && props.footer ? "justify-between" : "justify-end",
+            showCollapseControl && props.footer ? "justify-between" : "justify-end",
           )}
           data-user-message-footer="true"
         >
-          {canCollapse ? (
+          {showCollapseControl ? (
             <Button
               type="button"
               size="xs"
@@ -5697,7 +6142,7 @@ function UserMessageReviewCommentCard({ comment }: { comment: ReviewCommentConte
         <div className="text-xs font-medium text-foreground">
           {formatWorkspaceRelativePath(comment.filePath, ctx.workspaceRoot)}
         </div>
-        <div className="text-secondary-label text-2xs">
+        <div className="text-2xs text-muted-foreground">
           {comment.sectionTitle} · {comment.rangeLabel}
         </div>
       </div>
@@ -5829,6 +6274,7 @@ type WorkEntryIconName =
   | "check"
   | "circle-alert"
   | "computer"
+  | "code"
   | "device"
   | "eye"
   | "globe"
@@ -5909,7 +6355,7 @@ function ToolActivityIconView(props: {
     <NativeAppToolActivityIcon
       app={props.icon.app}
       fallbackName={props.fallbackName}
-      className={props.className}
+      className={cn(props.className, "size-5")}
       muted={props.muted}
     />
   );
@@ -6025,9 +6471,10 @@ function WorkEntryIcon({ name, className }: { name: WorkEntryIconName; className
     case "brain":
       return <BrainIcon className={className} aria-hidden />;
     case "browser":
-      return <BrowserAppIcon className={className} />;
     case "computer":
-      return <ComputerUseAppIcon className={className} />;
+      return <BrowserAppIcon className={className} />;
+    case "code":
+      return <Code2Icon className={className} aria-hidden />;
     case "device":
       return <SmartphoneIcon className={className} aria-hidden />;
     case "t3-code":
@@ -6158,12 +6605,34 @@ const toolCallExpandedBodyClassName =
 
 function workEntryIconName(workEntry: TimelineWorkEntry): WorkEntryIconName {
   if (workEntry.structuredPayload?.type === "notification") {
-    return workEntry.structuredPayload.outcome === "failed" ? "circle-alert" : "zap";
+    if (workEntry.structuredPayload.outcome === "failed") return "circle-alert";
+    const source = workEntry.structuredPayload.source;
+    switch (source.kind) {
+      case "subagent":
+      case "delegated_task":
+        return "bot";
+      case "command":
+        return "terminal";
+      case "monitor":
+        return "eye";
+      case "background_task":
+        return "zap";
+      case "system":
+        return "t3-code";
+      default:
+        source satisfies never;
+        return "zap";
+    }
   }
   if (workEntry.itemType === "user_input_request" || workEntry.itemType === "approval_request") {
     return "message-circle";
   }
   if (workEntry.toolSurface) return workEntry.toolSurface;
+  if (
+    workEntry.structuredPayload?.type === "dynamic_tool" &&
+    isJavaScriptReplTool(workEntry.structuredPayload.toolName)
+  )
+    return "code";
   const toolPresentation = resolveWorkEntryToolPresentation(workEntry);
   if (toolPresentation) return toolPresentation.icon;
   const action = toolGroupAction(workEntry);
@@ -6204,8 +6673,11 @@ function remarkThoughtPreview(fallback: string) {
 }
 
 function ReasoningTraceContent({ entries }: { entries: ReadonlyArray<TimelineWorkEntry> }) {
+  const { isWorking, latestRunId } = use(TimelineRowActivityCtx);
+  const isStreaming = (entry: TimelineWorkEntry) =>
+    isWorking && entry.runId === latestRunId && entry.toolLifecycleStatus === "inProgress";
   return (
-    <WorkLogDetails>
+    <WorkLogDetails followLive={entries.some(isStreaming)}>
       {entries.map((entry) => (
         <ReasoningTraceEntryMarkdown key={entry.id} entry={entry} />
       ))}
@@ -6265,18 +6737,48 @@ function ReasoningTraceEntryMarkdown({ entry }: { entry: TimelineWorkEntry }) {
   );
 }
 
-const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
+type WorkEntryRowProps = {
   workEntry: TimelineWorkEntry;
   workspaceRoot: string | undefined;
   displayLabel?: string | undefined;
   onToggleEntry?: ((collapsed: boolean) => void) | undefined;
-}) {
+};
+
+const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: WorkEntryRowProps) {
+  const ctx = use(TimelineRowCtx);
+  const item = props.workEntry.projectedItem?.item;
+  const childThreadId =
+    item?.type === "notification" ? notificationChildThreadId(item.source) : undefined;
+  if (item?.type !== "notification" || childThreadId === undefined) {
+    return <WorkEntryLogRow {...props} />;
+  }
+  return (
+    <SubagentNotificationLink
+      parentRef={scopeThreadRef(ctx.activeThreadEnvironmentId, item.threadId)}
+      childThreadId={childThreadId}
+      outcome={item.outcome}
+      createdAt={props.workEntry.createdAt}
+      timestampFormat={ctx.timestampFormat}
+      providerStatuses={ctx.providerStatuses}
+      onOpenThread={ctx.onOpenThread}
+      fallback={<WorkEntryLogRow {...props} />}
+    />
+  );
+});
+
+function WorkEntryLogRow(props: WorkEntryRowProps) {
   const { workEntry, workspaceRoot, displayLabel } = props;
   const ctx = use(TimelineRowCtx);
   const { threadRef, onImageExpand, timestampFormat } = ctx;
+  const { retryableWorkspacePreparationRunIds, onRetryWorkspacePreparation } = ctx;
+  const threadTarget = useThreadReadTarget(workEntry, ctx.activeThreadEnvironmentId);
   const createdThread =
     workEntry.projectedItem?.item.type === "thread_created"
       ? workEntry.projectedItem.item
+      : undefined;
+  const notifiedSubagentThreadId =
+    workEntry.projectedItem?.item.type === "notification"
+      ? notificationChildThreadId(workEntry.projectedItem.item.source)
       : undefined;
   const groupView = use(WorkGroupViewCtx);
   const [expanded, setExpanded] = useState(
@@ -6301,6 +6803,12 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
     const label = warning
       ? `Usage limit reached.${resetTime ? ` Retry after ${resetTime}.` : ""}`
       : workEntry.label;
+    const retryRunId =
+      failureItem.runId !== null &&
+      retryableWorkspacePreparationRunIds.has(failureItem.runId) &&
+      failureItem.failure.code === ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE
+        ? failureItem.runId
+        : null;
     return (
       <WorkLogRow
         data-v2-item-type="error"
@@ -6331,6 +6839,19 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
             {failureItem.failure.message}
           </p>
         ) : null}
+        {retryRunId !== null && onRetryWorkspacePreparation ? (
+          <div className="ms-7 pb-1">
+            <Button
+              type="button"
+              size="xs"
+              variant="outline"
+              onClick={() => onRetryWorkspacePreparation(retryRunId)}
+            >
+              <RotateCcwIcon aria-hidden />
+              Retry
+            </Button>
+          </div>
+        ) : null}
       </WorkLogRow>
     );
   }
@@ -6350,8 +6871,8 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
       : (workEntry.toolIcon ?? workEntry.toolSource?.icon);
   const isReasoning = workEntry.itemType === "reasoning";
   // The question is the row's identity: a generic "User input submitted"
-  // label buries what was asked, so lead with the question text and keep the
-  // answer as the trailing preview.
+  // label buries what was asked, so lead with the question text (even over a
+  // lone tool row's display label) and keep the answer as the trailing preview.
   const questionHeading = workEntry.questionAnswer
     ? getQuestionTextPreview(workEntry.questionAnswer)
     : "";
@@ -6360,12 +6881,25 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
       ? workEntry.toolLifecycleStatus === "inProgress"
         ? "Thinking"
         : "Thought"
-      : questionHeading || displayLabel || workEntryDisplayLabel(workEntry, workspaceRoot);
+      : questionHeading || (displayLabel ?? workEntryDisplayLabel(workEntry, workspaceRoot));
   const answerPreview =
     workEntry.questionAnswer && hasQuestionAnswer(workEntry.questionAnswer)
       ? getQuestionAnswerPreview(workEntry.questionAnswer)
       : null;
   const viewedImagePath = workEntryViewedImagePath(workEntry);
+  const payload = workEntry.structuredPayload;
+  const skill =
+    payload?.type === "dynamic_tool"
+      ? claudeSkillInvocation(payload.toolName, payload.input)
+      : undefined;
+  // Reads and skills expand to plain text instead of the item inspector. A
+  // skill's heading already names it, so only its arguments are left to show.
+  const plainOutput =
+    toolGroupAction(workEntry) === "read"
+      ? workEntryReadOutput(workEntry, workspaceRoot)
+      : skill
+        ? (skill.args ?? null)
+        : undefined;
   const viewedImage =
     viewedImagePath && threadRef
       ? resolveViewedImageAsset(viewedImagePath, {
@@ -6385,16 +6919,37 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
     );
   const expandedBody =
     expanded && !isReasoning
-      ? buildToolCallExpandedBody(
-          workEntry,
-          workspaceRoot,
-          previewText,
-          viewedImage ? viewedImagePath : null,
-        )
+      ? plainOutput !== undefined
+        ? plainOutput
+        : buildToolCallExpandedBody(
+            workEntry,
+            workspaceRoot,
+            previewText,
+            viewedImage ? viewedImagePath : null,
+          )
       : null;
-  const canExpandProjectedItem = canExpand || workEntry.projectedItem !== undefined;
+  // Projected rows expand to the item inspector, so only offer a disclosure
+  // when it has something to show, even if that output still has to load.
+  // Reads and skills still fetch the output the timeline withheld.
+  const plainOutputFetches =
+    plainOutput !== undefined &&
+    workEntry.projectedItem !== undefined &&
+    turnItemNeedsDetailFetch(workEntry.projectedItem.item);
+  const canExpandProjectedItem =
+    plainOutput !== undefined
+      ? Boolean(plainOutput || viewedImage || workEntry.questionAnswer || plainOutputFetches)
+      : workEntry.projectedItem === undefined
+        ? canExpand
+        : isReasoning
+          ? Boolean(workEntry.detail?.trim())
+          : Boolean(
+              viewedImage ||
+              workEntry.questionAnswer ||
+              turnItemHasDetail(workEntry.projectedItem.item),
+            );
   // Reserve destructive row styling for severe failures, not routine tool errors.
   const iconWrapperClass = cn(
+    "flex size-4 items-center justify-center",
     showWarningIndicator
       ? "text-warning"
       : showDestructiveRowStyle
@@ -6412,7 +6967,10 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
       : workLogEntryIsToolLike(workEntry)
         ? "text-secondary-label"
         : "text-foreground/80";
-  const accessiblePreview = [previewText, answerPreview].filter(Boolean).join(": ");
+  const threadLabel = isReasoning ? null : threadReadLabel(previewText, threadTarget);
+  const accessiblePreview = [threadLabel?.text ?? previewText, answerPreview]
+    .filter(Boolean)
+    .join(": ");
   const accessibleDisplayText = showFailedIndicator
     ? `${accessiblePreview}, tool call failed`
     : accessiblePreview;
@@ -6455,11 +7013,7 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
         <div className="min-w-0 flex-1 overflow-hidden">
           <p className="flex min-w-0 w-full items-baseline gap-1.5 text-sm leading-relaxed">
             <span
-              className={cn(
-                answerPreview ? "shrink-0" : "min-w-0 flex-1",
-                "truncate",
-                headingClass,
-              )}
+              className={cn(answerPreview ? "min-w-0" : "min-w-0 flex-1", "truncate", headingClass)}
             >
               {isReasoning && !expanded ? (
                 <ReactMarkdown
@@ -6473,6 +7027,12 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
                 >
                   {workEntry.detail ?? previewText}
                 </ReactMarkdown>
+              ) : threadLabel ? (
+                <ThreadReadLabel
+                  label={threadLabel}
+                  environmentId={ctx.activeThreadEnvironmentId}
+                  linked
+                />
               ) : (
                 previewText
               )}
@@ -6480,9 +7040,12 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
             {answerPreview ? (
               <span
                 className={cn(
-                  answerPreview ? "min-w-0" : "min-w-0 flex-1",
-                  expanded ? "whitespace-pre-wrap break-words select-text" : "truncate",
-                  headingClass,
+                  "min-w-0 truncate",
+                  !expanded &&
+                    workEntry.questionAnswer &&
+                    hasQuestionAnswer(workEntry.questionAnswer)
+                    ? "text-foreground"
+                    : "text-muted-foreground",
                 )}
               >
                 {answerPreview}
@@ -6496,7 +7059,7 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
           {createdThread ? (
             <button
               type="button"
-              className="shrink-0 rounded-sm text-sm text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              className="shrink-0 rounded-sm text-sm text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
               aria-label={`Open ${createdThread.title ?? "created thread"}`}
               onClick={(event) => {
                 event.stopPropagation();
@@ -6507,9 +7070,21 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
               Open chat
             </button>
           ) : null}
+          {notifiedSubagentThreadId ? (
+            <InlineButton
+              aria-label="Open subagent thread"
+              onClick={(event) => {
+                event.stopPropagation();
+                ctx.onOpenThread(notifiedSubagentThreadId);
+              }}
+              onKeyDown={stopRowToggle}
+            >
+              Open subagent
+            </InlineButton>
+          ) : null}
           {showFailedIndicator &&
           !showDestructiveRowStyle &&
-          !toolIconAcceptsTint(entryIconName, entryToolIcon) ? (
+          !toolIconAcceptsTint(entryToolIcon) ? (
             <XIcon aria-hidden className={cn("size-3 shrink-0", failedToolIconClassName)} />
           ) : null}
           <TimelineRowTimestamp createdAt={workEntry.createdAt} timestampFormat={timestampFormat} />
@@ -6551,9 +7126,11 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
       !isReasoning &&
       !workEntry.questionAnswer &&
       canExpandProjectedItem &&
-      (expandedBody || workEntry.projectedItem) ? (
+      (expandedBody ||
+        plainOutputFetches ||
+        (workEntry.projectedItem && plainOutput === undefined)) ? (
         <WorkLogDetails kind="panel">
-          {workEntry.projectedItem ? (
+          {workEntry.projectedItem && plainOutput === undefined ? (
             <V2ItemInspector
               projectedItem={workEntry.projectedItem}
               environmentId={ctx.activeThreadEnvironmentId}
@@ -6562,17 +7139,29 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
               onOpenThread={ctx.onOpenThread}
               onOpenTurnDiff={ctx.onOpenTurnDiff}
               onRollbackCheckpoint={ctx.onRollbackCheckpoint}
+              onImageExpand={ctx.onImageExpand}
             />
-          ) : expandedBody ? (
-            <ScrollFrame variant="compact">
-              <pre className={toolCallExpandedBodyClassName}>{expandedBody}</pre>
-            </ScrollFrame>
-          ) : null}
+          ) : (
+            <>
+              {expandedBody ? (
+                <ScrollFrame variant="compact">
+                  <pre className={toolCallExpandedBodyClassName}>{expandedBody}</pre>
+                </ScrollFrame>
+              ) : null}
+              {plainOutputFetches && workEntry.projectedItem ? (
+                <FetchedToolOutput
+                  projectedItem={workEntry.projectedItem}
+                  environmentId={ctx.activeThreadEnvironmentId}
+                  onImageExpand={onImageExpand}
+                />
+              ) : null}
+            </>
+          )}
         </WorkLogDetails>
       ) : null}
     </WorkLogRow>
   );
-});
+}
 
 function QuestionAnswerHistory({
   answer,

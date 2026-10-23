@@ -101,6 +101,10 @@ it("localizes compatibility and update advisory defaults", () => {
     title: "有可用更新",
     detail: "有可用更新：安装 v2.0.0。",
   });
+  expect(getProviderSummary({ ...provider, status: "warning" }, zhT)).toEqual({
+    headline: "需要处理",
+    detail: "提供商已安装，但服务器无法完全验证。",
+  });
 });
 
 it("does not suggest copying a command that installs an incompatible latest version", () => {

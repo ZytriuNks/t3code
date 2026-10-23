@@ -7,6 +7,12 @@ vi.mock("../../hooks/useSettings", () => ({
     "This setting is saved on a server, and the hosted app is not anchored to one. Change it from the desktop app or from the server's own address.",
   usePrimarySettingsAvailable: () => true,
 }));
+vi.mock("../../state/session", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../state/session")>()),
+  useEnvironmentScope: () => true,
+  useEnvironmentsWithScope: (environments: readonly { environmentId: string }[]) =>
+    new Set(environments.map((environment) => environment.environmentId)),
+}));
 vi.mock("./useScopedSettings", () => ({
   useClearScopedSettings: () => () => undefined,
   useClearProjectOverrides: () => () => undefined,

@@ -1,9 +1,9 @@
-import type { I18nContextValue } from "../../i18n/I18nProvider";
 import type {
   ServerProvider,
   ServerProviderVersionAdvisory,
   ServerProviderCompatibilityAdvisory,
 } from "@t3tools/contracts";
+import type { I18nContextValue } from "../../i18n/I18nProvider";
 
 /**
  * Visual treatment for each server-reported provider status. Centralized so

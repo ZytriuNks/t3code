@@ -37,8 +37,8 @@ import {
   recordMessagesUntilTurnResultAndFinalize,
   resolveClaudeRecordingExecutablePath,
 } from "./ClaudeAdapterV2.testkit.ts";
-import { makeProviderReplayGate } from "../testkit/ProviderReplayGate.testkit.ts";
-import { readProviderReplayTranscript } from "../testkit/ReplayTranscriptNdjson.ts";
+import { makeProviderReplayGate } from "@t3tools/provider-testing/replayGate";
+import { readProviderReplayTranscript } from "@t3tools/provider-testing/replayTranscript";
 
 const isClaudeAgentSdkQueryRunnerError = Schema.is(ClaudeAgentSdkQueryRunnerError);
 const isClaudeReplayFrameMismatchError = Schema.is(ClaudeReplayFrameMismatchError);

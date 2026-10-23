@@ -1,12 +1,16 @@
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import type { EnvironmentId } from "@t3tools/contracts";
+import { CHATGPT_USAGE_URL, isChatGptUsageLimitFailure } from "@t3tools/shared/usageLimits";
 import * as DateTime from "effect/DateTime";
+import * as Option from "effect/Option";
 import { useState } from "react";
-import { Pressable, View } from "react-native";
+import { Linking, Pressable, View } from "react-native";
 import { AppText as Text } from "../../components/AppText";
+import { ProviderIcon } from "../../components/ProviderIcon";
 import { threadEnvironment } from "../../state/threads";
 import { useAtomCommand } from "../../state/use-atom-command";
+import { useThreadDetail } from "../../state/use-thread-detail";
 
 export function UsageLimitRecoveryCard({
   thread,
@@ -18,6 +22,14 @@ export function UsageLimitRecoveryCard({
   const updateMetadata = useAtomCommand(threadEnvironment.updateMetadata);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // ChatGPT's own usage limit is a subscription state, not a provider quota, so
+  // it gets its own wording and a link to the account's usage settings. The
+  // scheduled recovery below still applies when the reset time is known.
+  const detail = Option.getOrNull(useThreadDetail({ environmentId, threadId: thread.id }).data);
+  const chatGptUsageLimit = isChatGptUsageLimitFailure(
+    detail?.visibleTurnItems.map((entry) => entry.item) ?? [],
+    detail?.runs.find((run) => run.id === thread.latestRun?.runId),
+  );
   const resetAt = thread.runtime?.usageLimitResetAt ?? null;
   const canSchedule =
     resetAt !== null &&
@@ -26,10 +38,14 @@ export function UsageLimitRecoveryCard({
   const recovery = thread.limitRecovery;
   const scheduled =
     recovery?.runId === runId && recovery?.resetAt === resetAt && recovery?.autoResume;
+  // Managed sharing reaches the client as a `provider_error` that only names the
+  // limit in its failure code, so the ChatGPT card must not depend on the
+  // usage_limit class that drives the scheduled-recovery card below.
   if (
-    thread.runtime?.status !== "failed" ||
-    thread.runtime.lastErrorClass !== "usage_limit" ||
-    !runId
+    !chatGptUsageLimit &&
+    (thread.runtime?.status !== "failed" ||
+      thread.runtime.lastErrorClass !== "usage_limit" ||
+      !runId)
   )
     return null;
   const snoozed =
@@ -67,12 +83,31 @@ export function UsageLimitRecoveryCard({
     }
   }
   return (
-    <View className="mx-3 mb-2 gap-2 rounded-xl border border-warning-foreground/25 bg-background p-3">
+    <View className="mx-3 mb-2 gap-2 rounded-xl border border-warning-foreground/25 bg-screen p-3">
+      {chatGptUsageLimit ? (
+        <View className="flex-row items-center gap-2">
+          <ProviderIcon provider="codex" size={16} />
+          <Text className="text-sm font-t3-medium text-warning-foreground">
+            ChatGPT usage limit reached
+          </Text>
+        </View>
+      ) : null}
       <Text className="text-sm text-warning-foreground">
         {resetAt
           ? `Usage limit resets ${DateTime.toDateUtc(DateTime.makeUnsafe(resetAt)).toLocaleString()}.`
-          : "The provider did not report a reset time. Retry manually when your limit is available."}
+          : chatGptUsageLimit
+            ? "Review your usage settings in ChatGPT to continue."
+            : "The provider did not report a reset time. Retry manually when your limit is available."}
       </Text>
+      {chatGptUsageLimit ? (
+        <Pressable
+          accessibilityRole="link"
+          className="min-h-11 self-start justify-center rounded-lg bg-subtle px-3 py-2 active:opacity-70"
+          onPress={() => void Linking.openURL(CHATGPT_USAGE_URL).catch(() => undefined)}
+        >
+          <Text className="text-sm font-t3-medium text-foreground">Manage usage</Text>
+        </Pressable>
+      ) : null}
       {canSchedule ? (
         <View className="flex-row flex-wrap gap-2">
           <Pressable

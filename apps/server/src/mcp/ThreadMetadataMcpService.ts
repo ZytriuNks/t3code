@@ -14,10 +14,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
-import {
-  ThreadManagementError,
-  ThreadManagementService,
-} from "../orchestration-v2/ThreadManagementService.ts";
+import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
 
 export class ThreadMetadataMcpService extends Context.Service<
@@ -38,7 +35,9 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function threadLookupFailure(error: ThreadManagementError): OrchestratorMcpFailure {
+function threadLookupFailure(
+  error: ThreadManagementService.ThreadManagementError,
+): OrchestratorMcpFailure {
   return error._tag === "ThreadManagementThreadNotFoundError"
     ? failure("thread_not_found", error.message)
     : failure("orchestration_error", error.message);
@@ -58,7 +57,7 @@ function commandId(input: {
     [
       "command",
       "mcp",
-      stablePart(input.scope.providerSessionId),
+      stablePart(input.scope.requestNamespace),
       "thread-update",
       stablePart(input.threadId),
       stablePart(input.action),
@@ -134,7 +133,7 @@ function resultFromThread(input: {
 
 const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
-  const threadManagement = yield* ThreadManagementService;
+  const threadManagement = yield* ThreadManagementService.ThreadManagementService;
 
   const update = Effect.fn("ThreadMetadataMcpService.update")(function* (
     scope: McpInvocationScope,
@@ -147,39 +146,32 @@ const make = Effect.gen(function* () {
       );
     }
 
-    const parentShell = yield* threadManagement
-      .getThreadShell(scope.threadId)
-      .pipe(
-        Effect.mapError((error) =>
-          failure(
-            "orchestration_error",
-            `Unable to locate calling thread ${scope.threadId}: ${errorMessage(error)}`,
-          ),
-        ),
+    const threadId = input.threadId ?? scope.thread?.threadId;
+    if (threadId === undefined) {
+      return yield* failure(
+        "target_required",
+        "Pass threadId: this MCP client is not running inside a T3 thread.",
       );
-    if (parentShell === null) {
-      return yield* failure("thread_not_found", `Calling thread ${scope.threadId} was not found.`);
     }
-    const parent = yield* threadManagement
-      .getThreadRecords(scope.threadId, [])
+    const shell = yield* threadManagement
+      .getThreadShell(threadId)
       .pipe(
         Effect.mapError((error) =>
           failure(
             "orchestration_error",
-            `Unable to read calling thread ${scope.threadId}: ${errorMessage(error)}`,
+            `Unable to locate thread ${threadId}: ${errorMessage(error)}`,
           ),
         ),
       );
-    const threadId = input.threadId ?? scope.threadId;
-    const target =
-      threadId === scope.threadId
-        ? parent
-        : yield* threadManagement
-            .getProjectThreadRecords({ projectId: parent.thread.projectId, threadId }, [])
-            .pipe(Effect.mapError(threadLookupFailure));
+    if (shell === null || shell.deletedAt !== null) {
+      return yield* failure("thread_not_found", `Thread ${threadId} was not found.`);
+    }
+    const target = yield* threadManagement
+      .getProjectThreadRecords({ projectId: shell.projectId, threadId }, [])
+      .pipe(Effect.mapError(threadLookupFailure));
     const requestKey =
       input.clientRequestId === undefined
-        ? yield* crypto.randomUUIDv4.pipe(Effect.orDie)
+        ? yield* crypto.randomUUIDv4().pipe(Effect.orDie)
         : input.clientRequestId;
     const updateCommandId = commandId({
       scope,
@@ -227,5 +219,5 @@ const make = Effect.gen(function* () {
 export const layer: Layer.Layer<
   ThreadMetadataMcpService,
   never,
-  Crypto.Crypto | ThreadManagementService
+  Crypto.Crypto | ThreadManagementService.ThreadManagementService
 > = Layer.effect(ThreadMetadataMcpService, make);

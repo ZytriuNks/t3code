@@ -8,6 +8,7 @@ import {
   NodeId,
   ProviderThreadId,
   ProviderTurnId,
+  ProviderDriverKind,
   RunAttemptId,
   RunId,
   MessageId,
@@ -19,11 +20,23 @@ import * as DateTime from "effect/DateTime";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { createInlineBufferPlugin } from "../markdown-streaming";
-import { makeThreadProjectionFixture } from "../test-fixtures";
+import { makeThreadFixture, makeThreadProjectionFixture } from "../test-fixtures";
+import {
+  SubagentConversationOverlay,
+  useSubagentConversation,
+} from "./SubagentConversationOverlay";
+import { ThreadAgentsPanel } from "./ThreadAgentsPanel";
+import { ThreadDetailsPanel, type ThreadDetailsPanelProps } from "./chat/ThreadDetailsPanel";
+import { PopoverCreateHandle } from "./ui/popover";
+import { RightPanelTabs } from "./RightPanelTabs";
+import { DEFAULT_RESOLVED_KEYBINDINGS } from "@t3tools/shared/keybindings";
+import { selectThreadRightPanelState, useRightPanelStore } from "../rightPanelStore";
 
 const v2Projection = makeThreadProjectionFixture();
 
 const state = vi.hoisted(() => ({
+  shells: [] as ReturnType<typeof makeThreadFixture>[],
+  parentProjection: null as OrchestrationV2ThreadProjection | null,
   projection: null as
     | (Partial<OrchestrationV2ThreadProjection> & {
         text: string;
@@ -40,6 +53,8 @@ const state = vi.hoisted(() => ({
     activeTurnInProgress: boolean;
     activeTurnStartedAt: string | null;
     runningRunId: RunId | null;
+    runlessWorkActive: boolean;
+    latestRun: { runId: RunId } | null;
     liveFollowEnabled?: boolean;
     onManualNavigation?: (direction?: -1 | 1) => void;
     onIsAtEndChange?: (isAtEnd: boolean) => void;
@@ -47,22 +62,52 @@ const state = vi.hoisted(() => ({
 }));
 
 vi.mock("~/state/entities", () => ({
-  useThreadShell: () => ({
-    title: "Review child",
-    projectId: "project-test",
-    worktreePath: null,
-    modelSelection: { instanceId: "codex", model: "gpt-6" },
-    lineage: { relationshipToParent: null, parentThreadId: null },
-  }),
+  useThreadShells: () => state.shells,
+  useProjects: () => [],
+  useServerConfigs: () => new Map(),
+  useThreadShell: (ref: ScopedThreadRef | null) =>
+    state.shells.find((shell) => shell.id === ref?.threadId) ?? {
+      title: "Review child",
+      projectId: "project-test",
+      worktreePath: null,
+      modelSelection: { instanceId: "codex", model: "gpt-6" },
+      lineage: { relationshipToParent: null, parentThreadId: null },
+    },
   useThreadProjection: (ref: ScopedThreadRef | null) =>
-    ref === null || state.projection === null
-      ? null
-      : { projection: { ...v2Projection, ...state.projection } },
+    ref?.threadId === "parent" && state.parentProjection !== null
+      ? { projection: state.parentProjection }
+      : ref === null || state.projection === null
+        ? null
+        : { projection: { ...v2Projection, ...state.projection } },
   useThreadVisibleTurnItems: () => [],
+  useThreadTextPlayback: () => null,
   useProject: () => null,
 }));
 
+vi.mock("@tanstack/react-router", () => ({ useNavigate: () => () => undefined }));
+vi.mock("~/hooks/useT3ProjectFileScripts", () => ({ useT3ProjectFileScripts: () => [] }));
+vi.mock("./BranchToolbar", () => ({ BranchToolbar: () => null }));
+vi.mock("./GitActionsControl", () => ({ default: () => null }));
+vi.mock("./ProjectScriptsControl", () => ({ default: () => null }));
+vi.mock("./chat/ThreadAutomationsPanel", () => ({ ThreadAutomationsPanel: () => null }));
+vi.mock("./chat/ThreadDetailsCard", () => ({
+  ThreadDetailsCard: ({ children }: { children: (density: "full") => ReactNode }) =>
+    children("full"),
+}));
+vi.mock("~/lib/archivedThreadsState", () => ({
+  useArchivedThreadSnapshots: () => ({ snapshots: [] }),
+}));
+vi.mock("~/state/use-atom-command", () => ({
+  useAtomCommand: () => async () => ({ _tag: "Success" }),
+}));
+vi.mock("~/state/orchestration", async () => {
+  const { Atom } = await import("effect/reactivity");
+  const granted = Atom.make(true);
+  return { orchestrationEnvironment: { stopWorkflow: { permissionAtom: () => granted } } };
+});
+
 vi.mock("~/state/threads", () => ({
+  threadEnvironment: { mergeBack: {}, stopSession: {}, interruptTurn: {} },
   useEnvironmentThread: () => ({
     status: state.status,
     error: state.error,
@@ -70,8 +115,11 @@ vi.mock("~/state/threads", () => ({
 }));
 
 vi.mock("~/state/environments", () => ({
+  useEnvironment: () => null,
   useEnvironments: () => ({ environments: [] }),
 }));
+
+vi.mock("~/browser/browserDefaults", () => ({ useBrowserDefaults: () => ({ profiles: [] }) }));
 
 vi.mock("~/hooks/useTheme", () => ({
   useTheme: () => ({ resolvedTheme: "light" }),
@@ -115,8 +163,12 @@ vi.mock("./chat/MessagesTimeline", () => ({
     activeTurnInProgress: boolean;
     activeTurnStartedAt: string | null;
     runningRunId: RunId | null;
+    runlessWorkActive: boolean;
+    latestRun: { runId: RunId } | null;
     smoothStreaming: boolean;
     onInitialLayout?: () => void;
+    onOpenThread?: (threadId: ThreadId) => void;
+    parentThreadLink?: { threadId: ThreadId; title: string } | null;
     timelineEntries?: Array<{ text?: string }>;
     listRef?: { current: { getScrollableNode: () => HTMLElement } | null };
   }) {
@@ -163,6 +215,15 @@ vi.mock("./chat/MessagesTimeline", () => ({
         <button type="button" onClick={props.onInitialLayout}>
           Finish initial layout
         </button>
+        {props.parentThreadLink ? (
+          <button
+            data-parent-thread
+            type="button"
+            onClick={() => props.onOpenThread?.(props.parentThreadLink!.threadId)}
+          >
+            {props.parentThreadLink.title}
+          </button>
+        ) : null}
       </div>
     );
   },
@@ -172,19 +233,6 @@ vi.mock("@legendapp/list/react", () => ({
   // The panel only needs a stable ref type in this test; the list itself is mocked above.
 }));
 
-vi.mock("@t3tools/client-runtime/environment", () => ({
-  scopeProjectRef: (environmentId: EnvironmentId, projectId: string) => ({
-    environmentId,
-    projectId,
-  }),
-  scopeThreadRef: (environmentId: EnvironmentId, threadId: ThreadId) => ({
-    environmentId,
-    threadId,
-  }),
-  scopedThreadKey: (threadRef: ScopedThreadRef) =>
-    `${threadRef.environmentId}:${threadRef.threadId}`,
-}));
-
 let SubagentConversationPanel: typeof import("./SubagentConversationPanel").SubagentConversationPanel;
 const mountedRoots: Array<{ root: Root; container: HTMLDivElement }> = [];
 const frames = new Map<number, FrameRequestCallback>();
@@ -192,7 +240,13 @@ const resizeChecks = new Set<() => void>();
 
 beforeEach(async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  Object.defineProperty(Element.prototype, "getAnimations", {
+    configurable: true,
+    value: () => [],
+  });
   state.projection = null;
+  state.shells = [];
+  state.parentProjection = null;
   state.status = "synchronizing";
   state.error = Option.none();
   state.listHidden = false;
@@ -210,12 +264,26 @@ beforeEach(async () => {
   vi.stubGlobal(
     "ResizeObserver",
     class {
-      constructor(private callback: () => void) {}
-      observe() {
-        resizeChecks.add(this.callback);
+      private targets = new Set<Element>();
+      private check = () =>
+        this.callback(
+          [...this.targets].map((target) => ({
+            target,
+            contentRect: target.getBoundingClientRect(),
+          })) as ResizeObserverEntry[],
+        );
+      constructor(private callback: (entries: ResizeObserverEntry[]) => void) {}
+      observe(target: Element) {
+        this.targets.add(target);
+        resizeChecks.add(this.check);
+      }
+      unobserve(target: Element) {
+        this.targets.delete(target);
+        if (this.targets.size === 0) resizeChecks.delete(this.check);
       }
       disconnect() {
-        resizeChecks.delete(this.callback);
+        this.targets.clear();
+        resizeChecks.delete(this.check);
       }
     },
   );
@@ -307,32 +375,44 @@ async function flushContentFrames() {
 
 const nativeStartedAt = DateTime.makeUnsafe("2026-10-16T01:00:00.000Z");
 const partialLink = "Read [label](https://exa";
-type ProviderTurn = OrchestrationV2ThreadProjection["providerTurns"][number];
+type ExecutionNode = OrchestrationV2ThreadProjection["nodes"][number];
 
-function providerTurn(overrides: Partial<ProviderTurn> = {}): ProviderTurn {
+function rootTurn(overrides: Partial<ExecutionNode> = {}): ExecutionNode {
   return {
-    id: ProviderTurnId.make("native-turn"),
-    providerThreadId: ProviderThreadId.make("native-child"),
-    nodeId: NodeId.make("native-root"),
-    runAttemptId: null,
-    nativeTurnRef: null,
-    ordinal: 1,
+    id: NodeId.make("native-root"),
+    threadId: v2Projection.thread.id,
+    runId: null,
+    parentNodeId: null,
+    rootNodeId: NodeId.make("native-root"),
+    kind: "root_turn",
     status: "running",
+    countsForRun: false,
+    providerThreadId: null,
+    providerTurnId: null,
+    nativeItemRef: null,
+    runtimeRequestId: null,
+    checkpointScopeId: null,
     startedAt: nativeStartedAt,
     completedAt: null,
     ...overrides,
   };
 }
 
-function nativeProjection(turns: readonly ProviderTurn[] = [providerTurn()]) {
+function nativeProjection(nodes: readonly ExecutionNode[] = [rootTurn()]) {
   return {
     text: partialLink,
     streaming: true,
     thread: {
       ...v2Projection.thread,
+      creationSource: "provider" as const,
+      lineage: {
+        parentThreadId: ThreadId.make("native-parent"),
+        relationshipToParent: "subagent" as const,
+        rootThreadId: ThreadId.make("native-parent"),
+      },
       activeProviderThreadId: ProviderThreadId.make("native-child"),
     },
-    providerTurns: turns,
+    nodes,
     messages: [
       {
         id: MessageId.make("native-message"),
@@ -357,11 +437,11 @@ function markdownBody(container: HTMLElement) {
 }
 
 describe("native subagent streaming activity", () => {
-  it.each(["completed", "interrupted", "failed", "cancelled"] as const)(
+  it.each(["completed", "interrupted", "failed", "cancelled", "rolled_back", "idle"] as const)(
     "buffers consecutive native fragments until the turn is %s, then releases the suffix",
     async (terminalStatus) => {
       state.status = "live";
-      state.projection = nativeProjection([providerTurn({ status: "pending", startedAt: null })]);
+      state.projection = nativeProjection([rootTurn({ status: "pending", startedAt: null })]);
       const view = await renderPanel("sidebar");
       expect(markdownBody(view.container)).toBe("Read label");
       expect(state.activity).toMatchObject({
@@ -369,6 +449,8 @@ describe("native subagent streaming activity", () => {
         activeTurnInProgress: true,
         activeTurnStartedAt: null,
         runningRunId: null,
+        runlessWorkActive: true,
+        latestRun: null,
       });
 
       for (const text of [partialLink, `${partialLink}mple`, `${partialLink}mple.com`]) {
@@ -386,7 +468,7 @@ describe("native subagent streaming activity", () => {
       // The turn terminal can arrive before the last message clears streaming.
       state.projection = {
         ...state.projection,
-        providerTurns: [providerTurn({ status: terminalStatus, completedAt: nativeStartedAt })],
+        nodes: [rootTurn({ status: terminalStatus, completedAt: nativeStartedAt })],
       };
       await view.update();
       expect(markdownBody(view.container)).toBe(`${partialLink}mple.com`);
@@ -408,7 +490,8 @@ describe("native subagent streaming activity", () => {
       const runId = RunId.make("app-run");
       const startedAt = DateTime.makeUnsafe("2026-10-16T02:00:00.000Z");
       state.projection = {
-        ...nativeProjection(),
+        ...nativeProjection([rootTurn({ runId })]),
+        thread: v2Projection.thread,
         runs: [
           {
             id: runId,
@@ -428,7 +511,6 @@ describe("native subagent streaming activity", () => {
             contextHandoffId: null,
           },
         ],
-        providerTurns: [providerTurn({ runAttemptId: RunAttemptId.make("app-attempt") })],
       };
       const view = await renderPanel("overlay");
       const working = status === "preparing" || status === "starting" || status === "running";
@@ -439,85 +521,192 @@ describe("native subagent streaming activity", () => {
         activeTurnStartedAt: DateTime.formatIso(startedAt),
         runningRunId: working ? runId : null,
       });
-      // A historical application run must not hide subsequent native work,
-      // while an application run waiting for input must retain its behavior.
+      // An unrelated runless node must not turn an ordinary waiting or
+      // completed app thread into provider-native work.
       if (status === "waiting" || status === "completed") {
-        const nextStartedAt = DateTime.makeUnsafe("2026-10-16T03:00:00.000Z");
-        state.projection = {
-          ...state.projection,
-          providerTurns: [providerTurn({ ordinal: 2, startedAt: nextStartedAt })],
-        };
+        state.projection = { ...state.projection, nodes: [rootTurn()] };
         await view.update();
-        expect(markdownBody(view.container)).toBe(
-          status === "completed" ? "Read label" : partialLink,
-        );
+        expect(markdownBody(view.container)).toBe(partialLink);
         expect(state.activity).toMatchObject({
-          isWorking: status === "completed",
-          activeTurnStartedAt: DateTime.formatIso(
-            status === "completed" ? nextStartedAt : startedAt,
-          ),
+          isWorking: false,
+          activeTurnStartedAt: DateTime.formatIso(startedAt),
           runningRunId: null,
+          runlessWorkActive: false,
+          latestRun: { runId },
         });
       }
     },
   );
 
-  it.each([false, true])(
-    "uses only the latest turn of the current provider thread, regardless of array order (%s)",
-    async (reverse) => {
-      const turns = [
-        providerTurn({ ordinal: 1 }),
-        providerTurn({ id: ProviderTurnId.make("newer-turn"), ordinal: 2, status: "completed" }),
-        providerTurn({
-          id: ProviderTurnId.make("unrelated-turn"),
-          providerThreadId: ProviderThreadId.make("unrelated-thread"),
-          ordinal: 99,
-        }),
-      ];
-      state.projection = nativeProjection(reverse ? turns.toReversed() : turns);
-      const view = await renderPanel("sidebar");
-      expect(markdownBody(view.container)).toBe(partialLink);
+  it.each(["pending", "running"] as const)(
+    "restores %s native work without borrowing a historical app run's identity or time",
+    async (status) => {
+      const historicalRunId = RunId.make("historical-run");
+      const before = DateTime.makeUnsafe("2026-10-16T00:00:00.000Z");
       state.projection = {
-        ...state.projection,
-        providerTurns: [
-          ...turns,
-          providerTurn({ id: ProviderTurnId.make("current-turn"), ordinal: 3 }),
+        ...nativeProjection([
+          rootTurn({ status, startedAt: status === "pending" ? null : nativeStartedAt }),
+        ]),
+        runs: [
+          {
+            id: historicalRunId,
+            threadId: v2Projection.thread.id,
+            ordinal: 1,
+            providerInstanceId: v2Projection.thread.providerInstanceId,
+            modelSelection: v2Projection.thread.modelSelection,
+            providerThreadId: null,
+            userMessageId: MessageId.make("historical-message"),
+            rootNodeId: null,
+            activeAttemptId: null,
+            status: "completed",
+            requestedAt: before,
+            startedAt: before,
+            completedAt: before,
+            checkpointId: null,
+            contextHandoffId: null,
+          },
         ],
       };
-      await view.update();
+      const view = await renderPanel("sidebar");
       expect(markdownBody(view.container)).toBe("Read label");
+      expect(state.activity).toMatchObject({
+        isWorking: true,
+        activeTurnInProgress: true,
+        activeTurnStartedAt: status === "pending" ? null : DateTime.formatIso(nativeStartedAt),
+        runlessWorkActive: true,
+        latestRun: null,
+        runningRunId: null,
+      });
       state.projection = {
         ...state.projection,
-        thread: { ...v2Projection.thread, activeProviderThreadId: null },
+        nodes: [rootTurn({ status: "completed", completedAt: nativeStartedAt })],
       };
       await view.update();
       expect(markdownBody(view.container)).toBe(partialLink);
+      expect(state.activity).toMatchObject({
+        isWorking: false,
+        runlessWorkActive: false,
+        latestRun: { runId: historicalRunId },
+        runningRunId: null,
+      });
     },
   );
 
-  it("does not revive an old native turn when the current provider thread changes", async () => {
+  it.each([false, true])(
+    "uses the latest runless root and ignores app-owned or nested work (%s)",
+    async (reverse) => {
+      const unrelated = [
+        rootTurn({ id: NodeId.make("app-root"), runId: RunId.make("app-run") }),
+        rootTurn({
+          id: NodeId.make("nested-tool"),
+          kind: "tool_call",
+          parentNodeId: NodeId.make("native-root"),
+        }),
+      ];
+      const nodes = [
+        rootTurn({ id: NodeId.make("older-root") }),
+        rootTurn({ status: "completed", completedAt: nativeStartedAt }),
+        ...(reverse ? unrelated.toReversed() : unrelated),
+      ];
+      state.projection = nativeProjection(nodes);
+      const view = await renderPanel("sidebar");
+      expect(markdownBody(view.container)).toBe(partialLink);
+      state.projection = nativeProjection([
+        ...nodes,
+        rootTurn({ id: NodeId.make("current-root") }),
+      ]);
+      await view.update();
+      expect(markdownBody(view.container)).toBe("Read label");
+      // Runless root identity survives provider-session handoff or restoration.
+      state.projection = {
+        ...state.projection,
+        thread: { ...nativeProjection().thread, activeProviderThreadId: null },
+      };
+      await view.update();
+      expect(markdownBody(view.container)).toBe("Read label");
+    },
+  );
+
+  it("does not revive a previous child's activity when switching to settled history", async () => {
+    state.projection = nativeProjection();
+    const view = await renderPanel("sidebar");
+    expect(markdownBody(view.container)).toBe("Read label");
+    const restored = nativeProjection([
+      rootTurn({ status: "completed", completedAt: nativeStartedAt }),
+    ]);
+    state.projection = {
+      ...restored,
+      thread: { ...restored.thread, id: ThreadId.make("child-2") },
+      nodes: restored.nodes.map((node) => ({ ...node, threadId: ThreadId.make("child-2") })),
+    };
+    await view.update({ threadRef: threadRef("child-2") });
+    expect(markdownBody(view.container)).toBe(partialLink);
+    expect(state.activity).toMatchObject({ isWorking: false, runlessWorkActive: false });
+    state.projection = nativeProjection();
+    await view.update({ threadRef: threadRef("child-1") });
+    expect(markdownBody(view.container)).toBe("Read label");
+  });
+
+  it("settles from the root status even when a stale provider turn still says running", async () => {
     state.projection = nativeProjection();
     const view = await renderPanel("sidebar");
     expect(markdownBody(view.container)).toBe("Read label");
     state.projection = {
-      ...state.projection,
-      thread: {
-        ...v2Projection.thread,
-        activeProviderThreadId: ProviderThreadId.make("new-provider-thread"),
-      },
+      ...nativeProjection([rootTurn({ status: "completed", completedAt: nativeStartedAt })]),
+      providerTurns: [
+        {
+          id: ProviderTurnId.make("stale-turn"),
+          providerThreadId: ProviderThreadId.make("native-child"),
+          nodeId: NodeId.make("native-root"),
+          runAttemptId: null,
+          nativeTurnRef: null,
+          ordinal: 1,
+          status: "running",
+          startedAt: nativeStartedAt,
+          completedAt: null,
+        },
+      ],
     };
     await view.update();
     expect(markdownBody(view.container)).toBe(partialLink);
+    expect(state.activity).toMatchObject({ isWorking: false, runlessWorkActive: false });
   });
 
-  it("settles a turn with a completion timestamp even if its status still says running", async () => {
-    state.projection = nativeProjection();
+  it("does not treat provider-created ordinary threads as native subagents", async () => {
+    state.projection = {
+      ...nativeProjection(),
+      thread: { ...nativeProjection().thread, lineage: v2Projection.thread.lineage },
+    };
+    const view = await renderPanel("sidebar");
+    expect(markdownBody(view.container)).toBe(partialLink);
+    expect(state.activity).toMatchObject({ isWorking: false, runlessWorkActive: false });
+  });
+
+  it("keeps provider-native waiting work active without inventing an app run", async () => {
+    state.projection = nativeProjection([rootTurn({ status: "waiting" })]);
     const view = await renderPanel("sidebar");
     expect(markdownBody(view.container)).toBe("Read label");
-    state.projection = nativeProjection([providerTurn({ completedAt: nativeStartedAt })]);
-    await view.update();
-    expect(markdownBody(view.container)).toBe(partialLink);
+    expect(state.activity).toMatchObject({
+      isWorking: true,
+      runlessWorkActive: true,
+      activeTurnStartedAt: DateTime.formatIso(nativeStartedAt),
+      runningRunId: null,
+      latestRun: null,
+    });
   });
+
+  it.each(["web", "mcp"] as const)(
+    "does not treat %s-created threads as provider-native work",
+    async (creationSource) => {
+      state.projection = {
+        ...nativeProjection(),
+        thread: { ...nativeProjection().thread, creationSource },
+      };
+      const view = await renderPanel("sidebar");
+      expect(markdownBody(view.container)).toBe(partialLink);
+      expect(state.activity).toMatchObject({ isWorking: false, runlessWorkActive: false });
+    },
+  );
 });
 
 describe("subagent live follow", () => {
@@ -744,6 +933,24 @@ describe("SubagentConversationPanel", () => {
     expect(isReady(view.container)).toBe(true);
   });
 
+  it("cancels pending readiness work and resize observation on unmount", async () => {
+    state.projection = { text: "child response" };
+    state.status = "cached";
+    const onReadyChange = vi.fn();
+    const view = await renderPanel("sidebar", { onReadyChange });
+    await act(() => findElement(view.container, '[data-testid="timeline"] button').click());
+    expect(frames.size).toBeGreaterThan(0);
+    expect(resizeChecks.size).toBeGreaterThan(0);
+    const mounted = mountedRoots.pop()!;
+    await act(() => mounted.root.unmount());
+    mounted.container.remove();
+    expect(frames.size).toBe(0);
+    expect(resizeChecks.size).toBe(0);
+    await flushContentFrames();
+    expect(onReadyChange).toHaveBeenCalledTimes(1);
+    expect(onReadyChange).toHaveBeenLastCalledWith(false);
+  });
+
   it("keeps the overlay mounted until its exit animation completes", async () => {
     state.projection = { text: "child response" };
     state.status = "cached";
@@ -756,7 +963,7 @@ describe("SubagentConversationPanel", () => {
     const event = new Event("webkitAnimationEnd", { bubbles: true });
     Object.defineProperty(event, "animationName", { value: "subagent-conversation-exit" });
     await act(() => {
-      findElement(view.container, ".subagent-conversation-overlay-content").dispatchEvent(event);
+      findElement(view.container, "[data-subagent-overlay-content]").dispatchEvent(event);
     });
     expect(onClosed).toHaveBeenCalledTimes(1);
   });
@@ -773,5 +980,320 @@ describe("SubagentConversationPanel", () => {
       "Could not load this conversation.",
     );
     expect(view.container.querySelector('[aria-label="Back to agents"]')).not.toBeNull();
+  });
+});
+
+function parentProjection(): OrchestrationV2ThreadProjection {
+  return {
+    ...v2Projection,
+    thread: { ...v2Projection.thread, id: threadRef("parent").threadId },
+    subagents: [
+      {
+        id: NodeId.make("child-task"),
+        threadId: threadRef("parent").threadId,
+        runId: null,
+        parentNodeId: NodeId.make("parent-root"),
+        origin: "provider_native",
+        createdBy: "agent",
+        driver: ProviderDriverKind.make("codex"),
+        providerInstanceId: v2Projection.thread.providerInstanceId,
+        providerThreadId: null,
+        childThreadId: threadRef("child-1").threadId,
+        nativeTaskRef: null,
+        prompt: "Review",
+        title: "Review child",
+        model: null,
+        status: "running",
+        result: null,
+        startedAt: nativeStartedAt,
+        completedAt: null,
+        updatedAt: nativeStartedAt,
+      },
+    ],
+  };
+}
+
+function prepareChild() {
+  const parent = makeThreadFixture({
+    id: threadRef("parent").threadId,
+    environmentId,
+    title: "Parent",
+  });
+  const child = makeThreadFixture({
+    id: threadRef("child-1").threadId,
+    environmentId,
+    title: "Review child",
+    lineage: {
+      rootThreadId: parent.id,
+      parentThreadId: parent.id,
+      relationshipToParent: "subagent",
+    },
+  });
+  state.shells = [parent, child];
+  state.parentProjection = parentProjection();
+  state.projection = nativeProjection([rootTurn({ status: "pending", startedAt: null })]);
+  state.status = "live";
+  return parent;
+}
+
+async function renderOverlayEntry(onNavigate = vi.fn()) {
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  mountedRoots.push({ root, container });
+  function Entry({ ownerId }: { ownerId: string }) {
+    const conversation = useSubagentConversation({
+      owner: threadRef(ownerId),
+      projection: parentProjection(),
+      onNavigate,
+    });
+    return (
+      <>
+        <ThreadDetailsPanel
+          anchor={{ current: null }}
+          handle={PopoverCreateHandle()}
+          onPresentationChange={() => {}}
+          environmentId={environmentId}
+          threadId={threadRef(ownerId).threadId}
+          activeProjectName={undefined}
+          activeProjectScripts={undefined}
+          preferredScriptId={null}
+          keybindings={[]}
+          availableEditors={[]}
+          showOpenInPicker={false}
+          gitCwd={null}
+          isGitRepo={false}
+          envLocked={false}
+          availableEnvironments={[]}
+          onEnvironmentChange={() => {}}
+          onEnvModeChange={() => {}}
+          envMode="local"
+          startFromOrigin={false}
+          onStartFromOriginChange={() => {}}
+          onComposerFocusRequest={() => {}}
+          onRunProjectScript={() => {}}
+          onAddProjectScript={vi.fn() as ThreadDetailsPanelProps["onAddProjectScript"]}
+          onUpdateProjectScript={vi.fn() as ThreadDetailsPanelProps["onUpdateProjectScript"]}
+          onDeleteProjectScript={vi.fn() as ThreadDetailsPanelProps["onDeleteProjectScript"]}
+          onOpenThread={conversation.openRelatedThread}
+        />
+        <SubagentConversationOverlay conversation={conversation} composerElement={null} />
+      </>
+    );
+  }
+  const update = async (ownerId = "parent") => {
+    await act(() => root.render(<Entry ownerId={ownerId} />));
+  };
+  await update();
+  const open = async () =>
+    act(() => {
+      const row = [
+        ...container.querySelectorAll<HTMLButtonElement>(
+          "[data-thread-relationships-panel] button",
+        ),
+      ].find((button) => button.textContent?.includes("Review"));
+      if (!row) throw new Error("Missing child lineage entry");
+      row.click();
+    });
+  return { container, update, open, onNavigate };
+}
+
+describe("subagent entry integration with the real conversation panel", () => {
+  it("opens direct children as a preview, waits for real readiness, and closes after the exit", async () => {
+    prepareChild();
+    const view = await renderOverlayEntry();
+    // The parent lineage scrollbar stays mounted when its child preview closes.
+    const parentResizeChecks = new Set(resizeChecks);
+    await view.open();
+    expect(view.onNavigate).not.toHaveBeenCalled();
+    expect(isReady(view.container)).toBe(false);
+    expect(markdownBody(view.container)).toBe("Read label");
+    await finishLayout(view.container);
+    expect(isReady(view.container)).toBe(true);
+    await act(() =>
+      findElement(view.container, '[aria-label="Close subagent conversation"]').click(),
+    );
+    expect(isReady(view.container)).toBe(false);
+    expect(
+      findElement(view.container, "[data-subagent-conversation-panel]").getAttribute(
+        "data-subagent-panel-closing",
+      ),
+    ).toBe("true");
+    const event = new Event("webkitAnimationEnd", { bubbles: true });
+    Object.defineProperty(event, "animationName", { value: "subagent-conversation-exit" });
+    await act(() =>
+      findElement(view.container, "[data-subagent-overlay-content]").dispatchEvent(event),
+    );
+    expect(view.container.querySelector("[data-subagent-conversation-panel]")).toBeNull();
+    expect(frames.size).toBe(0);
+    expect(resizeChecks).toEqual(parentResizeChecks);
+  });
+
+  it("maximizes the preview to the exact environment-scoped child route", async () => {
+    prepareChild();
+    const view = await renderOverlayEntry();
+    await view.open();
+    await finishLayout(view.container);
+    await act(() =>
+      findElement(view.container, '[aria-label="Open subagent conversation"]').click(),
+    );
+    expect(view.onNavigate).toHaveBeenCalledExactlyOnceWith(threadRef("child-1"));
+    expect(view.container.querySelector("[data-subagent-conversation-panel]")).toBeNull();
+  });
+
+  it("keeps parent navigation a full route and clears preview state on owner switches", async () => {
+    prepareChild();
+    const view = await renderOverlayEntry();
+    await view.open();
+    await finishLayout(view.container);
+    await act(() => findElement(view.container, "[data-parent-thread]").click());
+    expect(view.onNavigate).toHaveBeenLastCalledWith(threadRef("parent"));
+    expect(view.container.querySelector("[data-subagent-conversation-panel]")).toBeNull();
+    await view.open();
+    await view.update("other-parent");
+    expect(view.container.querySelector("[data-subagent-conversation-panel]")).toBeNull();
+    await view.update("parent");
+    expect(view.container.querySelector("[data-subagent-conversation-panel]")).toBeNull();
+  });
+
+  it("closes by Escape without navigating away from the parent", async () => {
+    prepareChild();
+    const view = await renderOverlayEntry();
+    await view.open();
+    await finishLayout(view.container);
+    const event = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
+    await act(() => window.dispatchEvent(event));
+    expect(event.defaultPrevented).toBe(true);
+    expect(
+      findElement(view.container, "[data-subagent-conversation-panel]").getAttribute(
+        "data-subagent-panel-closing",
+      ),
+    ).toBe("true");
+    expect(view.onNavigate).not.toHaveBeenCalled();
+  });
+
+  it("opens and returns from an Agents sidebar using real child readiness and maximization", async () => {
+    const parent = prepareChild();
+    const onOpenThread = vi.fn();
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    mountedRoots.push({ root, container });
+    await act(() =>
+      root.render(
+        <ThreadAgentsPanel
+          environmentId={environmentId}
+          threadId={parent.id}
+          projection={parentProjection()}
+          shell={parent}
+          onOpenThread={onOpenThread}
+        />,
+      ),
+    );
+    const roster = findElement(container, "[aria-busy]").lastElementChild as HTMLElement;
+    const open = () => findElement(roster, "button").click();
+    await act(open);
+    expect(roster.hidden).toBe(false);
+    expect(markdownBody(container)).toBe("Read label");
+    await finishLayout(container);
+    expect(roster.hidden).toBe(true);
+    await act(() => findElement(container, '[aria-label="Back to agents"]').click());
+    expect(roster.hidden).toBe(false);
+    expect(container.querySelector("[data-subagent-conversation-panel]")).toBeNull();
+    await act(open);
+    await finishLayout(container);
+    await act(() => findElement(container, '[aria-label="Open subagent conversation"]').click());
+    expect(onOpenThread).toHaveBeenCalledExactlyOnceWith(threadRef("child-1"));
+  });
+
+  it("launches the actual Agents surface, opens its real child panel, and closes back to the launcher", async () => {
+    const parent = prepareChild();
+    const ref = threadRef("parent");
+    useRightPanelStore.setState({ byThreadKey: {} });
+    function Entry() {
+      const panel = useRightPanelStore((store) =>
+        selectThreadRightPanelState(store.byThreadKey, ref),
+      );
+      const active = panel.surfaces.find((surface) => surface.id === panel.activeSurfaceId);
+      const noop = () => {};
+      return (
+        <RightPanelTabs
+          mode="inline"
+          open
+          keybindings={DEFAULT_RESOLVED_KEYBINDINGS}
+          getShortcutContext={() => ({
+            terminalFocus: false,
+            terminalOpen: false,
+            previewFocus: false,
+            previewOpen: false,
+            isWeb: true,
+            isDesktop: false,
+          })}
+          environmentId={environmentId}
+          surfaces={panel.surfaces}
+          activeSurfaceId={panel.activeSurfaceId}
+          pendingSurfaceIds={new Set()}
+          previewSessions={{}}
+          desktopByTabId={{}}
+          terminalLabelsById={new Map()}
+          onActivate={(surface) => useRightPanelStore.getState().activateSurface(ref, surface.id)}
+          onCloseSurface={(surface) => useRightPanelStore.getState().closeSurface(ref, surface.id)}
+          onCloseOtherSurfaces={noop}
+          onCloseSurfacesToRight={noop}
+          onCloseAllSurfaces={noop}
+          onCopyFilePath={noop}
+          onAddBrowser={noop}
+          onAddBrowserInProfile={noop}
+          onAddTerminal={noop}
+          onAddDiff={noop}
+          onAddFiles={noop}
+          onAddPullRequest={noop}
+          onAddPullRequests={noop}
+          onAddDevice={noop}
+          onAddAgents={() => useRightPanelStore.getState().open(ref, "agents")}
+          agentsAvailable
+          browserAvailable={false}
+          terminalAvailable={false}
+          diffAvailable={false}
+          filesAvailable={false}
+          pullRequestAvailable={false}
+          pullRequestsAvailable={false}
+          deviceAvailable={false}
+        >
+          {active?.kind === "agents" ? (
+            <ThreadAgentsPanel
+              environmentId={environmentId}
+              threadId={parent.id}
+              projection={parentProjection()}
+              shell={parent}
+              onOpenThread={noop}
+            />
+          ) : null}
+        </RightPanelTabs>
+      );
+    }
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    mountedRoots.push({ root, container });
+    await act(() => root.render(<Entry />));
+    const launch = [...container.querySelectorAll<HTMLButtonElement>("button")].find((button) =>
+      button.textContent?.includes("Agents"),
+    );
+    expect(launch).toBeDefined();
+    await act(() => launch!.click());
+    expect(
+      selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, ref).activeSurfaceId,
+    ).toBe("agents");
+    const roster = findElement(container, "[aria-busy]").lastElementChild as HTMLElement;
+    await act(() => findElement(roster, "button").click());
+    expect(markdownBody(container)).toBe("Read label");
+    expect(isReady(container)).toBe(false);
+    await finishLayout(container);
+    expect(isReady(container)).toBe(true);
+    expect(roster.hidden).toBe(true);
+    await act(() => findElement(container, 'button[aria-label="Close Agents"]').click());
+    expect(container.querySelector("[data-subagent-conversation-panel]")).toBeNull();
+    expect(container.textContent).toContain("Open a surface");
   });
 });

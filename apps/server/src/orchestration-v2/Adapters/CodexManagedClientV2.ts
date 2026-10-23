@@ -6,7 +6,7 @@ import * as Exit from "effect/Exit";
 import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import type { CodexEffectiveRuntime } from "../../provider/CodexManagedRuntime.ts";
-import type { ProviderAuthController } from "../../provider/Services/ProviderAuthService.ts";
+import type { ProviderAuthController } from "@t3tools/provider-core/server/auth";
 import type { CodexAppServerClientFactoryShape } from "./CodexAdapterV2.ts";
 
 export const makeCodexManagedClientV2 = Effect.fn("makeCodexManagedClientV2")(function* (options: {
@@ -14,6 +14,7 @@ export const makeCodexManagedClientV2 = Effect.fn("makeCodexManagedClientV2")(fu
   readonly input: Parameters<CodexAppServerClientFactoryShape["open"]>[0];
   readonly resolveRuntime: Effect.Effect<CodexEffectiveRuntime, ProviderSetupError, Scope.Scope>;
   readonly withAccess: NonNullable<ProviderAuthController["withAccess"]>;
+  readonly initializeParams: CodexSchema.V1InitializeParams;
 }) {
   type Client = CodexClient.CodexAppServerClient["Service"];
   const registrations: Array<(client: Client) => Effect.Effect<void>> = [];
@@ -87,13 +88,7 @@ export const makeCodexManagedClientV2 = Effect.fn("makeCodexManagedClientV2")(fu
           });
         const next = yield* open;
         yield* Effect.gen(function* () {
-          yield* next.client.request("initialize", {
-            clientInfo: { name: "t3code_desktop", title: "T3 Code Desktop", version: "0.1.0" },
-            capabilities: {
-              experimentalApi: true,
-              optOutNotificationMethods: ["turn/diff/updated"],
-            },
-          });
+          yield* next.client.request("initialize", options.initializeParams);
           yield* next.client.notify("initialized", undefined);
           for (const bind of registrations) yield* bind(next.client);
           yield* next.client.raw.request("thread/resume", {

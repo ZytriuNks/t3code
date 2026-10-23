@@ -15,13 +15,14 @@ import {
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
-import { ProviderAdapterRegistryV2 } from "../ProviderAdapterRegistry.ts";
+import * as ProviderAdapterRegistry from "../ProviderAdapterRegistry.ts";
 
 import { ClaudeOrchestratorReplayHarness } from "../Adapters/ClaudeAdapterV2.testkit.ts";
 import { CodexOrchestratorReplayHarness } from "../Adapters/CodexAdapterV2.testkit.ts";
-import { IdAllocatorV2, layer as idAllocatorLayer } from "../IdAllocator.ts";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import { provideDeterministicTestRuntime } from "./DeterministicRuntime.ts";
 import {
+  CODEX_MODEL_SELECTION,
   THREAD_MERGE_BACK_FORK_PROMPT,
   THREAD_MERGE_BACK_HANDOFF_PROMPT,
   THREAD_MERGE_BACK_RECALL,
@@ -36,11 +37,11 @@ import {
   THREAD_MERGE_BACK_SOURCE_PROMPT,
 } from "./fixtures/shared.ts";
 import { runOrchestratorV2ProviderReplayScenario } from "./ProviderReplayHarness.ts";
-import { makeCheckpointWorkspace } from "./ReplayFixtureWorkspace.ts";
+import { makeCheckpointWorkspace } from "@t3tools/provider-testing/replayWorkspace";
 import {
   decodeProviderReplayNdjson,
   materializeReplayTranscriptWorkspace,
-} from "./ReplayTranscriptNdjson.ts";
+} from "@t3tools/provider-testing/replayTranscript";
 
 // These recorded 0.137 rollouts predate injection. Preserve their native fork
 // and turn exchanges, and assert the new history delivery at the adapter boundary.
@@ -49,9 +50,9 @@ const CodexHistoryReplayHarness: typeof CodexOrchestratorReplayHarness = {
   ...CodexOrchestratorReplayHarness,
   makeProviderAdapterRegistryLayer: (transcript, options) =>
     Layer.effect(
-      ProviderAdapterRegistryV2,
+      ProviderAdapterRegistry.ProviderAdapterRegistryV2,
       Effect.gen(function* () {
-        const registry = yield* ProviderAdapterRegistryV2;
+        const registry = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
         return {
           ...registry,
           get: (id) =>
@@ -97,10 +98,6 @@ const CodexHistoryReplayHarness: typeof CodexOrchestratorReplayHarness = {
     ),
 };
 
-const CODEX_MODEL_SELECTION = {
-  instanceId: ProviderInstanceId.make("codex"),
-  model: "gpt-5.4",
-} as const;
 const CLAUDE_MODEL_SELECTION = {
   instanceId: ProviderInstanceId.make("claudeAgent"),
   model: "claude-sonnet-4-6",
@@ -120,7 +117,8 @@ interface ProviderVariant {
 const PROVIDERS: ReadonlyArray<ProviderVariant> = [
   {
     driver: ProviderDriverKind.make("codex"),
-    modelSelection: CODEX_MODEL_SELECTION,
+    // Recorded on gpt-6-sol: gpt-6-luna tends to recall an acknowledgement instead of the markers.
+    modelSelection: { ...CODEX_MODEL_SELECTION, model: "gpt-6-sol" },
   },
   {
     driver: ProviderDriverKind.make("claudeAgent"),
@@ -259,12 +257,13 @@ function makeCreateCommand(input: {
 }
 
 describe("orchestration V2 merge-back provider replay", () => {
-  for (const variant of PROVIDERS) {
-    it.effect(`merges one fork delta back into the original ${variant.driver} thread`, () =>
+  it.effect.each(PROVIDERS)(
+    "merges one fork delta back into the original $driver thread",
+    (variant) =>
       Effect.gen(function* () {
         const rawTranscript = yield* readTranscript("thread_merge_back_continue", variant.driver);
         const materialized = yield* Effect.gen(function* () {
-          const ids = yield* IdAllocatorV2;
+          const ids = yield* IdAllocator.IdAllocatorV2;
           const projectId = yield* ids.allocate.project({
             fixtureName: `thread-merge-back-${variant.driver}`,
           });
@@ -365,7 +364,7 @@ describe("orchestration V2 merge-back provider replay", () => {
             },
           ] satisfies ReadonlyArray<OrchestrationV2Command>;
           return { commands, sourceThreadId, forkThreadId, forkRunId };
-        }).pipe(Effect.provide(idAllocatorLayer), provideDeterministicTestRuntime);
+        }).pipe(Effect.provide(IdAllocator.layer), provideDeterministicTestRuntime);
         const summary = forkDeltaSummary({
           sourceThreadId: materialized.forkThreadId,
           targetThreadId: materialized.sourceThreadId,
@@ -454,13 +453,15 @@ describe("orchestration V2 merge-back provider replay", () => {
         assert.notInclude(visibleConversationText(source), "Context handoff (");
         assert.include(visibleConversationText(fork), "merge fork stored");
       }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
-    );
+  );
 
-    it.effect(`merges two sibling fork deltas into the original ${variant.driver} thread`, () =>
+  it.effect.each(PROVIDERS)(
+    "merges two sibling fork deltas into the original $driver thread",
+    (variant) =>
       Effect.gen(function* () {
         const rawTranscript = yield* readTranscript("thread_merge_back_siblings", variant.driver);
         const materialized = yield* Effect.gen(function* () {
-          const ids = yield* IdAllocatorV2;
+          const ids = yield* IdAllocator.IdAllocatorV2;
           const fixtureName = `thread-merge-back-siblings-${variant.driver}`;
           const projectId = yield* ids.allocate.project({ fixtureName });
           const sourceThreadId = yield* ids.allocate.thread({
@@ -599,7 +600,7 @@ describe("orchestration V2 merge-back provider replay", () => {
             firstForkRunId,
             secondForkRunId,
           };
-        }).pipe(Effect.provide(idAllocatorLayer), provideDeterministicTestRuntime);
+        }).pipe(Effect.provide(IdAllocator.layer), provideDeterministicTestRuntime);
         const firstSummary = forkDeltaSummary({
           sourceThreadId: materialized.firstForkThreadId,
           targetThreadId: materialized.sourceThreadId,
@@ -727,6 +728,5 @@ describe("orchestration V2 merge-back provider replay", () => {
         assert.include(visibleConversationText(secondFork), "second merge sibling stored");
         assert.notInclude(visibleConversationText(secondFork), "first merge sibling stored");
       }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
-    );
-  }
+  );
 });

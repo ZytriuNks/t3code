@@ -48,6 +48,9 @@ vi.mock("./DiffWorkerPoolProvider", () => ({
   DiffWorkerPoolProvider: ({ children }: { children: ReactNode }) => children,
 }));
 vi.mock("@effect/atom-react", () => ({ useAtomValue: () => null }));
+vi.mock("../state/presentation", () => ({
+  useEnvironmentPresentation: () => ({ isReady: true, presentation: null }),
+}));
 vi.mock("../hooks/useTheme", () => ({ useTheme: () => ({ resolvedTheme: "dark" }) }));
 vi.mock("../hooks/useSettings", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../hooks/useSettings")>();
@@ -58,10 +61,14 @@ vi.mock("../hooks/useSettings", async (importOriginal) => {
       select ? select(settings) : settings,
   };
 });
+vi.mock("../state/query", () => ({
+  useEnvironmentQuery: () => ({ data: null, error: null, refresh: () => {} }),
+}));
 vi.mock("../state/use-atom-query-runner", () => ({ useAtomQueryRunner: () => vi.fn() }));
 vi.mock("../state/use-atom-command", () => ({ useAtomCommand: () => vi.fn() }));
 vi.mock("../state/session", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../state/session")>()),
+  useEnvironmentScope: () => false,
   usePreparedConnection: () => ({ _tag: "None" }),
 }));
 vi.mock("../state/entities", () => ({

@@ -9,9 +9,62 @@ import {
   relatedThreadIds,
   resolveMergeBackTargetThreadId,
   walkThreadRelationships,
+  threadRelationshipRowStatus,
 } from "./threadRelationships.ts";
 
 describe("thread relationships", () => {
+  it.each([
+    ["running", "completed"],
+    ["completed", "running"],
+    ["running", "running"],
+    ["completed", "completed"],
+    ["waiting", "failed"],
+    ["interrupted", "pending"],
+  ])("keeps parent %s independent of child %s", (parentStatus, childStatus) => {
+    const parent = ThreadId.make("parent");
+    const child = ThreadId.make("child");
+    const graph = deriveThreadRelationshipGraph({
+      threads: [
+        {
+          id: parent,
+          activityRunStatus: parentStatus,
+          status: "cancelled",
+          lineage: { parentThreadId: null },
+        },
+        {
+          id: child,
+          activityRunStatus: childStatus,
+          lineage: { parentThreadId: parent, relationshipToParent: "fork" },
+        },
+      ] as never,
+      projection: null,
+    });
+    expect(threadRelationshipRowStatus(graph, immediateThreadRelationships(graph, child)[0]!)).toBe(
+      parentStatus,
+    );
+    expect(
+      threadRelationshipRowStatus(graph, immediateThreadRelationships(graph, parent)[0]!),
+    ).toBe(childStatus);
+  });
+
+  it("does not label a missing parent with its child's running status", () => {
+    const parent = ThreadId.make("missing-parent");
+    const child = ThreadId.make("child");
+    const graph = deriveThreadRelationshipGraph({
+      threads: [
+        {
+          id: child,
+          status: "running",
+          lineage: { parentThreadId: parent, relationshipToParent: "subagent" },
+        },
+      ] as never,
+      projection: null,
+    });
+    expect(
+      threadRelationshipRowStatus(graph, immediateThreadRelationships(graph, child)[0]!),
+    ).toBeNull();
+  });
+
   it("keeps an older activity run visible over a newer cancelled run", () => {
     const parent = ThreadId.make("thread-parent");
     const child = ThreadId.make("thread-child");
@@ -133,6 +186,44 @@ describe("thread relationships", () => {
       ]),
     );
   });
+
+  it.each([
+    ["running", "running", "running"],
+    ["waiting", "completed", "waiting"],
+    [null, "queued", "queued"],
+    [null, "failed", "failed"],
+    [null, "interrupted", "interrupted"],
+    [null, "cancelled", "cancelled"],
+    [null, "completed", "completed"],
+    [null, "rolled_back", "interrupted"],
+  ])(
+    "shows child activity %s and latest status %s as %s after its delegated task settled",
+    (childActivity, childStatus, expected) => {
+      const parent = ThreadId.make("thread-parent");
+      const child = ThreadId.make("thread-child");
+      const graph = deriveThreadRelationshipGraph({
+        threads: [
+          { id: parent, status: "completed", forkedFrom: null, lineage: { parentThreadId: null } },
+          {
+            id: child,
+            status: childStatus,
+            activityRunStatus: childActivity,
+            latestRunId: "run-child-followup",
+            forkedFrom: null,
+            lineage: { parentThreadId: parent, relationshipToParent: "subagent" },
+          },
+        ] as never,
+        projection: {
+          thread: { id: parent },
+          subagents: [{ childThreadId: child, status: "completed" }],
+          contextTransfers: [],
+        } as never,
+      });
+
+      const row = immediateThreadRelationships(graph, parent)[0]!;
+      expect(threadRelationshipRowStatus(graph, row)).toBe(expected);
+    },
+  );
 
   it("keeps the live shell when an archived snapshot contains the same thread id", () => {
     const parent = ThreadId.make("thread-parent");

@@ -1,3 +1,4 @@
+import * as OtelEnvironment from "@t3tools/shared/otelEnvironment";
 import { DEFAULT_SIGNAL_EXPORT } from "@t3tools/shared/observability";
 // @effect-diagnostics nodeBuiltinImport:off - CLI integration uses temporary Node paths.
 import * as NodeFS from "node:fs";
@@ -22,23 +23,22 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as References from "effect/References";
 import * as Stream from "effect/Stream";
-import { Command } from "effect/unstable/cli";
+import { Command } from "effect/cli";
 
+import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import { cli } from "../binCli.ts";
 import * as ServerConfig from "../config.ts";
-import { EventSinkV2 } from "../orchestration-v2/EventSink.ts";
+import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as EventStore from "../orchestration-v2/EventStore.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
-import {
-  OrchestrationV2EventSinkLayerLive,
-  ProjectServiceLayerLive,
-} from "../orchestration-v2/runtimeLayer.ts";
-import { layerConfig as SqlitePersistenceLayerLive } from "../persistence/Layers/Sqlite.ts";
+import * as RuntimeLayer from "../orchestration-v2/runtimeLayer.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ProjectEnrichmentService from "../project/ProjectEnrichmentService.ts";
 import * as ProjectFaviconResolver from "../project/ProjectFaviconResolver.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
 import * as T3ProjectFileLoader from "../project/T3ProjectFileLoader.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import {
   ProjectLiveServerDeclaredResponseError,
@@ -46,9 +46,9 @@ import {
   projectCommandErrorFromLiveServerRequest,
 } from "./project.ts";
 
-const CliRuntimeLayer = Layer.mergeAll(NodeServices.layer, NetService.layer);
+const layerCliRuntime = Layer.mergeAll(NodeServices.layer, NetService.layer);
 const runCli = (args: ReadonlyArray<string>) =>
-  Command.runWith(cli, { version: "0.0.0" })(args).pipe(Effect.provide(CliRuntimeLayer));
+  Command.runWith(cli, { version: "0.0.0" })(args).pipe(Effect.provide(layerCliRuntime));
 
 const makeConfig = (baseDir: string) =>
   Effect.gen(function* () {
@@ -60,13 +60,13 @@ const makeConfig = (baseDir: string) =>
       traceBatchWindowMs: 200,
       traceMaxBytes: 10 * 1024 * 1024,
       traceMaxFiles: 10,
+      otelEnvironment: OtelEnvironment.none,
       otlpTracesUrl: undefined,
       otlpMetricsUrl: undefined,
       otlpLogsUrl: undefined,
       otlpTracesExport: DEFAULT_SIGNAL_EXPORT,
       otlpMetricsExport: DEFAULT_SIGNAL_EXPORT,
       otlpLogsExport: DEFAULT_SIGNAL_EXPORT,
-      otlpServiceName: "t3-server",
       mode: "web",
       port: 0,
       host: "127.0.0.1",
@@ -89,13 +89,14 @@ const makeConfig = (baseDir: string) =>
 const readProjects = (baseDir: string) =>
   Effect.gen(function* () {
     const config = yield* makeConfig(baseDir);
-    const layer = ProjectServiceLayerLive.pipe(
+    const layer = RuntimeLayer.layerProjectService.pipe(
       Layer.provideMerge(ProjectEnrichmentService.layer),
       Layer.provideMerge(RepositoryIdentityResolver.layer),
       Layer.provideMerge(ProjectFaviconResolver.layer),
       Layer.provideMerge(T3ProjectFileLoader.layer),
       Layer.provideMerge(WorkspacePaths.layer),
-      Layer.provideMerge(SqlitePersistenceLayerLive),
+      Layer.provideMerge(ServerSettings.layer.pipe(Layer.provide(ServerSecretStore.layer))),
+      Layer.provideMerge(SqlitePersistence.layerConfig),
       Layer.provideMerge(NodeServices.layer),
       Layer.provide(ServerConfig.layer(config)),
       Layer.provide(Layer.succeed(References.MinimumLogLevel, config.logLevel)),
@@ -170,11 +171,11 @@ const makeThreadPersistenceLayer = Effect.fn("ProjectCliTest.makeThreadPersisten
   function* (baseDir: string) {
     const config = yield* makeConfig(baseDir);
     return Layer.mergeAll(
-      OrchestrationV2EventSinkLayerLive,
+      RuntimeLayer.layerEventSink,
       ProjectionStore.layer,
       EventStore.layer,
     ).pipe(
-      Layer.provideMerge(SqlitePersistenceLayerLive),
+      Layer.provideMerge(SqlitePersistence.layerConfig),
       Layer.provideMerge(NodeServices.layer),
       Layer.provide(ServerConfig.layer(config)),
       Layer.provide(Layer.succeed(References.MinimumLogLevel, config.logLevel)),
@@ -194,7 +195,7 @@ const seedNativeThreads = Effect.fn("ProjectCliTest.seedNativeThreads")(function
   const createdAt = DateTime.makeUnsafe("2026-09-04T12:00:00.000Z");
   const providerInstanceId = ProviderInstanceId.make("codex");
   yield* Effect.gen(function* () {
-    const eventSink = yield* EventSinkV2;
+    const eventSink = yield* EventSink.EventSinkV2;
     yield* eventSink.write({
       commandId: CommandId.make("project-cli-seed-threads"),
       events: threads.map(({ id, projectId, archived }) => {

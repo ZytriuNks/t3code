@@ -8,7 +8,8 @@ import {
   ThreadId,
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
-import { ThreadLinkedPullRequest, ThreadTitleRegeneration } from "./orchestration.ts";
+import { ThreadLinkedPullRequest } from "./threadPullRequest.ts";
+import { ThreadTitleRegeneration } from "./threadTitle.ts";
 
 function hasOnlyPairedSurrogates(value: string): boolean {
   for (let index = 0; index < value.length; index += 1) {
@@ -79,7 +80,7 @@ export type ThreadMetadataMcpPullRequest = typeof ThreadMetadataMcpPullRequest.T
 
 export const ThreadMetadataMcpUpdateInput = Schema.Struct({
   threadId: Schema.optional(ThreadId).annotate({
-    description: "Thread in the calling project. Omit to update the calling thread.",
+    description: "Thread to update. Omit to update the calling thread.",
   }),
   action: ThreadMetadataMcpAction,
   title: Schema.optional(ThreadMetadataTitle),

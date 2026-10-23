@@ -1,13 +1,15 @@
+import { observeResize } from "~/lib/observeResize";
 import {
   scopeProjectRef,
   scopeThreadRef,
   scopedThreadKey,
 } from "@t3tools/client-runtime/environment";
 import {
-  deriveActiveNativeProviderTurn,
+  deriveProviderSubagentStatus,
   deriveThreadActivityRun,
 } from "@t3tools/client-runtime/state/thread-execution";
 import {
+  isOrchestrationV2WorkActive,
   type MessageId,
   type RunId,
   type ScopedThreadRef,
@@ -16,7 +18,6 @@ import {
 import { ArrowLeft, Maximize2, X } from "lucide-react";
 import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import * as Option from "effect/Option";
-import * as DateTime from "effect/DateTime";
 import { useTheme } from "~/hooks/useTheme";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { useEnvironmentSettings } from "~/hooks/useSettings";
@@ -27,6 +28,7 @@ import {
   useThreadProjection,
   useThreadShell,
   useThreadVisibleTurnItems,
+  useThreadTextPlayback,
 } from "~/state/entities";
 import { cn } from "~/lib/utils";
 import { deriveTimelineEntriesFromVisibleTurnItemsWithState } from "~/session-logic";
@@ -69,12 +71,11 @@ function isActiveRun(status: string | undefined): boolean {
 
 function ThreadPanelHeader({
   title,
-  mode,
   onBack,
   onClose,
   onMaximize,
   modelInfo,
-}: Pick<SubagentConversationPanelProps, "title" | "mode" | "onBack" | "onClose" | "onMaximize"> & {
+}: Pick<SubagentConversationPanelProps, "title" | "onBack" | "onClose" | "onMaximize"> & {
   modelInfo: ReturnType<typeof resolveSubagentModelInfo>;
 }) {
   return (
@@ -91,7 +92,7 @@ function ThreadPanelHeader({
         info={modelInfo}
         className="max-w-2/3 text-right text-3xs text-muted-foreground"
       />
-      {mode === "overlay" && onMaximize ? (
+      {onMaximize ? (
         <Button
           variant="ghost"
           size="icon-xs"
@@ -132,6 +133,7 @@ export function SubagentConversationPanel({
   const projection = detail?.projection ?? null;
   const threadState = useEnvironmentThread(threadRef.environmentId, threadRef.threadId);
   const visibleTurnItems = useThreadVisibleTurnItems(threadRef);
+  const textPlayback = useThreadTextPlayback(threadRef);
   const parentThreadRef = useMemo(() => {
     const parentThreadId =
       shell?.lineage.relationshipToParent === "subagent" ? shell.lineage.parentThreadId : null;
@@ -179,17 +181,16 @@ export function SubagentConversationPanel({
     () => (projection === null ? null : deriveThreadActivityRun(projection)),
     [projection],
   );
-  const nativeActivityTurn = useMemo(
-    () => (projection === null ? null : deriveActiveNativeProviderTurn(projection)),
+  const providerSubagentStatus = useMemo(
+    () => (projection === null ? null : deriveProviderSubagentStatus(projection)),
     [projection],
   );
-  const isWorking = isActiveRun(activityRun?.status) || nativeActivityTurn !== null;
-  const activeTurnStartedAt =
-    nativeActivityTurn !== null
-      ? nativeActivityTurn.startedAt === null
-        ? null
-        : DateTime.formatIso(nativeActivityTurn.startedAt)
-      : (activityRun?.startedAt ?? null);
+  const runlessWorkActive =
+    providerSubagentStatus !== null && isOrchestrationV2WorkActive(providerSubagentStatus.status);
+  const isWorking = isActiveRun(activityRun?.status) || runlessWorkActive;
+  const activeTurnStartedAt = runlessWorkActive
+    ? providerSubagentStatus.startedAt
+    : (activityRun?.startedAt ?? null);
   const providerStatuses =
     environments.find((environment) => environment.environmentId === threadRef.environmentId)
       ?.serverConfig?.providers ?? EMPTY_PROVIDER_STATUSES;
@@ -298,7 +299,7 @@ export function SubagentConversationPanel({
       if (geometry === previousGeometry) {
         disposed = true;
         observer.disconnect();
-        resizeObserver.disconnect();
+        stopObservingResize();
         setReadyThreadKey(routeKey);
       } else {
         previousGeometry = geometry;
@@ -315,14 +316,13 @@ export function SubagentConversationPanel({
       attributes: true,
       attributeFilter: ["style", "hidden", "data-markdown-code-pending", "data-timeline-empty"],
     });
-    const resizeObserver = new ResizeObserver(scheduleContentCheck);
-    resizeObserver.observe(viewport);
+    const stopObservingResize = observeResize(viewport, scheduleContentCheck);
     scheduleContentCheck();
     return () => {
       disposed = true;
       if (frame !== null) cancelAnimationFrame(frame);
       observer.disconnect();
-      resizeObserver.disconnect();
+      stopObservingResize();
     };
   }, [layoutThreadKey, ready, routeKey, threadState.status]);
   useLayoutEffect(() => {
@@ -340,9 +340,9 @@ export function SubagentConversationPanel({
   return (
     <PanelSurface
       className={cn(
-        "subagent-conversation-panel flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden",
+        "flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden",
         mode === "overlay"
-          ? "subagent-conversation-overlay rounded-xl shadow-composer dark:shadow-none before:rounded-xl"
+          ? "rounded-xl shadow-composer dark:shadow-none before:rounded-xl"
           : "bg-background",
       )}
       data-subagent-conversation-panel={mode}
@@ -352,10 +352,8 @@ export function SubagentConversationPanel({
       inert={!ready || closing}
     >
       <div
-        className={cn(
-          "relative z-10 flex min-h-0 flex-1 flex-col",
-          mode === "overlay" && "subagent-conversation-overlay-content",
-        )}
+        data-subagent-overlay-content={mode === "overlay" ? "" : undefined}
+        className="relative z-10 flex min-h-0 flex-1 flex-col"
         onAnimationEnd={(event) => {
           if (closing && event.animationName === "subagent-conversation-exit") {
             onClosed?.();
@@ -364,7 +362,6 @@ export function SubagentConversationPanel({
       >
         <ThreadPanelHeader
           title={threadTitle}
-          mode={mode}
           onBack={onBack}
           onClose={onClose}
           onMaximize={onMaximize}
@@ -378,6 +375,7 @@ export function SubagentConversationPanel({
           ) : projection !== null ? (
             <MessagesTimeline
               key={routeKey}
+              textPlayback={textPlayback}
               onInitialLayout={onTimelineInitialLayout}
               isWorking={isWorking}
               activeTurnInProgress={isWorking}
@@ -397,9 +395,9 @@ export function SubagentConversationPanel({
               conversationStructureThinkingLabel={settings.conversationStructureThinkingLabel}
               listRef={listRef}
               timelineEntries={timelineProjection.entries}
-              latestRun={nativeActivityTurn === null ? activityRun : null}
+              latestRun={runlessWorkActive ? null : activityRun}
               runningRunId={isActiveRun(activityRun?.status) ? (activityRun?.runId ?? null) : null}
-              activeProviderTurnId={nativeActivityTurn?.id ?? null}
+              runlessWorkActive={runlessWorkActive}
               turnDiffSummaries={EMPTY_TURN_DIFF_SUMMARIES}
               routeThreadKey={routeKey}
               displayThreadKey={routeKey}

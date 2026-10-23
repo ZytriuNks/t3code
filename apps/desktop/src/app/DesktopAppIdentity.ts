@@ -85,16 +85,18 @@ export const make = Effect.gen(function* () {
     return commitHash;
   });
 
-  const userDataPath = DesktopUserData.resolveUserDataPath({
-    appDataDirectory: environment.appDataDirectory,
-    isDevelopment: environment.isDevelopment,
-    platform: environment.platform,
-    appName: environment.appName ?? "T3 Code (Experimental)",
-  }).pipe(Effect.provide(userDataContext));
+  const userDataPath = DesktopUserData.resolveUserDataPath(environment).pipe(
+    Effect.provide(userDataContext),
+  );
 
   const configure = Effect.gen(function* () {
     const commitHash = yield* resolveAboutCommitHash;
-    yield* electronApp.setName(environment.displayName);
+    // Electron removes spaces from this name to build the native User-Agent
+    // product token, but leaves parentheses intact. Keep the runtime name valid
+    // without rewriting preview sessions (which breaks Turnstile, #7110).
+    yield* electronApp.setName(
+      `${environment.branding.baseName} ${environment.branding.stageLabel}`,
+    );
     yield* electronApp.setAboutPanelOptions({
       applicationName: environment.displayName,
       applicationVersion: environment.appVersion,

@@ -406,9 +406,10 @@ export function showContextMenuFallback<T extends string>(
       menu.dataset.level = String(level);
 
       const inner = document.createElement("div");
-      inner.className = "w-full min-w-0 max-w-sm overflow-x-hidden p-1";
+      inner.className =
+        "max-h-[calc(100vh-0.5rem)] w-full min-w-0 max-w-sm overflow-y-auto overflow-x-hidden p-1";
       inner.style.cssText =
-        "width:100%;min-width:0;max-width:24rem;overflow-x:hidden;padding:0.25rem;";
+        "width:100%;max-height:calc(100vh - 0.5rem);min-width:0;max-width:24rem;overflow-x:hidden;overflow-y:auto;padding:0.25rem;";
 
       const enabledButtons = () =>
         [...inner.querySelectorAll<HTMLButtonElement>("button")].filter(
@@ -562,15 +563,13 @@ export function showContextMenuFallback<T extends string>(
           };
           highlightUpdates.set(button, updateHighlight);
           button.addEventListener("mouseenter", () => {
-            // Pointer hover transfers real DOM focus to the row so keyboard
-            // activation still works, but `isKeyboardFocused` stays false so
-            // the highlight is purely visual. Blur whichever row currently
-            // owns focus so opening a nested submenu doesn't leave its first
-            // row focused.
-            if (document.activeElement && document.activeElement !== button) {
-              (document.activeElement as HTMLElement).blur();
+            // Editing menus keep the input focused so hovering cannot commit its draft.
+            if (!options.preserveFocus) {
+              if (document.activeElement && document.activeElement !== button) {
+                (document.activeElement as HTMLElement).blur();
+              }
+              button.focus({ preventScroll: true });
             }
-            button.focus({ preventScroll: true });
             hoveredButton = button;
             isHovered = true;
             updateHighlight();

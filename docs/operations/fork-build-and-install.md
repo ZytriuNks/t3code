@@ -1,7 +1,7 @@
 # Fork 构建与安装指南
 
-本 fork 基于 `productName` 派生三个桌面身份：Alpha（已合并并审验的
-主用基线）、Experimental（待审验候选）、Dev（参考对照）。本指南说明
+本 fork 基于 `productName` 派生三个桌面身份：Beta（主用基线，覆盖当前
+Alpha）、Experimental（待审验候选）、Dev（参考对照）。本指南说明
 构建、安装与身份核验；维护者本地的 PR 和构建记录保存在 `AGENTS-local/`。
 
 ## 三个身份如何隔离
@@ -10,12 +10,12 @@
 
 | productName              | 安装目录                                         | Chromium userData                | Server t3Home         |
 | ------------------------ | ------------------------------------------------ | -------------------------------- | --------------------- |
-| `T3 Code (Alpha)`        | `D:\t3code\alpha\T3 Code (Alpha)\`               | `%APPDATA%\t3code\`              | `~\.t3-alpha\`        |
+| `T3 Code (Beta)`         | 复用当前 Alpha 安装目录（由安装脚本解析）        | `%APPDATA%\t3code\`              | `~\.t3-alpha\`        |
 | `T3 Code (Experimental)` | `D:\t3code\experimental\T3 Code (Experimental)\` | `%APPDATA%\t3code-experimental\` | `~\.t3-experimental\` |
 | `T3 Code (Dev)`          | `D:\t3code\dev\T3 Code (Dev)\`                   | `%APPDATA%\t3code-dev\`          | `~\.t3-dev\`          |
 
 构建身份由 `scripts/build-desktop-artifact.ts` 中的
-`DESKTOP_IDENTITY_BY_PRODUCT_NAME` 决定。运行时的名称、系统身份、
+`resolveDesktopIdentity` 决定。运行时的名称、系统身份、
 数据目录和协议仍分别由桌面模块派生，修改构建表并不会自动更新这些判断。
 
 安装版 Dev 的 `isDevelopment` 仍为 `false`；这个字段表示是否连接开发服务器，
@@ -36,17 +36,16 @@
 
 安装完成后您能在以下三处看到 fork：
 
-1. `D:\t3code\alpha\T3 Code (Alpha)\`、`D:\t3code\experimental\…`、
-   `D:\t3code\dev\…` 三个目录互不重叠。
-2. `HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall` 下三
-   条独立的卸载项 `T3 Code (Alpha) 0.0.42-fork-1` 等。
-3. `~\.t3-alpha\`、`~\.t3-experimental\`、`~\.t3-dev\` 三个目录，
-   每个目录下的 `userdata\statev2.sqlite` 持有各自的对话与设置。
+1. Beta 覆盖当前 Alpha 的安装目录；Experimental 和 Dev 保持各自目录。
+2. `HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall` 下保留
+   当前阶段的卸载项，Beta 安装前会清理 Beta/Alpha 的旧项。
+3. Beta/Alpha 共用 `~\.t3-alpha\` 和 `%APPDATA%\t3code\`；
+   `~\.t3-experimental\`、`~\.t3-dev\` 仍各自隔离。
 
 ## 构建流程
 
 为每个阶段分别选择源码基线和版本号。Experimental 使用待审验分支；Dev
-使用对应的已合并基线；Alpha 仅在明确请求后构建。严格 A/B 对照需要记录
+使用对应的已合并基线；Beta 为当前主用基线。严格 A/B 对照需要记录
 两包的源码提交，确认差异范围，不能仅凭相近版本号判断。
 
 构建前核对 `release/`、存档目录以及已安装版本，选择该阶段尚未使用的新版本号。
@@ -98,22 +97,23 @@ fork build 时会进入 `UninstallLoop`：调旧版 uninstaller，失败 5 次
 安装一次成功。
 
 ```powershell
-# 用户先关闭要升级的 Dev / Experimental，再按阶段分别调用
+# 用户先关闭要升级的 Beta / Experimental / Dev，再按阶段分别调用
+pwsh .\scripts\fork-build\install-fork.ps1 -Stage Beta
 pwsh .\scripts\fork-build\install-fork.ps1 -Stage Dev
 pwsh .\scripts\fork-build\install-fork.ps1 -Stage Experimental
 ```
 
 `Stage` 是单值参数，不支持 `-Stage Experimental,Dev`。不要使用 `-Force`：
-当前脚本会停止所有匹配的 T3 进程，可能关闭主用 Alpha。Alpha 安装按维护者
-明确安排手动执行。
+当前脚本会停止所有匹配的 T3 进程，可能关闭主用 Beta。Beta 安装按维护者
+明确安排执行。
 
 显式使用 `-InstallerPath` 时必须与单个 `-Stage` 匹配；不要将它与 `-Stage All`
 组合，否则三个阶段会重复执行同一个安装包，并清理其他阶段的卸载项。
 
 ## 数据迁移 / 备份
 
-- Alpha baseline：`~\.t3-alpha\userdata\` 即为基线；上游 Alpha
-  release 若用本 fork 派生，会自动继承此目录。
+- Beta baseline：`~\.t3-alpha\userdata\` 即为基线；Beta 会继承当前 Alpha
+  的服务器状态和 Electron userData 身份。
 - 上游 stock Alpha release：NSIS 装到
   `%LOCALAPPDATA%\Programs\T3 Code\`，对应 Chromium userData 为
   `%APPDATA%\T3 Code\`、t3Home 为 `~\.t3\`——和本 fork 的

@@ -6,6 +6,12 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import type * as EffectAcpSchema from "effect-acp/compat";
 import * as NodePath from "node:path";
+import * as NodeFSP from "node:fs/promises";
+
+const linkDirectory = (target: string, link: string) =>
+  Effect.tryPromise(() =>
+    NodeFSP.symlink(target, link, process.platform === "win32" ? "junction" : "dir"),
+  );
 
 import {
   acpClientExecuteDisposition,
@@ -15,7 +21,7 @@ import {
   acpPermissionDisposition,
   makeAcpClientPolicyGrants,
   type AcpRuntimePolicy,
-} from "./AcpClientPolicy.ts";
+} from "@t3tools/provider-acp/server/clientPolicy";
 
 function permissionRequest(
   kind: NonNullable<EffectAcpSchema.RequestPermissionRequest["toolCall"]["kind"]>,
@@ -103,8 +109,12 @@ describe("acpPermissionDisposition", () => {
       });
       const outsideFile = path.join(outside, "existing.ts");
       yield* fileSystem.writeFileString(outsideFile, "outside");
-      yield* fileSystem.symlink(outsideFile, path.join(workspace, "linked-file.ts"));
-      yield* fileSystem.symlink(outside, path.join(workspace, "linked-directory"));
+      const linkedFile =
+        process.platform === "win32" ? "linked-file/existing.ts" : "linked-file.ts";
+      if (process.platform === "win32")
+        yield* linkDirectory(outside, path.join(workspace, "linked-file"));
+      else yield* fileSystem.symlink(outsideFile, path.join(workspace, linkedFile));
+      yield* linkDirectory(outside, path.join(workspace, "linked-directory"));
 
       const realPolicy: AcpRuntimePolicy = {
         runtimeMode: "full-access",
@@ -118,10 +128,7 @@ describe("acpPermissionDisposition", () => {
       };
 
       assert.equal(
-        acpPermissionDisposition(
-          realPolicy,
-          permissionRequest("edit", [{ path: "linked-file.ts" }]),
-        ),
+        acpPermissionDisposition(realPolicy, permissionRequest("edit", [{ path: linkedFile }])),
         "deny",
       );
       assert.equal(
@@ -137,8 +144,8 @@ describe("acpPermissionDisposition", () => {
           realPolicy,
           permissionRequest("edit", [{ path: "linked-directory/../escaped-file.ts" }]),
         ),
-        "deny",
-        "physical symlink traversal must be resolved before parent segments",
+        process.platform === "win32" ? "allow" : "deny",
+        "Win32 normalizes parent segments before junction traversal; POSIX resolves symlinks first",
       );
     }).pipe(Effect.provide(NodeServices.layer)),
   );
@@ -156,7 +163,7 @@ describe("acpPermissionDisposition", () => {
       const workspaceLink = path.join(workspaceLinkParent, "workspace-link");
       yield* fileSystem.makeDirectory(path.join(workspace, "src"), { recursive: true });
       yield* fileSystem.writeFileString(path.join(workspace, "src", "existing.ts"), "existing");
-      yield* fileSystem.symlink(workspace, workspaceLink);
+      yield* linkDirectory(workspace, workspaceLink);
 
       const realPolicy: AcpRuntimePolicy = {
         runtimeMode: "full-access",
@@ -269,12 +276,15 @@ describe("client-mediated dispositions", () => {
     assert.equal(acpClientExecuteDisposition(policy), "ask");
   });
 
-  it("allows in auto and full-access modes without an explicit sandbox", () => {
+  it("allows automatic file operations while auto-accept-edits still asks for commands", () => {
     for (const runtimeMode of ["auto", "auto-accept-edits", "full-access"] as const) {
       const policy: AcpRuntimePolicy = { runtimeMode, cwd };
       assert.equal(acpClientReadDisposition(policy, NodePath.join(cwd, "file.ts")), "allow");
       assert.equal(acpClientWriteDisposition(policy, NodePath.join(cwd, "file.ts")), "allow");
-      assert.equal(acpClientExecuteDisposition(policy), "allow");
+      assert.equal(
+        acpClientExecuteDisposition(policy),
+        runtimeMode === "auto-accept-edits" ? "ask" : "allow",
+      );
     }
   });
 
@@ -414,7 +424,7 @@ describe("makeAcpClientPolicyGrants", () => {
         prefix: "t3-acp-grant-outside-",
       });
       yield* fileSystem.makeDirectory(path.join(workspace, "approved"), { recursive: true });
-      yield* fileSystem.symlink(outside, path.join(workspace, "approved", "linked"));
+      yield* linkDirectory(outside, path.join(workspace, "approved", "linked"));
 
       const grants = makeAcpClientPolicyGrants();
       grants.recordApproval({

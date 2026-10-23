@@ -4,7 +4,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 
-import * as HostProcess from "./hostProcess.ts";
+import * as HostProcess from "./HostProcess.ts";
 import { isCommandAvailable, resolveCommandPath } from "./shell.ts";
 
 type Editor = (typeof EDITORS)[number];
@@ -33,7 +33,7 @@ const resolveNonCursorVscodePath = Effect.fn("editor.resolveNonCursorVscodePath"
     const entry = rawEntry.trim().replace(/^"+|"+$/g, "");
     if (entry.length === 0) continue;
     const candidate = yield* resolveCommandPath(path.join(entry, "code"), { env }).pipe(
-      Effect.option,
+      Effect.map(Option.fromNullishOr),
     );
     if (Option.isSome(candidate) && candidate.value !== cursorPath) {
       if (!isCursorCodeShim(candidate.value)) return Option.some(candidate.value);
@@ -42,13 +42,21 @@ const resolveNonCursorVscodePath = Effect.fn("editor.resolveNonCursorVscodePath"
   return Option.none<string>();
 });
 
+/** True for `<name> <version>.app`, where the version is digits and dots (`IntelliJ IDEA 2026.1.4.app`).
+ * A plain prefix match would let one editor steal another's bundle, e.g. stable VS Code resolving to
+ * `Visual Studio Code - Insiders.app`. */
+const isVersionedBundle = (entry: string, name: string) => {
+  if (!entry.startsWith(`${name} `) || !entry.endsWith(".app")) return false;
+  return /^\d[\d.]*$/.test(entry.slice(name.length + 1, -".app".length));
+};
+
 export const resolveEditorCommand = Effect.fn("editor.resolveEditorCommand")(function* (
   editor: Editor,
   env: NodeJS.ProcessEnv,
 ) {
   if (editor.commands === null) return Option.none();
   const baseArgs = "baseArgs" in editor ? editor.baseArgs : [];
-  const platform = yield* HostProcess.HostProcessPlatform;
+  const platform = yield* HostProcess.Platform;
   let skipBareVscodeCommand = false;
 
   // Cursor ships a `code` compatibility shim. When it precedes the official
@@ -57,7 +65,9 @@ export const resolveEditorCommand = Effect.fn("editor.resolveEditorCommand")(fun
   // next non-Cursor `code` executable and return its concrete path so the
   // later spawn cannot resolve the shim again.
   if (editor.id === "vscode" && platform === "win32") {
-    const resolvedCode = yield* resolveCommandPath("code", { env }).pipe(Effect.option);
+    const resolvedCode = yield* resolveCommandPath("code", { env }).pipe(
+      Effect.map(Option.fromNullishOr),
+    );
     if (Option.isSome(resolvedCode) && isCursorCodeShim(resolvedCode.value)) {
       skipBareVscodeCommand = true;
       const officialCode = yield* resolveNonCursorVscodePath(env, resolvedCode.value);
@@ -69,9 +79,14 @@ export const resolveEditorCommand = Effect.fn("editor.resolveEditorCommand")(fun
     }
   }
 
-  for (const command of editor.commands) {
-    if (skipBareVscodeCommand && editor.id === "vscode" && command === "code") continue;
-    if (yield* isCommandAvailable(command, { env })) return Option.some({ command, baseArgs });
+  // OpenZFS also installs a `zed` executable. Prefer the macOS editor bundle
+  // so a PATH entry for the ZFS Event Daemon cannot take over editor opens.
+  const preferBundle = platform === "darwin" && editor.id === "zed";
+  if (!preferBundle) {
+    for (const command of editor.commands) {
+      if (skipBareVscodeCommand && command === "code") continue;
+      if (yield* isCommandAvailable(command, { env })) return Option.some({ command, baseArgs });
+    }
   }
 
   const path = yield* Path.Path;
@@ -85,8 +100,18 @@ export const resolveEditorCommand = Effect.fn("editor.resolveEditorCommand")(fun
   if (platform === "darwin") {
     const roots = [...(home ? [path.join(home, "Applications")] : []), "/Applications"];
     for (const root of roots) {
-      for (const name of names) {
-        const contents = path.join(root, `${name}.app`, "Contents");
+      // JetBrains Toolbox installs bundles named after the app and its version
+      // (`IntelliJ IDEA 2026.1.4.app`), so list the directory and accept
+      // `<name> <version>.app` as well as the exact `<name>.app`.
+      const entries = yield* fs.readDirectory(root).pipe(Effect.orElseSucceed(() => []));
+      const bundles = new Set(names.map((name) => `${name}.app`));
+      for (const entry of entries) {
+        if (names.some((name) => entry === `${name}.app` || isVersionedBundle(entry, name))) {
+          bundles.add(entry);
+        }
+      }
+      for (const bundle of bundles) {
+        const contents = path.join(root, bundle, "Contents");
         candidates.push(
           ...(jetbrains || editor.id === "zed"
             ? [path.join(contents, "MacOS", editor.id === "zed" ? "cli" : command)]
@@ -160,6 +185,7 @@ export const resolveEditorCommand = Effect.fn("editor.resolveEditorCommand")(fun
     }
   }
 
+  if (preferBundle) candidates.push(...editor.commands);
   for (const candidate of candidates) {
     if (yield* isCommandAvailable(candidate, { env })) {
       return Option.some({

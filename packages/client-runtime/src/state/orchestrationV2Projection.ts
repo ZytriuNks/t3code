@@ -1,5 +1,7 @@
+import { applyThreadPullRequestLinkUpdate } from "@t3tools/shared/threadPullRequests";
 import type {
   OrchestrationV2DomainEvent,
+  OrchestrationV2Run,
   OrchestrationV2ThreadProjection,
   OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
@@ -86,6 +88,14 @@ function oldestLocalTurnOrdinal(
   return oldest;
 }
 
+const UNFINISHED_RUN_STATUSES: ReadonlySet<OrchestrationV2Run["status"]> = new Set([
+  "preparing",
+  "queued",
+  "starting",
+  "running",
+  "waiting",
+]);
+
 function shouldDropMissingPartialTurnItem(
   projection: OrchestrationV2ThreadProjection,
   item: OrchestrationV2TurnItem,
@@ -94,6 +104,37 @@ function shouldDropMissingPartialTurnItem(
   if (projection.visibleTurnItems.some((row) => row.sourceItemId === item.id)) {
     return false;
   }
+  if (item.runId === null) {
+    return isBelowPartialWindow(projection, item, latestLocalTurnOrdinal);
+  }
+  // A queued run keeps the ordinal it got when queued, so a steer sent later
+  // can raise the watermark past it. Items of a run that has not finished are
+  // new, not unloaded history: the first lands while the run is still queued,
+  // and a bounded window can start after the ones before it.
+  if (
+    projection.runs.some((run) => run.id === item.runId && UNFINISHED_RUN_STATUSES.has(run.status))
+  ) {
+    return false;
+  }
+  // Later items of a run already in the window can raise the watermark first.
+  if (
+    projection.visibleTurnItems.some(
+      (row) =>
+        row.visibility === "local" &&
+        row.item.runId === item.runId &&
+        row.item.ordinal <= item.ordinal,
+    )
+  ) {
+    return false;
+  }
+  return isBelowPartialWindow(projection, item, latestLocalTurnOrdinal);
+}
+
+function isBelowPartialWindow(
+  projection: OrchestrationV2ThreadProjection,
+  item: OrchestrationV2TurnItem,
+  latestLocalTurnOrdinal: number | null | undefined,
+): boolean {
   if (
     latestLocalTurnOrdinal !== null &&
     latestLocalTurnOrdinal !== undefined &&
@@ -161,15 +202,20 @@ export function applyOrchestrationV2ProjectionEvent(
   const latestLocalTurnOrdinal = options?.latestLocalTurnOrdinal;
   const base = { ...projection, updatedAt: event.occurredAt };
   switch (event.type) {
+    case "thread.pull-request-link-updated":
+      return {
+        ...base,
+        thread: applyThreadPullRequestLinkUpdate(projection.thread, event.payload),
+      };
     case "thread.created":
     case "thread.archived":
     case "thread.unarchived":
     case "thread.deleted":
     case "thread.settled":
-    case "thread.auto-settle-set":
     case "thread.unsettled":
     case "thread.snoozed":
     case "thread.unsnoozed":
+    case "thread.auto-settle-set":
     case "thread.pinned":
     case "thread.unpinned":
     case "thread.pin-reordered":
@@ -190,6 +236,18 @@ export function applyOrchestrationV2ProjectionEvent(
       const next = { ...base, runs: upsertEntity(base.runs, event.payload) };
       return { ...next, visibleTurnItems: activeVisibleTurnItems(next) };
     }
+    case "run.background-work-cancelled":
+      return {
+        ...base,
+        runs: base.runs.map((run) =>
+          run.id === event.payload.runId
+            ? {
+                ...run,
+                restartCancelledBackgroundWork: event.payload.restartCancelledBackgroundWork,
+              }
+            : run,
+        ),
+      };
     case "run-attempt.created":
     case "run-attempt.updated": {
       const next = { ...base, attempts: upsertEntity(base.attempts, event.payload) };

@@ -1,19 +1,35 @@
-import { EnvironmentId } from "@t3tools/contracts";
+// @vitest-environment jsdom
+
+import { EnvironmentId, type AuthEnvironmentScope } from "@t3tools/contracts";
+import { createRoot } from "react-dom/client";
+import { useThreadFindHighlights } from "./chat/threadFindHighlights";
+import { searchableMessageSegments } from "@t3tools/shared/threadFindText";
+import { countThreadSearchOccurrences } from "@t3tools/shared/threadSearch";
+
+import { MarkdownFindContext } from "./chat/markdownFindContext";
 import { act, type ComponentProps, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { create, type ReactTestInstance, type ReactTestRenderer } from "react-test-renderer";
+import { create, type ReactTestRenderer } from "react-test-renderer";
 import { describe, expect, it, vi } from "vite-plus/test";
-import type { Root, RootContent } from "mdast";
-import type { Plugin } from "unified";
 
 import { getSyntaxHighlighterPromise } from "../lib/syntaxHighlighting";
-import * as syntaxHighlighting from "../lib/syntaxHighlighting";
-import * as skillInlineText from "./chat/SkillInlineText";
 import { GitHubIcon } from "./Icons";
 import { Button } from "./ui/button";
 import { setMarkdownTaskChecked } from "./files/filePreviewMode";
 
+vi.mock("../hooks/useFileMetadata", () => ({ useFileMetadata: () => null }));
 vi.mock("@effect/atom-react", () => ({ useAtomValue: () => null }));
+const diagramRender = vi.hoisted(() => ({ pending: null as Promise<void> | null }));
+vi.mock("./chat/MermaidDiagram", async () => {
+  const { use } = await import("react");
+  return {
+    // Real Mermaid needs layout APIs jsdom lacks; a rendered diagram is an SVG.
+    MermaidDiagram: () => {
+      if (diagramRender.pending) use(diagramRender.pending);
+      return <svg aria-label="Diagram" />;
+    },
+  };
+});
 vi.mock("../hooks/useTheme", () => ({ useTheme: () => ({ resolvedTheme: "dark" }) }));
 vi.mock("../hooks/useSettings", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../hooks/useSettings")>();
@@ -38,12 +54,24 @@ vi.mock("./ui/tooltip", async () => {
     TooltipPopup: () => null,
   };
 });
+vi.mock("../state/query", () => ({
+  useEnvironmentQuery: () => ({ data: null, error: null, refresh: () => {} }),
+}));
 vi.mock("../state/use-atom-query-runner", () => ({ useAtomQueryRunner: () => vi.fn() }));
 vi.mock("../state/use-atom-command", () => ({ useAtomCommand: () => vi.fn() }));
-vi.mock("../state/session", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../state/session")>()),
-  usePreparedConnection: () => ({ _tag: "Loading" }),
-}));
+vi.mock("../state/session", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../state/session")>();
+  const { AuthStandardClientScopes } = await import("@t3tools/contracts");
+  const grantedScopes = new Set<AuthEnvironmentScope>(AuthStandardClientScopes);
+  const hasScope = (environmentId: EnvironmentId | null, scope: AuthEnvironmentScope) =>
+    environmentId !== null && grantedScopes.has(scope);
+  return {
+    ...actual,
+    useEnvironmentScope: hasScope,
+    readEnvironmentScope: hasScope,
+    usePreparedConnection: () => ({ _tag: "Loading" }),
+  };
+});
 vi.mock("../state/entities", () => ({
   readThreadShell: () => null,
   useProjects: () => [],
@@ -68,7 +96,6 @@ import ChatMarkdown, {
   hasMarkdownFilePrimaryAction,
   shouldUseMarkdownFileBrowserPrimaryAction,
 } from "./ChatMarkdown";
-import { StreamingMarkdownFootnotes } from "./chat/StreamingMarkdownFootnotes";
 
 function codeButton(renderer: ReactTestRenderer, label: string) {
   const button = renderer.root
@@ -78,440 +105,79 @@ function codeButton(renderer: ReactTestRenderer, label: string) {
   return button.props as ComponentProps<typeof Button>;
 }
 
-describe("streamed Markdown media", () => {
-  it.each([
-    ["written back to back", "\n", true],
-    ["separated by body text", "\n\nA paragraph between them.\n\n", false],
-  ] as const)("groups footnote definitions %s into one run", async (_label, between, grouped) => {
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-    let renderer: ReactTestRenderer | undefined;
-    const text = `One[^a] and two[^b].\n\n[^a]: First note.${between}[^b]: Second note.\n`;
-    try {
-      await act(() => {
-        renderer = create(<ChatMarkdown cwd={undefined} text={text} smoothStreaming isStreaming />);
-      });
-      const items = renderer!.root.findByType(StreamingMarkdownFootnotes).props.items as Array<{
-        id: string;
-        follows?: string | null;
-      }>;
-      expect(items).toHaveLength(2);
-      expect(items[0]!.follows).toBeNull();
-      expect(items[1]!.follows).toBe(grouped ? items[0]!.id : null);
-    } finally {
-      await act(() => renderer?.unmount());
-      vi.unstubAllGlobals();
-    }
+describe("ChatMarkdown bare anchor placeholders", () => {
+  it.each(["<A>", "<a>", "<a >", "<a/>", "<A/>", "<a />"])(
+    "preserves unmatched %s without linking later blocks",
+    (token) => {
+      const text = `- **"From ${token}"** appears in the header.\n\n- **Tests:** cover inheritance.\n\nThe deferred move continues on B.\n\nSee <a href="https://example.com">the link</a>.`;
+      const document = new DOMParser().parseFromString(
+        renderToStaticMarkup(<ChatMarkdown cwd="/tmp/project" text={text} />),
+        "text/html",
+      );
+
+      expect(document.querySelector("strong")?.textContent).toBe(`"From ${token}"`);
+      expect([...document.querySelectorAll("a")].map((link) => link.textContent)).toEqual([
+        "the link",
+      ]);
+      expect(document.querySelectorAll("li")).toHaveLength(2);
+      expect(
+        [...document.querySelectorAll("p")].map((paragraph) => paragraph.textContent),
+      ).toContain("The deferred move continues on B.");
+    },
+  );
+
+  it.each(["</a>  ", "<div>more</div>\n</a>"])(
+    "preserves a paired anchor closing in the raw block %s",
+    (closing) => {
+      const document = new DOMParser().parseFromString(
+        renderToStaticMarkup(
+          <ChatMarkdown cwd="/tmp/project" text={`See <a>label\n\n${closing}\n\nfinish`} />,
+        ),
+        "text/html",
+      );
+      expect(document.querySelector("p")?.textContent).toBe("See label");
+    },
+  );
+
+  it("preserves a paired anchor after comment-looking raw text", () => {
+    const document = new DOMParser().parseFromString(
+      renderToStaticMarkup(
+        <ChatMarkdown cwd="/tmp/project" text="See <a>label<script><!-- </script> --></a>" />,
+      ),
+      "text/html",
+    );
+    expect(document.querySelector("p")?.textContent).toBe("See label -->");
   });
 
-  it("keeps marker-after footnotes in the live FIFO while treating prior definitions as history", async () => {
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-    let renderer: ReactTestRenderer | undefined;
+  it.each(["<!-- </a> -->", '<div title="</a>">more</div>', '<script>"</a>"</script>'])(
+    "ignores apparent closing anchors inside %s",
+    (html) => {
+      const document = new DOMParser().parseFromString(
+        renderToStaticMarkup(
+          <ChatMarkdown cwd="/tmp/project" text={`Before <A>.\n\n${html}\n\nAfter.`} />,
+        ),
+        "text/html",
+      );
+      expect(document.querySelector("p")?.textContent).toBe("Before <A>.");
+      expect(document.querySelectorAll("a")).toHaveLength(0);
+    },
+  );
+
+  it("preserves paired HTML anchors, details, markdown links, and inline code", () => {
     const text =
-      "Earlier[^old].\n\n[^old]: Historical note.\n\nLater[^live].\n\n[^live]: Live note.\n";
-    const boundary = text.indexOf("Later");
-    try {
-      await act(() => {
-        renderer = create(
-          <ChatMarkdown
-            cwd={undefined}
-            text={text}
-            smoothStreaming
-            isStreaming
-            smoothTextResume={{
-              key: "environment/thread/run/item/body",
-              baselineText: text.slice(0, boundary),
-              mountText: text.slice(0, boundary),
-              synchronized: true,
-            }}
-          />,
-        );
-      });
-      const items = renderer!.root.findByType(StreamingMarkdownFootnotes).props.items as Array<{
-        id: string;
-        synchronized?: boolean;
-      }>;
-      expect(items.map((item) => item.synchronized)).toEqual([true, false]);
-    } finally {
-      await act(() => renderer?.unmount());
-      vi.unstubAllGlobals();
-    }
-  });
-
-  it("requests a link's favicon during smooth playback without replacing its label", async () => {
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-    let renderer: ReactTestRenderer | undefined;
-    const source = "See [reference][ref].\n\n[ref]: https://example.com\n";
-    const view = (text: string, streaming = true) => (
-      <ChatMarkdown cwd={undefined} text={text} smoothStreaming isStreaming={streaming} />
+      'Bare <a>label</a>, <a id="section"></a>, `<A>`, and [docs](https://example.com).\n\n<details><summary>More</summary>Details</details>';
+    const document = new DOMParser().parseFromString(
+      renderToStaticMarkup(<ChatMarkdown cwd="/tmp/project" text={text} />),
+      "text/html",
     );
-    try {
-      await act(() => {
-        renderer = create(view(source));
-      });
-      const label = renderer!.root.findByType("a");
-      expect(label.props.href).toBe("https://example.com");
-      // Playback ignores the fixed, aria-hidden icon box, so its request need
-      // not wait for the whole response to finish.
-      const icon = renderer!.root.findByType("img");
-      expect(icon.props.src).toContain("example.com");
-      await act(() => renderer!.update(view(source + "\nFollowing text")));
-      expect(renderer!.root.findByType("img")).toBe(icon);
-      await act(() => renderer!.update(view(source + "\nFollowing text", false)));
-      expect(renderer!.root.findByType("img")).toBe(icon);
-      expect(renderer!.root.findByType("a")).toBe(label);
-    } finally {
-      await act(() => renderer?.unmount());
-      vi.unstubAllGlobals();
-    }
-  });
 
-  it.each(["- [x]", "- [ ]\n  - [x]", "- [x]\n\n**unfinished"])(
-    "keeps bodyless checkbox controls at stream completion: %s",
-    async (text) => {
-      let renderer: ReactTestRenderer | undefined;
-      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-      const message = (streaming: boolean) => (
-        <ChatMarkdown
-          cwd={undefined}
-          text={text}
-          smoothStreaming
-          isStreaming={streaming}
-          smoothComplete={!streaming}
-        />
-      );
-      try {
-        await act(() => {
-          renderer = create(message(true));
-        });
-        const checks = renderer!.root.findAllByType("input");
-        expect(checks.length).toBeGreaterThan(0);
-        await act(() => renderer!.update(message(false)));
-        expect(renderer!.root.findAllByType("input")).toEqual(checks);
-        expect(JSON.stringify(renderer!.toJSON())).not.toMatch(/\[[ xX]\]/u);
-      } finally {
-        await act(() => renderer?.unmount());
-        vi.unstubAllGlobals();
-      }
-    },
-  );
-  it("preserves footnote ownership while authored details open, nest and close", async () => {
-    let renderer: ReactTestRenderer | undefined;
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-    const prefix = "Reference[^one].\n\n[^one]: Existing footnote.\n\n";
-    const message = (suffix: string) => (
-      <ChatMarkdown cwd={undefined} text={prefix + suffix} smoothStreaming isStreaming />
-    );
-    try {
-      await act(() => {
-        renderer = create(message(""));
-      });
-      const footnote = renderer!.root.findByType("section");
-      const item = footnote.findByType("li");
-      for (const suffix of [
-        "<details open>\n<summary>More</summary>\n\nGrowing paragraph",
-        "<details open>\n<summary>More</summary>\n\nGrowing paragraph\n\n<details>\n<summary>Nested</summary>\n\nNested text",
-        "<details open>\n<summary>More</summary>\n\nGrowing paragraph\n\n</details>\n\nTail",
-        "<section>\n\nAnother section\n\n</section>\n\nTail",
-        "<section>\n\nAnother section\n\n</section>\n\n<section>\n\nA second section\n\n</section>\n\nTail",
-      ]) {
-        await act(() => renderer!.update(message(suffix)));
-        const current = renderer!.root
-          .findAllByType("section")
-          .find((section) => section.props["data-footnotes"] !== undefined);
-        expect(current).toBe(footnote);
-        expect(current!.findByType("li")).toBe(item);
-      }
-    } finally {
-      await act(() => renderer?.unmount());
-      vi.unstubAllGlobals();
-    }
-  });
-  it("preserves decoded media and footnotes while appended paragraphs cross history groups", async () => {
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
-    let renderer: ReactTestRenderer | undefined;
-    const prefix =
-      "![Picture](https://example.com/image.png)\n\nReference[^one].\n\n[^one]: Existing footnote.\n\n";
-    const view = (count: number) => (
-      <ChatMarkdown
-        cwd={undefined}
-        smoothStreaming
-        isStreaming
-        text={prefix + Array.from({ length: count }, (_, i) => `Paragraph ${i}.`).join("\n\n")}
-      />
-    );
-    try {
-      await act(() => {
-        renderer = create(view(12));
-      });
-      const image = renderer!.root.findByType("img");
-      await act(() => image.props.onLoad());
-      const surface = renderer!.root.findByProps({ "data-smooth-media": "" });
-      const footnote = renderer!.root.findByType("section");
-      const item = footnote.findByType("li");
-      for (const count of [16, 31, 32, 48, 65, 97]) {
-        await act(() => renderer!.update(view(count)));
-        await act(() => vi.advanceTimersByTime(100));
-        expect(renderer!.root.findByType("img")).toBe(image);
-        expect(renderer!.root.findByProps({ "data-smooth-media": "" })).toBe(surface);
-        expect(renderer!.root.findAllByProps({ "data-markdown-media-pending": "" })).toHaveLength(
-          0,
-        );
-        expect(renderer!.root.findByType("section")).toBe(footnote);
-        expect(footnote.findByType("li")).toBe(item);
-        expect(JSON.stringify(renderer!.toJSON())).toContain(`Paragraph ${count - 1}.`);
-      }
-    } finally {
-      await act(() => renderer?.unmount());
-      vi.useRealTimers();
-      vi.unstubAllGlobals();
-    }
-  });
-
-  it.each(["list", "table"])(
-    "keeps historical %s rows mounted across groups and updates late references",
-    async (kind) => {
-      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-      let renderer: ReactTestRenderer | undefined;
-      const view = (count: number, resolved = false) => {
-        const rows = Array.from({ length: count }, (_, i) =>
-          kind === "list" ? `- Row ${i} [target][ref]` : `| Row ${i} | [target][ref] |`,
-        ).join("\n");
-        return (
-          <ChatMarkdown
-            cwd={undefined}
-            smoothStreaming
-            text={
-              (kind === "table" ? "| Name | Link |\n| --- | --- |\n" : "") +
-              rows +
-              (resolved ? "\n\n[ref]: https://example.com/resolved" : "")
-            }
-          />
-        );
-      };
-      try {
-        await act(() => {
-          renderer = create(view(16));
-        });
-        const tag = kind === "list" ? "li" : "tr";
-        const rows = renderer!.root.findAllByType(tag);
-        for (const count of [32, 48, 65]) {
-          await act(() => renderer!.update(view(count)));
-          const current = renderer!.root.findAllByType(tag);
-          rows.forEach((row, index) => expect(current[index]).toBe(row));
-        }
-        await act(() => renderer!.update(view(65, true)));
-        expect(
-          renderer!.root
-            .findAllByType("a")
-            .filter((link) => link.props.href === "https://example.com/resolved"),
-        ).toHaveLength(65);
-        rows.forEach((row, index) => expect(renderer!.root.findAllByType(tag)[index]).toBe(row));
-      } finally {
-        await act(() => renderer?.unmount());
-        vi.unstubAllGlobals();
-      }
-    },
-  );
-
-  it("retains an existing footnote node when a new reference changes footnote order", async () => {
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-    let renderer: ReactTestRenderer | undefined;
-    const definitions = "\n\n[^one]: Existing footnote.\n\n[^two]: New footnote.";
-    const message = (references: string) => (
-      <ChatMarkdown cwd={undefined} text={references + definitions} smoothStreaming isStreaming />
-    );
-    try {
-      await act(() => {
-        renderer = create(message("Reference[^one]."));
-      });
-      const original = renderer!.root
-        .findAllByType("li")
-        .find((item) => String(item.props.id).endsWith("fn-one"));
-      expect(original).toBeDefined();
-      await act(() => renderer!.update(message("New[^two] before existing[^one].")));
-      expect(
-        renderer!.root.findAllByType("li").find((item) => String(item.props.id).endsWith("fn-one")),
-      ).toBe(original);
-    } finally {
-      await act(() => renderer?.unmount());
-      vi.unstubAllGlobals();
-    }
-  });
-  it("preloads a linked image and preserves its loader while the outer URL and following output arrive", async () => {
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
-    let renderer: ReactTestRenderer | undefined;
-    const source = "[![Picture](https://example.com/image.png)](https://example.com/full.png)";
-    const imageEnd = source.indexOf(")") + 1;
-    const view = (text: string, isStreaming = true) => (
-      <ChatMarkdown text={text} cwd={undefined} isStreaming={isStreaming} smoothStreaming />
-    );
-    try {
-      await act(async () => {
-        renderer = create(view(""));
-      });
-      for (let end = 1; end < imageEnd; end++) {
-        await act(async () => renderer!.update(view(source.slice(0, end))));
-        expect(renderer!.root.findAllByType("img")).toHaveLength(0);
-      }
-      await act(async () => renderer!.update(view(source.slice(0, imageEnd))));
-      await act(async () => vi.advanceTimersByTime(32));
-      const image = renderer!.root.findByType("img");
-      await act(async () => image.props.onLoad());
-      const surface = renderer!.root.findByProps({ "data-smooth-media": "" });
-      for (let end = imageEnd + 1; end <= source.length; end++) {
-        await act(async () => renderer!.update(view(source.slice(0, end))));
-        await act(async () => vi.advanceTimersByTime(32));
-        expect(renderer!.root.findByType("img")).toBe(image);
-        expect(renderer!.root.findByProps({ "data-smooth-media": "" })).toBe(surface);
-      }
-      for (const suffix of ["\n", "\n\n正文", "\n\n正文\n\n[^one]: 注释"]) {
-        await act(async () => renderer!.update(view(source + suffix)));
-        await act(async () => vi.advanceTimersByTime(32));
-        expect(renderer!.root.findByType("img")).toBe(image);
-        expect(renderer!.root.findByProps({ "data-smooth-media": "" })).toBe(surface);
-        expect(renderer!.root.findAllByProps({ "data-markdown-media-pending": "" })).toHaveLength(
-          0,
-        );
-      }
-      await act(async () => renderer!.update(view(source + "\n\n正文", false)));
-      expect(renderer!.root.findByType("img")).toBe(image);
-    } finally {
-      await act(async () => renderer?.unmount());
-      vi.useRealTimers();
-      vi.unstubAllGlobals();
-    }
-  });
-
-  it("keeps a standalone image's admitted surface and loader mounted when decoding finishes", async () => {
-    let renderer: ReactTestRenderer | undefined;
-    try {
-      await act(async () => {
-        renderer = create(
-          <ChatMarkdown text="![Fixture](https://example.com/fixture.png)" cwd={undefined} />,
-        );
-      });
-      const image = renderer!.root.findByType("img");
-      const surface = renderer!.root.findByProps({ "data-markdown-media-pending": "" });
-      await act(async () => image.props.onLoad());
-      expect(renderer!.root.findByType("img")).toBe(image);
-      expect(
-        renderer!.root.findAllByProps({
-          "data-markdown-copy": "![Fixture](https://example.com/fixture.png)",
-        }),
-      ).toContain(surface);
-      expect(renderer!.root.findAllByProps({ "data-markdown-media-pending": "" })).toHaveLength(0);
-    } finally {
-      await act(async () => renderer?.unmount());
-    }
-  });
-
-  it.each(["", "<div>Header</div>\n\n", "<details open>\n<summary>More</summary>\n\n"])(
-    "shows the standalone image slot through HTML parsing: %s",
-    async (prefix) => {
-      let renderer: ReactTestRenderer | undefined;
-      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-      const view = (text: string) => (
-        <ChatMarkdown text={prefix + text} cwd={undefined} smoothStreaming isStreaming />
-      );
-      try {
-        await act(async () => {
-          renderer = create(view("![Fixture](https://example.com/part"));
-        });
-        expect(renderer!.root.findAllByProps({ "aria-label": "Loading image" })).toHaveLength(1);
-        expect(renderer!.root.findAllByType("img")).toHaveLength(0);
-        const surface = renderer!.root.findByProps({ "data-smooth-media": "" });
-        await act(async () =>
-          renderer!.update(view("![Fixture](https://example.com/complete.png)")),
-        );
-        const image = renderer!.root.findByType("img");
-        expect(image.props.src).toBe("https://example.com/complete.png");
-        expect(renderer!.root.findByProps({ "data-smooth-media": "" })).toBe(surface);
-        await act(async () => image.props.onLoad());
-        expect(renderer!.root.findAllByProps({ "aria-label": "Loading image" })).toHaveLength(0);
-        expect(renderer!.root.findByProps({ "data-smooth-media": "" })).toBe(surface);
-        await act(async () =>
-          renderer!.update(view("![Fixture](https://example.com/replacement.png)")),
-        );
-        expect(renderer!.root.findByProps({ "data-smooth-media": "" })).toBe(surface);
-        expect(renderer!.root.findAllByProps({ "aria-label": "Loading image" })).toHaveLength(1);
-        await act(async () => renderer!.root.findByType("img").props.onLoad());
-        expect(renderer!.root.findAllByProps({ "aria-label": "Loading image" })).toHaveLength(0);
-      } finally {
-        await act(async () => renderer?.unmount());
-        vi.unstubAllGlobals();
-      }
-    },
-  );
-
-  it("keeps a reference image loading until its definition finishes, then reports only a real load error", async () => {
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
-    let renderer: ReactTestRenderer | undefined;
-    const view = (text: string) => (
-      <ChatMarkdown text={text} cwd={undefined} smoothStreaming isStreaming />
-    );
-    try {
-      await act(async () => {
-        renderer = create(view("!["));
-      });
-      const surface = renderer!.root.findByProps({ "data-smooth-media": "" });
-      const before = "![Fixture][photo]\n\nFollowing text.\n\n";
-      const definition = "[photo]: https://example.com/fixture.png";
-      for (const source of [
-        "![Fixture",
-        "![Fixture]",
-        "![Fixture][pho",
-        before,
-        before + definition,
-      ]) {
-        await act(async () => renderer!.update(view(source)));
-        await act(async () => vi.advanceTimersByTime(100));
-        expect(renderer!.root.findByProps({ "data-smooth-media": "" })).toBe(surface);
-        expect(renderer!.root.findAllByType("img")).toHaveLength(0);
-        expect(renderer!.root.findAllByProps({ role: "alert" })).toHaveLength(0);
-      }
-      await act(async () => renderer!.update(view(before + definition + "\n")));
-      await act(async () => vi.advanceTimersByTime(100));
-      const image = renderer!.root.findByType("img");
-      expect(image.props.src).toBe("https://example.com/fixture.png");
-      expect(renderer!.root.findByProps({ "data-smooth-media": "" })).toBe(surface);
-      await act(async () => image.props.onError());
-      expect(renderer!.root.findByProps({ role: "alert" })).toBe(surface);
-    } finally {
-      await act(async () => renderer?.unmount());
-      vi.useRealTimers();
-      vi.unstubAllGlobals();
-    }
-  });
-
-  it("releases pending syntax when Markdown preload is disabled", async () => {
-    let renderer: ReactTestRenderer | undefined;
-    const text = "前文 ![Fixture][photo]\n\n后文";
-    const view = (preload: boolean) => (
-      <ChatMarkdown
-        text={text}
-        cwd={undefined}
-        isStreaming
-        smoothStreaming
-        smoothMarkdownPreload={preload}
-      />
-    );
-    try {
-      await act(async () => {
-        renderer = create(view(true));
-      });
-      const content = () => JSON.stringify(renderer!.toJSON());
-      expect(content()).not.toContain("![Fixture][photo]");
-      expect(content()).toContain("后文");
-      await act(async () => renderer!.update(view(false)));
-      expect(content()).toContain("![Fixture][photo]");
-      await act(async () => renderer!.update(view(true)));
-      expect(content()).not.toContain("![Fixture][photo]");
-    } finally {
-      await act(async () => renderer?.unmount());
-    }
+    expect([...document.querySelectorAll("a")].map((link) => link.textContent)).toEqual([
+      "label",
+      "",
+      "docs",
+    ]);
+    expect(document.querySelector("code")?.textContent).toBe("<A>");
+    expect(document.querySelector("[data-markdown-details]")?.textContent).toContain("More");
   });
 });
 
@@ -584,45 +250,6 @@ describe("ChatMarkdown context references", () => {
 });
 
 describe("ChatMarkdown favicon privacy", () => {
-  it("resolves a preloaded reference without replacing its label or inserting another icon slot", async () => {
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-    vi.useFakeTimers();
-    let renderer: ReactTestRenderer | undefined;
-    const text = "正文[引用标签逐字符出现][ref]，后文继续。\n\n";
-    const view = (source: string) => (
-      <ChatMarkdown cwd={undefined} text={source} smoothStreaming isStreaming />
-    );
-    try {
-      await act(() => {
-        renderer = create(view(text));
-      });
-      const link = renderer!.root.findByType("a");
-      const icon = link.findAll((node) => node.type === "span" && node.props["aria-hidden"])[0]!;
-      const labels = link
-        .findAllByType("span")
-        .filter((node) => node.children.some((child) => typeof child === "string"));
-      expect(
-        labels
-          .flatMap((node) => node.children.filter((child) => typeof child === "string"))
-          .join(""),
-      ).toBe("引用标签逐字符出现");
-      expect(link.props.href).toBeUndefined();
-      await act(() => renderer!.update(view(text + "[ref]: https://example.com/reference\n")));
-      await act(() => vi.advanceTimersByTimeAsync(120));
-      const resolved = renderer!.root.findByType("a");
-      expect(resolved).toBe(link);
-      expect(resolved.props.href).toBe("https://example.com/reference");
-      expect(resolved.findAll((node) => node.type === "span" && node.props["aria-hidden"])).toEqual(
-        [icon],
-      );
-      for (const label of labels) expect(resolved.findAllByType("span")).toContain(label);
-    } finally {
-      await act(() => renderer?.unmount());
-      vi.useRealTimers();
-      vi.unstubAllGlobals();
-    }
-  });
-
   it("suppresses private link images while preserving public links across updates", async () => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     let renderer: ReactTestRenderer | undefined;
@@ -660,420 +287,74 @@ describe("ChatMarkdown favicon privacy", () => {
 });
 
 describe("ChatMarkdown streaming", () => {
-  it("buffers literal idle edits again when streaming resumes with the same source", async () => {
+  it("runs only a complete single-line shell block after a click", async () => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const onRunShellCommand = vi.fn();
     let renderer: ReactTestRenderer | undefined;
-    const text = "Visible\n\n**unfinished";
-    try {
-      await act(() => {
-        renderer = create(<ChatMarkdown cwd={undefined} text={text} smoothStreaming />);
-      });
-      expect(JSON.stringify(renderer!.toJSON())).toContain("**unfinished");
-      await act(() => {
-        renderer!.update(<ChatMarkdown cwd={undefined} text={text} smoothStreaming isStreaming />);
-      });
-      expect(JSON.stringify(renderer!.toJSON())).not.toContain("**unfinished");
-      await act(() => {
-        renderer!.update(
-          <ChatMarkdown cwd={undefined} text={text} smoothStreaming smoothComplete />,
-        );
-      });
-      expect(JSON.stringify(renderer!.toJSON())).toContain("**unfinished");
-    } finally {
-      await act(() => renderer?.unmount());
-      vi.unstubAllGlobals();
-    }
-  });
-  it("reuses the complete Markdown parse when upstream and working activity finish", async () => {
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-    const parses = vi.fn();
-    const observeParsing: Plugin<[], Root> = function () {
-      const parse = this.parser!;
-      this.parser = (source, file) => {
-        parses(source);
-        return parse(source, file);
-      };
-    };
-    const extraRemarkPlugins = [observeParsing];
-    const text = "**Complete text** and `inline code`.\n\n| A | B |\n|---|---|\n| one | two |";
-    const markdown = (isStreaming: boolean, smoothComplete = false) => (
+    const message = (text: string, isStreaming = false) => (
       <ChatMarkdown
-        cwd={undefined}
+        cwd="/tmp/project"
         text={text}
-        smoothStreaming
         isStreaming={isStreaming}
-        smoothComplete={smoothComplete}
-        extraRemarkPlugins={extraRemarkPlugins}
-      />
-    );
-    let renderer: ReactTestRenderer | undefined;
-    try {
-      await act(async () => {
-        renderer = create(markdown(true));
-      });
-      const count = parses.mock.calls.length;
-      await act(async () => {
-        renderer!.update(markdown(false));
-      });
-      await act(async () => {
-        renderer!.update(markdown(false, true));
-      });
-      expect(parses).toHaveBeenCalledTimes(count);
-      expect(renderer!.root.findAllByType("table")).toHaveLength(1);
-    } finally {
-      await act(async () => renderer?.unmount());
-      vi.unstubAllGlobals();
-    }
-  });
-
-  it.each(["**unfinished", "[unfinished", "`unfinished", "| A | B |"])(
-    "releases withheld literal Markdown at completion without a second finish parse: %s",
-    async (suffix) => {
-      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-      const parses = vi.fn();
-      const observeParsing: Plugin<[], Root> = function () {
-        const parse = this.parser!;
-        this.parser = (source, file) => {
-          parses(source);
-          return parse(source, file);
-        };
-      };
-      const extraRemarkPlugins = [observeParsing];
-      const text = "Visible\n\n" + suffix;
-      const markdown = (isStreaming: boolean, smoothComplete = false, source = text) => (
-        <ChatMarkdown
-          cwd={undefined}
-          text={source}
-          smoothStreaming
-          isStreaming={isStreaming}
-          smoothComplete={smoothComplete}
-          extraRemarkPlugins={extraRemarkPlugins}
-        />
-      );
-      let renderer: ReactTestRenderer | undefined;
-      try {
-        await act(async () => {
-          renderer = create(markdown(true));
-        });
-        expect(JSON.stringify(renderer!.toJSON())).not.toContain(suffix);
-        parses.mockClear();
-        await act(async () => {
-          renderer!.update(markdown(false));
-        });
-        expect(JSON.stringify(renderer!.toJSON())).toContain(suffix);
-        expect(parses).toHaveBeenCalledTimes(1);
-        await act(async () => {
-          renderer!.update(markdown(false, true));
-        });
-        expect(parses).toHaveBeenCalledTimes(1);
-        // A later idle edit remains literal instead of being buffered again.
-        await act(async () => {
-          renderer!.update(markdown(false, true, text + " more"));
-        });
-        expect(JSON.stringify(renderer!.toJSON())).toContain(suffix + " more");
-      } finally {
-        await act(async () => renderer?.unmount());
-        vi.unstubAllGlobals();
-      }
-    },
-  );
-
-  it.each(["```typescript\n", "```\n", "  ```typescript\n"])(
-    "holds the open fence %j until it closes, including code that has arrived",
-    async (opening) => {
-      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
-      let renderer: ReactTestRenderer | undefined;
-      const view = (text: string) => (
-        <ChatMarkdown cwd={undefined} text={text} smoothStreaming isStreaming />
-      );
-      try {
-        await act(async () => {
-          renderer = create(view("History\n\n" + opening));
-        });
-        expect(renderer!.root.findAllByProps({ "data-markdown-code-pending": "" })).toHaveLength(1);
-        await act(async () => {
-          renderer!.update(view("History\n\n```typescript\nconst a = 1;"));
-          vi.advanceTimersByTime(100);
-        });
-        await act(async () => vi.advanceTimersByTime(100));
-        expect(renderer!.root.findAllByProps({ "data-markdown-code-pending": "" })).toHaveLength(1);
-        for (const source of [
-          "History\n\n```typescript\nconst a = 1;\n```",
-          "History\n\n```typescript\n```",
-          "History\n\n<pre><code></code></pre>",
-        ]) {
-          await act(async () => {
-            renderer!.update(view(source));
-            vi.advanceTimersByTime(100);
-          });
-          await act(async () => vi.advanceTimersByTime(100));
-          expect(renderer!.root.findAllByProps({ "data-markdown-code-pending": "" })).toHaveLength(
-            0,
-          );
-        }
-      } finally {
-        await act(() => renderer?.unmount());
-        vi.useRealTimers();
-        vi.unstubAllGlobals();
-      }
-    },
-  );
-
-  it("releases and re-holds a short code suffix when Markdown preload toggles", async () => {
-    await getSyntaxHighlighterPromise("text");
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-    let renderer: ReactTestRenderer | undefined;
-    const parsedCodeValues: string[] = [];
-    const captureCodeValues: Plugin<[], Root> = () => (tree) => {
-      const visit = (node: Root | RootContent) => {
-        if (node.type === "code") parsedCodeValues.push(node.value);
-        else if ("children" in node) node.children.forEach(visit);
-      };
-      visit(tree);
-    };
-    const extraRemarkPlugins = [captureCodeValues];
-    const fence = String.fromCharCode(96).repeat(3);
-    const partial = "> " + fence + "text\n> KEEP\n> " + fence.slice(0, 2);
-    const view = (preload: boolean) => (
-      <ChatMarkdown
-        cwd={undefined}
-        text={partial}
-        smoothStreaming
-        isStreaming
-        smoothMarkdownPreload={preload}
-        extraRemarkPlugins={extraRemarkPlugins}
+        onRunShellCommand={onRunShellCommand}
       />
     );
     try {
       await act(async () => {
-        renderer = create(view(true));
+        renderer = create(message("```bash\necho hello\n```", true));
       });
-      expect(parsedCodeValues.at(-1)).toBe("KEEP");
-
-      await act(async () => {
-        renderer!.update(view(false));
-      });
-      expect(parsedCodeValues.at(-1)).toBe("KEEP\n" + fence.slice(0, 2));
-
-      await act(async () => {
-        renderer!.update(view(true));
-      });
-      expect(parsedCodeValues.at(-1)).toBe("KEEP");
-    } finally {
-      await act(async () => renderer?.unmount());
-      vi.unstubAllGlobals();
-    }
-  });
-
-  it("does not load a syntax grammar for an open live fence before it closes", async () => {
-    const highlighter = await getSyntaxHighlighterPromise("typescript");
-    const promise = Promise.resolve(highlighter);
-    const syntax = vi
-      .spyOn(syntaxHighlighting, "getSyntaxHighlighterPromise")
-      .mockReturnValue(promise);
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
-    let renderer: ReactTestRenderer | undefined;
-    try {
-      await act(async () => {
-        renderer = create(
-          <ChatMarkdown cwd={undefined} text="```type" smoothStreaming isStreaming />,
-        );
-      });
-      expect(syntax).not.toHaveBeenCalled();
-      await act(async () => {
-        renderer!.update(
-          <ChatMarkdown
-            cwd={undefined}
-            text={"```typescript\nconst a = 1;"}
-            smoothStreaming
-            isStreaming
-          />,
-        );
-        vi.advanceTimersByTime(100);
-      });
-      await act(async () => vi.advanceTimersByTime(100));
-      expect(syntax).not.toHaveBeenCalled();
-      await act(async () => {
-        renderer!.update(
-          <ChatMarkdown
-            cwd={undefined}
-            text={"```typescript\nconst a = 1;\n```"}
-            smoothStreaming
-            isStreaming
-          />,
-        );
-        vi.advanceTimersByTime(100);
-      });
-      await act(async () => vi.advanceTimersByTime(100));
-      expect(syntax).toHaveBeenCalledWith("typescript");
-    } finally {
-      await act(() => renderer?.unmount());
-      vi.restoreAllMocks();
-      vi.useRealTimers();
-      vi.unstubAllGlobals();
-    }
-  });
-
-  it("marks pending code until the highlighter renders its text", async () => {
-    const highlighter = await getSyntaxHighlighterPromise("text");
-    let resolveHighlight!: (value: typeof highlighter) => void;
-    const pendingHighlight = new Promise<typeof highlighter>((resolve) => {
-      resolveHighlight = resolve;
-    });
-    vi.spyOn(syntaxHighlighting, "getSyntaxHighlighterPromise").mockReturnValue(pendingHighlight);
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-    let renderer: ReactTestRenderer | undefined;
-    try {
-      await act(async () => {
-        renderer = create(<ChatMarkdown cwd={undefined} text={"```text\ncold panel code\n```"} />);
-      });
-      expect(renderer!.root.findAllByProps({ "data-markdown-code-pending": "" })).toHaveLength(1);
-      expect(renderer!.root.findAllByProps({ className: "chat-markdown-shiki" })).toHaveLength(0);
-      await act(async () => resolveHighlight(highlighter));
-      expect(renderer!.root.findAllByProps({ "data-markdown-code-pending": "" })).toHaveLength(0);
+      const mounted = renderer!;
       expect(
-        renderer!.root.findByProps({ className: "chat-markdown-shiki" }).props
-          .dangerouslySetInnerHTML.__html,
-      ).toContain("cold panel code");
-    } finally {
-      await act(() => renderer?.unmount());
-      vi.restoreAllMocks();
-      vi.unstubAllGlobals();
-    }
-  });
+        mounted.root
+          .findAllByType(Button)
+          .some((button) => button.props["aria-label"] === "Run in terminal"),
+      ).toBe(false);
 
-  it.each([false, true])(
-    "keeps completed smooth code readable before highlighting when initially complete is %s",
-    async (initiallyComplete) => {
-      const highlighter = await getSyntaxHighlighterPromise("text");
-      let resolveHighlight!: (value: typeof highlighter) => void;
-      const pendingHighlight = new Promise<typeof highlighter>((resolve) => {
-        resolveHighlight = resolve;
+      await act(async () => {
+        mounted.update(message("```bash\necho hello\n```"));
       });
-      vi.spyOn(syntaxHighlighting, "getSyntaxHighlighterPromise").mockReturnValue(pendingHighlight);
-      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-      let renderer: ReactTestRenderer | undefined;
-      const code = `completed smooth code ${initiallyComplete}`;
-      const text = `\`\`\`text\n${code}\n\`\`\``;
-      const plainText = (node: ReactTestInstance): string =>
-        node.children
-          .map((child) => (typeof child === "string" ? child : plainText(child)))
-          .join("");
-      try {
-        await act(async () => {
-          renderer = create(
-            <ChatMarkdown
-              cwd={undefined}
-              text={text}
-              isStreaming={!initiallyComplete}
-              smoothStreaming
-              smoothComplete={initiallyComplete}
-            />,
-          );
-        });
-        if (!initiallyComplete) {
-          const pendingCode = renderer!.root.findByType("pre");
-          expect(pendingCode.props.className).not.toBe("invisible");
-          expect(plainText(pendingCode)).toContain(code);
-          await act(async () => {
-            renderer!.update(
-              <ChatMarkdown cwd={undefined} text={text} smoothStreaming smoothComplete />,
-            );
-          });
-        }
-        const fallback = renderer!.root.findByType("pre");
-        expect(plainText(fallback)).toContain(code);
-        expect(fallback.props.className).not.toBe("invisible");
-        expect(fallback.props["aria-hidden"]).toBeUndefined();
-        expect(renderer!.root.findAllByProps({ "data-markdown-code-pending": "" })).toHaveLength(0);
+      await act(async () => {
+        codeButton(mounted, "Run in terminal").onClick?.({} as never);
+      });
+      expect(onRunShellCommand).toHaveBeenCalledExactlyOnceWith("echo hello");
 
-        await act(async () => resolveHighlight(highlighter));
-        const highlighted = renderer!.root.findByProps({ className: "chat-markdown-shiki" });
-        expect(
-          highlighted.props.dangerouslySetInnerHTML?.__html ?? plainText(highlighted),
-        ).toContain(code);
-      } finally {
-        await act(() => renderer?.unmount());
-        vi.restoreAllMocks();
-        vi.unstubAllGlobals();
+      for (const text of [
+        "~~~bash\necho tilde\n~~~",
+        "> ```bash\n> echo quote\n> ```",
+        "````bash\necho four\n````",
+      ]) {
+        await act(async () => {
+          mounted.update(message(text));
+        });
+        expect(codeButton(mounted, "Run in terminal")).toBeDefined();
       }
-    },
-  );
 
-  it.each([true, false])(
-    "runs only a complete single-line shell block (raw HTML: %s)",
-    async (parseRawHtml) => {
-      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-      const onRunShellCommand = vi.fn();
-      let renderer: ReactTestRenderer | undefined;
-      const message = (text: string, isStreaming = false) => (
-        <ChatMarkdown
-          cwd="/tmp/project"
-          text={text}
-          isStreaming={isStreaming}
-          parseRawHtml={parseRawHtml}
-          onRunShellCommand={onRunShellCommand}
-        />
-      );
-      try {
+      for (const text of [
+        "```bash\necho one\necho two\n```",
+        "```typescript\necho hello\n```",
+        "```bash\n\n```",
+        "```bash\necho hello\n\n```",
+        "```bash\necho hello\\\n```",
+        "```bash\necho safe \u202e#\n```",
+        "```bash\necho incomplete",
+        "~~~bash\necho incomplete",
+        "````bash\necho incomplete\n```",
+        '<pre><code class="language-bash">echo html</code></pre>',
+      ]) {
         await act(async () => {
-          renderer = create(message("```bash\necho hello\n```", true));
+          mounted.update(message(text));
         });
-        const mounted = renderer!;
         expect(
           mounted.root
             .findAllByType(Button)
             .some((button) => button.props["aria-label"] === "Run in terminal"),
         ).toBe(false);
-
-        await act(async () => {
-          mounted.update(message("```bash\necho hello\n```"));
-        });
-        await act(async () => {
-          codeButton(mounted, "Run in terminal").onClick?.({} as never);
-        });
-        expect(onRunShellCommand).toHaveBeenCalledExactlyOnceWith("echo hello");
-
-        for (const text of [
-          "~~~bash\necho tilde\n~~~",
-          "> ```bash\n> echo quote\n> ```",
-          "````bash\necho four\n````",
-        ]) {
-          await act(async () => {
-            mounted.update(message(text));
-          });
-          expect(codeButton(mounted, "Run in terminal")).toBeDefined();
-        }
-
-        for (const text of [
-          "```bash\necho one\necho two\n```",
-          "```typescript\necho hello\n```",
-          "```bash\n\n```",
-          "```bash\necho hello\n\n```",
-          "```bash\necho hello\\\n```",
-          "```bash\necho safe \u202e#\n```",
-          "```bash\necho incomplete",
-          "~~~bash\necho incomplete",
-          "````bash\necho incomplete\n```",
-          '<pre><code class="language-bash">echo html</code></pre>',
-        ]) {
-          await act(async () => {
-            mounted.update(message(text));
-          });
-          expect(
-            mounted.root
-              .findAllByType(Button)
-              .some((button) => button.props["aria-label"] === "Run in terminal"),
-          ).toBe(false);
-        }
-      } finally {
-        await act(async () => renderer?.unmount());
-        vi.unstubAllGlobals();
       }
-    },
-  );
+    } finally {
+      await act(async () => renderer?.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
 
   it("does not retokenize completed lines when streaming finishes", async () => {
     const highlighter = await getSyntaxHighlighterPromise("typescript");
@@ -1095,47 +376,6 @@ describe("ChatMarkdown streaming", () => {
       await act(async () => renderer?.unmount());
       vi.unstubAllGlobals();
       vi.restoreAllMocks();
-    }
-  });
-
-  it("preserves mounted text and code when streaming and working activity finish", async () => {
-    await getSyntaxHighlighterPromise("text");
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-    let renderer: ReactTestRenderer | undefined;
-    const text =
-      "# Stable title\n\nBefore **bold text**.\n\n```text\nstable code\n```\n\nAfter code.";
-    try {
-      await act(async () => {
-        renderer = create(<ChatMarkdown cwd={undefined} text={text} isStreaming smoothStreaming />);
-      });
-      const mounted = renderer!;
-      const heading = mounted.root.findByType("h1");
-      const paragraphs = mounted.root.findAllByType("p");
-      const codeBlock = mounted.root.findByProps({ "data-language": "text" });
-      const highlighted = mounted.root.findByProps({ className: "chat-markdown-shiki" });
-
-      await act(async () => {
-        mounted.update(<ChatMarkdown cwd={undefined} text={text} smoothStreaming />);
-      });
-      expect(mounted.root.findByType("h1")).toBe(heading);
-      const finishedParagraphs = mounted.root.findAllByType("p");
-      expect(finishedParagraphs).toHaveLength(paragraphs.length);
-      finishedParagraphs.forEach((paragraph, index) => expect(paragraph).toBe(paragraphs[index]));
-      expect(mounted.root.findByProps({ "data-language": "text" })).toBe(codeBlock);
-      expect(mounted.root.findByProps({ className: "chat-markdown-shiki" })).toBe(highlighted);
-
-      await act(async () => {
-        mounted.update(<ChatMarkdown cwd={undefined} text={text} smoothStreaming smoothComplete />);
-      });
-      expect(mounted.root.findByType("h1")).toBe(heading);
-      mounted.root
-        .findAllByType("p")
-        .forEach((paragraph, index) => expect(paragraph).toBe(paragraphs[index]));
-      expect(mounted.root.findByProps({ "data-language": "text" })).toBe(codeBlock);
-      expect(mounted.root.findByProps({ className: "chat-markdown-shiki" })).toBe(highlighted);
-    } finally {
-      await act(async () => renderer?.unmount());
-      vi.unstubAllGlobals();
     }
   });
 
@@ -1265,58 +505,54 @@ describe("ChatMarkdown streaming", () => {
     }
   });
 
-  it.each([true, false])(
-    "edits current task markers after reusing a renderer (raw HTML: %s)",
-    async (parseRawHtml) => {
-      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-      let renderer: ReactTestRenderer | undefined;
-      let editedText: string | undefined;
-      const message = (text: string) => (
-        <ChatMarkdown
-          cwd="/tmp/project"
-          text={text}
-          parseRawHtml={parseRawHtml}
-          onTaskListChange={({ markerOffset, checked }) => {
-            editedText = setMarkdownTaskChecked(text, markerOffset, checked);
-            renderer!.update(message(editedText));
-          }}
-        />
-      );
+  it("edits the current task text and marker after reusing a renderer", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    let renderer: ReactTestRenderer | undefined;
+    let editedText: string | undefined;
+    const message = (text: string) => (
+      <ChatMarkdown
+        cwd="/tmp/project"
+        text={text}
+        onTaskListChange={({ markerOffset, checked }) => {
+          editedText = setMarkdownTaskChecked(text, markerOffset, checked);
+          renderer!.update(message(editedText));
+        }}
+      />
+    );
 
-      try {
-        await act(async () => {
-          renderer = create(message("- [ ] First\n- [ ] Second"));
-        });
-        const mounted = renderer!;
-        const originalInput = mounted.root.findAllByType("input")[1]!;
-        await act(async () => {
-          mounted.update(message("- [ ] A longer first task\n- [ ] Second"));
-        });
+    try {
+      await act(async () => {
+        renderer = create(message("- [ ] First\n- [ ] Second"));
+      });
+      const mounted = renderer!;
+      const originalInput = mounted.root.findAllByType("input")[1]!;
+      await act(async () => {
+        mounted.update(message("- [ ] A longer first task\n- [ ] Second"));
+      });
 
-        const input = mounted.root.findAllByType("input")[1]!;
-        const listItem = mounted.root.findAllByType("li")[1]!;
-        const { onChange } = input.props as ComponentProps<"input">;
-        if (!onChange) throw new Error("Task checkbox has no edit handler");
-        await act(async () => {
-          onChange({
-            currentTarget: {
-              checked: true,
-              closest: () => ({
-                dataset: { taskMarkerOffset: String(listItem.props["data-task-marker-offset"]) },
-              }),
-            },
-          } as unknown as Parameters<typeof onChange>[0]);
-        });
+      const input = mounted.root.findAllByType("input")[1]!;
+      const listItem = mounted.root.findAllByType("li")[1]!;
+      const { onChange } = input.props as ComponentProps<"input">;
+      if (!onChange) throw new Error("Task checkbox has no edit handler");
+      await act(async () => {
+        onChange({
+          currentTarget: {
+            checked: true,
+            closest: () => ({
+              dataset: { taskMarkerOffset: String(listItem.props["data-task-marker-offset"]) },
+            }),
+          },
+        } as unknown as Parameters<typeof onChange>[0]);
+      });
 
-        expect(input).toBe(originalInput);
-        expect(editedText).toBe("- [ ] A longer first task\n- [x] Second");
-        expect(mounted.root.findAllByType("input")[1]!.props.checked).toBe(true);
-      } finally {
-        await act(async () => renderer?.unmount());
-        vi.unstubAllGlobals();
-      }
-    },
-  );
+      expect(input).toBe(originalInput);
+      expect(editedText).toBe("- [ ] A longer first task\n- [x] Second");
+      expect(mounted.root.findAllByType("input")[1]!.props.checked).toBe(true);
+    } finally {
+      await act(async () => renderer?.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
 });
 
 describe("canUseMarkdownFileShellActions", () => {
@@ -1377,81 +613,6 @@ describe("hasMarkdownFilePrimaryAction", () => {
 });
 
 describe("ChatMarkdown skill chips", () => {
-  it("retains unchanged history while updating equal-length inline content and attributes", async () => {
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-    const renderSkills = vi.spyOn(skillInlineText, "renderSkillInlineMarkdownChildren");
-    const history = Array.from({ length: 96 }, (_, i) => `Paragraph ${i}`).join("\n\n");
-    const view = (tail: string) => <ChatMarkdown cwd={undefined} text={`${history}\n\n${tail}`} />;
-    let renderer: ReactTestRenderer | undefined;
-    try {
-      await act(() => {
-        renderer = create(view("[label](/first) **bold**"));
-      });
-      const paragraphs = renderer!.root.findAllByType("p").slice(0, -1);
-      for (const tail of [
-        "[label](/other) ~~bold~~",
-        "[other](/other) **bold**",
-        "[other](/other)",
-      ]) {
-        renderSkills.mockClear();
-        await act(() => renderer!.update(view(tail)));
-        expect(renderSkills).toHaveBeenCalledTimes(1);
-        renderer!.root
-          .findAllByType("p")
-          .slice(0, -1)
-          .forEach((p, i) => expect(p).toBe(paragraphs[i]));
-        expect(renderer!.root.findByType("a").props.href).toBe("/other");
-        expect(renderer!.root.findAllByType("del")).toHaveLength(tail.includes("~~") ? 1 : 0);
-        expect(renderer!.root.findAllByType("strong")).toHaveLength(tail.includes("**") ? 1 : 0);
-      }
-    } finally {
-      await act(() => renderer?.unmount());
-      renderSkills.mockRestore();
-      vi.unstubAllGlobals();
-    }
-  });
-
-  it("does not render historical paragraphs again when only streaming activity finishes", async () => {
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-    const renderSkills = vi.spyOn(skillInlineText, "renderSkillInlineMarkdownChildren");
-    const text = Array.from({ length: 64 }, (_, i) => `Paragraph ${i} uses $review`).join("\n\n");
-    let renderer: ReactTestRenderer | undefined;
-    try {
-      await act(() => {
-        renderer = create(<ChatMarkdown cwd={undefined} text={text} smoothStreaming isStreaming />);
-      });
-      const paragraphs = renderer!.root.findAllByType("p");
-      renderSkills.mockClear();
-      await act(() =>
-        renderer!.update(
-          <ChatMarkdown cwd={undefined} text={text} smoothStreaming smoothComplete />,
-        ),
-      );
-      expect(renderSkills).not.toHaveBeenCalled();
-      renderer!.root
-        .findAllByType("p")
-        .forEach((paragraph, i) => expect(paragraph).toBe(paragraphs[i]));
-      await act(() =>
-        renderer!.update(
-          <ChatMarkdown
-            cwd={undefined}
-            text={text}
-            smoothStreaming
-            smoothComplete
-            skills={[{ name: "review", displayName: "Review" }]}
-          />,
-        ),
-      );
-      expect(
-        renderer!.root.findAllByProps({ "data-markdown-copy": "$review" }).length,
-      ).toBeGreaterThanOrEqual(64);
-    } finally {
-      await act(() => renderer?.unmount());
-      renderSkills.mockRestore();
-      vi.unstubAllGlobals();
-    }
-  });
-
   it("updates digit-leading skill labels when discovered skills change", async () => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     let renderer: ReactTestRenderer | undefined;
@@ -1640,6 +801,36 @@ describe("ChatMarkdown file option chips", () => {
   });
 });
 
+describe("ChatMarkdown Codex follow-up suggestions", () => {
+  it.each([true, false])("renders the label with parseRawHtml=%s", (parseRawHtml) => {
+    const html = renderToStaticMarkup(
+      <ChatMarkdown
+        cwd="/tmp/project"
+        text={
+          'Done.\n\n- :codex-followup[Prepare print version]{prompt="Prepare the document for printing."}'
+        }
+        lineBreaks={!parseRawHtml}
+        parseRawHtml={parseRawHtml}
+      />,
+    );
+
+    expect(html).toContain("Prepare print version");
+    expect(html).not.toContain("codex-followup");
+    expect(html).not.toContain("Prepare the document for printing.");
+  });
+
+  it("keeps the label of a malformed follow-up created by over-indented list recovery", () => {
+    const html = renderToStaticMarkup(
+      <ChatMarkdown
+        cwd="/tmp/project"
+        text="-       Next :codex-followup[Prepare print version]"
+      />,
+    );
+
+    expect(html).toContain("<li>Next :codex-followup[Prepare print version]</li>");
+  });
+});
+
 const ARTIFACT_TEMPLATE_DIRECTIVE =
   '::artifact-template{skill_name="artifact-template-hello-world" skill_directory="/Users/test/.codex/skills/artifact-template-hello-world" display_name="Hello World" artifact_kind="document"}';
 
@@ -1721,15 +912,15 @@ describe("ChatMarkdown heading levels", () => {
       />,
     );
 
-    expect(html).toContain('<h1 aria-level="4">Top</h1>');
-    expect(html).toContain('<h2 aria-level="5">Section</h2>');
-    expect(html).toContain('<h6 aria-level="6">Fine print</h6>');
+    expect(html).toContain('<h1 id="user-content-top" aria-level="4">Top</h1>');
+    expect(html).toContain('<h2 id="user-content-section" aria-level="5">Section</h2>');
+    expect(html).toContain('<h6 id="user-content-fine-print" aria-level="6">Fine print</h6>');
   });
 
   it("leaves heading levels alone when the markdown is not nested", () => {
     const html = renderToStaticMarkup(<ChatMarkdown cwd="/tmp/project" text="# Top" />);
 
-    expect(html).toContain("<h1>Top</h1>");
+    expect(html).toContain('<h1 id="user-content-top">Top</h1>');
   });
 });
 
@@ -1794,37 +985,6 @@ describe("ChatMarkdown Windows file links", () => {
     expect(html).toContain("chat-markdown-file-link");
   });
 
-  it.each([true, false])(
-    "keeps CommonMark escape characters in authored Windows destinations with raw HTML=%s",
-    async (parseRawHtml) => {
-      let renderer: ReactTestRenderer | null = null;
-      try {
-        await act(() => {
-          renderer = create(
-            <ChatMarkdown
-              cwd="C:/workspace"
-              environmentId={environmentId}
-              parseRawHtml={parseRawHtml}
-              text={String.raw`[Config](C:\workspace\.t3\_cache\settings.json)
-
-[Reference][config]
-
-[config]: C:\workspace\.t3\settings.json
-
-[Escaped](C:/workspace/a&amp;b.json)`}
-            />,
-          );
-        });
-        const links = renderer!.root.findAllByType("a").map((link) => link.props.href);
-        expect(links).toContain("C:/workspace/.t3/_cache/settings.json");
-        expect(links).toContain("C:/workspace/.t3/settings.json");
-        expect(links).toContain("C:/workspace/a&b.json");
-      } finally {
-        await act(() => renderer?.unmount());
-      }
-    },
-  );
-
   it.each([true, false])("normalizes backslashes with parseRawHtml=%s", (parseRawHtml) => {
     const html = renderToStaticMarkup(
       <ChatMarkdown
@@ -1839,6 +999,23 @@ describe("ChatMarkdown Windows file links", () => {
     expect(html).toContain('href="C:/Users/shawn/project/src/main.ts"');
     expect(html).toContain("chat-markdown-file-link");
   });
+
+  it.each([true, false])(
+    "keeps backslashes CommonMark would read as escapes with parseRawHtml=%s",
+    (parseRawHtml) => {
+      const html = renderToStaticMarkup(
+        <ChatMarkdown
+          cwd="C:/Users/shawn/project"
+          environmentId={environmentId}
+          text={String.raw`[settings](C:\Users\shawn\.claude\settings.json)`}
+          lineBreaks={!parseRawHtml}
+          parseRawHtml={parseRawHtml}
+        />,
+      );
+
+      expect(html).toContain('href="C:/Users/shawn/.claude/settings.json"');
+    },
+  );
 
   it.each([true, false])(
     "distinguishes same-named backslash paths with parseRawHtml=%s",
@@ -1907,4 +1084,394 @@ describe("ChatMarkdown Windows file links", () => {
     expect(html).not.toContain("d:alert");
     expect(html).not.toContain("chat-markdown-file-link");
   });
+});
+
+it("opens a disclosure only when find selects a match inside it", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  vi.stubGlobal(
+    "Highlight",
+    class extends Set<Range> {
+      constructor(...ranges: Range[]) {
+        super(ranges);
+      }
+    },
+  );
+  const highlights = new Map<string, Set<Range>>();
+  vi.stubGlobal("CSS", { highlights, escape: (value: string) => value });
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  const openStates = () =>
+    [...container.querySelectorAll("[data-markdown-details-open]")].map((node) =>
+      node.getAttribute("data-markdown-details-open"),
+    );
+  function Probe({
+    activeOccurrence,
+    searching = true,
+  }: {
+    activeOccurrence: number;
+    searching?: boolean;
+  }) {
+    useThreadFindHighlights({
+      container,
+      query: searching ? "needle" : "",
+      activeRowId: "row",
+      activeOccurrence,
+      onActiveRange: () => {},
+    });
+    return (
+      <div data-timeline-row-id="row">
+        <div data-thread-find-text>
+          <MarkdownFindContext value={searching}>
+            <ChatMarkdown
+              cwd={undefined}
+              text={[
+                "Visible needle.",
+                "<details><summary>Unrelated</summary><p>nothing here</p></details>",
+                "<details><summary>Outer</summary><details><summary>Inner</summary><p>needle</p></details></details>",
+              ].join("\n\n")}
+            />
+          </MarkdownFindContext>
+        </div>
+      </div>
+    );
+  }
+  const frame = () =>
+    act(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+  try {
+    // Closed panels are unmounted until find starts, as in the app.
+    await act(() => root.render(<Probe activeOccurrence={0} searching={false} />));
+    expect(container.textContent).not.toContain("nothing here");
+    await act(() => root.render(<Probe activeOccurrence={0} />));
+    await frame();
+    // Selecting the visible match opens nothing; the folded one is counted but not painted.
+    expect(openStates()).toEqual(["false", "false", "false"]);
+    expect(container.textContent).toContain("nothing here");
+    expect(
+      [...(highlights.get("t3-thread-find-active") ?? [])].map((range) => range.toString()),
+    ).toEqual(["needle"]);
+    expect(highlights.get("t3-thread-find")?.size).toBe(0);
+
+    await act(() => root.render(<Probe activeOccurrence={1} />));
+    await frame();
+    await frame();
+    // Stepping to the folded match opens its two ancestors, not the unrelated one.
+    expect(openStates()).toEqual(["false", "true", "true"]);
+    expect(highlights.get("t3-thread-find-active")?.size).toBe(1);
+  } finally {
+    await act(() => root.unmount());
+    container.remove();
+    vi.unstubAllGlobals();
+  }
+});
+
+it.each([false, true])(
+  "keeps painted Mermaid source while its EOF diagram is pending (smooth=%s)",
+  async (smoothStreaming) => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    let finishDiagram!: () => void;
+    diagramRender.pending = new Promise<void>((resolve) => {
+      finishDiagram = resolve;
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const text =
+      "```mermaid\ngraph TD\n  ALREADY_PAINTED_NODE --> LastNode\n```\n\n" +
+      "## References\n\nThe final visible paragraph must stay below the code.";
+    const render = (isStreaming: boolean) =>
+      act(() =>
+        root.render(
+          <ChatMarkdown
+            cwd={undefined}
+            text={text}
+            isStreaming={isStreaming}
+            smoothStreaming={smoothStreaming}
+          />,
+        ),
+      );
+    try {
+      await render(true);
+      expect(container.querySelector("pre")?.textContent ?? "").toContain("ALREADY_PAINTED_NODE");
+      await render(false);
+      // EOF不能先拿掉已绘制的代码，再用较矮占位符挤动后续正文。
+      expect(container.querySelector("pre")?.textContent ?? "").toContain("ALREADY_PAINTED_NODE");
+      expect(container.textContent).toContain("The final visible paragraph");
+      await act(async () => finishDiagram());
+      expect(container.querySelector('svg[aria-label="Diagram"]')).not.toBeNull();
+      expect(container.querySelector("pre")).toBeNull();
+    } finally {
+      await act(async () => {
+        finishDiagram();
+        root.unmount();
+      });
+      diagramRender.pending = null;
+      container.remove();
+      vi.unstubAllGlobals();
+    }
+  },
+);
+
+it.each([false, true])(
+  "renders a closed Mermaid fence before EOF and preserves its diagram at EOF (smooth=%s)",
+  async (smoothStreaming) => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const open = "```mermaid\ngraph TD\n  StableNode --> LastNode\n";
+    const closed = `${open}\`\`\`\n\nThe response is still streaming.`;
+    const render = (text: string, isStreaming: boolean) =>
+      act(() =>
+        root.render(
+          <ChatMarkdown
+            cwd={undefined}
+            text={text}
+            isStreaming={isStreaming}
+            smoothStreaming={smoothStreaming}
+          />,
+        ),
+      );
+    try {
+      await render(open, true);
+      expect(container.querySelector('svg[aria-label="Diagram"]')).toBeNull();
+      expect(container.querySelector("pre")?.textContent ?? "").toContain("StableNode");
+      await render(closed, true);
+      // 平滑模式会合并源码提交，先交付该批次，再检查图表是否仍错误地等待 EOF。
+      await act(async () => vi.advanceTimersByTime(96));
+      const diagram = container.querySelector('svg[aria-label="Diagram"]');
+      expect(diagram).not.toBeNull();
+      await render(closed, false);
+      expect(container.querySelector('svg[aria-label="Diagram"]')).toBe(diagram);
+    } finally {
+      await act(() => root.unmount());
+      container.remove();
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  },
+);
+
+it("keeps Mermaid diagrams rendered until find selects a match in their source", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  vi.stubGlobal(
+    "Highlight",
+    class extends Set<Range> {
+      constructor(...ranges: Range[]) {
+        super(ranges);
+      }
+    },
+  );
+  const highlights = new Map<string, Set<Range>>();
+  vi.stubGlobal("CSS", { highlights, escape: (value: string) => value });
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  const diagram = "```mermaid\ngraph TD; Alpha-->Beta\n```";
+  function Probe({ query }: { query: string }) {
+    useThreadFindHighlights({
+      container,
+      query,
+      activeRowId: "row",
+      activeOccurrence: 0,
+      onActiveRange: () => {},
+    });
+    return (
+      <div data-timeline-row-id="row">
+        <div data-thread-find-text>
+          <MarkdownFindContext value={true}>
+            <ChatMarkdown cwd={undefined} text={`Needle first.\n\n${diagram}\n\n${diagram}`} />
+          </MarkdownFindContext>
+        </div>
+      </div>
+    );
+  }
+  const frame = () =>
+    act(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+  const diagrams = () => container.querySelectorAll('svg[aria-label="Diagram"]').length;
+  try {
+    await act(() => root.render(<Probe query="Needle" />));
+    await frame();
+    expect(diagrams()).toBe(2);
+    await act(() => root.render(<Probe query="Alpha" />));
+    await frame();
+    await frame();
+    // Only the diagram holding the selected match switches to source.
+    expect(diagrams()).toBe(1);
+    expect(
+      [...(highlights.get("t3-thread-find-active") ?? [])].map((range) => range.toString()),
+    ).toEqual(["Alpha"]);
+  } finally {
+    await act(() => root.unmount());
+    container.remove();
+    vi.unstubAllGlobals();
+  }
+});
+
+it.each([
+  {
+    text: "```mermaid\ngraph TD; SearchSourceAlpha-->B\n```",
+    query: "SearchSourceAlpha",
+    count: 1,
+  },
+  {
+    text: "★ Insight ─────\nfirst line\nsecond line",
+    query: "first line second",
+    count: 0,
+    lineBreaks: true,
+  },
+  { text: '```ts title="src/needle.ts"\nconst a = 1;\n```', query: "needle", count: 0 },
+  { text: "```weirdlang\nconst a = 1;\n```", query: "weirdlang", count: 0 },
+  { text: "Use $test-t3-app now", query: "T3 App Testing", count: 1 },
+  { text: "`/tmp/file.ts:42`", query: "file.ts · L42", count: 1, user: true, lineBreaks: true },
+  { text: "> [!NOTE]\n> Searchable alert", query: "Searchable alert", count: 1 },
+  {
+    text: "<details><summary>Folded</summary><p>Hidden needle</p></details>",
+    query: "Hidden needle",
+    count: 1,
+  },
+  { text: ARTIFACT_TEMPLATE_DIRECTIVE, query: "Hello World", count: 1, useTemplate: true },
+  { text: ARTIFACT_TEMPLATE_DIRECTIVE, query: "Document template", count: 1, useTemplate: true },
+  { text: ARTIFACT_TEMPLATE_DIRECTIVE, query: "World Document", count: 0, useTemplate: true },
+  { text: ARTIFACT_TEMPLATE_DIRECTIVE, query: "Use template", count: 0, useTemplate: true },
+])(
+  "highlights the indexed occurrences of $query in $text",
+  async ({ text, query, count, lineBreaks, user, useTemplate }) => {
+    const skills = [{ name: "test-t3-app", displayName: "T3 App Testing" }];
+    const highlights = new Map<string, Set<Range>>();
+    vi.stubGlobal(
+      "Highlight",
+      class extends Set<Range> {
+        constructor(...ranges: Range[]) {
+          super(ranges);
+        }
+      },
+    );
+    vi.stubGlobal("CSS", { highlights, escape: (value: string) => value });
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    function Probe() {
+      useThreadFindHighlights({
+        container,
+        query,
+        activeRowId: "row",
+        activeOccurrence: 0,
+        onActiveRange: () => {},
+      });
+      return (
+        <div data-timeline-row-id="row">
+          <div data-thread-find-text>
+            <MarkdownFindContext value={true}>
+              <ChatMarkdown
+                text={text}
+                cwd={undefined}
+                skills={skills}
+                lineBreaks={lineBreaks ?? false}
+                parseRawHtml={!user}
+                onUseArtifactTemplate={useTemplate ? () => undefined : undefined}
+              />
+            </MarkdownFindContext>
+          </div>
+        </div>
+      );
+    }
+    try {
+      await act(() => root.render(<Probe />));
+      await act(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+      const ranges = [...highlights.values()].flatMap((value) => [...value]);
+      expect(ranges.map((range) => range.toString())).toEqual(
+        Array.from({ length: count }, () => query),
+      );
+      const segments =
+        searchableMessageSegments(
+          { role: user ? "user" : "assistant", text, streaming: false },
+          undefined,
+          skills,
+        ) ?? [];
+      expect(
+        segments.reduce((sum, segment) => sum + countThreadSearchOccurrences(segment, query), 0),
+      ).toBe(count);
+    } finally {
+      await act(() => root.unmount());
+      container.remove();
+      vi.unstubAllGlobals();
+    }
+  },
+);
+
+describe("ChatMarkdown heading ids", () => {
+  it("never gives two headings the same id, even when a suffix matches another heading", () => {
+    const html = renderToStaticMarkup(
+      <ChatMarkdown
+        cwd="/tmp/project"
+        parseRawHtml
+        text={
+          '## Setup\n\n## Setup\n\n## Setup-1\n\n<h2 id="install-1">Pinned</h2>\n\n## Install\n\n## Install'
+        }
+      />,
+    );
+    const ids = [...html.matchAll(/<h2 id="([^"]+)"/g)].map((match) => match[1]);
+    expect(ids).toEqual([
+      "user-content-setup",
+      "user-content-setup-1",
+      "user-content-setup-1-1",
+      "user-content-install-1",
+      "user-content-install",
+      "user-content-install-2",
+    ]);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+});
+
+describe("ChatMarkdown in-page links", () => {
+  it.each([true, false])(
+    "scrolls a table-of-contents link to its heading without touching the URL (parseRawHtml=%s)",
+    async (parseRawHtml) => {
+      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+      const { createRoot } = await import("react-dom/client");
+      const container = document.createElement("div");
+      document.body.append(container);
+      const root = createRoot(container);
+      window.history.replaceState(null, "", "/#/env/thread");
+      const scrollIntoView = vi.fn();
+      HTMLElement.prototype.scrollIntoView = scrollIntoView;
+      try {
+        await act(async () => {
+          root.render(
+            <ChatMarkdown
+              cwd="/tmp/project"
+              parseRawHtml={parseRawHtml}
+              text={
+                "- [Operating model](#1-operating-model)\n- [Missing](#nowhere)\n\n## 1. Operating model\n\n## 1. Operating model"
+              }
+            />,
+          );
+        });
+        const headings = [...container.querySelectorAll("h2")];
+        expect(headings.map((heading) => heading.id)).toEqual([
+          "user-content-1-operating-model",
+          "user-content-1-operating-model-1",
+        ]);
+
+        const [tocLink, missingLink] = [...container.querySelectorAll("a")];
+        const click = () => new MouseEvent("click", { bubbles: true, cancelable: true });
+        const tocClick = click();
+        tocLink!.dispatchEvent(tocClick);
+        expect(tocClick.defaultPrevented).toBe(true);
+        expect(scrollIntoView.mock.contexts).toEqual([headings[0]]);
+
+        const missingClick = click();
+        missingLink!.dispatchEvent(missingClick);
+        expect(missingClick.defaultPrevented).toBe(true);
+        expect(scrollIntoView).toHaveBeenCalledTimes(1);
+        expect(window.location.hash).toBe("#/env/thread");
+      } finally {
+        await act(async () => root.unmount());
+        container.remove();
+      }
+    },
+  );
 });

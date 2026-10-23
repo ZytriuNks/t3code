@@ -15,8 +15,8 @@ vi.mock("./chat/composerEventScope", () => ({
   useComposerMenuProps: () => ({}),
 }));
 
-vi.mock("./chat/ThreadDetailsControl", () => ({
-  ThreadDetailsSelectControl: ({
+vi.mock("./chat/ComposerControl", () => ({
+  ComposerSelectControl: ({
     "aria-label": ariaLabel,
     children,
   }: {

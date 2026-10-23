@@ -12,6 +12,7 @@ import {
 import { deriveProviderInstanceEntries, NO_PROVIDER_MODEL_SELECTION } from "../providerInstances";
 import type { RightPanelSurface } from "../rightPanelStore";
 import {
+  CommandId,
   EnvironmentId,
   EventId,
   MessageId,
@@ -23,15 +24,16 @@ import {
   type OrchestrationV2ProjectedTurnItem,
   type WorktreeSetupSnapshot,
 } from "@t3tools/contracts";
-import type { CodexArtifactTemplate } from "@t3tools/client-runtime/codex-artifact-templates";
+import type { CodexArtifactTemplate } from "@t3tools/shared/codexArtifactTemplates";
 import * as DateTime from "effect/DateTime";
+import * as Option from "effect/Option";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
-import { Atom, AsyncResult } from "effect/unstable/reactivity";
+import { Atom, AsyncResult } from "effect/reactivity";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { environmentThreadDetails } from "../state/threads";
 
 import type { Thread, TurnDiffSummary } from "../types";
-import { makeThreadFixture } from "../test-fixtures";
+import { makeThreadFixture, makeThreadProjectionFixture } from "../test-fixtures";
 import {
   agentControlledBrowserCloseConfirmation,
   ENVIRONMENT_RECONNECT_WARNING_GRACE_MS,
@@ -72,7 +74,6 @@ import {
   getStartedThreadModelChangeBlockReason,
   hasEnvironmentReconnectWarningGraceElapsed,
   hasServerAcknowledgedLocalDispatch,
-  latestCompletedToolTurnItemId,
   isBranchMismatchDismissedForSession,
   reconcileMountedTerminalThreadIds,
   resolveDraftPromotionNavigationTarget,
@@ -583,46 +584,6 @@ describe("startNewThreadForProject", () => {
   });
 });
 
-describe("latestCompletedToolTurnItemId", () => {
-  it("uses the newest V2 tool completion even when items arrive out of order", () => {
-    const first = DateTime.makeUnsafe("2026-03-29T00:00:01.000Z");
-    const latest = DateTime.makeUnsafe("2026-03-29T00:00:02.000Z");
-    const items: Parameters<typeof latestCompletedToolTurnItemId>[0] = [
-      {
-        id: TurnItemId.make("tool-latest"),
-        type: "dynamic_tool",
-        status: "failed",
-        completedAt: latest,
-        ordinal: 1,
-      },
-      {
-        id: TurnItemId.make("assistant"),
-        type: "assistant_message",
-        status: "completed",
-        completedAt: latest,
-        ordinal: 4,
-      },
-      {
-        id: TurnItemId.make("tool-pending"),
-        type: "command_execution",
-        status: "running",
-        completedAt: null,
-        ordinal: 3,
-      },
-      {
-        id: TurnItemId.make("tool-first"),
-        type: "command_execution",
-        status: "completed",
-        completedAt: first,
-        ordinal: 2,
-      },
-    ];
-
-    expect(latestCompletedToolTurnItemId(items)).toBe("tool-latest");
-    expect(latestCompletedToolTurnItemId([])).toBeNull();
-  });
-});
-
 describe("hasServerAcknowledgedLocalDispatch", () => {
   it("does not acknowledge unchanged server state", () => {
     const localDispatch = createLocalDispatchSnapshot(
@@ -666,6 +627,30 @@ describe("hasServerAcknowledgedLocalDispatch", () => {
         threadError: null,
       }),
     ).toBe(true);
+  });
+
+  it("holds a first send while the thread shell still reports a preparing run", () => {
+    // The draft had no run. The server thread's shell shows the new run before
+    // the detail projection behind `phase` loads.
+    const localDispatch = createLocalDispatchSnapshot(makeThread());
+    const preparingRun = {
+      ...completedTurn,
+      status: "preparing" as const,
+      startedAt: null,
+      completedAt: null,
+    };
+
+    expect(
+      hasServerAcknowledgedLocalDispatch({
+        localDispatch,
+        phase: "disconnected",
+        latestRun: preparingRun,
+        runtime: { ...readySession, status: "preparing", activeRunId: preparingRun.runId },
+        hasPendingApproval: false,
+        hasPendingUserInput: false,
+        threadError: null,
+      }),
+    ).toBe(false);
   });
 
   it("waits for the matching running turn before acknowledging", () => {
@@ -1394,6 +1379,28 @@ describe("shouldShowWorkingActivity", () => {
       }),
     ).toBe(true);
   });
+
+  it("keeps Thinking while the run is pending with no assistant output yet", () => {
+    expect(
+      shouldShowWorkingActivity({
+        isWorking: true,
+        activeRunId: runId,
+        latestRunId: runId,
+        latestAssistantMessage: null,
+      }),
+    ).toBe(true);
+  });
+
+  it("keeps Thinking while the run is queued and no assistant output has arrived", () => {
+    expect(
+      shouldShowWorkingActivity({
+        isWorking: true,
+        activeRunId: null,
+        latestRunId: runId,
+        latestAssistantMessage: null,
+      }),
+    ).toBe(true);
+  });
 });
 
 describe("environment reconnect warning grace", () => {
@@ -1876,6 +1883,26 @@ describe("proactive completed diff guard", () => {
       }),
     ).toBe("ignore");
   });
+
+  it("leaves an already open diff and its chosen scope alone", () => {
+    const largeCheckpoint = {
+      status: "ready",
+      files: Array.from({ length: 3 }, (_, index) => ({
+        path: `src/app-${index}.ts`,
+        kind: "modified" as const,
+        additions: 20,
+        deletions: 0,
+      })),
+    } satisfies Pick<TurnDiffSummary, "status" | "files">;
+
+    expect(
+      resolveProactiveTurnDiffAction({
+        checkpoint: largeCheckpoint,
+        isGitRepo: true,
+        activeSurfaceKind: "diff",
+      }),
+    ).toBe("ignore");
+  });
 });
 
 describe("shouldRefocusComposerOnWindowFocus", () => {
@@ -2180,5 +2207,73 @@ describe("worktree setup visibility", () => {
       ...settledDone,
       sequence: 9,
     });
+  });
+});
+
+describe("waitForRevertedMessage", () => {
+  const threadRef = { environmentId: EnvironmentId.make("env-1"), threadId: ThreadId.make("t") };
+  const messageId = MessageId.make("message-2");
+  const requestId = CommandId.make("rollback-1");
+
+  function projectionAtom() {
+    const base = makeThreadProjectionFixture();
+    const projection = {
+      ...base,
+      messages: [
+        {
+          id: messageId,
+          threadId: base.thread.id,
+          runId: RunId.make("run-2"),
+          nodeId: null,
+          role: "user",
+          text: "second",
+          attachments: [],
+          streaming: false,
+          createdAt: base.updatedAt,
+          updatedAt: base.updatedAt,
+        },
+      ],
+    } as unknown as ReturnType<typeof makeThreadProjectionFixture>;
+    const state = Atom.make({ data: Option.some(projection) });
+    vi.spyOn(environmentThreadDetails, "stateAtom").mockReturnValue(state as never);
+    return { state, projection };
+  }
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it("rejects with the projected reason when the rollback fails for good", async () => {
+    const { state, projection } = projectionAtom();
+    const waiting = waitForRevertedMessage(threadRef, messageId, 1, requestId, async () => {});
+    await Promise.resolve();
+    appAtomRegistry.set(state, {
+      data: Option.some({
+        ...projection,
+        thread: {
+          ...projection.thread,
+          rollbackFailure: { requestId, message: "The provider could not roll back." },
+        },
+      }),
+    });
+
+    await expect(waiting).rejects.toThrow("The provider could not roll back.");
+  });
+
+  it("ignores a failure recorded for an earlier rollback", async () => {
+    vi.useFakeTimers();
+    const { state, projection } = projectionAtom();
+    const waiting = waitForRevertedMessage(threadRef, messageId, 1, requestId, async () => {}, 50);
+    const settled = expect(waiting).rejects.toThrow("Timed out waiting for the thread to rewind.");
+    appAtomRegistry.set(state, {
+      data: Option.some({
+        ...projection,
+        thread: {
+          ...projection.thread,
+          rollbackFailure: { requestId: CommandId.make("rollback-0"), message: "Old failure." },
+        },
+      }),
+    });
+    await vi.advanceTimersByTimeAsync(50);
+    await settled;
+    vi.useRealTimers();
   });
 });

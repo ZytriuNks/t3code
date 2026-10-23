@@ -1,15 +1,15 @@
 import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 
+import { type CommandId, ProjectId } from "./baseSchemas.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import {
   ClientSettingsSchema,
   ClientSettingsPatch,
   ClaudeSettings,
-  DEFAULT_CONVERSATION_STRUCTURE,
   DEFAULT_SERVER_SETTINGS,
-  ProjectSettingsOverrides,
-  PROJECT_SCOPED_SERVER_SETTING_KEYS,
+  requiredScopesForProjectMutation,
+  resolveProjectProviderInstanceEnabled,
   resolveProviderInstanceEnabled,
   ServerSettings,
   ServerSettingsPatch,
@@ -22,162 +22,42 @@ const decodeServerSettings = Schema.decodeUnknownSync(ServerSettings);
 const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
-const decodeProjectSettingsOverrides = Schema.decodeSync(ProjectSettingsOverrides);
 
-describe("conversationStructure", () => {
-  it("validates and preserves smooth text yield duration in defaults, overrides and patches", () => {
-    expect(decodeServerSettings({}).smoothTextYieldDurationMs).toBe(200);
-    expect(decodeProjectSettingsOverrides({}).smoothTextYieldDurationMs).toBeUndefined();
-    for (const duration of [80, 200, 1000]) {
-      expect(
-        decodeServerSettingsPatch({ smoothTextYieldDurationMs: duration })
-          .smoothTextYieldDurationMs,
-      ).toBe(duration);
-      expect(
-        decodeProjectSettingsOverrides({ smoothTextYieldDurationMs: duration })
-          .smoothTextYieldDurationMs,
-      ).toBe(duration);
-    }
-    for (const duration of [79, 1001, 80.5, "200", null]) {
-      expect(() => decodeServerSettingsPatch({ smoothTextYieldDurationMs: duration })).toThrow();
-      expect(() =>
-        decodeProjectSettingsOverrides({ smoothTextYieldDurationMs: duration }),
-      ).toThrow();
-    }
-  });
-  it("includes the yield duration in the project-scoped setting set", () => {
-    expect(PROJECT_SCOPED_SERVER_SETTING_KEYS).toContain("smoothTextYieldDurationMs");
-  });
-  it("round-trips yield duration through server settings encoding and patches", () => {
-    const input = { smoothTextYieldDurationMs: 870 };
-    expect(encodeServerSettings(decodeServerSettings(input))).toMatchObject(input);
-    expect(decodeServerSettingsPatch(input)).toEqual(input);
-    expect(decodeProjectSettingsOverrides(input)).toEqual(input);
-  });
-
-  it("validates and preserves text fade duration in defaults, overrides and patches", () => {
-    expect(decodeServerSettings({}).smoothTextFadeDurationMs).toBe(200);
-    expect(decodeProjectSettingsOverrides({}).smoothTextFadeDurationMs).toBeUndefined();
-    for (const duration of [0, 180, 1000]) {
-      expect(
-        decodeServerSettingsPatch({ smoothTextFadeDurationMs: duration }).smoothTextFadeDurationMs,
-      ).toBe(duration);
-      expect(
-        decodeProjectSettingsOverrides({ smoothTextFadeDurationMs: duration })
-          .smoothTextFadeDurationMs,
-      ).toBe(duration);
-    }
-    for (const duration of [-1, 1001, 1.5, "180", null])
-      expect(() => decodeServerSettingsPatch({ smoothTextFadeDurationMs: duration })).toThrow();
-  });
-  it("defaults to the current behaviour with an idle label", () => {
-    const decoded = decodeProjectSettingsOverrides({});
-    expect(decoded.conversationStructure).toBeUndefined();
-    expect(decoded.conversationStructureThinkingLabel).toBeUndefined();
-    expect(decoded.conversationStructureIdleLabel).toBeUndefined();
-    expect(DEFAULT_CONVERSATION_STRUCTURE).toBe("default");
-  });
-
-  it("accepts both structure values and a custom idle label", () => {
-    const decoded = decodeProjectSettingsOverrides({
-      conversationStructure: "restructured",
-      conversationStructureThinkingLabel: "Working it out",
-      conversationStructureIdleLabel: "考虑下一步",
-    });
-    expect(decoded.conversationStructure).toBe("restructured");
-    expect(decoded.conversationStructureThinkingLabel).toBe("Working it out");
-    expect(decoded.conversationStructureIdleLabel).toBe("考虑下一步");
-  });
-
-  it("defaults both keys on the environment-wide server settings", () => {
-    const decoded = decodeServerSettings({});
-    expect(decoded.conversationStructure).toBe(DEFAULT_CONVERSATION_STRUCTURE);
-    // Empty labels mean the client's translated built-in text.
-    expect(decoded.conversationStructureThinkingLabel).toBe("");
-    expect(decoded.conversationStructureIdleLabel).toBe("");
-  });
-
-  it("round-trips both keys through the environment-wide settings write path", () => {
-    const input = {
-      conversationStructure: "restructured",
-      conversationStructureThinkingLabel: "Working it out",
-      conversationStructureIdleLabel: "考虑下一步",
-    };
-    expect(encodeServerSettings(decodeServerSettings(input))).toMatchObject(input);
-    expect(decodeServerSettingsPatch(input)).toEqual(input);
-  });
-
-  it("rejects an unknown structure value", () => {
-    expect(() => decodeServerSettings({ conversationStructure: "unknown" })).toThrow();
-    expect(() => decodeServerSettingsPatch({ conversationStructure: "unknown" })).toThrow();
-  });
-});
-
-describe("ClientSettings context menu visibility", () => {
-  it("defaults to showing unavailable context menu items", () => {
-    expect(decodeClientSettings({}).hideUnavailableContextMenuItems).toBe(false);
-    expect(decodeClientSettingsPatch({ hideUnavailableContextMenuItems: true })).toEqual({
+describe("fork preferences after the settings migration", () => {
+  it("keeps client preferences through decoding, patching and persistence", () => {
+    const patch = decodeClientSettingsPatch({
+      language: "zh-CN",
       hideUnavailableContextMenuItems: true,
+      autoExpandThreadDetailsPanel: false,
+      legacySidebarProjectGuides: false,
+      legacySidebarThreadStatusDots: true,
+      legacySidebarHideStatusLabels: true,
     });
+    const saved = encodeClientSettings(
+      decodeClientSettings({ ...decodeClientSettings({}), ...patch }),
+    );
+    expect(saved).toMatchObject(patch);
+    expect(decodeClientSettings(saved)).toMatchObject(patch);
+    expect(decodeClientSettings({}).language).toBe("system");
+    expect(() => decodeClientSettingsPatch({ language: "unknown" })).toThrow();
+  });
+
+  it("defaults and persists the Scratch working directory", () => {
+    expect(decodeServerSettings({}).scratchBaseDirectory).toBe("");
+    const patch = decodeServerSettingsPatch({ scratchBaseDirectory: "  ~/中文 chats  " });
+    expect(patch.scratchBaseDirectory).toBe("~/中文 chats");
+    expect(
+      decodeServerSettings(encodeServerSettings(decodeServerSettings(patch))).scratchBaseDirectory,
+    ).toBe("~/中文 chats");
   });
 });
 
 describe("ServerSettings response streaming", () => {
-  it("enables Markdown preload by default and round-trips its environment and project overrides", () => {
-    expect(decodeServerSettings({}).smoothMarkdownPreload).toBe(true);
-    expect(decodeProjectSettingsOverrides({}).smoothMarkdownPreload).toBeUndefined();
-    const input = {
-      smoothMarkdownPreload: false,
-      projectSettingsOverrides: { project: { smoothMarkdownPreload: true } },
-    };
-    expect(encodeServerSettings(decodeServerSettings(input))).toMatchObject(input);
-    expect(decodeServerSettingsPatch(input)).toEqual(input);
-    expect(() => decodeServerSettingsPatch({ smoothMarkdownPreload: "yes" })).toThrow();
-  });
-  it("stores independent line strategies and inherits them when a project has no override", () => {
-    expect(decodeServerSettings({}).smoothOutputLineMode).toBe("adaptive");
-    expect(decodeProjectSettingsOverrides({}).smoothOutputLineMode).toBeUndefined();
-    const input = {
-      smoothOutputLineMode: "parallel",
-      projectSettingsOverrides: { project: { smoothOutputLineMode: "adaptive" } },
-    };
-    expect(encodeServerSettings(decodeServerSettings(input))).toMatchObject(input);
-    expect(decodeServerSettingsPatch(input)).toEqual(input);
-    expect(() => decodeServerSettingsPatch({ smoothOutputLineMode: "random" })).toThrow();
-  });
-  it("defaults to expanded footnotes and round-trips automatic collapse at every scope", () => {
-    expect(decodeServerSettings({}).footnotesAutoCollapse).toBe(false);
-    expect(decodeProjectSettingsOverrides({}).footnotesAutoCollapse).toBeUndefined();
-    const input = {
-      footnotesAutoCollapse: true,
-      projectSettingsOverrides: { project: { footnotesAutoCollapse: false } },
-    };
-    expect(encodeServerSettings(decodeServerSettings(input))).toMatchObject(input);
-    expect(decodeServerSettingsPatch(input)).toEqual(input);
-    expect(() => decodeServerSettingsPatch({ footnotesAutoCollapse: "yes" })).toThrow();
-  });
-  it("keeps character output as the default and round-trips token mode through every settings scope", () => {
-    expect(decodeServerSettings({}).smoothOutputMode).toBe("character");
-    expect(decodeProjectSettingsOverrides({}).smoothOutputMode).toBeUndefined();
-    const input = {
-      smoothOutputMode: "token",
-      projectSettingsOverrides: { project: { smoothOutputMode: "character" } },
-    };
-    expect(encodeServerSettings(decodeServerSettings(input))).toMatchObject(input);
-    expect(decodeServerSettingsPatch(input)).toEqual(input);
-    expect(() => decodeServerSettingsPatch({ smoothOutputMode: "word" })).toThrow();
-    // `auto` is opt-in: it adapts between the two, so it has to survive the
-    // same round trip as either fixed mode.
-    const adapting = { smoothOutputMode: "auto" as const };
-    expect(encodeServerSettings(decodeServerSettings(adapting))).toMatchObject(adapting);
-    expect(decodeServerSettingsPatch(adapting)).toEqual(adapting);
-  });
-
   it("defaults to paragraph buffering", () => {
     expect(decodeServerSettings({}).responseStreamingMode).toBe("paragraph");
   });
 
-  it.each(["turn", "paragraph", "realtime", "smooth"])(
+  it.each(["turn", "paragraph"])(
     "round-trips %s as an environment setting and project override",
     (responseStreamingMode) => {
       const input = {
@@ -205,9 +85,11 @@ describe("storage cleanup settings", () => {
     expect(decodeServerSettings({}).worktreeCleanup).toBeNull();
     expect(decodeServerSettings({}).storageCleanup).toEqual({
       worktreeAfterDays: null,
+      worktreeSettledAfterDays: null,
       worktreeOnMerge: false,
       worktreeOnDelete: false,
       worktreeUnchanged: false,
+      worktreeKeepWhen: "uncommitted-changes",
       browserArtifactsAfterDays: null,
       logsAfterDays: null,
     });
@@ -219,6 +101,9 @@ describe("storage cleanup settings", () => {
     });
     expect(decodeServerSettingsPatch({ storageCleanup: { worktreeAfterDays: null } })).toEqual({
       storageCleanup: { worktreeAfterDays: null },
+    });
+    expect(decodeServerSettingsPatch({ storageCleanup: { worktreeSettledAfterDays: 0 } })).toEqual({
+      storageCleanup: { worktreeSettledAfterDays: 0 },
     });
   });
 
@@ -235,11 +120,60 @@ describe("storage cleanup settings", () => {
         },
       }),
     ).toThrow();
+    expect(
+      decodeServerSettings({
+        projectSettingsOverrides: {
+          project: {
+            worktreeCleanup: {
+              mode: "custom",
+              rules: {
+                worktreeAfterDays: null,
+                worktreeOnMerge: false,
+                worktreeOnDelete: false,
+                worktreeUnchanged: false,
+              },
+            },
+          },
+        },
+      }).projectSettingsOverrides[ProjectId.make("project")]?.worktreeCleanup,
+    ).toMatchObject({
+      mode: "custom",
+      rules: { worktreeSettledAfterDays: null, worktreeKeepWhen: "uncommitted-changes" },
+    });
+  });
+
+  it("decodes older custom rules with the default local-file policy", () => {
+    const settings = decodeServerSettings({
+      worktreeCleanup: {
+        mode: "custom",
+        rules: {
+          worktreeAfterDays: 8,
+          worktreeOnMerge: false,
+          worktreeOnDelete: false,
+          worktreeUnchanged: false,
+        },
+      },
+    });
+    expect(settings.worktreeCleanup).toMatchObject({
+      rules: { worktreeKeepWhen: "uncommitted-changes" },
+    });
+    expect(
+      decodeServerSettingsPatch({ storageCleanup: { worktreeKeepWhen: "tracked-changes" } }),
+    ).toEqual({ storageCleanup: { worktreeKeepWhen: "tracked-changes" } });
+    expect(() =>
+      decodeServerSettingsPatch({ storageCleanup: { worktreeKeepWhen: "unknown" } }),
+    ).toThrow();
   });
 
   it.each([0, -1, 1.5, 3651])("rejects invalid retention %s", (days) => {
     expect(() =>
       decodeServerSettingsPatch({ storageCleanup: { browserArtifactsAfterDays: days } }),
+    ).toThrow();
+  });
+
+  it.each([-1, 1.5, 3651])("rejects invalid settled retention %s", (days) => {
+    expect(() =>
+      decodeServerSettingsPatch({ storageCleanup: { worktreeSettledAfterDays: days } }),
     ).toThrow();
   });
 });
@@ -359,17 +293,6 @@ describe("custom model settings", () => {
       { slug: "named", name: "Named", capabilities },
     ]);
   });
-
-  it("accepts entries at the settings patch boundary", () => {
-    expect(
-      decodeServerSettingsPatch({
-        providers: { codex: { customModels: [{ slug: "x", capabilities }] } },
-      }).providers?.codex?.customModels,
-    ).toEqual([{ slug: "x", capabilities }]);
-    expect(() =>
-      decodeServerSettingsPatch({ providers: { codex: { customModels: [{ name: "no slug" }] } } }),
-    ).toThrow();
-  });
 });
 
 describe("ClaudeSettings auto-compaction", () => {
@@ -390,33 +313,6 @@ describe("ClaudeSettings auto-compaction", () => {
       expect(() => decodeClaudeSettings({ autoCompactWindow: value })).toThrow();
     },
   );
-
-  it("rejects an unsupported threshold at the settings patch boundary", () => {
-    expect(() =>
-      decodeServerSettingsPatch({ providers: { claudeAgent: { autoCompactWindow: "300k" } } }),
-    ).toThrow();
-    expect(
-      decodeServerSettingsPatch({ providers: { claudeAgent: { autoCompactWindow: "300000" } } }),
-    ).toBeDefined();
-  });
-});
-
-describe("ClientSettings language", () => {
-  it("follows the system when existing settings omit the preference", () => {
-    expect(decodeClientSettings({}).language).toBe("system");
-    expect(decodeClientSettingsPatch({})).not.toHaveProperty("language");
-  });
-
-  it.each(["system", "en", "zh-CN"])("round-trips the %s preference", (language) => {
-    const settings = decodeClientSettings({ language });
-    expect(encodeClientSettings(settings).language).toBe(language);
-    expect(decodeClientSettingsPatch({ language }).language).toBe(language);
-  });
-
-  it.each(["zh", "zh-TW", "auto", null])("rejects unsupported language %s", (language) => {
-    expect(() => decodeClientSettings({ language })).toThrow();
-    expect(() => decodeClientSettingsPatch({ language })).toThrow();
-  });
 });
 
 describe("ClientSettings notifications", () => {
@@ -779,55 +675,6 @@ describe("ClientSettings environment identification", () => {
 });
 
 describe("ClientSettings sidebar", () => {
-  it("shows legacy project guides by default and persists either visibility", () => {
-    expect(decodeClientSettings({}).legacySidebarProjectGuides).toBe(true);
-    for (const visible of [false, true]) {
-      const patch = decodeClientSettingsPatch({ legacySidebarProjectGuides: visible });
-      expect(
-        decodeClientSettings({ ...decodeClientSettings({}), ...patch }).legacySidebarProjectGuides,
-      ).toBe(visible);
-    }
-    expect(() => decodeClientSettingsPatch({ legacySidebarProjectGuides: "false" })).toThrow();
-  });
-
-  it("preserves automatic workspace details and persists opting out", () => {
-    expect(decodeClientSettings({}).autoExpandThreadDetailsPanel).toBe(true);
-    for (const enabled of [false, true]) {
-      const patch = decodeClientSettingsPatch({ autoExpandThreadDetailsPanel: enabled });
-      expect(
-        decodeClientSettings({ ...decodeClientSettings({}), ...patch })
-          .autoExpandThreadDetailsPanel,
-      ).toBe(enabled);
-    }
-    expect(() => decodeClientSettingsPatch({ autoExpandThreadDetailsPanel: "false" })).toThrow();
-  });
-
-  it("keeps labels for existing dot preferences and allows hiding them", () => {
-    const stored = decodeClientSettings({ legacySidebarThreadStatusDots: true });
-    expect(stored.legacySidebarHideStatusLabels).toBe(false);
-    for (const hidden of [true, false]) {
-      const patch = decodeClientSettingsPatch({ legacySidebarHideStatusLabels: hidden });
-      expect(decodeClientSettings({ ...stored, ...patch }).legacySidebarHideStatusLabels).toBe(
-        hidden,
-      );
-    }
-    expect(() => decodeClientSettingsPatch({ legacySidebarHideStatusLabels: "true" })).toThrow();
-  });
-
-  it("keeps legacy thread status dots opt-in and preserves toggles", () => {
-    expect(decodeClientSettings({}).legacySidebarThreadStatusDots).toBe(false);
-
-    for (const enabled of [true, false]) {
-      const patch = decodeClientSettingsPatch({ legacySidebarThreadStatusDots: enabled });
-      expect(patch.legacySidebarThreadStatusDots).toBe(enabled);
-      expect(
-        decodeClientSettings({ ...decodeClientSettings({}), ...patch })
-          .legacySidebarThreadStatusDots,
-      ).toBe(enabled);
-    }
-    expect(() => decodeClientSettingsPatch({ legacySidebarThreadStatusDots: "true" })).toThrow();
-  });
-
   it("defaults to the current sidebar", () => {
     expect(decodeClientSettings({}).legacySidebarEnabled).toBe(false);
   });
@@ -970,9 +817,6 @@ describe("ServerSettings.providerInstances (slice-2 invariant)", () => {
   it("decodes a fully empty config (legacy on-disk shape) without complaint", () => {
     const decoded = decodeServerSettings({});
     expect(decoded.providerInstances).toEqual({});
-    // Legacy `providers` struct is still hydrated with its per-driver defaults
-    // so existing call sites keep working through the migration.
-    expect(decoded.providers.codex.enabled).toBe(true);
   });
 
   it("decodes a multi-instance map mixing first-party and fork drivers", () => {
@@ -1019,27 +863,23 @@ describe("ServerSettings.providerInstances (slice-2 invariant)", () => {
 });
 
 describe("provider enabled defaults", () => {
-  it("enables only the stable bindings by default", () => {
-    const decoded = decodeServerSettings({});
-    expect(decoded.providers.codex.enabled).toBe(true);
-    expect(decoded.providers.claudeAgent.enabled).toBe(true);
-    expect(decoded.providers.cursor.enabled).toBe(false);
-    expect(decoded.providers.grok.enabled).toBe(false);
-    expect(decoded.providers.opencode.enabled).toBe(false);
+  it("keeps Muse disabled until a configured instance opts in", () => {
+    const muse = ProviderDriverKind.make("muse");
+    expect(resolveProviderInstanceEnabled({ driver: muse, config: {} })).toBe(false);
+    expect(resolveProviderInstanceEnabled({ driver: muse, enabled: true, config: {} })).toBe(true);
+    expect(
+      resolveProviderInstanceEnabled({ driver: muse, enabled: true, config: { enabled: false } }),
+    ).toBe(false);
   });
 
-  it("keeps Cursor enabled when an existing user explicitly opted in", () => {
-    const cursor = ProviderDriverKind.make("cursor");
-    const cursorId = ProviderInstanceId.make("cursor");
-    const decoded = decodeServerSettings({
-      providers: { cursor: { enabled: true } },
-      providerInstances: {
-        [cursorId]: { driver: cursor, enabled: true, config: {} },
-      },
-    });
-
-    expect(decoded.providers.cursor.enabled).toBe(true);
-    expect(resolveProviderInstanceEnabled(decoded.providerInstances[cursorId]!)).toBe(true);
+  it("enables only the stable bindings by default", () => {
+    const enabledByDefault = (driver: string) =>
+      resolveProviderInstanceEnabled({ driver: ProviderDriverKind.make(driver), config: {} });
+    expect(enabledByDefault("codex")).toBe(true);
+    expect(enabledByDefault("claudeAgent")).toBe(true);
+    for (const driver of ["cursor", "grok", "muse", "pi", "opencode", "antigravity"]) {
+      expect(enabledByDefault(driver)).toBe(false);
+    }
   });
 
   it("resolves instance enabled state with explicit false winning", () => {
@@ -1111,42 +951,6 @@ describe("ServerSettings worktree defaults", () => {
   });
 });
 
-describe("ServerSettings Cursor legacy settings", () => {
-  it("preserves V1 Cursor CLI settings when reading and writing shared settings", () => {
-    const decoded = decodeServerSettings({
-      providers: {
-        cursor: {
-          enabled: true,
-          binaryPath: "cursor-agent",
-          apiEndpoint: "http://127.0.0.1:3774",
-        },
-      },
-    });
-
-    expect(decoded.providers.cursor.enabled).toBe(true);
-    expect(encodeServerSettings(decoded).providers?.cursor).toMatchObject({
-      binaryPath: "cursor-agent",
-      apiEndpoint: "http://127.0.0.1:3774",
-    });
-  });
-
-  it("ignores obsolete Cursor CLI settings in patches", () => {
-    const patch = decodeServerSettingsPatch({
-      providers: {
-        cursor: {
-          enabled: true,
-          binaryPath: "cursor-agent",
-          apiEndpoint: "http://127.0.0.1:3774",
-        },
-      },
-    });
-
-    expect(patch.providers?.cursor?.enabled).toBe(true);
-    expect(patch.providers?.cursor).not.toHaveProperty("binaryPath");
-    expect(patch.providers?.cursor).not.toHaveProperty("apiEndpoint");
-  });
-});
-
 describe("ServerSettings.sourceControlWritingStyle", () => {
   it("defaults all style settings for legacy configs", () => {
     const settings = decodeServerSettings({});
@@ -1205,27 +1009,12 @@ describe("ServerSettingsPatch.providerInstances", () => {
 });
 
 describe("ServerSettingsPatch string normalization", () => {
-  it("defaults no-project chats to the built-in directory and allows resetting it", () => {
-    expect(decodeServerSettings({}).scratchBaseDirectory).toBe("");
-    expect(decodeServerSettingsPatch({ scratchBaseDirectory: "   " }).scratchBaseDirectory).toBe(
-      "",
-    );
-  });
-
   it("trims string settings while decoding patches", () => {
     const patch = decodeServerSettingsPatch({
       addProjectBaseDirectory: "  ~/Development  ",
-      scratchBaseDirectory: "  ~/Chats  ",
       textGenerationModelSelection: { model: "  gpt-5.4-mini  " },
       observability: {
         otlpTracesUrl: "  http://localhost:4318/v1/traces  ",
-      },
-      providers: {
-        codex: {
-          binaryPath: "  /opt/homebrew/bin/codex  ",
-          homePath: "  ~/.codex  ",
-          launchArgs: "  --strict-config --enable foo  ",
-        },
       },
       providerInstances: {
         codex_personal: {
@@ -1237,12 +1026,8 @@ describe("ServerSettingsPatch string normalization", () => {
     });
 
     expect(patch.addProjectBaseDirectory).toBe("~/Development");
-    expect(patch.scratchBaseDirectory).toBe("~/Chats");
     expect(patch.textGenerationModelSelection?.model).toBe("gpt-5.4-mini");
     expect(patch.observability?.otlpTracesUrl).toBe("http://localhost:4318/v1/traces");
-    expect(patch.providers?.codex?.binaryPath).toBe("/opt/homebrew/bin/codex");
-    expect(patch.providers?.codex?.homePath).toBe("~/.codex");
-    expect(patch.providers?.codex?.launchArgs).toBe("--strict-config --enable foo");
     expect(patch.providerInstances?.[ProviderInstanceId.make("codex_personal")]?.driver).toBe(
       "codex",
     );
@@ -1259,21 +1044,9 @@ describe("ServerSettingsPatch string normalization", () => {
     const encoded = encodeServerSettings({
       ...defaultSettings,
       addProjectBaseDirectory: "  ~/Development  ",
-      scratchBaseDirectory: "  ~/Chats  ",
-      providers: {
-        ...defaultSettings.providers,
-        codex: {
-          ...defaultSettings.providers.codex,
-          binaryPath: "  /opt/homebrew/bin/codex  ",
-          launchArgs: "  --strict-config  ",
-        },
-      },
     });
 
     expect(encoded.addProjectBaseDirectory).toBe("~/Development");
-    expect(encoded.scratchBaseDirectory).toBe("~/Chats");
-    expect(encoded.providers?.codex?.binaryPath).toBe("/opt/homebrew/bin/codex");
-    expect(encoded.providers?.codex?.launchArgs).toBe("--strict-config");
   });
 });
 
@@ -1311,4 +1084,162 @@ it("validates remote device hosts and rejects ambiguous host ids", () => {
     decodeDeviceHostSettings({ deviceHosts: [{ ...host, target: "-oProxyCommand=bad" }] }),
   ).toThrow();
   expect(() => decodeDeviceHostSettings({ deviceHosts: [{ ...host, port: 0 }] })).toThrow();
+});
+
+describe("branch naming settings", () => {
+  it("defaults existing settings to the t3 static prefix", () => {
+    expect(decodeServerSettings({})).toMatchObject({
+      branchNamingMode: "static",
+      branchNamePrefix: "t3",
+      branchNameInstructions: "",
+    });
+  });
+  it.each(["static", "semantic", "custom"])(
+    "round-trips %s and project overrides",
+    (branchNamingMode) => {
+      const naming = {
+        branchNamingMode,
+        branchNamePrefix: "team/",
+        branchNameInstructions: "Include the issue ID.",
+      };
+      const input = { ...naming, projectSettingsOverrides: { project: naming } };
+      expect(encodeServerSettings(decodeServerSettings(input))).toMatchObject(input);
+      expect(decodeServerSettingsPatch(input)).toEqual(input);
+    },
+  );
+});
+
+describe("ServerSettings.removeAgentCreditsOnMerge", () => {
+  it("keeps agent credits by default and accepts opt-in patches", () => {
+    expect(decodeServerSettings({}).removeAgentCreditsOnMerge).toBe(false);
+    expect(
+      decodeServerSettingsPatch({ removeAgentCreditsOnMerge: true }).removeAgentCreditsOnMerge,
+    ).toBe(true);
+    expect(
+      decodeServerSettings({
+        projectSettingsOverrides: { project: { removeAgentCreditsOnMerge: true } },
+      }).projectSettingsOverrides["project" as ProjectId]?.removeAgentCreditsOnMerge,
+    ).toBe(true);
+  });
+});
+
+describe("resolveProjectProviderInstanceEnabled", () => {
+  const projectId = "project-a" as ProjectId;
+  const instanceId = ProviderInstanceId.make("codex_work");
+
+  it("inherits the machine value when the project has no override", () => {
+    const settings: ServerSettings = {
+      ...DEFAULT_SERVER_SETTINGS,
+      providerInstances: {
+        [instanceId]: { driver: ProviderDriverKind.make("codex"), enabled: false },
+      },
+    };
+    expect(resolveProjectProviderInstanceEnabled(settings, projectId, instanceId)).toBe(false);
+  });
+
+  it("lets a project enable an instance the machine disabled", () => {
+    const settings: ServerSettings = {
+      ...DEFAULT_SERVER_SETTINGS,
+      providerInstances: {
+        [instanceId]: { driver: ProviderDriverKind.make("codex"), enabled: false },
+      },
+      projectSettingsOverrides: {
+        [projectId]: { providerInstances: { [instanceId]: { enabled: true } } },
+      },
+    };
+    expect(resolveProjectProviderInstanceEnabled(settings, projectId, instanceId)).toBe(true);
+  });
+
+  it("lets a project disable an instance the machine enabled", () => {
+    const settings: ServerSettings = {
+      ...DEFAULT_SERVER_SETTINGS,
+      providerInstances: {
+        [instanceId]: { driver: ProviderDriverKind.make("codex"), enabled: true },
+      },
+      projectSettingsOverrides: {
+        [projectId]: { providerInstances: { [instanceId]: { enabled: false } } },
+      },
+    };
+    expect(resolveProjectProviderInstanceEnabled(settings, projectId, instanceId)).toBe(false);
+  });
+
+  it("always resolves to the machine value when no project is in scope", () => {
+    const settings: ServerSettings = {
+      ...DEFAULT_SERVER_SETTINGS,
+      providerInstances: {
+        [instanceId]: { driver: ProviderDriverKind.make("codex"), enabled: true },
+      },
+      projectSettingsOverrides: {
+        [projectId]: { providerInstances: { [instanceId]: { enabled: false } } },
+      },
+    };
+    expect(resolveProjectProviderInstanceEnabled(settings, null, instanceId)).toBe(true);
+  });
+
+  it("falls back to the unconfigured default when the instance has no settings entry", () => {
+    const settings: ServerSettings = { ...DEFAULT_SERVER_SETTINGS, providerInstances: {} };
+    // `codex_work` has no entry in `providerInstances`, so with no project
+    // override either, this is the same unconfigured-default fallback a
+    // machine-wide (no project) lookup would use.
+    expect(resolveProjectProviderInstanceEnabled(settings, projectId, instanceId)).toBe(
+      resolveProjectProviderInstanceEnabled(settings, null, instanceId),
+    );
+
+    const overridden = {
+      ...settings,
+      projectSettingsOverrides: {
+        [projectId]: { providerInstances: { [instanceId]: { enabled: true } } },
+      },
+    };
+    expect(resolveProjectProviderInstanceEnabled(overridden, projectId, instanceId)).toBe(true);
+  });
+});
+
+describe("requiredScopesForProjectMutation", () => {
+  it("adds the settings scope only when a mutation carries scripts", () => {
+    const projectId = "project-1" as ProjectId;
+    const commandId = "command-1" as CommandId;
+    expect(
+      requiredScopesForProjectMutation({ type: "project.update", commandId, projectId }),
+    ).toEqual(["orchestration:operate"]);
+    expect(
+      requiredScopesForProjectMutation({
+        type: "project.update",
+        commandId,
+        projectId,
+        scripts: [],
+      }),
+    ).toEqual(["orchestration:operate", "settings:write"]);
+  });
+});
+
+describe("server model preferences", () => {
+  it("decodes a visibility update scoped to a provider instance and model", () => {
+    const patch = { setModelsHidden: [{ provider: "codex_work", model: "sol", hidden: false }] };
+    expect(decodeServerSettingsPatch(patch)).toEqual(patch);
+    expect(() =>
+      decodeServerSettingsPatch({ setModelsHidden: [{ provider: "codex_work", model: "sol" }] }),
+    ).toThrow();
+  });
+  it("distinguishes unmigrated lists from deliberately cleared lists", () => {
+    expect(decodeServerSettings({})).toMatchObject({
+      favorites: null,
+      providerModelPreferences: null,
+    });
+    const input = { favorites: [], providerModelPreferences: {} };
+    expect(encodeServerSettings(decodeServerSettings(input))).toMatchObject(input);
+    expect(decodeServerSettingsPatch(input)).toEqual(input);
+  });
+
+  it("round trips favorites and hidden models keyed by provider instance", () => {
+    const input = {
+      favorites: [{ provider: "codex_work", model: "sol" }],
+      providerModelPreferences: { codex_work: { hiddenModels: ["astra"], modelOrder: ["sol"] } },
+    };
+    expect(encodeServerSettings(decodeServerSettings(input))).toMatchObject(input);
+    expect(decodeServerSettingsPatch(input)).toEqual(input);
+    expect(decodeServerSettingsPatch({ migrateModelPreferences: input })).toEqual({
+      migrateModelPreferences: input,
+    });
+  });
 });

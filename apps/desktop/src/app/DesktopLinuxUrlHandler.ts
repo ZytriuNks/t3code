@@ -4,8 +4,8 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import * as ChildProcess from "effect/unstable/process/ChildProcess";
-import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
+import * as ChildProcess from "effect/process/ChildProcess";
+import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import * as ElectronProtocol from "../electron/ElectronProtocol.ts";
 import * as DesktopAssets from "./DesktopAssets.ts";
@@ -119,7 +119,7 @@ export const make = Effect.gen(function* () {
 
   const scheme = ElectronProtocol.getDesktopScheme({
     isDevelopment: environment.isDevelopment,
-    appName: environment.appName ?? "T3 Code (Experimental)",
+    appName: environment.appName,
   });
   const desktopEntryPath = environment.path.join(
     environment.linuxApplicationsDir,

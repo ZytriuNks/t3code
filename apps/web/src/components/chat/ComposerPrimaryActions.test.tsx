@@ -21,6 +21,7 @@ function renderPendingActions(isRunning: boolean) {
   return renderToStaticMarkup(
     createElement(ComposerPrimaryActions, {
       compact: true,
+      canOperateThread: true,
       pendingAction: {
         questionIndex: 0,
         isLastQuestion: true,
@@ -29,6 +30,7 @@ function renderPendingActions(isRunning: boolean) {
         isComplete: true,
       },
       isRunning,
+      canInterrupt: isRunning,
       showPlanFollowUpPrompt: false,
       promptHasText: false,
       isSendBusy: false,
@@ -44,15 +46,14 @@ function renderPendingActions(isRunning: boolean) {
   );
 }
 
-function renderSendButton(
-  sendDisabledReason: string | null = null,
-  isEditingQueuedMessage = false,
-) {
+function renderSendButton(sendDisabledReason: string | null = null) {
   return renderToStaticMarkup(
     createElement(ComposerPrimaryActions, {
       compact: true,
+      canOperateThread: true,
       pendingAction: null,
       isRunning: false,
+      canInterrupt: false,
       showPlanFollowUpPrompt: false,
       promptHasText: true,
       isSendBusy: false,
@@ -61,7 +62,6 @@ function renderSendButton(
       isEnvironmentUnavailable: false,
       isPreparingWorktree: false,
       hasSendableContent: true,
-      isEditingQueuedMessage,
       onPreviousPendingQuestion: () => {},
       onInterrupt: () => {},
       onImplementPlanInNewThread: () => {},
@@ -80,11 +80,6 @@ describe("ComposerPrimaryActions", () => {
 
     expect(markup).toContain("disabled");
     expect(markup).toContain('aria-label="Sending feedback"');
-  });
-
-  it("labels queue edits separately from ordinary sends", () => {
-    expect(renderSendButton()).toContain('aria-label="Submit message"');
-    expect(renderSendButton(null, true)).toContain('aria-label="Update queued message"');
   });
 
   it("offers Stop generation while a running turn is waiting for user input", () => {

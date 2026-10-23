@@ -20,7 +20,7 @@ const defaultInput = {
   runningUnderArm64Translation: false,
 } satisfies DesktopEnvironment.MakeDesktopEnvironmentInput;
 
-const makeEnvironmentLayer = (
+const layerEnvironment = (
   overrides: Partial<DesktopEnvironment.MakeDesktopEnvironmentInput> = {},
   env: Record<string, string | undefined> = {},
 ) =>
@@ -36,8 +36,7 @@ const makeEnvironmentLayer = (
 const makeEnvironment = (
   overrides: Partial<DesktopEnvironment.MakeDesktopEnvironmentInput> = {},
   env: Record<string, string | undefined> = {},
-) =>
-  DesktopEnvironment.DesktopEnvironment.pipe(Effect.provide(makeEnvironmentLayer(overrides, env)));
+) => DesktopEnvironment.DesktopEnvironment.pipe(Effect.provide(layerEnvironment(overrides, env)));
 
 describe("DesktopEnvironment", () => {
   for (const stage of [
@@ -50,8 +49,8 @@ describe("DesktopEnvironment", () => {
       stateDir: "/Users/alice/.t3-dev/userdata",
     },
     {
-      appName: "T3 Code (Alpha)",
-      stageLabel: "Alpha",
+      appName: "T3 Code (Beta)",
+      stageLabel: "Beta",
       appUserModelId: "com.t3tools.t3code",
       linuxWmClass: "t3code",
       linuxDesktopEntryName: "com.t3tools.T3Code.desktop",
@@ -201,7 +200,7 @@ describe("DesktopEnvironment", () => {
         resourcesPath: "/tmp/.mount_t3code/resources",
       });
 
-      assert.equal(environment.linuxDesktopEntryName, "com.t3tools.T3Code.Experimental.desktop");
+      assert.equal(environment.linuxDesktopEntryName, "com.t3tools.T3Code.desktop");
     }),
   );
 
@@ -213,9 +212,9 @@ describe("DesktopEnvironment", () => {
       );
       const production = yield* makeEnvironment();
 
-      assert.equal(development.stateDir, "/Users/alice/.t3-experimental/dev");
-      assert.equal(production.stateDir, "/Users/alice/.t3-experimental/userdata");
-      assert.equal(production.appUserModelId, "com.t3tools.t3code.experimental");
+      assert.equal(development.stateDir, "/Users/alice/.t3-alpha/dev");
+      assert.equal(production.stateDir, "/Users/alice/.t3-alpha/userdata");
+      assert.equal(production.appUserModelId, "com.t3tools.t3code");
     }),
   );
 

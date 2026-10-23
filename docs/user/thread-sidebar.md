@@ -19,7 +19,9 @@ A thread does not need a project. To start one without a project, click **or
 start without a project** under a new thread's heading, pick **No project** from
 the project menu in that heading or from **New thread in...** in the command
 palette, or press `mod+alt+n`. On mobile, pick **No project** from the project
-list. To move a draft into a project, pick the project in the heading.
+list. It starts on your current machine; before sending, pick another machine
+from the machine menu to move it there. To move a draft into a project, pick the
+project in the heading.
 
 Each thread without a project works in its own folder under `~/.t3/scratch` (the
 `scratch` folder of your T3 data directory), named after its date, the first words
@@ -28,13 +30,6 @@ of its first message, and a short id, like
 folder, so the files the agent wrote stay until you delete them. Branch, worktree, and diff controls stay hidden because
 these folders are not Git repositories. This is unavailable when the data
 directory itself sits inside a Git checkout.
-
-To choose where new no-project chat folders are created, set **Settings → General →
-No-project chats base directory** on web or desktop, or **Settings → Thread behavior →
-No-project chats** on mobile. Enter an absolute path or a
-`~/` path on the selected environment, outside a Git repository. Each new chat
-still gets its own subfolder. Leave the setting blank to use the default scratch
-directory again. Changing it does not move existing chats or their files.
 
 ### Start in the background
 
@@ -55,7 +50,8 @@ Pin a thread from its menu to keep it above your active work.
 On web and desktop, unpinning, settling, snoozing, and archiving a thread each show
 a notification with **Undo** for five seconds. Undo restores the thread's previous
 state, including its pinned position, and reopens an archived thread you were
-viewing. `mod+z` triggers the most recent Undo when no text field is focused; see
+viewing. Discarding an unsent draft from the sidebar works the same way: Undo brings
+back its text and attachments. `mod+z` triggers the most recent Undo when no text field is focused; see
 [Keybindings](./keybindings.md#commands-with-special-behavior).
 
 On web and desktop, you can also drag files from your computer onto any thread row:
@@ -118,13 +114,15 @@ open.
 
 ### Fold working threads (beta)
 
-On web and desktop, turn on **Settings → General → Working section (beta)** to move threads that
-are working or monitoring into a collapsed **Working** section at the bottom of the sidebar. A
-thread returns to the top of the active list when it finishes, fails, or needs an approval or
-answer. Pinned threads stay in the pinned section.
+Turn on **Settings → General → Working section (beta)** on web and desktop, or **Settings →
+Thread behavior → Working section** on iOS and Android, to move threads that are working or
+monitoring into a collapsed **Working** section below the active list. A thread returns to the top
+of the active list when it finishes, fails, or needs an approval or answer. The Working section
+lists the thread you last sent work to first. Pinned threads stay in the pinned section. Each
+device keeps its own choice.
 
 While this is on, the active list is ordered by when each thread last came back to you, so you
-cannot drag to reorder it. Your saved order returns when you turn it off.
+cannot drag or move threads within it. Your saved order returns when you turn it off.
 
 ## Settle finished work
 
@@ -136,12 +134,26 @@ sending an answer or restarting the agent. Settling also closes the thread's
 terminals that wait at an idle prompt, and keeps their output. A terminal that
 runs a command, such as a dev server, stays open.
 
+To reclaim disk space from settled work, turn on **Run in the thread's worktree when the
+thread settles** for one of the project's actions, or set `"runOnSettle": true` on a
+`t3.json` script, for example `cargo clean`. It runs each time a thread in its own
+worktree settles, manually or automatically, even if a terminal there still runs a
+command such as a dev server. Threads in the project's main checkout skip it. Its terminal
+closes when the command succeeds and stays open when it fails.
+
+On web and desktop, press a thread's **Settle** button and drag up or down to
+settle every thread in that section between it and the one you release on.
+The **Un-settle** and **Wake** buttons work the same way in their sections.
+Press `Escape` while dragging to cancel.
+
 By default, environments settle inactive threads after three days and settle
 threads whose pull request merged. A closed pull request can also settle an idle
 thread. Work in progress, pending questions or approvals, and live background work
 prevent automatic settlement. An open pull request does not prevent inactivity
-settlement, but an old closed or merged pull request does not settle work you
-resumed after it closed.
+settlement unless you turn on **Keep threads with a PR** in **Settings → General**,
+but an old closed or merged pull request does not settle work you
+resumed after it closed. Only your own messages count as resuming. A turn that
+finished background work or a pull request watch starts on its own does not.
 
 To keep one thread out of the settled shelf no matter how long it sits idle, open its menu,
 choose **Auto-settle behavior**, and pick **Disabled**. The current option is checked. Pick
@@ -183,6 +195,10 @@ for custom configuration.
 **Limited** means the provider stopped on a usage or rate limit. The conversation
 keeps the provider's explanation. Retry after the limit resets, or switch to
 another provider instance.
+On web and desktop, press **Resume** in an empty composer to continue a limited
+or interrupted turn manually.
+Queued messages stay saved while the limit blocks the thread. They run after
+the continuation finishes. If the queue was held by a restart, resume it then.
 
 When the provider reports a reset time, choose **Resume at reset** to schedule a
 continuation. You can cancel it from the thread. Enable **Auto-resume limited
@@ -200,6 +216,16 @@ snooze limit stops by default. Providers without a reset time offer manual
 retry and the normal snooze choices.
 
 On web and desktop, use **Agents** to follow work delegated to subagents.
+Stop on a thread also stops the subagents it delegated to.
+
+Provider-native subagent threads can't take messages; message the parent thread
+instead. When such a subagent needs an approval or an answer, the parent thread
+asks for it.
+
+To continue its work separately, choose **Continue in new thread**. This opens a
+draft in the same project and environment with the subagent thread attached as a
+reference. Review or edit the draft, then send it when ready. The original
+subagent stays read-only and is not resumed by this action.
 
 Expand a tool call in the conversation to see its full command and output.
 Summaries shorten shell wrappers and can still describe the latest call after it

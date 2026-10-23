@@ -1,16 +1,16 @@
-import {
-  ProviderInstanceId,
-  ThreadId,
-  type ConversationStructure,
-  type WorktreeSetupSnapshot,
-} from "@t3tools/contracts";
+import { shouldPreserveAssistantLineBreaks } from "@t3tools/shared/markdownPipeline";
+import { ThreadId, type WorktreeSetupSnapshot } from "@t3tools/contracts";
 import {
   CheckpointRef,
   NodeId,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  ProviderTurnId,
   RunAttemptId,
   TurnItemId,
   RuntimeRequestId,
   type OrchestrationV2ProjectedTurnItem,
+  type OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import {
@@ -21,129 +21,31 @@ import {
 } from "../../session-logic";
 import { makeStreamingTimelineFixture } from "../../test-fixtures";
 import type { TurnDiffSummary } from "../../types";
-import type { QueuedComposerMessage } from "../../queuedMessageStore";
 import { describe, expect, it } from "vite-plus/test";
-import { MessageId, RunId } from "@t3tools/contracts";
+import { EnvironmentId, MessageId, RunId } from "@t3tools/contracts";
+import { serializeAssistantCitation } from "@t3tools/shared/assistantCitations";
 import {
   computeStableMessagesTimelineRows,
   computeMessageDurationStart,
   deriveMessagesTimelineRows,
+  timelineEntryTurnFoldRunId,
   deriveMessagesTimelineRowsWithState,
+  shouldCollapseUserMessage,
   liveWorkEntryLabel,
   normalizeCompactToolLabel,
   resolveAssistantMessageCopyState,
-  resolveSmoothComplete,
-  resolveTimelineDomIsAtEnd,
-  resolveTimelineIsAtEnd,
-  resolveTimelineMinimapCurrentIndex,
-  resolveTimelineMinimapViewport,
-  shouldRearmTimelineFollow,
   resolveWorkGroupScrollIndex,
-  shouldCancelTimelineFollowOnNativeScroll,
   shouldFollowWorkGroupAppend,
-  shouldPreserveAssistantLineBreaks,
-  shouldMaintainVisibleTimelineContent,
+  threadReadLabelPrefix,
+  threadReadTargetId,
+  threadReadTargetTitle,
   type MessagesTimelineRow,
   resolveTimelineToolPresentation,
   workEntryDisplayLabel,
+  workEntryReadOutput,
   workEntryIsVisibleInGroup,
 } from "./MessagesTimeline.logic";
-
-describe("minimap viewport lookup", () => {
-  it("keeps the existing current marker and visible band through gaps and zero-height rows", () => {
-    const itemBounds = [
-      { top: 0, height: 30 },
-      { top: 100, height: 0 },
-      { top: 100, height: 20 },
-      { top: 250, height: 50 },
-    ];
-    for (let scrollTop = -20; scrollTop <= 400; scrollTop += 10) {
-      const scrollBottom = scrollTop + 65;
-      const result = resolveTimelineMinimapViewport({
-        scrollTop,
-        scrollBottom,
-        itemCount: itemBounds.length,
-        getItemBounds: (index) => itemBounds[index]!,
-      });
-      expect(result.currentIndex).toBe(
-        resolveTimelineMinimapCurrentIndex({ scrollTop, scrollBottom, itemBounds }),
-      );
-      expect(result.inViewIndices).toEqual(
-        itemBounds.flatMap((item, index) =>
-          item.top < scrollBottom && item.top + Math.max(1, item.height) > scrollTop ? [index] : [],
-        ),
-      );
-    }
-  });
-
-  it("falls back to the existing semantics while virtual positions are unavailable", () => {
-    const itemBounds = [
-      { top: 0, height: 10 },
-      { top: null, height: null },
-      { top: 200, height: 10 },
-    ];
-    expect(
-      resolveTimelineMinimapViewport({
-        scrollTop: 150,
-        scrollBottom: 250,
-        itemCount: itemBounds.length,
-        getItemBounds: (index) => itemBounds[index]!,
-      }),
-    ).toEqual({ currentIndex: 2, inViewIndices: [2] });
-  });
-
-  it("reads a bounded number of cached positions at the bottom of long history", () => {
-    let reads = 0;
-    const result = resolveTimelineMinimapViewport({
-      scrollTop: 999_850,
-      scrollBottom: 1_000_000,
-      itemCount: 10_000,
-      getItemBounds: (index) => {
-        reads += 1;
-        return { top: index * 100, height: 50 };
-      },
-    });
-    expect(result).toEqual({ currentIndex: 9_999, inViewIndices: [9_999] });
-    expect(reads).toBeLessThan(32);
-  });
-});
-
-describe("local queued messages", () => {
-  it("keeps queued submissions visible after timeline activity in submission order", () => {
-    const makeQueuedMessage = (id: string): QueuedComposerMessage => ({
-      id,
-      prompt: id,
-      images: [],
-      files: [],
-      terminalContexts: [],
-      threadContexts: [],
-      previewAnnotations: [],
-      reviewComments: [],
-      sendSettings: {
-        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
-        runtimeMode: "full-access",
-        interactionMode: "default",
-        promptEffort: null,
-      },
-      queuedAfterToolActivityId: null,
-      createdAt: "2026-09-11T00:00:00.000Z",
-    });
-    const first = makeQueuedMessage("first");
-    const second = makeQueuedMessage("second");
-    const rows = deriveMessagesTimelineRows({
-      timelineEntries: [],
-      queuedMessages: [first, second],
-      isWorking: false,
-      turnDiffSummaries: [],
-      supportsConversationRollback: false,
-    });
-
-    expect(rows.slice(-2)).toEqual([
-      expect.objectContaining({ kind: "queued-message", queuedMessage: first, isNext: true }),
-      expect.objectContaining({ kind: "queued-message", queuedMessage: second, isNext: false }),
-    ]);
-  });
-});
+import type { WorkLogEntry } from "../../session-logic";
 
 describe("expanded tool group scrolling", () => {
   const entries = [{ id: "first" }, { id: "second" }];
@@ -192,209 +94,21 @@ describe("expanded tool group scrolling", () => {
       resolveWorkGroupScrollIndex(entries, { entryId: "removed", offset: 120 }),
     ).toBeUndefined();
   });
-
-  it("follows an append when a short group becomes virtualized, but preserves reading and status updates", () => {
-    const short = Array.from({ length: 24 }, (_, index) => ({ id: `tool-${index}` }));
-    const appended = [...short, { id: "tool-24" }];
-    const reading = { entryId: "tool-12", offset: 0 };
-    const atEnd = { ...reading, end: { entryId: "tool-23", index: 23 } };
-    expect(resolveWorkGroupScrollIndex(appended, atEnd)).toEqual({
-      index: 24,
-      viewOffset: 0,
-      viewPosition: 1,
-    });
-    expect(resolveWorkGroupScrollIndex(appended, reading)).toEqual({ index: 12, viewOffset: -0 });
-    expect(resolveWorkGroupScrollIndex(short, atEnd)).toEqual({ index: 12, viewOffset: -0 });
-    expect(resolveWorkGroupScrollIndex([{ id: "prepended" }, ...short], atEnd)).toEqual({
-      index: 13,
-      viewOffset: -0,
-    });
-  });
-});
-
-describe("smooth streaming scroll edge", () => {
-  it("never lets row-size compensation move the viewport during smooth output", () => {
-    // LegendList's maintainVisibleContentPosition pins whatever the reader is
-    // looking at back to the same screen offset when a row resizes. During
-    // smooth output the thinking block grows every frame while it is inside
-    // the viewport, so compensation keeps writing scrollTop after the reader
-    // has left the edge.
-    expect(
-      shouldMaintainVisibleTimelineContent({
-        smoothStreaming: true,
-        liveFollowEnabled: false,
-      }),
-    ).toBe(false);
-    expect(
-      shouldMaintainVisibleTimelineContent({
-        smoothStreaming: true,
-        liveFollowEnabled: true,
-      }),
-    ).toBe(false);
-    // Outside smooth output the historical reading behaviour is unchanged.
-    expect(
-      shouldMaintainVisibleTimelineContent({
-        smoothStreaming: false,
-        liveFollowEnabled: false,
-      }),
-    ).toBe(true);
-    expect(
-      shouldMaintainVisibleTimelineContent({
-        smoothStreaming: false,
-        liveFollowEnabled: true,
-      }),
-    ).toBe(true);
-  });
-
-  it("uses the native viewport instead of LegendList's near-end band", () => {
-    const state = {
-      isAtEnd: true,
-      contentLength: 2_000,
-      scroll: 1_160,
-      scrollLength: 800,
-    };
-    const viewport = {
-      scrollTop: 500,
-      scrollHeight: 2_000,
-      clientHeight: 800,
-    };
-
-    // The virtualized state is inside its 40px re-arm band, while the native
-    // viewport is hundreds of pixels above the real bottom.
-    expect(resolveTimelineIsAtEnd(state)).toBe(true);
-    expect(resolveTimelineDomIsAtEnd(viewport)).toBe(false);
-  });
-
-  it("recognizes only the actual native bottom as the smooth live edge", () => {
-    expect(
-      resolveTimelineDomIsAtEnd({
-        scrollTop: 1_200,
-        scrollHeight: 2_000,
-        clientHeight: 800,
-      }),
-    ).toBe(true);
-    expect(
-      resolveTimelineDomIsAtEnd({
-        scrollTop: 1_199.75,
-        scrollHeight: 2_000,
-        clientHeight: 800,
-      }),
-    ).toBe(false);
-  });
-
-  it("treats the first one-pixel upward move as leaving the live edge", () => {
-    expect(
-      shouldCancelTimelineFollowOnNativeScroll({
-        smoothStreaming: true,
-        liveFollowEnabled: true,
-        nativeIsAtEnd: false,
-        previousScrollTop: 1_000,
-        scrollTop: 999,
-        layoutChanged: false,
-        blockedByProgrammaticPositioning: false,
-      }),
-    ).toBe(true);
-    expect(
-      shouldCancelTimelineFollowOnNativeScroll({
-        smoothStreaming: true,
-        liveFollowEnabled: true,
-        nativeIsAtEnd: false,
-        previousScrollTop: 1_000,
-        scrollTop: 999.75,
-        layoutChanged: false,
-        blockedByProgrammaticPositioning: false,
-      }),
-    ).toBe(true);
-  });
-
-  it("cancels follow even while the smooth-scroll controller is unavailable", () => {
-    expect(
-      shouldCancelTimelineFollowOnNativeScroll({
-        smoothStreaming: true,
-        liveFollowEnabled: true,
-        nativeIsAtEnd: false,
-        previousScrollTop: 1_000,
-        scrollTop: 700,
-        layoutChanged: false,
-        blockedByProgrammaticPositioning: false,
-      }),
-    ).toBe(true);
-    expect(
-      shouldCancelTimelineFollowOnNativeScroll({
-        smoothStreaming: true,
-        liveFollowEnabled: true,
-        nativeIsAtEnd: false,
-        previousScrollTop: 1_000,
-        scrollTop: 700,
-        layoutChanged: false,
-        blockedByProgrammaticPositioning: true,
-      }),
-    ).toBe(false);
-  });
-
-  it("does not re-arm after a stale end report while reading above the end", () => {
-    expect(
-      shouldRearmTimelineFollow({
-        isAtEnd: true,
-        scrollMode: "free-scrolling",
-        scrollIntent: "away-from-end",
-      }),
-    ).toBe(false);
-    expect(
-      shouldRearmTimelineFollow({
-        isAtEnd: true,
-        scrollMode: "free-scrolling",
-        scrollIntent: null,
-      }),
-    ).toBe(false);
-    expect(
-      shouldRearmTimelineFollow({
-        isAtEnd: true,
-        scrollMode: "free-scrolling",
-        scrollIntent: "toward-end",
-      }),
-    ).toBe(true);
-    expect(
-      shouldRearmTimelineFollow({
-        isAtEnd: true,
-        scrollMode: "anchoring-new-turn",
-        scrollIntent: null,
-      }),
-    ).toBe(false);
-    expect(
-      shouldRearmTimelineFollow({
-        isAtEnd: true,
-        scrollMode: "following-end",
-        scrollIntent: null,
-      }),
-    ).toBe(true);
-  });
-
-  it("does not confuse a layout correction or content growth with upward navigation", () => {
-    const input = {
-      smoothStreaming: true,
-      liveFollowEnabled: true,
-      nativeIsAtEnd: false,
-      previousScrollTop: 1_000,
-      scrollTop: 980,
-      layoutChanged: true,
-      blockedByProgrammaticPositioning: false,
-    };
-    expect(shouldCancelTimelineFollowOnNativeScroll(input)).toBe(false);
-    expect(shouldCancelTimelineFollowOnNativeScroll({ ...input, scrollTop: 1_000 })).toBe(false);
-    // The next upward move through stable geometry must still cancel.
-    expect(
-      shouldCancelTimelineFollowOnNativeScroll({
-        ...input,
-        previousScrollTop: 980,
-        scrollTop: 979,
-        layoutChanged: false,
-      }),
-    ).toBe(true);
-  });
 });
 
 describe("work entry labels", () => {
+  it("uses live titles only for active thread shells", () => {
+    const shell = { title: " Review auth flow ", archivedAt: null, deletedAt: null };
+    expect(threadReadTargetTitle(shell)).toBe("Review auth flow");
+    expect(threadReadTargetTitle({ ...shell, title: "Harden session refresh" })).toBe(
+      "Harden session refresh",
+    );
+    expect(threadReadTargetTitle({ ...shell, archivedAt: "2026-10-07T12:00:00Z" })).toBeNull();
+    expect(threadReadTargetTitle({ ...shell, deletedAt: "2026-10-07T12:00:00Z" })).toBeNull();
+    expect(threadReadTargetTitle({ ...shell, title: "  " })).toBeNull();
+    expect(threadReadTargetTitle(null)).toBeNull();
+  });
+
   const entry = {
     id: "tool-1",
     createdAt: "2026-09-01T12:00:00Z",
@@ -454,6 +168,37 @@ describe("work entry labels", () => {
     expect(workEntryDisplayLabel(browserEntry, undefined)).toBe(label);
   });
 
+  it.each([
+    ["inProgress", true, "Reading thread"],
+    ["completed", false, "Read thread"],
+    ["failed", false, "Failed to read thread"],
+    ["declined", false, "Declined to read thread"],
+    ["stopped", false, "Stopped reading thread"],
+  ] as const)("names the read thread in the %s label", (toolLifecycleStatus, active, prefix) => {
+    const threadRead = {
+      ...entry,
+      itemType: "dynamic_tool" as const,
+      toolLifecycleStatus,
+      structuredPayload: {
+        type: "dynamic_tool",
+        toolName: "t3-code.t3_thread_read",
+        input: { threadId: " thread-child ", view: "activity" },
+      } as never,
+    };
+    expect(threadReadTargetId(threadRead)).toBe("thread-child");
+    expect(threadReadLabelPrefix(liveWorkEntryLabel(threadRead, undefined, active))).toBe(prefix);
+    expect(threadReadLabelPrefix(workEntryDisplayLabel(threadRead, undefined))).toBe(prefix);
+  });
+
+  it("finds no target for other tools or thread reads without one", () => {
+    const payload = (toolName: string, input: unknown) => ({
+      structuredPayload: { type: "dynamic_tool", toolName, input } as never,
+    });
+    expect(threadReadTargetId(payload("t3-code.t3_thread_wait", { threadId: "t" }))).toBeNull();
+    expect(threadReadTargetId(payload("t3-code.t3_thread_read", { threadId: "  " }))).toBeNull();
+    expect(threadReadTargetId(payload("t3-code.t3_thread_read", null))).toBeNull();
+  });
+
   it("uses the active summary state for legacy tools without a lifecycle status", () => {
     const browserEntry = { ...entry, toolTitle: "T3-code.preview_click" };
     expect(liveWorkEntryLabel(browserEntry, undefined, true)).toBe(
@@ -476,6 +221,87 @@ describe("work entry labels", () => {
     expect(liveWorkEntryLabel(browserEntry, undefined, false)).toBe(
       "Clicked in the preview browser",
     );
+  });
+
+  it("labels file reads with the path and never the file body", () => {
+    const readEntry = {
+      ...entry,
+      itemType: "dynamic_tool" as const,
+      toolTitle: "Read",
+      label: "Read",
+      detail: "---\nname: env\n---\n cons t x = 1",
+      toolData: { input: { file_path: "src/env.ts" } },
+      structuredPayload: {
+        type: "dynamic_tool",
+        toolName: "Read",
+        input: { file_path: "src/env.ts" },
+      } as NonNullable<WorkLogEntry["structuredPayload"]>,
+    };
+    expect(workEntryDisplayLabel(readEntry, undefined)).toBe("Read src/env.ts");
+    expect(workEntryReadOutput(readEntry, undefined)).toBe("src/env.ts");
+    expect(workEntryReadOutput(readEntry, "/workspace/ohseearr")).toBe(
+      "/workspace/ohseearr/src/env.ts",
+    );
+    expect(
+      workEntryReadOutput(
+        {
+          structuredPayload: {
+            type: "dynamic_tool",
+            toolName: "Read",
+            input: {},
+          } as NonNullable<WorkLogEntry["structuredPayload"]>,
+          toolData: { locations: [{ path: "src/from-location.ts" }] },
+        },
+        "/workspace/ohseearr",
+      ),
+    ).toBe("/workspace/ohseearr/src/from-location.ts");
+    expect(workEntryReadOutput({ detail: "---", toolData: {} }, undefined)).toBeNull();
+  });
+
+  it("labels Claude Grep from structured input instead of a generic tool heading", () => {
+    expect(
+      workEntryDisplayLabel(
+        {
+          ...entry,
+          itemType: "dynamic_tool",
+          toolTitle: "Grep",
+          label: "Grep",
+          toolData: { input: { pattern: "TODO", path: "apps/web" } },
+          structuredPayload: {
+            type: "dynamic_tool",
+            toolName: "Grep",
+            input: { pattern: "TODO", path: "apps/web" },
+          } as NonNullable<WorkLogEntry["structuredPayload"]>,
+        },
+        undefined,
+      ),
+    ).toBe("Searched TODO in web");
+  });
+
+  it("labels file searches with the adapter title and its search target", () => {
+    expect(
+      workEntryDisplayLabel(
+        {
+          ...entry,
+          itemType: "file_search",
+          label: "Searched TODO in web",
+          toolTitle: "Searched TODO in web",
+          detail: "TODO",
+          toolData: { type: "file_search", pattern: "TODO" },
+        },
+        undefined,
+      ),
+    ).toBe("Searched TODO in web");
+  });
+
+  it("keeps a multi-line approval prompt as its label", () => {
+    const prompt = "Allow this command?\nrm -rf dist";
+    expect(
+      workEntryDisplayLabel(
+        { ...entry, itemType: "approval_request", requestKind: "command", detail: prompt },
+        undefined,
+      ),
+    ).toBe(prompt);
   });
 
   it("keeps custom titles and output for unrecognized tools", () => {
@@ -839,184 +665,152 @@ describe("resolveAssistantMessageCopyState", () => {
 });
 
 describe("deriveMessagesTimelineRows", () => {
-  it("leads the worktree setup card with the working header", () => {
-    const snapshot: WorktreeSetupSnapshot = {
-      threadId: ThreadId.make("thread-setup"),
-      phase: "running",
-      startedAt: "2026-01-01T00:00:00Z",
-      endedAt: null,
-      branch: "feature",
-      baseRef: "main",
-      worktreePath: null,
-      setupScript: null,
-      stages: [],
-      error: null,
-      sequence: 3,
-    };
-    const userEntry = {
-      id: "user-entry",
-      kind: "message",
-      createdAt: "2026-01-01T00:00:00Z",
-      message: {
-        id: "user-1" as never,
-        role: "user",
-        text: "Build it",
-        runId: null,
-        createdAt: "2026-01-01T00:00:00Z",
-        updatedAt: "2026-01-01T00:00:00Z",
-        streaming: false,
-      },
-    } as const;
-    const assistantEntry = {
-      id: "assistant-entry",
-      kind: "message",
-      createdAt: "2026-01-01T00:00:30Z",
-      message: {
-        id: "assistant-1" as never,
-        role: "assistant",
-        text: "On it",
-        runId: "turn-1" as never,
-        createdAt: "2026-01-01T00:00:30Z",
-        updatedAt: "2026-01-01T00:00:30Z",
-        streaming: true,
-      },
-    } as const;
-    const withoutMessages = deriveMessagesTimelineRows({
-      timelineEntries: [],
-      isWorking: true,
-      activeTurnStartedAt: "2026-01-01T00:00:00Z",
-      turnDiffSummaries: [],
-      supportsConversationRollback: false,
-      worktreeSetup: snapshot,
-    });
-    expect(withoutMessages).toEqual([
-      { kind: "working", id: "working-indicator-row", createdAt: "2026-01-01T00:00:00Z" },
-      {
-        kind: "worktree-setup",
-        id: "worktree-setup-row",
-        createdAt: "2026-01-01T00:00:00Z",
-        snapshot,
-        embedded: false,
-      },
-    ]);
-
-    // The main pass already places the working header after the send while a
-    // bootstrap counts as working; the card slots under that one header.
-    const withUserMessage = deriveMessagesTimelineRows({
-      timelineEntries: [userEntry],
-      isWorking: true,
-      activeTurnStartedAt: "2026-01-01T00:00:00Z",
-      turnDiffSummaries: [],
-      supportsConversationRollback: false,
-      worktreeSetup: snapshot,
-    });
-    expect(withUserMessage.map((row) => row.kind)).toEqual([
-      "message",
-      "working",
-      "worktree-setup",
-    ]);
-
-    // A failed setup never handed off, so the card stays under the send. The
-    // rest of the timeline is untouched: a running send still gets its
-    // working and thinking rows remain visible.
-    const withMessages = deriveMessagesTimelineRows({
-      timelineEntries: [userEntry, assistantEntry],
-      isWorking: true,
-      activeTurnStartedAt: "2026-01-01T00:00:00Z",
-      turnDiffSummaries: [],
-      supportsConversationRollback: false,
-      worktreeSetup: { ...snapshot, phase: "failed" },
-    });
-    expect(withMessages.map((row) => row.kind)).toEqual([
-      "message",
-      "worktree-setup",
-      "working",
-      "message",
-      "thinking",
-    ]);
-    // Once the agent stage is done and the turn is live, a still-running
-    // script leaves the timeline; the working header surfaces it instead.
-    const stage = (id: "agent" | "setup-script", status: "done" | "running") =>
-      ({
+  it("stops stranded thinking after a steer and follows the next thought or tool", () => {
+    const runId = RunId.make("steered-run");
+    const at = "2026-10-01T06:19:10Z";
+    const thought = (id: string): TimelineEntry => ({
+      kind: "work",
+      id,
+      createdAt: at,
+      entry: {
         id,
-        status,
-        startedAt: "2026-01-01T00:00:10Z",
-        endedAt: status === "done" ? "2026-01-01T00:00:11Z" : null,
-        percent: null,
-        detail: null,
-        tail: [],
-      }) as const;
-    const asyncSnapshot: WorktreeSetupSnapshot = {
-      ...snapshot,
-      stages: [stage("setup-script", "running"), stage("agent", "done")],
-    };
-    const liveTurn = {
-      runId: "turn-1" as never,
-      status: "running",
-      startedAt: "2026-01-01T00:00:11Z",
-      completedAt: null,
-    } as const;
-    const asyncRows = deriveMessagesTimelineRows({
-      timelineEntries: [userEntry],
-      latestRun: liveTurn,
-      isWorking: true,
-      activeTurnStartedAt: "2026-01-01T00:00:00Z",
-      turnDiffSummaries: [],
-      supportsConversationRollback: false,
-      worktreeSetup: asyncSnapshot,
-    });
-    expect(asyncRows.map((row) => row.kind)).toEqual(["message", "working", "thinking"]);
-
-    // Dispatched but not yet visible as a turn: the full card stays put so
-    // nothing collapses during the handoff.
-    const handoffRows = deriveMessagesTimelineRows({
-      timelineEntries: [userEntry],
-      isWorking: true,
-      activeTurnStartedAt: "2026-01-01T00:00:00Z",
-      turnDiffSummaries: [],
-      supportsConversationRollback: false,
-      worktreeSetup: asyncSnapshot,
-    });
-    expect(handoffRows.map((row) => row.kind)).toEqual(["message", "working", "worktree-setup"]);
-    expect(handoffRows[2]).toMatchObject({ kind: "worktree-setup", embedded: false });
-
-    // A script that outlives the reply never trails the assistant's message.
-    const outlivedRows = deriveMessagesTimelineRows({
-      timelineEntries: [
-        userEntry,
-        { ...assistantEntry, message: { ...assistantEntry.message, streaming: false } },
-      ],
-      latestRun: { ...liveTurn, status: "completed", completedAt: "2026-01-01T00:00:40Z" },
-      isWorking: false,
-      activeTurnStartedAt: null,
-      turnDiffSummaries: [],
-      supportsConversationRollback: false,
-      worktreeSetup: asyncSnapshot,
-    });
-    expect(outlivedRows.map((row) => row.kind)).toEqual(["message", "message"]);
-
-    // A failed script after the handoff keeps its row under the send.
-    const failedRows = deriveMessagesTimelineRows({
-      timelineEntries: [userEntry],
-      latestRun: liveTurn,
-      isWorking: true,
-      activeTurnStartedAt: "2026-01-01T00:00:00Z",
-      turnDiffSummaries: [],
-      supportsConversationRollback: false,
-      worktreeSetup: {
-        ...asyncSnapshot,
-        phase: "done",
-        endedAt: "2026-01-01T00:00:20Z",
-        stages: [{ ...stage("setup-script", "done"), status: "failed" }, stage("agent", "done")],
+        runId,
+        createdAt: at,
+        label: "Thinking",
+        tone: "thinking",
+        itemType: "reasoning",
+        detail: id,
+        toolLifecycleStatus: "inProgress",
       },
     });
-    expect(failedRows.map((row) => row.kind)).toEqual([
-      "message",
-      "worktree-setup",
-      "working",
-      "thinking",
-    ]);
-    expect(failedRows[1]).toMatchObject({ kind: "worktree-setup", embedded: true });
+    const steer: TimelineEntry = {
+      kind: "message",
+      id: "steer",
+      createdAt: at,
+      message: {
+        id: MessageId.make("steer"),
+        role: "user",
+        text: "Also evaluate speed",
+        runId,
+        inputIntent: "steer",
+        streaming: false,
+        createdAt: at,
+        updatedAt: at,
+      },
+    };
+    const first = thought("first-thought");
+    const next = thought("next-thought");
+    const tool: TimelineEntry = {
+      kind: "work",
+      id: "tool",
+      createdAt: at,
+      entry: {
+        id: "tool",
+        runId,
+        createdAt: at,
+        label: "Running cat",
+        tone: "tool",
+        command: "cat file",
+        toolLifecycleStatus: "inProgress",
+      },
+    };
+    const rows = (timelineEntries: ReadonlyArray<TimelineEntry>) =>
+      deriveMessagesTimelineRows({
+        timelineEntries,
+        runningRunId: runId,
+        isWorking: true,
+        activeTurnStartedAt: at,
+        turnDiffSummaries: [],
+        supportsConversationRollback: false,
+      });
+    expect(rows([first]).find((row) => row.kind === "work-live")).toMatchObject({
+      active: true,
+      entry: { id: "first-thought" },
+    });
+    const afterSteer = rows([first, steer]);
+    expect(afterSteer.some((row) => row.kind === "work-live")).toBe(false);
+    expect(afterSteer.at(-1)?.kind).toBe("thinking");
+    expect(afterSteer.find((row) => row.kind === "work")).toMatchObject({
+      groupedEntries: [{ id: "first-thought", toolLifecycleStatus: "completed" }],
+    });
+    for (const entries of [
+      [first, steer, next],
+      [first, next],
+      [first, steer, next, tool],
+    ]) {
+      const live = rows(entries).filter((row) => row.kind === "work-live" && row.active);
+      expect(live).toHaveLength(1);
+      expect(live[0]).toMatchObject({ entry: { id: entries.at(-1)!.id } });
+    }
+    // Presentation must not rewrite the retained provider lifecycle.
+    expect(first.kind === "work" && first.entry.toolLifecycleStatus).toBe("inProgress");
+  });
+
+  it.each(["cua_repl.js", "node_repl.js", "js"])(
+    "shows the %s action title for a retained tool item",
+    (toolName) => {
+      const fixture = makeStreamingTimelineFixture();
+      const source = fixture.visibleTurnItems.find((row) => row.item.type === "dynamic_tool")!;
+      if (source.item.type !== "dynamic_tool") throw new Error("Expected tool fixture");
+      const item = {
+        ...source.item,
+        title: null,
+        toolName,
+        input: {
+          code: "await game.getAXStateAndScreenshot();",
+          title: "Inspect Saga music screen",
+        },
+      };
+      const entries = deriveTimelineEntriesFromVisibleTurnItems({
+        visibleTurnItems: [{ ...source, item }],
+        optimisticMessages: [],
+      });
+      const work = entries.find((entry) => entry.kind === "work");
+      expect(work?.kind === "work" && workEntryDisplayLabel(work.entry, undefined)).toBe(
+        "Inspect Saga music screen",
+      );
+      const rows = deriveMessagesTimelineRows({
+        timelineEntries: entries,
+        isWorking: false,
+        runningRunId: fixture.runId,
+        activeTurnStartedAt: fixture.time(0),
+        turnDiffSummaries: [],
+        supportsConversationRollback: false,
+      });
+      expect(rows.find((row) => row.kind === "work")).toMatchObject({
+        displayLabel: "Inspect Saga music screen",
+      });
+    },
+  );
+
+  it("recovers the failed Sky call stored as a generic js integration", () => {
+    const fixture = makeStreamingTimelineFixture();
+    const source = fixture.visibleTurnItems.find((row) => row.item.type === "dynamic_tool")!;
+    if (source.item.type !== "dynamic_tool") throw new Error("Expected tool fixture");
+    const item = {
+      ...source.item,
+      type: "dynamic_tool" as const,
+      status: "failed" as const,
+      title: "js",
+      toolName: "node_repl.js",
+      toolSource: { key: "mcp:node_repl", name: "node repl", kind: "integration" as const },
+      input: {
+        title: "Restrict the breakpoint to Git actions",
+        code: "await sky.type_text({app:'T3 Code (Nightly)',text:'debug(ga.run)'});",
+      },
+    };
+    const entries = deriveTimelineEntriesFromVisibleTurnItems({
+      visibleTurnItems: [{ ...source, item }],
+      optimisticMessages: [],
+    });
+    const entry = entries.find((row) => row.kind === "work");
+    expect(entry?.kind === "work" && workEntryDisplayLabel(entry.entry, undefined)).toBe(
+      "Restrict the breakpoint to Git actions",
+    );
+    expect(entry?.kind === "work" && entry.entry).toMatchObject({
+      toolSurface: "computer",
+      toolSource: { key: "computer-use", kind: "computer" },
+    });
   });
 
   it("presents project MCP calls and summarizes successful clones through the web timeline", () => {
@@ -1215,6 +1009,7 @@ describe("deriveMessagesTimelineRows", () => {
                     status: "superseded" as const,
                     attemptOrdinal: 0,
                     rootNodeId: "old-root" as never,
+                    completedAt: null,
                   },
                 }
               : {}),
@@ -1297,98 +1092,6 @@ describe("deriveMessagesTimelineRows", () => {
       },
     ]);
   });
-
-  it.each(["file_change", "dynamic_tool"] as const)(
-    "moves the current %s record into body history on completion",
-    (type) => {
-      const fixture = makeStreamingTimelineFixture();
-      const source = fixture.visibleTurnItems.find((row) => row.item.type === "dynamic_tool")!;
-      if (source.item.type !== "dynamic_tool") throw new Error("Expected tool fixture");
-      const previous: OrchestrationV2ProjectedTurnItem = {
-        ...source,
-        sourceItemId: TurnItemId.make("previous-browser"),
-        item: {
-          ...source.item,
-          type: "dynamic_tool",
-          id: TurnItemId.make("previous-browser"),
-          status: "completed",
-          toolName: "mcp__t3_code__preview_snapshot",
-          input: { tabId: "audit-browser" },
-        },
-      };
-      const current: OrchestrationV2ProjectedTurnItem = {
-        ...source,
-        position: source.position + 1,
-        sourceItemId: TurnItemId.make("current-tool"),
-        item: {
-          ...source.item,
-          ...(type === "file_change"
-            ? { type, fileName: "src/audit.ts", additions: 1 }
-            : {
-                type,
-                toolName: "mcp__t3_code__preview_navigate",
-                input: { url: "https://example.com" },
-              }),
-          id: TurnItemId.make("current-tool"),
-          ordinal: source.item.ordinal + 1,
-          status: "running",
-          completedAt: null,
-        },
-      };
-      const input = {
-        conversationStructure: "restructured" as const,
-        isWorking: true,
-        runningRunId: fixture.runId,
-        activeTurnStartedAt: fixture.time(0),
-        turnDiffSummaries: [],
-        supportsConversationRollback: false,
-      };
-      const entriesFor = (items: OrchestrationV2ProjectedTurnItem[]) =>
-        deriveTimelineEntriesFromVisibleTurnItems({
-          visibleTurnItems: items,
-          optimisticMessages: [],
-        });
-      const timelineEntries = entriesFor([previous, current]);
-      const initial = deriveMessagesTimelineRows({ ...input, timelineEntries });
-      const groups = initial.flatMap((row) =>
-        row.kind === "work-toggle" || row.kind === "work-live" ? [row.groupId] : [],
-      );
-      const rows = deriveMessagesTimelineRows({
-        ...input,
-        timelineEntries,
-        expandedWorkGroupIds: new Set(groups),
-      });
-      const live = rows.find((row) => row.kind === "work-live");
-      expect(live?.groupedEntries.map((entry) => entry.projectedItem?.sourceItemId)).toEqual([
-        current.sourceItemId,
-      ]);
-      const body = rows.find((row) => row.kind === "work" && row.id !== `${live?.groupId}:details`);
-      expect(
-        body?.kind === "work" &&
-          body.groupedEntries.map((entry) => entry.projectedItem?.sourceItemId),
-      ).toEqual([previous.sourceItemId]);
-      const completedEntries = entriesFor([
-        previous,
-        { ...current, item: { ...current.item, status: "completed" } },
-      ]);
-      const archived = deriveMessagesTimelineRows({
-        ...input,
-        isWorking: false,
-        runningRunId: null,
-        timelineEntries: completedEntries,
-        expandedRunIds: new Set([fixture.runId]),
-        expandedWorkGroupIds: new Set(groups),
-      });
-      expect(archived.some((row) => row.kind === "work-live")).toBe(false);
-      expect(archived.some((row) => row.kind === "turn-fold")).toBe(true);
-      const details = archived.filter((row) => row.kind === "work");
-      expect(details).toHaveLength(1);
-      expect(details[0]!.groupedEntries.map((entry) => entry.projectedItem?.sourceItemId)).toEqual([
-        previous.sourceItemId,
-        current.sourceItemId,
-      ]);
-    },
-  );
 
   it("gives live compaction the activity slot and restores Thinking when it completes", () => {
     const fixture = makeStreamingTimelineFixture();
@@ -1569,76 +1272,6 @@ describe("deriveMessagesTimelineRows", () => {
     expect(assistantRows[1]?.assistantCopyStreaming).toBe(true);
   });
 
-  it.each(["default", "restructured"] as const)(
-    "shows %s changed-file controls by the associated run lifecycle while preserving historical controls",
-    (conversationStructure) => {
-      const at = "2026-10-18T10:00:00Z";
-      const makeEntry = (id: string) => ({
-        kind: "message" as const,
-        id,
-        createdAt: at,
-        message: {
-          id: MessageId.make(id),
-          runId: RunId.make(id),
-          role: "assistant" as const,
-          text: "Answer",
-          streaming: false,
-          createdAt: at,
-          updatedAt: at,
-        },
-      });
-      const historical = makeEntry("historical");
-      const current = makeEntry("current");
-      const summary = (id: string): TurnDiffSummary => ({
-        runId: RunId.make(id),
-        assistantMessageId: MessageId.make(id),
-        completedAt: at,
-        checkpointTurnCount: 1,
-        checkpointRef: CheckpointRef.make(id),
-        status: "ready",
-        files: [{ path: `${id}.ts`, kind: "modified", additions: 1, deletions: 0 }],
-      });
-      const summaries = [summary("historical"), summary("current")];
-      for (const state of [
-        { isWorking: true, status: "running", visible: false },
-        { isWorking: false, status: "running", visible: false },
-        { isWorking: false, status: "completed", visible: true },
-        { isWorking: false, status: "interrupted", visible: true },
-        // Sending the next prompt must leave the previous answer's controls usable.
-        { isWorking: true, status: "completed", visible: true },
-      ] as const) {
-        const rows = deriveMessagesTimelineRows({
-          timelineEntries: [
-            historical,
-            {
-              ...makeEntry("current-prompt"),
-              message: { ...current.message, id: MessageId.make("current-prompt"), role: "user" },
-            },
-            current,
-          ],
-          conversationStructure,
-          isWorking: state.isWorking,
-          supportsConversationRollback: false,
-          turnDiffSummaries: summaries,
-          latestRun: {
-            runId: current.message.runId,
-            status: state.status,
-            startedAt: at,
-            completedAt: state.status === "running" ? null : at,
-          },
-        });
-        const messages = rows.filter((row) => row.kind === "message");
-        expect(messages.find((row) => row.id === historical.id)?.assistantTurnDiffSummary).toBe(
-          summaries[0],
-        );
-        expect(messages.find((row) => row.id === current.id)?.assistantTurnDiffSummary).toBe(
-          state.visible ? summaries[1] : undefined,
-        );
-        expect(rows.some((row) => row.kind === "thinking")).toBe(state.isWorking);
-      }
-    },
-  );
-
   it("projects assistant diff summaries and user revert counts onto the affected rows", () => {
     const assistantTurnDiffSummary = {
       runId: "turn-1" as never,
@@ -1701,111 +1334,106 @@ describe("deriveMessagesTimelineRows", () => {
     expect(assistantRow?.assistantTurnDiffSummary).toBe(assistantTurnDiffSummary);
   });
 
-  it.each(["default", "restructured"] as const)(
-    "folds settled work under %s",
-    (conversationStructure) => {
-      const timelineEntries = [
-        {
-          id: "user-entry",
-          kind: "message" as const,
+  it("folds the first assistant message and settled work before the terminal response", () => {
+    const timelineEntries = [
+      {
+        id: "user-entry",
+        kind: "message" as const,
+        createdAt: "2026-01-01T00:00:00Z",
+        message: {
+          id: "user-1" as never,
+          role: "user" as const,
+          text: "Build it",
+          runId: null,
           createdAt: "2026-01-01T00:00:00Z",
-          message: {
-            id: "user-1" as never,
-            role: "user" as const,
-            text: "Build it",
-            runId: null,
-            createdAt: "2026-01-01T00:00:00Z",
-            updatedAt: "2026-01-01T00:00:00Z",
-            streaming: false,
-          },
+          updatedAt: "2026-01-01T00:00:00Z",
+          streaming: false,
         },
-        {
-          id: "assistant-first-entry",
-          kind: "message" as const,
+      },
+      {
+        id: "assistant-first-entry",
+        kind: "message" as const,
+        createdAt: "2026-01-01T00:00:05Z",
+        message: {
+          id: "assistant-first" as never,
+          role: "assistant" as const,
+          text: "Synthetic deployment checklist\n1. Confirm the deployment is ready.",
+          runId: "turn-1" as never,
           createdAt: "2026-01-01T00:00:05Z",
-          message: {
-            id: "assistant-first" as never,
-            role: "assistant" as const,
-            text: "Synthetic deployment checklist\n1. Confirm the deployment is ready.",
-            runId: "turn-1" as never,
-            createdAt: "2026-01-01T00:00:05Z",
-            updatedAt: "2026-01-01T00:00:06Z",
-            streaming: false,
-          },
+          updatedAt: "2026-01-01T00:00:06Z",
+          streaming: false,
         },
-        {
-          id: "work-entry-1",
-          kind: "work" as const,
+      },
+      {
+        id: "work-entry-1",
+        kind: "work" as const,
+        createdAt: "2026-01-01T00:00:08Z",
+        entry: {
+          id: "work-1",
           createdAt: "2026-01-01T00:00:08Z",
-          entry: {
-            id: "work-1",
-            createdAt: "2026-01-01T00:00:08Z",
-            runId: "turn-1" as never,
-            label: "Ran command",
-            tone: "tool" as const,
-          },
+          runId: "turn-1" as never,
+          label: "Ran command",
+          tone: "tool" as const,
         },
-        {
-          id: "assistant-final-entry",
-          kind: "message" as const,
+      },
+      {
+        id: "assistant-final-entry",
+        kind: "message" as const,
+        createdAt: "2026-01-01T00:00:20Z",
+        message: {
+          id: "assistant-final" as never,
+          role: "assistant" as const,
+          text: "Done",
+          runId: "turn-1" as never,
           createdAt: "2026-01-01T00:00:20Z",
-          message: {
-            id: "assistant-final" as never,
-            role: "assistant" as const,
-            text: "Done",
-            runId: "turn-1" as never,
-            createdAt: "2026-01-01T00:00:20Z",
-            updatedAt: "2026-01-01T00:00:22Z",
-            streaming: false,
-          },
+          updatedAt: "2026-01-01T00:00:22Z",
+          streaming: false,
         },
-      ];
+      },
+    ];
 
-      const collapsedRows = deriveMessagesTimelineRows({
-        timelineEntries,
-        conversationStructure,
-        isWorking: false,
-        activeTurnStartedAt: null,
-        turnDiffSummaries: [],
-        supportsConversationRollback: false,
-      });
+    const collapsedRows = deriveMessagesTimelineRows({
+      timelineEntries,
+      isWorking: false,
+      activeTurnStartedAt: null,
+      turnDiffSummaries: [],
+      supportsConversationRollback: false,
+    });
 
-      const foldRow = collapsedRows.find(
-        (row): row is Extract<(typeof collapsedRows)[number], { kind: "turn-fold" }> =>
-          row.kind === "turn-fold",
-      );
-      expect(foldRow?.runId).toBe("turn-1");
-      expect(foldRow?.expanded).toBe(false);
-      // User message boundary (00:00:00) → terminal message updatedAt (00:00:22).
-      expect(foldRow?.label).toBe("Worked for 22s");
-      expect(collapsedRows.map((row) => row.id)).toEqual([
-        "user-entry",
-        "turn-fold:turn-1",
-        "assistant-final-entry",
-      ]);
+    const foldRow = collapsedRows.find(
+      (row): row is Extract<(typeof collapsedRows)[number], { kind: "turn-fold" }> =>
+        row.kind === "turn-fold",
+    );
+    expect(foldRow?.runId).toBe("turn-1");
+    expect(foldRow?.expanded).toBe(false);
+    // User message boundary (00:00:00) → terminal message updatedAt (00:00:22).
+    expect(foldRow?.label).toBe("Worked for 22s");
+    expect(collapsedRows.map((row) => row.id)).toEqual([
+      "user-entry",
+      "turn-fold:turn-1",
+      "assistant-final-entry",
+    ]);
 
-      const expandedRows = deriveMessagesTimelineRows({
-        timelineEntries,
-        conversationStructure,
-        expandedRunIds: new Set(["turn-1" as never]),
-        isWorking: false,
-        activeTurnStartedAt: null,
-        turnDiffSummaries: [],
-        supportsConversationRollback: false,
-      });
+    const expandedRows = deriveMessagesTimelineRows({
+      timelineEntries,
+      expandedRunIds: new Set(["turn-1" as never]),
+      isWorking: false,
+      activeTurnStartedAt: null,
+      turnDiffSummaries: [],
+      supportsConversationRollback: false,
+    });
 
-      expect(expandedRows.map((row) => row.id)).toEqual([
-        "user-entry",
-        "turn-fold:turn-1",
-        "assistant-first-entry",
-        conversationStructure === "restructured" ? "work-toggle:work-entry-1" : "work-entry-1",
-        "assistant-final-entry",
-      ]);
-      expect(
-        expandedRows.find((row) => row.kind === "turn-fold" && row.expanded === true),
-      ).toBeDefined();
-    },
-  );
+    expect(expandedRows.map((row) => row.id)).toEqual([
+      "user-entry",
+      "turn-fold:turn-1",
+      "assistant-first-entry",
+      "work-entry-1",
+      "assistant-final-entry",
+    ]);
+    expect(
+      expandedRows.find((row) => row.kind === "turn-fold" && row.expanded === true),
+    ).toBeDefined();
+  });
 
   it.each([1, 2, 3])("folds %i completed activities after the terminal response", (count) => {
     const runId = RunId.make("turn-1");
@@ -2456,6 +2084,60 @@ describe("deriveMessagesTimelineRows", () => {
     expect(rows.some((row) => row.kind === "thinking")).toBe(false);
   });
 
+  it("carries the latest thought on the live row while a later tool runs", () => {
+    type WorkEntry = Extract<
+      Parameters<typeof deriveMessagesTimelineRows>[0]["timelineEntries"][number],
+      { kind: "work" }
+    >;
+    const work = (
+      id: string,
+      at: string,
+      fields: Omit<WorkEntry["entry"], "id" | "createdAt" | "runId" | "label">,
+    ): WorkEntry => ({
+      id: `${id}-entry`,
+      kind: "work",
+      createdAt: at,
+      entry: { id, createdAt: at, runId: "turn-1" as never, label: id, ...fields },
+    });
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries: [
+        work("old-thought", "2026-01-01T00:00:01Z", {
+          itemType: "reasoning",
+          detail: "First idea.",
+          tone: "thinking" as const,
+          toolLifecycleStatus: "completed" as const,
+        }),
+        work("new-thought", "2026-01-01T00:00:02Z", {
+          itemType: "reasoning",
+          detail: "Found the cause.",
+          tone: "thinking" as const,
+          toolLifecycleStatus: "completed" as const,
+        }),
+        work("running-command", "2026-01-01T00:00:03Z", {
+          command: "rg cause",
+          requestKind: "command",
+          tone: "tool" as const,
+          toolLifecycleStatus: "inProgress" as const,
+        }),
+      ],
+      latestRun: {
+        runId: "turn-1" as never,
+        status: "running",
+        startedAt: "2026-01-01T00:00:00Z",
+        completedAt: null,
+      },
+      isWorking: true,
+      activeTurnStartedAt: "2026-01-01T00:00:00Z",
+      turnDiffSummaries: [],
+      supportsConversationRollback: false,
+    });
+
+    expect(rows.find((row) => row.kind === "work-live")).toMatchObject({
+      entry: { id: "running-command" },
+      thought: { id: "new-thought" },
+    });
+  });
+
   it("keeps an actually running tool in the shared activity row", () => {
     const rows = deriveMessagesTimelineRows({
       timelineEntries: [
@@ -2528,6 +2210,355 @@ describe("deriveMessagesTimelineRows", () => {
         { id: "completed-command" },
       ],
     });
+  });
+
+  it("folds each run of a provider-native subagent thread like a normal turn", () => {
+    // A Claude subagent's child thread, as projected: no runs, one runless
+    // root turn, and a user prompt for the launch and for a SendMessage resume.
+    const threadId = ThreadId.make("subagent-child");
+    const rootNodeId = NodeId.make("task-root");
+    const at = (second: number) =>
+      DateTime.makeUnsafe(new Date(Date.UTC(2026, 8, 25, 22, 51, second)).toISOString());
+    const base = (id: string, ordinal: number, second: number, endSecond = second) => ({
+      id: TurnItemId.make(id),
+      threadId,
+      runId: null,
+      nodeId: rootNodeId,
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal,
+      status: "completed" as const,
+      title: null,
+      startedAt: at(second),
+      completedAt: at(endSecond),
+      updatedAt: at(endSecond),
+    });
+    const prompt = (id: string, ordinal: number, second: number) => ({
+      ...base(id, ordinal, second),
+      type: "user_message" as const,
+      messageId: MessageId.make(id),
+      text: `Prompt ${id}`,
+      attachments: [],
+      inputIntent: "turn_start" as const,
+      createdBy: "agent" as const,
+      creationSource: "provider" as const,
+    });
+    const answer = (id: string, ordinal: number, second: number) => ({
+      ...base(id, ordinal, second),
+      type: "assistant_message" as const,
+      messageId: MessageId.make(id),
+      text: `Answer ${id}`,
+      streaming: false,
+    });
+    type ResumeState = "running" | "completed" | "failed";
+    const items = (resume: ResumeState) =>
+      [
+        prompt("launch", 1, 0),
+        { ...base("launch-ls", 2, 4), type: "command_execution" as const, input: "ls src" },
+        {
+          ...base("launch-thinking", 3, 8),
+          type: "reasoning" as const,
+          title: "Thinking",
+          text: "Not there.",
+          streaming: false,
+        },
+        answer("launch-answer", 4, 8),
+        prompt("resume", 5, 72),
+        {
+          ...base("resume-ls", 6, 77),
+          type: "command_execution" as const,
+          input: "ls src",
+          status: resume === "running" ? ("running" as const) : ("completed" as const),
+          completedAt: resume === "running" ? null : at(77),
+        },
+        ...(resume === "failed"
+          ? [
+              {
+                ...base("resume-error", 7, 80),
+                type: "error" as const,
+                status: "failed" as const,
+                failure: {
+                  class: "provider_error" as const,
+                  message: "Subagent failed",
+                  code: null,
+                  retryable: null,
+                },
+              },
+            ]
+          : []),
+        ...(resume === "running" ? [] : [answer("resume-answer", 8, 80)]),
+      ].map((item, position) => ({
+        position,
+        visibility: "local" as const,
+        sourceThreadId: threadId,
+        sourceItemId: item.id,
+        item,
+      }));
+    const rows = (input: {
+      resume: ResumeState;
+      working: boolean;
+      expandedRunIds?: ReadonlySet<RunId>;
+    }) =>
+      deriveMessagesTimelineRows({
+        timelineEntries: deriveTimelineEntriesFromVisibleTurnItems({
+          visibleTurnItems: items(input.resume),
+          optimisticMessages: [],
+        }),
+        latestRun: null,
+        isWorking: input.working,
+        runlessWorkActive: input.working,
+        ...(input.expandedRunIds === undefined ? {} : { expandedRunIds: input.expandedRunIds }),
+        activeTurnStartedAt: input.working ? DateTime.formatIso(at(72)) : null,
+        turnDiffSummaries: [],
+        supportsConversationRollback: false,
+      });
+    const shape = (timeline: ReadonlyArray<MessagesTimelineRow>) =>
+      timeline.map((row) =>
+        row.kind === "turn-fold"
+          ? `fold:${row.label}`
+          : row.kind === "message"
+            ? `${row.message.role}:${row.message.id}`
+            : row.kind,
+      );
+
+    // Settled: each run folds its work, keeping its prompt and final answer.
+    const settled = rows({ resume: "completed", working: false });
+    expect(shape(settled)).toEqual([
+      "user:launch",
+      "fold:Worked for 8.0s",
+      "assistant:launch-answer",
+      "user:resume",
+      "fold:Worked for 8.0s",
+      "assistant:resume-answer",
+    ]);
+
+    // Each fold opens on its own.
+    const launchFold = settled.find((row) => row.kind === "turn-fold");
+    if (launchFold?.kind !== "turn-fold") throw new Error("Expected the launch fold");
+    const expanded = rows({
+      resume: "completed",
+      working: false,
+      expandedRunIds: new Set([launchFold.runId]),
+    });
+    expect(shape(expanded)).toEqual([
+      "user:launch",
+      "fold:Worked for 8.0s",
+      "work-toggle",
+      "assistant:launch-answer",
+      "user:resume",
+      "fold:Worked for 8.0s",
+      "assistant:resume-answer",
+    ]);
+
+    // While the resume runs, only the settled launch folds.
+    expect(shape(rows({ resume: "running", working: true }))).toEqual([
+      "user:launch",
+      "fold:Worked for 8.0s",
+      "assistant:launch-answer",
+      "user:resume",
+      "working",
+      "work-live",
+    ]);
+
+    // A failed run stays open, as on a normal thread.
+    expect(shape(rows({ resume: "failed", working: false }))).toEqual([
+      "user:launch",
+      "fold:Worked for 8.0s",
+      "assistant:launch-answer",
+      "user:resume",
+      "work",
+      "work",
+      "assistant:resume-answer",
+    ]);
+  });
+
+  it("keeps imported V1 turns folded once the thread's first V2 run starts", () => {
+    const at = (second: number) => `2026-01-01T00:00:${String(second).padStart(2, "0")}Z`;
+    const message = (
+      id: string,
+      role: "user" | "assistant",
+      second: number,
+      runId: string | null = null,
+    ) => ({
+      id,
+      kind: "message" as const,
+      createdAt: at(second),
+      message: {
+        id: id as never,
+        role,
+        text: id,
+        runId: runId as never,
+        createdAt: at(second),
+        updatedAt: at(second),
+        streaming: false,
+      },
+    });
+    const rows = (tail: ReadonlyArray<ReturnType<typeof message>>) =>
+      deriveMessagesTimelineRows({
+        timelineEntries: [
+          message("imported-prompt", "user", 0),
+          message("imported-update", "assistant", 4),
+          {
+            id: "imported-command",
+            kind: "work",
+            createdAt: at(5),
+            entry: {
+              id: "imported-command",
+              createdAt: at(5),
+              runId: null,
+              label: "Ran git",
+              command: "git status",
+              requestKind: "command",
+              tone: "tool" as const,
+              toolLifecycleStatus: "completed" as const,
+            },
+          },
+          message("imported-answer", "assistant", 8),
+          ...tail,
+        ],
+        latestRun: {
+          runId: "run-1" as never,
+          status: "running",
+          startedAt: at(20),
+          completedAt: null,
+        },
+        isWorking: true,
+        activeTurnStartedAt: at(20),
+        turnDiffSummaries: [],
+        supportsConversationRollback: false,
+      }).map((row) =>
+        row.kind === "message" ? `${row.message.role}:${row.message.id}` : row.kind,
+      );
+
+    // V2 work starts from a sent prompt, or with no new prompt (a wake or a resume).
+    expect(rows([message("new-prompt", "user", 20, "run-1")]).slice(0, 4)).toEqual([
+      "user:imported-prompt",
+      "turn-fold",
+      "assistant:imported-answer",
+      "user:new-prompt",
+    ]);
+    const withoutPrompt = rows([]);
+    expect(withoutPrompt).toContain("turn-fold");
+    expect(withoutPrompt).not.toContain("assistant:imported-update");
+
+    // Find must open the fold holding a folded imported message by its synthetic key.
+    const timelineEntries = [
+      message("imported-prompt", "user", 0),
+      message("imported-update", "assistant", 4),
+      message("imported-answer", "assistant", 8),
+    ];
+    const foldInput = { timelineEntries, latestRun: null, isWorking: false };
+    const foldRunId = timelineEntryTurnFoldRunId(foldInput, "imported-update");
+    expect(foldRunId).not.toBeNull();
+    // The rendered turn-fold row carries the same key, so find can map it back.
+    const foldRow = deriveMessagesTimelineRows({
+      ...foldInput,
+      turnDiffSummaries: [],
+      supportsConversationRollback: false,
+    }).find((row) => row.kind === "turn-fold");
+    expect(foldRow?.kind === "turn-fold" ? foldRow.runId : null).toBe(foldRunId);
+    expect(timelineEntryTurnFoldRunId(foldInput, "imported-answer")).toBeNull();
+    const expanded = deriveMessagesTimelineRows({
+      ...foldInput,
+      expandedRunIds: new Set([foldRunId!]),
+      turnDiffSummaries: [],
+      supportsConversationRollback: false,
+    });
+    expect(
+      expanded.some((row) => row.kind === "message" && row.message.id === "imported-update"),
+    ).toBe(true);
+  });
+
+  it("shows a provider-native subagent's runless tools as live work while it works", () => {
+    const entries = (commandStatus: "inProgress" | "completed") => [
+      {
+        id: "task-entry",
+        kind: "message" as const,
+        createdAt: "2026-01-01T00:00:00Z",
+        message: {
+          id: "task" as never,
+          role: "user" as const,
+          text: "Audit the adapters",
+          runId: null,
+          createdAt: "2026-01-01T00:00:00Z",
+          updatedAt: "2026-01-01T00:00:00Z",
+          streaming: false,
+        },
+      },
+      {
+        id: "command-entry",
+        kind: "work" as const,
+        createdAt: "2026-01-01T00:00:05Z",
+        entry: {
+          id: "command",
+          createdAt: "2026-01-01T00:00:05Z",
+          runId: null,
+          label: "Running git",
+          command: "git diff --stat",
+          requestKind: "command" as const,
+          tone: "tool" as const,
+          toolLifecycleStatus: commandStatus,
+        },
+      },
+    ];
+    const rows = (input: { commandStatus: "inProgress" | "completed"; working: boolean }) =>
+      deriveMessagesTimelineRows({
+        timelineEntries: entries(input.commandStatus),
+        latestRun: null,
+        isWorking: input.working,
+        runlessWorkActive: input.working,
+        activeTurnStartedAt: input.working ? "2026-01-01T00:00:00Z" : null,
+        turnDiffSummaries: [],
+        supportsConversationRollback: false,
+      });
+
+    const running = rows({ commandStatus: "inProgress", working: true });
+    expect(running.map((row) => row.kind)).toEqual(["message", "working", "work-live"]);
+    expect(running.find((row) => row.kind === "work-live")).toMatchObject({
+      entry: { id: "command" },
+      active: true,
+    });
+
+    // Once the subagent settles, the same entries fold as finished history.
+    const settled = rows({ commandStatus: "completed", working: false });
+    expect(settled.map((row) => row.kind)).toEqual(["message", "turn-fold"]);
+  });
+
+  it("does not treat runless entries as live work on a thread with runs", () => {
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries: [
+        {
+          id: "runless-command-entry",
+          kind: "work",
+          createdAt: "2026-01-01T00:00:05Z",
+          entry: {
+            id: "runless-command",
+            createdAt: "2026-01-01T00:00:05Z",
+            runId: null,
+            label: "Running git",
+            command: "git status",
+            requestKind: "command",
+            tone: "tool" as const,
+            toolLifecycleStatus: "inProgress" as const,
+          },
+        },
+      ],
+      latestRun: {
+        runId: "turn-1" as never,
+        status: "running",
+        startedAt: "2026-01-01T00:00:00Z",
+        completedAt: null,
+      },
+      isWorking: true,
+      activeTurnStartedAt: "2026-01-01T00:00:00Z",
+      turnDiffSummaries: [],
+      supportsConversationRollback: false,
+    });
+
+    expect(rows.some((row) => row.kind === "work-live")).toBe(false);
+    expect(rows.at(-1)?.kind).toBe("thinking");
   });
 
   it("renders a single completed tool call directly", () => {
@@ -2824,8 +2855,10 @@ describe("deriveMessagesTimelineRows", () => {
   it("reuses one activity row for initial thinking and the latest tool", () => {
     const deriveRows = (
       toolLifecycleStatus: "inProgress" | "completed" | "failed" | "declined" | null,
+      expandedWorkGroupIds?: ReadonlySet<string>,
     ) =>
       deriveMessagesTimelineRows({
+        ...(expandedWorkGroupIds ? { expandedWorkGroupIds } : {}),
         timelineEntries:
           toolLifecycleStatus === null
             ? []
@@ -2873,6 +2906,19 @@ describe("deriveMessagesTimelineRows", () => {
     expect(completedActivityRow).toMatchObject({ kind: "work-live", active: true });
     expect(failedRows.some((row) => row.kind === "work-live")).toBe(false);
     expect(failedRows.at(-1)).toMatchObject({ kind: "thinking", id: "live-activity-row" });
+    const failedThinkingRow = failedRows.at(-1);
+    const failedGroupId =
+      failedThinkingRow?.kind === "thinking" ? failedThinkingRow.groupId : undefined;
+    expect(failedGroupId).toBeDefined();
+    const expandedFailedRows = deriveRows("failed", new Set([failedGroupId!]));
+    expect(expandedFailedRows.slice(-2)).toMatchObject([
+      { kind: "thinking", id: "live-activity-row", expanded: true },
+      {
+        kind: "work",
+        isExpandedToolGroup: true,
+        groupedEntries: [{ id: "latest-command" }],
+      },
+    ]);
     expect(declinedRows.find((row) => row.kind === "work-live")).toMatchObject({ active: false });
     expect(declinedRows.at(-1)).toMatchObject({ kind: "thinking", id: "live-activity-row" });
     expect(initialRows.filter((row) => row.id === "live-activity-row")).toHaveLength(1);
@@ -3029,93 +3075,6 @@ describe("deriveMessagesTimelineRows", () => {
     expect(assistantRow?.showAssistantCopyButton).toBe(false);
     expect(rows.at(-1)).toMatchObject({ kind: "thinking" });
   });
-
-  it.each([
-    [false, false],
-    [true, false],
-    [false, true],
-    [true, true],
-  ])(
-    "reserves terminal metadata during projection handoff, trailing tools: %s, streaming: %s",
-    (trailingTools, streaming) => {
-      const message = {
-        id: MessageId.make("terminal"),
-        role: "assistant" as const,
-        text: "Body with a footnote.",
-        runId: RunId.make("turn-1"),
-        createdAt: "2026-01-01T00:00:10Z",
-        updatedAt: "2026-01-01T00:00:11Z",
-        streaming,
-      };
-      const input = {
-        timelineEntries: [
-          { id: "terminal-entry", kind: "message" as const, createdAt: message.createdAt, message },
-          ...(trailingTools
-            ? [
-                {
-                  id: "final-tool-entry",
-                  kind: "work" as const,
-                  createdAt: message.updatedAt,
-                  entry: {
-                    id: "final-tool",
-                    runId: message.runId,
-                    createdAt: message.updatedAt,
-                    label: "Read file",
-                    detail: "Completed",
-                    tone: "tool" as const,
-                    itemType: "command_execution" as const,
-                    toolLifecycleStatus: "completed" as const,
-                  },
-                },
-              ]
-            : []),
-        ],
-        expandedRunIds: new Set([message.runId]),
-        latestRun: {
-          runId: message.runId,
-          status: "running" as const,
-          startedAt: message.createdAt,
-          completedAt: null,
-        },
-        turnDiffSummaries: [],
-        supportsConversationRollback: false,
-      };
-      const working = deriveMessagesTimelineRows({
-        ...input,
-        isWorking: true,
-        activeTurnStartedAt: message.createdAt,
-      });
-      expect(working.find((row) => row.id === "terminal-entry")).toMatchObject({
-        showAssistantMeta: false,
-        reserveAssistantMeta: false,
-      });
-      const pending = deriveMessagesTimelineRows({
-        ...input,
-        isWorking: false,
-        activeTurnStartedAt: null,
-      });
-      const metadataId = trailingTools ? "assistant-meta:terminal" : "terminal-entry";
-      expect(pending.find((row) => row.id === metadataId)).toMatchObject({
-        reserveAssistantMeta: true,
-        showAssistantCopyButton: false,
-      });
-      expect(pending.find((row) => row.id === "terminal-entry")).toMatchObject({
-        showAssistantMeta: false,
-      });
-      if (trailingTools) expect(pending.at(-1)?.id).toBe(metadataId);
-      expect(pending.some((row) => row.kind === "thinking")).toBe(false);
-      const completed = deriveMessagesTimelineRows({
-        ...input,
-        isWorking: false,
-        activeTurnStartedAt: null,
-        latestRun: { ...input.latestRun, status: "completed", completedAt: message.updatedAt },
-      });
-      expect(completed.find((row) => row.id === metadataId)).toMatchObject({
-        showAssistantCopyButton: true,
-        reserveAssistantMeta: false,
-      });
-    },
-  );
 
   it.each([
     ["tools", "tool", "Used 3 tools"],
@@ -3414,697 +3373,6 @@ describe("deriveMessagesTimelineRows", () => {
       }
     },
   );
-
-  describe("restructured tool archiving", () => {
-    // One finished tool followed by one still-running tool: the shape where
-    // "keep everything live until the turn ends" and "release each tool the
-    // moment it finishes" disagree.
-    const streamingTools = [
-      {
-        id: "finished-command-entry",
-        kind: "work" as const,
-        createdAt: "2026-01-01T00:00:05Z",
-        entry: {
-          id: "finished-command",
-          createdAt: "2026-01-01T00:00:05Z",
-          runId: "turn-1" as never,
-          label: "Ran read",
-          command: "read src",
-          requestKind: "command",
-          tone: "tool" as const,
-          toolLifecycleStatus: "completed" as const,
-        },
-      },
-      {
-        id: "running-command-entry",
-        kind: "work" as const,
-        createdAt: "2026-01-01T00:00:06Z",
-        entry: {
-          id: "running-command",
-          createdAt: "2026-01-01T00:00:06Z",
-          runId: "turn-1" as never,
-          label: "Running rg",
-          command: "rg toolCall",
-          requestKind: "command",
-          tone: "tool" as const,
-          toolLifecycleStatus: "inProgress" as const,
-        },
-      },
-    ];
-
-    function deriveWithStructure(conversationStructure: ConversationStructure | undefined) {
-      return deriveWithStructureFor(streamingTools, conversationStructure);
-    }
-
-    function deriveWithStructureFor(
-      timelineEntries: TimelineEntry[],
-      conversationStructure: ConversationStructure | undefined,
-      expandedAttemptIds?: ReadonlySet<RunAttemptId>,
-      expandedWorkGroupIds?: ReadonlySet<string>,
-    ) {
-      return deriveMessagesTimelineRows({
-        timelineEntries,
-        ...(expandedAttemptIds ? { expandedAttemptIds } : {}),
-        ...(expandedWorkGroupIds ? { expandedWorkGroupIds } : {}),
-        latestRun: {
-          runId: "turn-1" as never,
-          status: "running",
-          startedAt: "2026-01-01T00:00:00Z",
-          completedAt: null,
-        },
-        isWorking: true,
-        activeTurnStartedAt: "2026-01-01T00:00:00Z",
-        turnDiffSummaries: [],
-        supportsConversationRollback: false,
-        conversationStructure,
-      });
-    }
-
-    function bodyWorkEntryIds(rows: MessagesTimelineRow[]): string[] {
-      return rows
-        .filter((row) => row.kind === "work")
-        .flatMap((row) =>
-          (row as Extract<MessagesTimelineRow, { kind: "work" }>).groupedEntries.map(
-            (entry) => entry.id,
-          ),
-        );
-    }
-
-    /** Every row that names this entry, live or archived. */
-    function liveEntryIds(rows: MessagesTimelineRow[]): string[] {
-      return rows.flatMap((row) =>
-        row.kind === "work-live" ? row.groupedEntries.map((entry) => entry.id) : [],
-      );
-    }
-
-    it("releases a finished tool from the live set so it archives into the body", () => {
-      const rows = deriveWithStructure("restructured");
-
-      // w1 finished, so it must appear in the body, not the live label.
-      expect(rows.find((row) => row.id === "work-toggle:finished-command-entry")).toMatchObject({
-        kind: "work-toggle",
-        hiddenCount: 1,
-      });
-      // w2 is still running, so it stays out of the body.
-      expect(bodyWorkEntryIds(rows)).not.toContain("running-command");
-      // The live row still names the one running operation.
-      expect(rows.find((row) => row.kind === "work-live")).toMatchObject({
-        entry: { id: "running-command" },
-        active: true,
-      });
-    });
-
-    it("scopes a native subagent's live label by its provider turn when no run exists", () => {
-      const nativeTools = streamingTools.map((entry) => ({
-        ...entry,
-        entry: {
-          ...entry.entry,
-          runId: null,
-          structuredPayload: { providerTurnId: "native-turn" } as never,
-        },
-      }));
-      const derive = (activeProviderTurnId: string | null) =>
-        deriveMessagesTimelineRows({
-          timelineEntries: nativeTools,
-          latestRun: null,
-          runningRunId: null,
-          activeProviderTurnId: activeProviderTurnId as never,
-          isWorking: true,
-          activeTurnStartedAt: "2026-01-01T00:00:00Z",
-          turnDiffSummaries: [],
-          supportsConversationRollback: false,
-          conversationStructure: "restructured",
-        });
-      const rows = derive("native-turn");
-      expect(rows.find((row) => row.kind === "work-live")).toMatchObject({
-        entry: { id: "running-command" },
-        active: true,
-      });
-      expect(bodyWorkEntryIds(rows)).not.toContain("running-command");
-      expect(rows.find((row) => row.id === "work-toggle:finished-command-entry")).toMatchObject({
-        kind: "work-toggle",
-        hiddenCount: 1,
-      });
-      // A different (older or switched) provider turn does not own these tools.
-      expect(derive("other-turn").some((row) => row.kind === "work-live")).toBe(false);
-    });
-
-    it("keeps the whole turn live under the default structure", () => {
-      const rows = deriveWithStructure("default");
-
-      expect(bodyWorkEntryIds(rows)).not.toContain("finished-command");
-      expect(rows.filter((row) => row.kind === "work-live")).toHaveLength(1);
-    });
-
-    /** The detail row the live label renders underneath itself when expanded. */
-    function expandedWorkGroupEntryIds(rows: MessagesTimelineRow[]): string[] {
-      return rows.flatMap((row) =>
-        row.kind === "work" && row.isExpandedToolGroup
-          ? row.groupedEntries.map((entry) => entry.id)
-          : [],
-      );
-    }
-
-    /** Every row that names this entry anywhere: live label, details, or body. */
-    function allRenderedEntryIds(rows: MessagesTimelineRow[]): string[] {
-      return rows.flatMap((row) => {
-        if (row.kind === "work" || row.kind === "work-live") {
-          return row.groupedEntries.map((entry) => entry.id);
-        }
-        return [];
-      });
-    }
-
-    it("shows only the running tool when the restructured live label is expanded", () => {
-      // Expanding the live label must not resurrect the tool that already
-      // archived into the body work group above it.
-      const rows = deriveWithStructureFor(
-        streamingTools,
-        "restructured",
-        undefined,
-        new Set(["work-group:running-command-entry"]),
-      );
-
-      expect(rows.find((row) => row.kind === "work-live")).toMatchObject({
-        entry: { id: "running-command" },
-        expanded: true,
-      });
-      expect(expandedWorkGroupEntryIds(rows)).toEqual(["running-command"]);
-      expect(liveEntryIds(rows)).toEqual(["running-command"]);
-      // The finished tool keeps a collapsed body group of its own.
-      expect(rows.find((row) => row.id === "work-toggle:finished-command-entry")).toMatchObject({
-        kind: "work-toggle",
-        hiddenCount: 1,
-        expanded: false,
-      });
-      expect(allRenderedEntryIds(rows)).not.toContain("finished-command");
-    });
-
-    it.each([true, false])("keeps tool batches separated by prose, working=%s", (isWorking) => {
-      const firstTool = streamingTools[0]!;
-      const secondTool = {
-        ...firstTool,
-        id: "second-command-entry",
-        entry: { ...firstTool.entry, id: "second-command", command: "echo second" },
-      };
-      const prose: TimelineEntry = {
-        id: "interleaved-prose",
-        kind: "message",
-        createdAt: "2026-01-01T00:00:05Z",
-        message: {
-          id: MessageId.make("interleaved-prose"),
-          role: "assistant",
-          text: "Between tools",
-          runId: RunId.make("turn-1"),
-          streaming: false,
-          createdAt: "2026-01-01T00:00:05Z",
-          updatedAt: "2026-01-01T00:00:05Z",
-        },
-      };
-      const finalProse: TimelineEntry = {
-        ...prose,
-        id: "final-prose",
-        message: { ...prose.message, id: MessageId.make("final-prose"), text: "After tools" },
-      };
-      const rows = deriveMessagesTimelineRows({
-        timelineEntries: [
-          firstTool,
-          {
-            ...firstTool,
-            id: "first-batch-second-entry",
-            entry: { ...firstTool.entry, id: "first-batch-second" },
-          },
-          prose,
-          secondTool,
-          {
-            ...secondTool,
-            id: "second-batch-second-entry",
-            entry: { ...secondTool.entry, id: "second-batch-second" },
-          },
-          ...(isWorking ? [streamingTools[1]!] : []),
-          finalProse,
-        ],
-        latestRun: {
-          runId: RunId.make("turn-1"),
-          status: isWorking ? "running" : "completed",
-          startedAt: "2026-01-01T00:00:00Z",
-          completedAt: isWorking ? null : "2026-01-01T00:00:10Z",
-        },
-        expandedWorkGroupIds: new Set([
-          "work-group:finished-command-entry",
-          "work-group:second-command-entry",
-        ]),
-        expandedRunIds: new Set([RunId.make("turn-1")]),
-        isWorking,
-        turnDiffSummaries: [],
-        supportsConversationRollback: false,
-        conversationStructure: "restructured",
-      });
-      expect(rows.filter((row) => row.kind === "work-toggle")).toHaveLength(2);
-      expect(expandedWorkGroupEntryIds(rows)).toEqual([
-        "finished-command",
-        "first-batch-second",
-        "second-command",
-        "second-batch-second",
-      ]);
-      expect(liveEntryIds(rows)).toEqual(isWorking ? ["running-command"] : []);
-      expect(rows.filter((row) => row.kind === "message").map((row) => row.id)).toEqual([
-        "interleaved-prose",
-        "final-prose",
-      ]);
-      const firstGroup = rows.findIndex(
-        (row) => row.kind === "work-toggle" && row.groupId === "work-group:finished-command-entry",
-      );
-      const secondGroup = rows.findIndex(
-        (row) => row.kind === "work-toggle" && row.groupId === "work-group:second-command-entry",
-      );
-      const between = rows.findIndex((row) => row.id === "interleaved-prose");
-      const lastProse = rows.findIndex((row) => row.id === "final-prose");
-      expect(firstGroup).toBeLessThan(between);
-      expect(secondGroup).toBeGreaterThan(between);
-      if (isWorking) expect(secondGroup).toBeGreaterThan(lastProse);
-      else expect(secondGroup).toBeLessThan(lastProse);
-    });
-
-    it("keeps live and body disclosures independent while another operation is in flight", () => {
-      const concurrent = {
-        ...streamingTools[1]!,
-        id: "new-running-entry",
-        entry: { ...streamingTools[1]!.entry, id: "new-running" },
-      };
-      const rows = deriveWithStructureFor(
-        [...streamingTools, concurrent],
-        "restructured",
-        undefined,
-        new Set(["work-group:new-running-entry"]),
-      );
-      expect(liveEntryIds(rows)).toEqual(["new-running"]);
-      expect(expandedWorkGroupEntryIds(rows)).toEqual(["new-running"]);
-      expect(rows.find((row) => row.kind === "work-toggle")).toMatchObject({
-        expanded: false,
-        hiddenCount: 2,
-      });
-    });
-
-    it("keeps an archived run's complete tool list separate from the active run", () => {
-      const archived = [1, 2].map((index) => ({
-        ...streamingTools[0]!,
-        id: `archived-entry-${index}`,
-        entry: {
-          ...streamingTools[0]!.entry,
-          id: `archived-tool-${index}`,
-          runId: RunId.make("turn-0"),
-        },
-      }));
-      const rows = deriveWithStructureFor(
-        [...archived, ...streamingTools],
-        "restructured",
-        undefined,
-        new Set(["work-group:archived-entry-1"]),
-      );
-      expect(expandedWorkGroupEntryIds(rows)).toEqual(["archived-tool-1", "archived-tool-2"]);
-      expect(rows.find((row) => row.id === "work-toggle:finished-command-entry")).toMatchObject({
-        kind: "work-toggle",
-        hiddenCount: 1,
-      });
-      expect(liveEntryIds(rows)).toEqual(["running-command"]);
-    });
-
-    it("retains stopped commands in the body list", () => {
-      const stopped = {
-        ...streamingTools[0]!,
-        id: "stopped-entry",
-        entry: {
-          ...streamingTools[0]!.entry,
-          id: "stopped-command",
-          toolLifecycleStatus: "stopped" as const,
-        },
-      };
-      const rows = deriveWithStructureFor(
-        [stopped, ...streamingTools],
-        "restructured",
-        undefined,
-        new Set(["work-group:stopped-entry"]),
-      );
-      expect(expandedWorkGroupEntryIds(rows)).toEqual(["stopped-command", "finished-command"]);
-      expect(liveEntryIds(rows)).toEqual(["running-command"]);
-    });
-
-    it("expands the default live label to the whole trailing tool set", () => {
-      // Regression guard: default keeps the trailing tools live until the turn
-      // ends, so its expanded details must still list all of them.
-      const rows = deriveWithStructureFor(
-        streamingTools,
-        "default",
-        undefined,
-        new Set(["work-group:finished-command-entry"]),
-      );
-
-      expect(expandedWorkGroupEntryIds(rows)).toEqual(["finished-command", "running-command"]);
-      expect(liveEntryIds(rows)).toEqual(["finished-command", "running-command"]);
-    });
-
-    it("keeps the whole turn live when no structure is set", () => {
-      const rows = deriveWithStructure(undefined);
-
-      expect(bodyWorkEntryIds(rows)).not.toContain("finished-command");
-      expect(rows.filter((row) => row.kind === "work-live")).toHaveLength(1);
-    });
-
-    // A completed tool with nothing in flight is the idle gap between two
-    // calls. The tool has already left the live set, so a live row built from
-    // the last visible tool would show it a second time next to its body row.
-    const idleGapEntries: TimelineEntry[] = [
-      {
-        id: "solo-command-entry",
-        kind: "work",
-        createdAt: "2026-01-01T00:00:05Z",
-        entry: {
-          id: "solo-command",
-          createdAt: "2026-01-01T00:00:05Z",
-          runId: "turn-1" as never,
-          label: "Ran read",
-          command: "read src",
-          requestKind: "command",
-          tone: "tool" as const,
-          toolLifecycleStatus: "completed" as const,
-        },
-      },
-    ];
-
-    it("archives the last finished tool without also keeping it live in the idle gap", () => {
-      const rows = deriveWithStructureFor(idleGapEntries, "restructured");
-
-      // Archived once into the body...
-      expect(rows.find((row) => row.id === "work-toggle:solo-command-entry")).toMatchObject({
-        kind: "work-toggle",
-        hiddenCount: 1,
-      });
-      // ...and not repeated by a live row that has nothing running to show.
-      expect(liveEntryIds(rows)).toEqual([]);
-      expect(rows.some((row) => row.kind === "work-live")).toBe(false);
-      // The gap falls back to the idle/thinking row rather than a stale label.
-      expect(rows.some((row) => row.kind === "thinking")).toBe(true);
-    });
-
-    it("still keeps the idle-gap tool live under the default structure", () => {
-      const rows = deriveWithStructureFor(idleGapEntries, "default");
-
-      expect(bodyWorkEntryIds(rows)).toEqual([]);
-      expect(liveEntryIds(rows)).toEqual(["solo-command"]);
-      expect(rows.some((row) => row.kind === "thinking")).toBe(false);
-    });
-
-    it("archives a failed tool into the body under the restructured structure", () => {
-      const failedEntries: TimelineEntry[] = [
-        {
-          id: "failed-command-entry",
-          kind: "work",
-          createdAt: "2026-01-01T00:00:05Z",
-          entry: {
-            id: "failed-command",
-            createdAt: "2026-01-01T00:00:05Z",
-            runId: "turn-1" as never,
-            label: "Ran tests",
-            command: "vp test run",
-            requestKind: "command",
-            tone: "tool" as const,
-            toolLifecycleStatus: "failed" as const,
-          },
-        },
-      ];
-
-      const rows = deriveWithStructureFor(failedEntries, "restructured");
-
-      expect(rows.find((row) => row.id === "work-toggle:failed-command-entry")).toMatchObject({
-        kind: "work-toggle",
-        hiddenCount: 1,
-        hasFailure: true,
-      });
-      expect(liveEntryIds(rows)).toEqual([]);
-      expect(rows.some((row) => row.kind === "work-live")).toBe(false);
-    });
-
-    it.each(["thinking", "tool"] as const)(
-      "keeps a superseded in-progress tool out of the live label during current %s",
-      (currentActivity) => {
-        const previousAttemptId = RunAttemptId.make("attempt-1");
-        const currentAttempt = {
-          id: RunAttemptId.make("attempt-2"),
-          runId: RunId.make("turn-1"),
-          status: "running" as const,
-          attemptOrdinal: 1,
-          rootNodeId: NodeId.make("root-1"),
-        };
-        const timelineEntries: TimelineEntry[] = [
-          {
-            ...streamingTools[1]!,
-            id: "previous-attempt-entry",
-            attempt: {
-              ...currentAttempt,
-              id: previousAttemptId,
-              status: "superseded",
-              attemptOrdinal: 0,
-            },
-            // Superseding an attempt can arrive before its tool settles.
-            entry: { ...streamingTools[1]!.entry, id: "previous-attempt-command" },
-          },
-          {
-            id: "current-response-entry",
-            kind: "message",
-            createdAt: "2026-01-01T00:00:07Z",
-            attempt: currentAttempt,
-            message: {
-              id: MessageId.make("current-response"),
-              role: "assistant",
-              text: "Current response",
-              runId: currentAttempt.runId,
-              createdAt: "2026-01-01T00:00:07Z",
-              updatedAt: "2026-01-01T00:00:07Z",
-              streaming: true,
-            },
-          },
-        ];
-        if (currentActivity === "tool") {
-          timelineEntries.push({
-            ...streamingTools[1]!,
-            createdAt: "2026-01-01T00:00:08Z",
-            attempt: currentAttempt,
-            entry: { ...streamingTools[1]!.entry, createdAt: "2026-01-01T00:00:08Z" },
-          });
-        }
-
-        for (const expanded of [false, true]) {
-          const rows = deriveWithStructureFor(
-            timelineEntries,
-            "restructured",
-            new Set(expanded ? [previousAttemptId] : []),
-          );
-
-          expect(rows.find((row) => row.kind === "attempt-fold")).toMatchObject({
-            attemptId: previousAttemptId,
-            expanded,
-          });
-          expect(
-            rows.filter((row) => row.id === "work-toggle:previous-attempt-entry"),
-          ).toHaveLength(expanded ? 1 : 0);
-          expect(liveEntryIds(rows)).toEqual(currentActivity === "tool" ? ["running-command"] : []);
-          expect(rows.some((row) => row.kind === "thinking")).toBe(currentActivity === "thinking");
-          expect(rows.some((row) => row.kind === "work-live")).toBe(currentActivity === "tool");
-        }
-      },
-    );
-
-    it("does not duplicate a running tool that starts a new attempt", () => {
-      // A retry opens a new attempt, so the trailing-tool scan stops at the
-      // boundary and the previous attempt's finished tool is outside the live
-      // set entirely. Expanding the fold is what puts it back on the timeline,
-      // and it must show up there exactly once.
-      const crossAttemptEntries: TimelineEntry[] = [
-        {
-          id: "previous-attempt-entry",
-          kind: "work",
-          createdAt: "2026-01-01T00:00:05Z",
-          attempt: {
-            id: "attempt-1" as never,
-            runId: "turn-1" as never,
-            status: "superseded" as const,
-            attemptOrdinal: 0,
-            rootNodeId: "root-1" as never,
-          },
-          entry: {
-            id: "previous-attempt-command",
-            createdAt: "2026-01-01T00:00:05Z",
-            runId: "turn-1" as never,
-            label: "Ran read",
-            command: "read src",
-            requestKind: "command",
-            tone: "tool" as const,
-            toolLifecycleStatus: "completed" as const,
-          },
-        },
-        {
-          id: "current-attempt-entry",
-          kind: "work",
-          createdAt: "2026-01-01T00:00:06Z",
-          attempt: {
-            id: "attempt-2" as never,
-            runId: "turn-1" as never,
-            status: "running" as const,
-            attemptOrdinal: 1,
-            rootNodeId: "root-1" as never,
-          },
-          entry: {
-            id: "current-attempt-command",
-            createdAt: "2026-01-01T00:00:06Z",
-            runId: "turn-1" as never,
-            label: "Running rg",
-            command: "rg toolCall",
-            requestKind: "command",
-            tone: "tool" as const,
-            toolLifecycleStatus: "inProgress" as const,
-          },
-        },
-      ];
-
-      const rows = deriveWithStructureFor(
-        crossAttemptEntries,
-        "restructured",
-        new Set(["attempt-1" as never]),
-      );
-
-      // The prior attempt is archived exactly once...
-      expect(rows.filter((row) => row.id === "work-toggle:previous-attempt-entry")).toHaveLength(1);
-      expect(liveEntryIds(rows)).not.toContain("previous-attempt-command");
-      // ...and the in-flight tool of the current attempt owns the live label.
-      expect(bodyWorkEntryIds(rows)).not.toContain("current-attempt-command");
-      expect(liveEntryIds(rows)).toContain("current-attempt-command");
-    });
-  });
-
-  describe("restructured idle label", () => {
-    // The thinking row carries two meanings that the structure cannot tell apart
-    // by itself: the model starting to think at the top of a turn, and the gap
-    // after the last tool finished. Only the gap is idle, and only the gap has a
-    // completed tool behind it.
-    const finishedTool = {
-      id: "finished-command-entry",
-      kind: "work" as const,
-      createdAt: "2026-01-01T00:00:05Z",
-      entry: {
-        id: "finished-command",
-        createdAt: "2026-01-01T00:00:05Z",
-        runId: "turn-1" as never,
-        label: "Ran read",
-        command: "read src",
-        requestKind: "command",
-        tone: "tool" as const,
-        toolLifecycleStatus: "completed" as const,
-      },
-    };
-    const userEntry = {
-      id: "user-entry",
-      kind: "message" as const,
-      createdAt: "2026-01-01T00:00:00Z",
-      message: {
-        id: MessageId.make("user-1"),
-        role: "user" as const,
-        text: "Do the thing.",
-        runId: null,
-        createdAt: "2026-01-01T00:00:00Z",
-        updatedAt: "2026-01-01T00:00:00Z",
-        streaming: false,
-      },
-    };
-
-    function deriveIdle(
-      timelineEntries: TimelineEntry[],
-      conversationStructure: ConversationStructure | undefined,
-    ) {
-      return deriveMessagesTimelineRows({
-        timelineEntries,
-        latestRun: {
-          runId: "turn-1" as never,
-          status: "running",
-          startedAt: "2026-01-01T00:00:00Z",
-          completedAt: null,
-        },
-        isWorking: true,
-        activeTurnStartedAt: "2026-01-01T00:00:00Z",
-        turnDiffSummaries: [],
-        supportsConversationRollback: false,
-        conversationStructure,
-      });
-    }
-
-    function thinkingRow(rows: MessagesTimelineRow[]) {
-      return rows.find((row) => row.kind === "thinking");
-    }
-
-    it("marks the thinking row idle once the turn's tools are all done", () => {
-      const rows = deriveIdle([userEntry, finishedTool], "restructured");
-
-      expect(thinkingRow(rows)).toMatchObject({ kind: "thinking", idle: true });
-    });
-
-    it("leaves the turn-opening thinking row unmarked", () => {
-      // No tool has run yet, so this is the model really starting to think.
-      const rows = deriveIdle([userEntry], "restructured");
-
-      expect(thinkingRow(rows)).toMatchObject({ kind: "thinking" });
-      expect(thinkingRow(rows)).not.toHaveProperty("idle");
-    });
-
-    it("leaves a failed tool's thinking row unmarked", () => {
-      // A failure is not idle planning. Labelling it so hides the error behind
-      // a calm message exactly when the user needs to notice it.
-      const failedTool = {
-        ...finishedTool,
-        id: "failed-command-entry",
-        entry: {
-          ...finishedTool.entry,
-          id: "failed-command",
-          toolLifecycleStatus: "failed" as const,
-        },
-      };
-
-      const row = thinkingRow(deriveIdle([userEntry, failedTool], "restructured"));
-      expect(row).toMatchObject({ kind: "thinking" });
-      expect(row).not.toHaveProperty("idle");
-    });
-
-    it("leaves a declined tool's thinking row unmarked under the default structure", () => {
-      // The restructured guard is the only thing keeping this row clean: a
-      // declined tool is neither a success nor a failure, so `activeWorkRow` is
-      // inactive, the thinking row is produced, and without the guard default
-      // would grow the idle key and greet the user with "Planning next move"
-      // right after their tool was denied.
-      const declinedTool = {
-        ...finishedTool,
-        id: "declined-command-entry",
-        entry: {
-          ...finishedTool.entry,
-          id: "declined-command",
-          toolLifecycleStatus: "declined" as const,
-        },
-      };
-
-      const row = thinkingRow(deriveIdle([userEntry, declinedTool], "default"));
-      expect(row).toMatchObject({ kind: "thinking" });
-      expect(row).not.toHaveProperty("idle");
-    });
-
-    it("leaves the default structure's thinking row unmarked", () => {
-      // Default keeps a finished tool in the live label, so the same tail has no
-      // thinking row at all — and the turn-opening row stays unmarked, which
-      // keeps the default shape byte for byte what it was.
-      expect(thinkingRow(deriveIdle([userEntry, finishedTool], "default"))).toBeUndefined();
-
-      const openingRow = thinkingRow(deriveIdle([userEntry], "default"));
-      expect(openingRow).toMatchObject({ kind: "thinking" });
-      expect(openingRow).not.toHaveProperty("idle");
-    });
-  });
 });
 
 describe("computeStableMessagesTimelineRows", () => {
@@ -4134,27 +3402,6 @@ describe("computeStableMessagesTimelineRows", () => {
 
     expect(updated).not.toBe(initial);
     expect(updated.result[0]).toBe(enrichedRow);
-  });
-
-  it("replaces a cached thinking row when only the idle marker changes", () => {
-    // The idle gap and real thinking share one row id and one createdAt, so
-    // without an idle comparison the label would stay whatever it was when the
-    // row was first cached.
-    const initialRow: MessagesTimelineRow = {
-      kind: "thinking",
-      id: "live-activity-row",
-      createdAt: "2026-01-01T00:00:00Z",
-    };
-    const idleRow: MessagesTimelineRow = { ...initialRow, idle: true };
-    const initial = computeStableMessagesTimelineRows([initialRow], {
-      byId: new Map(),
-      result: [],
-    });
-
-    const updated = computeStableMessagesTimelineRows([idleRow], initial);
-
-    expect(updated).not.toBe(initial);
-    expect(updated.result[0]).toBe(idleRow);
   });
 
   it.each(["", " \n"])("keeps Thinking after assistant content grows from %j", (text) => {
@@ -4609,6 +3856,7 @@ describe("v2 run and attempt history", () => {
       attemptOrdinal: 1,
       rootNodeId: "node-attempt-1" as never,
       status: "superseded" as const,
+      completedAt: null,
     };
     const activeAttempt = {
       id: activeAttemptId,
@@ -4616,6 +3864,7 @@ describe("v2 run and attempt history", () => {
       attemptOrdinal: 2,
       rootNodeId: "node-attempt-2" as never,
       status: "running" as const,
+      completedAt: null,
     };
     const timelineEntries = [
       {
@@ -4747,6 +3996,131 @@ describe("v2 run and attempt history", () => {
       "active-assistant-entry",
     ]);
   });
+
+  describe("a steer that supersedes an attempt", () => {
+    const runId = RunId.make("run-steered");
+    const at = (second: number) => `2026-01-01T00:00:${String(second).padStart(2, "0")}Z`;
+    // The steer stamps the superseded attempt at 0:10.
+    const supersededAttempt = {
+      id: RunAttemptId.make("attempt-1"),
+      runId,
+      attemptOrdinal: 1,
+      rootNodeId: NodeId.make("node-attempt-1"),
+      status: "superseded" as const,
+      completedAt: DateTime.makeUnsafe(at(10)),
+    };
+    const nextAttempt = {
+      id: RunAttemptId.make("attempt-2"),
+      runId,
+      attemptOrdinal: 2,
+      rootNodeId: NodeId.make("node-attempt-2"),
+      status: "completed" as const,
+      completedAt: DateTime.makeUnsafe(at(14)),
+    };
+    const assistantEntry = (
+      id: string,
+      attempt: typeof supersededAttempt | typeof nextAttempt,
+      completedSecond: number,
+    ): TimelineEntry => ({
+      id,
+      kind: "message",
+      createdAt: at(2),
+      attempt,
+      message: {
+        id: MessageId.make(id),
+        role: "assistant",
+        text: `${id} text`,
+        runId,
+        createdAt: at(2),
+        updatedAt: at(completedSecond),
+        streaming: false,
+      },
+      projectedItem: {
+        item: {
+          type: "assistant_message",
+          status: "completed",
+          completedAt: DateTime.makeUnsafe(at(completedSecond)),
+        },
+      } as never,
+    });
+    const rowsFor = (
+      replyCompletedSecond: number,
+      runStatus: "running" | "completed" = "completed",
+    ) =>
+      deriveMessagesTimelineRows({
+        timelineEntries: [
+          {
+            id: "initial-user-entry",
+            kind: "message",
+            createdAt: at(0),
+            attempt: supersededAttempt,
+            message: {
+              id: MessageId.make("initial-user"),
+              role: "user",
+              text: "Build it",
+              runId,
+              inputIntent: "turn_start",
+              createdAt: at(0),
+              updatedAt: at(0),
+              streaming: false,
+            },
+          },
+          {
+            id: "old-work-entry",
+            kind: "work",
+            createdAt: at(1),
+            attempt: supersededAttempt,
+            entry: { id: "old-work", createdAt: at(1), runId, label: "Read", tone: "tool" },
+          },
+          assistantEntry("old-reply-entry", supersededAttempt, replyCompletedSecond),
+          {
+            id: "steer-user-entry",
+            kind: "message",
+            createdAt: at(10),
+            attempt: nextAttempt,
+            message: {
+              id: MessageId.make("steer-user"),
+              role: "user",
+              text: "What are you working on?",
+              runId,
+              inputIntent: "steer",
+              createdAt: at(10),
+              updatedAt: at(10),
+              streaming: false,
+            },
+          },
+          assistantEntry("new-reply-entry", nextAttempt, 14),
+        ],
+        latestRun: {
+          runId,
+          status: runStatus,
+          startedAt: at(0),
+          completedAt: runStatus === "completed" ? at(14) : null,
+        },
+        isWorking: false,
+        turnDiffSummaries: [],
+        supportsConversationRollback: false,
+      });
+
+    it.each(["running", "completed"] as const)(
+      "keeps a reply that finished before the steer visible while the run is %s",
+      (runStatus) => {
+        const rows = rowsFor(4, runStatus);
+        expect(rows.some((row) => row.kind === "attempt-fold")).toBe(false);
+        expect(rows.map((row) => row.id)).toContain("old-reply-entry");
+      },
+    );
+
+    it("folds a reply the steer cut off as partial output", () => {
+      const rows = rowsFor(11, "running");
+      expect(rows.find((row) => row.kind === "attempt-fold")).toMatchObject({
+        attemptId: supersededAttempt.id,
+        label: "Superseded attempt",
+      });
+      expect(rows.map((row) => row.id)).not.toContain("old-reply-entry");
+    });
+  });
+
   it("hides the interruption request while keeping intervening work and the result", () => {
     const runId = "turn-1" as never;
     const interruptEvent = (type: "run_interrupt_request" | "run_interrupt_result") => ({
@@ -4813,6 +4187,47 @@ describe("v2 run and attempt history", () => {
 
     expect(rows.map((row) => row.id)).toEqual(["work-entry", "interrupt-result"]);
     expect(rows.some((row) => row.kind === "turn-fold")).toBe(false);
+
+    // The command the interrupt cut short stays visible with its outcome.
+    const stoppedRows = deriveMessagesTimelineRows({
+      timelineEntries: [
+        {
+          id: "stopped-command-entry",
+          kind: "work",
+          createdAt: "2026-01-01T00:00:01Z",
+          entry: {
+            id: "stopped-command",
+            createdAt: "2026-01-01T00:00:01Z",
+            runId,
+            label: "Ran command",
+            tone: "tool",
+            itemType: "command_execution",
+            command: "/bin/bash -lc 'sleep 90 && echo slept'",
+            toolLifecycleStatus: "stopped",
+          },
+        },
+        {
+          id: "interrupt-result",
+          kind: "event",
+          createdAt: "2026-01-01T00:00:03Z",
+          projectedItem: interruptEvent("run_interrupt_result") as never,
+        },
+      ],
+      latestRun: {
+        runId,
+        status: "interrupted",
+        startedAt: "2026-01-01T00:00:00Z",
+        completedAt: "2026-01-01T00:00:03Z",
+      },
+      isWorking: false,
+      turnDiffSummaries: [],
+      supportsConversationRollback: false,
+    });
+    expect(stoppedRows.map((row) => row.id)).toEqual(["stopped-command-entry", "interrupt-result"]);
+    expect(stoppedRows[0]).toMatchObject({
+      kind: "work",
+      displayLabel: "sleep 90 && echo slept",
+    });
   });
 });
 
@@ -5593,6 +5008,22 @@ it("keeps the working header in place across worktree setup handoff", () => {
   expect(handoffRows.map((row) => row.kind)).toEqual(["message", "working", "worktree-setup"]);
   expect(handoffRows[2]).toMatchObject({ kind: "worktree-setup", embedded: false });
 
+  // A clean finish before the turn is live keeps that same layout, so the card
+  // does not jump above the header in the gap before the run starts.
+  const settledRows = deriveMessagesTimelineRows({
+    timelineEntries: [userEntry],
+    isWorking: true,
+    activeTurnStartedAt: "2026-01-01T00:00:00Z",
+    turnDiffSummaries: [],
+    supportsConversationRollback: false,
+    worktreeSetup: {
+      ...snapshot,
+      phase: "done",
+      stages: [stage("setup-script", "done"), stage("agent", "done")],
+    },
+  });
+  expect(settledRows.map((row) => row.kind)).toEqual(["message", "working", "worktree-setup"]);
+
   // A script that already finished has nothing left to show once the turn is live.
   const finishedRows = deriveMessagesTimelineRows({
     timelineEntries: [userEntry],
@@ -5695,6 +5126,7 @@ describe("failed turn transcript", () => {
             attemptOrdinal: 1,
             rootNodeId: NodeId.make("superseded-root"),
             status: "superseded" as const,
+            completedAt: null,
           },
         })),
         latestRun: {
@@ -5757,71 +5189,315 @@ describe("failed turn transcript", () => {
   );
 });
 
-describe("resolveSmoothComplete", () => {
-  const currentRun = RunId.make("run-current");
-  const base = {
-    smoothStreaming: true,
-    messageRunId: currentRun,
-    messageStreaming: true,
-    itemType: "assistant_message" as const,
-    itemStatus: "running" as const,
-    latestRunId: currentRun,
-    isWorking: true,
-  };
-
-  it("waits for the active run's final assistant chunk", () => {
-    expect(resolveSmoothComplete(base)).toBe(false);
+describe("live subagents after their parent turn settles", () => {
+  const runId = RunId.make("parent-run");
+  const threadId = ThreadId.make("parent-thread");
+  const providerTurnId = ProviderTurnId.make("parent-provider-turn");
+  const at = (second: number) =>
+    DateTime.makeUnsafe(`2026-10-06T10:00:${String(second).padStart(2, "0")}Z`);
+  const base = (id: string, second: number) => ({
+    id: TurnItemId.make(id),
+    threadId,
+    runId,
+    nodeId: null,
+    providerThreadId: null,
+    providerTurnId,
+    nativeItemRef: null,
+    parentItemId: null,
+    ordinal: second,
+    title: null,
+    startedAt: at(second),
+    completedAt: at(second),
+    updatedAt: at(second),
   });
-
-  it.each(["completed", "failed", "cancelled", "interrupted", "rolled_back"] as const)(
-    "closes the source clock for a %s run even if transport and streaming flags lag",
-    (latestRunStatus) => {
-      expect(resolveSmoothComplete({ ...base, latestRunStatus })).toBe(true);
-    },
-  );
-
-  it.each(["preparing", "queued", "starting", "running", "waiting"] as const)(
-    "keeps the source clock open for a %s run",
-    (latestRunStatus) => {
-      expect(resolveSmoothComplete({ ...base, latestRunStatus })).toBe(false);
-    },
-  );
-
-  it.each(["cancelled", "failed", "interrupted"] as const)(
-    "completes a terminal %s item that kept its streaming bit",
-    (itemStatus) => {
-      expect(resolveSmoothComplete({ ...base, itemStatus })).toBe(true);
-    },
-  );
-
-  it("completes a stale run even when it kept streaming", () => {
-    expect(
-      resolveSmoothComplete({
-        ...base,
-        messageRunId: RunId.make("run-previous"),
+  const projected = (item: OrchestrationV2TurnItem): OrchestrationV2ProjectedTurnItem => ({
+    position: item.ordinal,
+    visibility: "local",
+    sourceThreadId: threadId,
+    sourceItemId: item.id,
+    item,
+  });
+  const child = (
+    id: string,
+    second: number,
+    status: OrchestrationV2TurnItem["status"],
+    origin: "app_owned" | "provider_native" = "app_owned",
+  ): OrchestrationV2TurnItem => ({
+    ...base(id, second),
+    status,
+    completedAt: status === "running" ? null : at(second),
+    type: "subagent",
+    subagentId: NodeId.make(id),
+    origin,
+    driver: ProviderDriverKind.make("codex"),
+    providerInstanceId: ProviderInstanceId.make("codex"),
+    childThreadId: origin === "app_owned" ? ThreadId.make(`${id}-thread`) : null,
+    prompt: `Inspect ${id}`,
+    result: null,
+  });
+  const rowsFor = (children: ReadonlyArray<OrchestrationV2TurnItem>) =>
+    deriveMessagesTimelineRows({
+      timelineEntries: deriveTimelineEntriesFromVisibleTurnItems({
+        visibleTurnItems: (
+          [
+            {
+              ...base("user", 0),
+              status: "completed",
+              type: "user_message",
+              messageId: MessageId.make("user"),
+              createdBy: "user",
+              creationSource: "web",
+              inputIntent: "turn_start",
+              text: "Delegate the review",
+              attachments: [],
+            },
+            {
+              ...base("reasoning", 1),
+              status: "completed",
+              type: "reasoning",
+              text: "Two children can split this.",
+              streaming: false,
+            },
+            {
+              ...base("command", 2),
+              status: "completed",
+              type: "command_execution",
+              input: "pwd",
+              output: "/repo",
+              exitCode: 0,
+            },
+            ...children,
+            {
+              ...base("assistant", 8),
+              status: "completed",
+              type: "assistant_message",
+              messageId: MessageId.make("assistant"),
+              text: "Both children are running.",
+              streaming: false,
+            },
+          ] satisfies OrchestrationV2TurnItem[]
+        ).map(projected),
+        optimisticMessages: [],
       }),
-    ).toBe(true);
+      latestRun: {
+        runId,
+        status: "completed",
+        startedAt: DateTime.formatIso(at(0)),
+        completedAt: DateTime.formatIso(at(8)),
+      },
+      isWorking: false,
+      turnDiffSummaries: [],
+      supportsConversationRollback: false,
+    });
+
+  it.each(["app_owned", "provider_native"] as const)(
+    "keeps a running %s child visible while the rest of the settled turn folds",
+    (origin) => {
+      const rows = rowsFor([child("child", 3, "running", origin)]);
+      // The reasoning and command still fold; only the live card stays out.
+      expect(rows.map((row) => row.id)).toEqual([
+        "user",
+        `turn-fold:${runId}`,
+        "child",
+        "assistant",
+      ]);
+    },
+  );
+
+  it.each(["completed", "failed"] as const)("folds a %s child with its settled turn", (status) => {
+    const rows = rowsFor([child("child", 3, status)]);
+    expect(rows.some((row) => row.id === "child")).toBe(false);
+    expect(rows.some((row) => row.kind === "turn-fold")).toBe(true);
   });
 
-  it("completes the active run once it stopped streaming and the transport settled", () => {
-    expect(resolveSmoothComplete({ ...base, messageStreaming: false, isWorking: false })).toBe(
-      true,
+  it("keeps a launch batch visible while any member is still running", () => {
+    const rows = rowsFor([child("done", 3, "completed"), child("live", 4, "running")]);
+    expect(rows.map((row) => row.id)).toEqual(["user", `turn-fold:${runId}`, "done", "assistant"]);
+    expect(rows.find((row) => row.id === "done")).toMatchObject({
+      subagents: [{ item: { id: "done" } }, { item: { id: "live" } }],
+    });
+  });
+
+  it("keeps a running child visible when a steer supersedes its attempt", () => {
+    const attempt = {
+      id: RunAttemptId.make("superseded-attempt"),
+      runId,
+      attemptOrdinal: 1,
+      rootNodeId: NodeId.make("superseded-root"),
+      status: "superseded" as const,
+      completedAt: null,
+    };
+    const entries = deriveTimelineEntriesFromVisibleTurnItems({
+      visibleTurnItems: (
+        [
+          {
+            ...base("command", 2),
+            status: "completed",
+            type: "command_execution",
+            input: "pwd",
+            output: "/repo",
+            exitCode: 0,
+          },
+          child("child", 3, "running"),
+        ] satisfies OrchestrationV2TurnItem[]
+      ).map(projected),
+      optimisticMessages: [],
+    }).map((entry) => ({ ...entry, attempt }));
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries: entries,
+      latestRun: {
+        runId,
+        status: "running",
+        startedAt: DateTime.formatIso(at(0)),
+        completedAt: null,
+      },
+      isWorking: false,
+      turnDiffSummaries: [],
+      supportsConversationRollback: false,
+    });
+    expect(rows.map((row) => row.id)).toEqual([`attempt-fold:${attempt.id}`, "child"]);
+  });
+});
+
+describe("subagent continued by a later turn", () => {
+  // Stored shape from #15891: resuming a subagent moves its item to the
+  // resuming run, but the item keeps the ordinal from the turn that started it.
+  const threadId = ThreadId.make("parent-thread");
+  const run1 = RunId.make("run-1");
+  const run2 = RunId.make("run-2");
+  const at = (second: number) =>
+    DateTime.makeUnsafe(`2026-10-09T10:00:${String(second).padStart(2, "0")}Z`);
+  const base = (id: string, runId: RunId, ordinal: number, second: number) => ({
+    id: TurnItemId.make(id),
+    threadId,
+    runId,
+    nodeId: null,
+    providerThreadId: null,
+    providerTurnId: null,
+    nativeItemRef: null,
+    parentItemId: null,
+    ordinal,
+    status: "completed" as const,
+    title: null,
+    startedAt: at(second),
+    completedAt: at(second),
+    updatedAt: at(second),
+  });
+  const user = (id: string, runId: RunId, ordinal: number, second: number) => ({
+    ...base(id, runId, ordinal, second),
+    type: "user_message" as const,
+    messageId: MessageId.make(id),
+    createdBy: "user" as const,
+    creationSource: "web" as const,
+    inputIntent: "turn_start" as const,
+    text: `Prompt ${id}`,
+    attachments: [],
+  });
+  const assistant = (id: string, runId: RunId, ordinal: number, second: number) => ({
+    ...base(id, runId, ordinal, second),
+    type: "assistant_message" as const,
+    messageId: MessageId.make(id),
+    text: `Answer ${id}`,
+    streaming: false,
+  });
+  const reasoning = (id: string, runId: RunId, ordinal: number, second: number) => ({
+    ...base(id, runId, ordinal, second),
+    type: "reasoning" as const,
+    text: "Thinking",
+    streaming: false,
+  });
+  const items: OrchestrationV2TurnItem[] = [
+    user("prompt-1", run1, 1_000_001, 0),
+    reasoning("reasoning-1", run1, 1_000_002, 1),
+    {
+      ...base("subagent", run2, 1_000_003, 2),
+      completedAt: at(40),
+      updatedAt: at(40),
+      type: "subagent",
+      subagentId: NodeId.make("subagent"),
+      origin: "provider_native",
+      driver: ProviderDriverKind.make("claudeAgent"),
+      providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+      childThreadId: null,
+      prompt: "Research the bug",
+      result: "Found it",
+    },
+    assistant("answer-1", run1, 1_000_004, 3),
+    user("prompt-2", run2, 2_000_001, 30),
+    reasoning("reasoning-2", run2, 2_000_002, 31),
+    assistant("answer-2", run2, 2_000_003, 32),
+    {
+      ...base("send-message", run2, 2_000_004, 33),
+      type: "dynamic_tool",
+      toolName: "SendMessage",
+      input: { to: "subagent" },
+      output: "Sent",
+    },
+    assistant("closing-2", run2, 2_000_005, 41),
+  ];
+
+  it("keeps each turn's fold between its own prompt and answer", () => {
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries: deriveTimelineEntriesFromVisibleTurnItems({
+        visibleTurnItems: items.map((item) => ({
+          position: item.ordinal,
+          visibility: "local",
+          sourceThreadId: threadId,
+          sourceItemId: item.id,
+          item,
+        })),
+        optimisticMessages: [],
+      }),
+      latestRun: {
+        runId: run2,
+        status: "completed",
+        startedAt: DateTime.formatIso(at(30)),
+        completedAt: DateTime.formatIso(at(41)),
+      },
+      isWorking: false,
+      turnDiffSummaries: [],
+      supportsConversationRollback: false,
+    });
+    expect(rows.map((row) => row.id)).toEqual([
+      "prompt-1",
+      `turn-fold:${run1}`,
+      "answer-1",
+      "prompt-2",
+      `turn-fold:${run2}`,
+      "closing-2",
+    ]);
+  });
+});
+
+describe("shouldCollapseUserMessage", () => {
+  it("measures a quote chip by its label, not its encoded link", () => {
+    const quote = "A long assistant paragraph that the user quoted. ".repeat(40);
+    const citation = serializeAssistantCitation({
+      version: 1,
+      environmentId: EnvironmentId.make("environment"),
+      threadId: ThreadId.make("thread"),
+      messageId: MessageId.make("source"),
+      text: quote,
+      comment: "Why does this matter?",
+      start: 0,
+      end: quote.length,
+      prefix: "",
+      suffix: "",
+    });
+
+    expect(shouldCollapseUserMessage(`${citation} Can you expand on this?`)).toBe(false);
+    expect(shouldCollapseUserMessage(`${citation} ${"More text. ".repeat(60)}`)).toBe(true);
+  });
+
+  it("measures file links and context chips by their label", () => {
+    const links = Array.from(
+      { length: 8 },
+      (_, index) =>
+        `[file${index}.ts](/workspace/projects/example/packages/some/deeply/nested/directory/file${index}.ts)`,
     );
-  });
+    const text = `Compare ${links.join(", ")} with [terminal 1](t3-context://v1/terminal/${"a".repeat(36)}).`;
 
-  it("keeps waiting while the transport is still working after the last chunk", () => {
-    expect(resolveSmoothComplete({ ...base, messageStreaming: false, isWorking: true })).toBe(
-      false,
-    );
-  });
-
-  it("does not complete when smooth streaming is off", () => {
-    expect(resolveSmoothComplete({ ...base, smoothStreaming: false })).toBe(false);
-  });
-
-  it("does not treat a non-assistant item's status as a terminal message", () => {
-    expect(resolveSmoothComplete({ ...base, itemType: "reasoning", itemStatus: "cancelled" })).toBe(
-      false,
-    );
+    expect(text.length).toBeGreaterThan(600);
+    expect(shouldCollapseUserMessage(text)).toBe(false);
   });
 });

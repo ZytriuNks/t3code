@@ -20,7 +20,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
-import { IdAllocatorV2, layer as idAllocatorLayer } from "./IdAllocator.ts";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import { applyToProjection, emptyProjection } from "./ProjectionStore.ts";
 import { planThreadDeletion } from "./ThreadDeletion.ts";
 
@@ -149,7 +149,6 @@ it.effect("cancels active work without reviving a run while disposing delegated 
               delegatedCompletion: {
                 disposition: "open",
                 nextGeneration: 3,
-                settledDeliveryCount: 1,
                 delivery: { generation: 2, messageId: queuedRun.userMessageId, taskIds: [taskId] },
               },
             }
@@ -187,7 +186,7 @@ it.effect("cancels active work without reviving a run while disposing delegated 
         message.attachments.map((attachment) => attachment.id),
       ),
       now: deletedAt,
-      idAllocator: yield* IdAllocatorV2,
+      idAllocator: yield* IdAllocator.IdAllocatorV2,
     });
     const deleted = plan.events.reduce(applyToProjection, projection);
     assert.deepEqual(deleted.thread.deletedAt, deletedAt);
@@ -216,7 +215,6 @@ it.effect("cancels active work without reviving a run while disposing delegated 
     assert.deepEqual(deleted.runs.find((run) => run.id === parentRun.id)?.delegatedCompletion, {
       disposition: "disposed",
       nextGeneration: 3,
-      settledDeliveryCount: 1,
       delivery: null,
     });
     assert.equal(deleted.subagents[0]?.completionDelivery?.state, "disposed");
@@ -224,7 +222,7 @@ it.effect("cancels active work without reviving a run while disposing delegated 
       (event) => event.type === "run.updated" && event.payload.id === queuedRun.id,
     );
     assert.lengthOf(queuedRunUpdates, 1);
-  }).pipe(Effect.provide(idAllocatorLayer)),
+  }).pipe(Effect.provide(IdAllocator.layer)),
 );
 
 it.effect("queues provider and resource cleanup and preserves an earlier deletion timestamp", () =>
@@ -275,7 +273,7 @@ it.effect("queues provider and resource cleanup and preserves an earlier deletio
         message.attachments.map((attachment) => attachment.id),
       ),
       now: deletedAt,
-      idAllocator: yield* IdAllocatorV2,
+      idAllocator: yield* IdAllocator.IdAllocatorV2,
     });
     const deleted = plan.events.reduce(applyToProjection, projection);
     assert.deepEqual(deleted.thread.deletedAt, createdAt);
@@ -293,8 +291,9 @@ it.effect("queues provider and resource cleanup and preserves an earlier deletio
           revokeMcpCredential: true,
         },
         { type: "terminal.cleanup" },
+        { type: "preview.cleanup" },
         { type: "attachment.cleanup", attachmentIds: ["shared_file"] },
       ],
     );
-  }).pipe(Effect.provide(idAllocatorLayer)),
+  }).pipe(Effect.provide(IdAllocator.layer)),
 );

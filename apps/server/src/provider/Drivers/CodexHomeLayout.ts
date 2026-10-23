@@ -1,18 +1,16 @@
-import * as NodeOS from "node:os";
-// @effect-diagnostics-next-line nodeBuiltinImport:off - Effect symlink 没有 type 参数，Windows 目录需要免提升权限的 junction。
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- Windows junctions and bigint inode identity are not exposed by Effect FileSystem.
 import * as NodeFSP from "node:fs/promises";
-
 import { ProviderDriverKind, type CodexSettings } from "@t3tools/contracts";
+import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as PlatformError from "effect/PlatformError";
-import * as Option from "effect/Option";
-import * as Predicate from "effect/Predicate";
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 
-import { expandHomePath } from "../../pathExpansion.ts";
+import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
 export interface CodexHomeLayout {
   readonly mode: "direct" | "authOverlay";
@@ -36,13 +34,13 @@ const KNOWN_SHARED_DIRECTORIES = [
 
 const PRIVATE_ENTRY_NAMES = new Set(["auth.json", "models_cache.json"]);
 const SHADOW_LOCAL_ENTRY_NAMES = new Set(["log", "memories", "tmp", ".t3-shared-links"]);
-const REPLACEABLE_SHARED_RUNTIME_DIRECTORIES = new Set(["mcp-oauth-locks"]);
+// Codex creates these runtime locks itself when it starts in a shadow home before the shared
+// home has one. They guard shared state, so a local copy is replaced with the shared link.
+const REPLACEABLE_SHARED_RUNTIME_ENTRIES = new Set(["mcp-oauth-locks", ".sqlite-maintenance.lock"]);
 
-function resolveHomePath(path: Path.Path, value: string | undefined): string {
+function resolveHomePath(path: Path.Path, home: string, value: string | undefined): string {
   const expanded =
-    value && value.trim().length > 0
-      ? expandHomePath(value)
-      : path.join(NodeOS.homedir(), ".codex");
+    value && value.trim().length > 0 ? expandHomePath(value, home) : path.join(home, ".codex");
   return path.resolve(expanded);
 }
 
@@ -50,7 +48,8 @@ export const resolveCodexHomeLayout = Effect.fn("resolveCodexHomeLayout")(functi
   config: CodexSettings,
 ): Effect.fn.Return<CodexHomeLayout, never, Path.Path> {
   const path = yield* Path.Path;
-  const sharedHomePath = resolveHomePath(path, config.homePath);
+  const home = yield* HostProcess.HomeDirectory;
+  const sharedHomePath = resolveHomePath(path, home, config.homePath);
   const shadowHomePath = config.shadowHomePath.trim();
   if (shadowHomePath.length === 0) {
     return {
@@ -61,7 +60,7 @@ export const resolveCodexHomeLayout = Effect.fn("resolveCodexHomeLayout")(functi
     };
   }
 
-  const effectiveHomePath = path.resolve(expandHomePath(shadowHomePath));
+  const effectiveHomePath = path.resolve(expandHomePath(shadowHomePath, home));
   return {
     mode: "authOverlay",
     sharedHomePath,
@@ -86,7 +85,6 @@ export class CodexShadowHomeFileSystemError extends Schema.TaggedError<CodexShad
       "remove",
       "symlink",
       "fileSymlink",
-      "link",
       "stat",
       "hardlinkMetadata",
     ]),
@@ -239,7 +237,6 @@ const ensureSymlink = Effect.fn("CodexHomeLayout.ensureSymlink")(function* (inpu
   readonly entryName: string;
 }): Effect.fn.Return<void, CodexShadowHomeError, Path.Path> {
   const path = yield* Path.Path;
-  const platform = yield* HostProcessPlatform;
   const target = path.join(input.sharedHomePath, input.entryName);
   const link = path.join(input.effectiveHomePath, input.entryName);
   const state = yield* readLinkState({
@@ -247,6 +244,7 @@ const ensureSymlink = Effect.fn("CodexHomeLayout.ensureSymlink")(function* (inpu
     linkPath: link,
   });
 
+  const platform = yield* HostProcess.Platform;
   if (platform === "win32") {
     const info = yield* input.fileSystem.stat(target).pipe(
       Effect.mapError(
@@ -255,7 +253,6 @@ const ensureSymlink = Effect.fn("CodexHomeLayout.ensureSymlink")(function* (inpu
             ...input,
             operation: "stat",
             path: target,
-            targetPath: target,
             cause,
           }),
       ),
@@ -263,7 +260,6 @@ const ensureSymlink = Effect.fn("CodexHomeLayout.ensureSymlink")(function* (inpu
     if (info.type === "File")
       return yield* ensureWindowsHardLink({ ...input, target, link, state });
   }
-
   const createLink =
     platform === "win32"
       ? Effect.tryPromise({
@@ -278,22 +274,20 @@ const ensureSymlink = Effect.fn("CodexHomeLayout.ensureSymlink")(function* (inpu
             }),
         })
       : input.fileSystem.symlink(target, link).pipe(
-          Effect.catchTags({
-            PlatformError: (cause) =>
+          Effect.mapError(
+            (cause) =>
               new CodexShadowHomeFileSystemError({
-                sharedHomePath: input.sharedHomePath,
-                effectiveHomePath: input.effectiveHomePath,
+                ...input,
                 operation: "symlink",
                 path: link,
                 targetPath: target,
-                entryName: input.entryName,
                 cause,
               }),
-          }),
+          ),
         );
 
   if (state._tag === "NotSymlink") {
-    if (!REPLACEABLE_SHARED_RUNTIME_DIRECTORIES.has(input.entryName)) {
+    if (!REPLACEABLE_SHARED_RUNTIME_ENTRIES.has(input.entryName)) {
       return yield* new CodexShadowHomeEntryConflictError({
         sharedHomePath: input.sharedHomePath,
         effectiveHomePath: input.effectiveHomePath,
@@ -366,7 +360,7 @@ const ensureWindowsHardLink = Effect.fn("CodexHomeLayout.ensureWindowsHardLink")
       targetPath: input.target,
     });
   return yield* Effect.gen(function* () {
-    // Windows 的 inode 可超过 Number.MAX_SAFE_INTEGER，Effect stat 会把它省略。
+    // Windows inode values may exceed Number.MAX_SAFE_INTEGER.
     const identity = (file: string) =>
       Effect.tryPromise({
         try: async () => {
@@ -374,12 +368,7 @@ const ensureWindowsHardLink = Effect.fn("CodexHomeLayout.ensureWindowsHardLink")
           return { dev: info.dev.toString(), ino: info.ino.toString() };
         },
         catch: (cause) =>
-          new CodexShadowHomeFileSystemError({
-            ...input,
-            operation: "stat",
-            path: file,
-            cause,
-          }),
+          new CodexShadowHomeFileSystemError({ ...input, operation: "stat", path: file, cause }),
       });
     const record = (value: typeof WindowsHardLinkIdentity.Type) =>
       Effect.gen(function* () {
@@ -391,14 +380,14 @@ const ensureWindowsHardLink = Effect.fn("CodexHomeLayout.ensureWindowsHardLink")
       const linkedInfo = yield* identity(input.link);
       if (linkedInfo.dev === targetIdentity.dev && linkedInfo.ino === targetIdentity.ino)
         return yield* record(linkedInfo);
-      // 只替换本程序此前创建的 hardlink；用户自己的同名文件仍是冲突。
       const owned = yield* fs
         .readFileString(marker)
         .pipe(Effect.flatMap(decodeWindowsHardLinkIdentity), Effect.option);
       if (
-        Option.isNone(owned) ||
-        owned.value.dev !== linkedInfo.dev ||
-        owned.value.ino !== linkedInfo.ino
+        !REPLACEABLE_SHARED_RUNTIME_ENTRIES.has(input.entryName) &&
+        (Option.isNone(owned) ||
+          owned.value.dev !== linkedInfo.dev ||
+          owned.value.ino !== linkedInfo.ino)
       )
         return yield* conflict();
       yield* fs.remove(input.link);

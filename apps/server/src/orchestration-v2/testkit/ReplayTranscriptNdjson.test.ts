@@ -1,4 +1,4 @@
-import { ProviderReplayNdjsonParseError } from "./ReplayTranscriptNdjson.ts";
+import { ProviderReplayNdjsonParseError } from "@t3tools/provider-testing/replayTranscript";
 import * as NodePath from "@effect/platform-node/NodePath";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
@@ -11,7 +11,7 @@ import {
   decodeProviderReplayNdjson,
   materializeReplayTranscriptWorkspace,
   readProviderReplayTranscript,
-} from "./ReplayTranscriptNdjson.ts";
+} from "@t3tools/provider-testing/replayTranscript";
 
 const encodeParseError = Schema.encodeUnknownEffect(ProviderReplayNdjsonParseError);
 

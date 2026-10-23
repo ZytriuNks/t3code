@@ -30,7 +30,7 @@ export function LegacySidebarPinButton(props: {
             aria-label={`${label}: ${props.title}`}
             aria-pressed={props.pinned}
             disabled={pending}
-            className="inline-flex h-6 min-w-6 cursor-pointer items-center justify-center rounded-md px-0.75 text-icon-muted hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-wait disabled:opacity-50"
+            className="inline-flex h-6 min-w-6 cursor-pointer items-center justify-center rounded-md px-0.75 text-icon-muted hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring disabled:cursor-wait disabled:opacity-50"
             onPointerDown={(event) => event.stopPropagation()}
             onKeyDown={(event) => event.stopPropagation()}
             onDoubleClick={(event) => event.stopPropagation()}

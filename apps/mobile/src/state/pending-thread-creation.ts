@@ -2,9 +2,9 @@ import {
   presentThreadShell,
   type EnvironmentThreadShell,
 } from "@t3tools/client-runtime/state/shell";
-import type { OrchestrationThread } from "@t3tools/contracts";
+import type { LocalThreadMessage } from "../lib/threadActivity";
 import { DEFAULT_PROVIDER_INTERACTION_MODE, DEFAULT_RUNTIME_MODE } from "@t3tools/contracts";
-import { Atom } from "effect/unstable/reactivity";
+import { Atom } from "effect/reactivity";
 import * as DateTime from "effect/DateTime";
 
 import { deriveThreadTitleFromPrompt } from "../lib/projectThreadStartTurn";
@@ -115,9 +115,7 @@ export function isPendingThreadCreationVisible(input: {
   return !input.loadedMessageIds?.includes(input.creationMessageId);
 }
 
-export function pendingThreadCreationMessage(
-  message: QueuedThreadMessage,
-): OrchestrationThread["messages"][number] {
+export function pendingThreadCreationMessage(message: QueuedThreadMessage): LocalThreadMessage {
   return {
     id: message.messageId,
     role: "user",
@@ -127,7 +125,6 @@ export function pendingThreadCreationMessage(
     // cannot resolve, so the feed's attachment rows would sit on a spinner
     // that only ends when the real message arrives — and never, if the
     // creation is rejected. The delivered message renders them moments later.
-    turnId: null,
     streaming: false,
     createdAt: message.createdAt,
     updatedAt: message.createdAt,

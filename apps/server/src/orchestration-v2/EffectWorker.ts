@@ -16,21 +16,17 @@ import {
   orchestrationEffectClaimsTotal,
   orchestrationEffectQueueWait,
 } from "../observability/Metrics.ts";
-import { RunFinalizationService } from "./RunFinalizationService.ts";
-import { ResourceCleanupService } from "./ResourceCleanupService.ts";
-import {
-  EffectOutboxV2,
-  REPLAY_SAFE_EFFECT_TYPES_AFTER_PROCESS_LOSS,
-  type OrchestrationEffectV2,
-} from "./EffectOutbox.ts";
-import { CheckpointRollbackServiceV2 } from "./CheckpointRollbackService.ts";
-import { ProviderSessionManagerV2 } from "./ProviderSessionManager.ts";
-import { ProviderTurnControlServiceV2 } from "./ProviderTurnControlService.ts";
-import { ProviderTurnStartServiceV2 } from "./ProviderTurnStartService.ts";
-import { RuntimeRequestServiceV2 } from "./RuntimeRequestService.ts";
-import { ThreadTitleRegenerationService } from "./ThreadTitleRegenerationService.ts";
-import { ThreadManagementService } from "./ThreadManagementService.ts";
-import { ServerSettingsService } from "../serverSettings.ts";
+import * as RunFinalizationService from "./RunFinalizationService.ts";
+import * as ResourceCleanupService from "./ResourceCleanupService.ts";
+import * as EffectOutbox from "./EffectOutbox.ts";
+import * as CheckpointRollbackService from "./CheckpointRollbackService.ts";
+import * as ProviderSessionManager from "./ProviderSessionManager.ts";
+import * as ProviderTurnControlService from "./ProviderTurnControlService.ts";
+import * as ProviderTurnStartService from "./ProviderTurnStartService.ts";
+import * as RuntimeRequestService from "./RuntimeRequestService.ts";
+import * as ThreadTitleRegenerationService from "./ThreadTitleRegenerationService.ts";
+import * as ThreadManagementService from "./ThreadManagementService.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import { continueRestartedRun } from "./RestartContinuation.ts";
 
 export class OrchestrationEffectExecutionError extends Schema.TaggedError<OrchestrationEffectExecutionError>()(
@@ -72,7 +68,7 @@ export interface OrchestrationEffectExecutorV2Shape {
    * failure, so a step can fail and try again instead of settling the run.
    */
   readonly execute: (
-    effect: OrchestrationEffectV2,
+    effect: EffectOutbox.OrchestrationEffectV2,
     options?: { readonly willRetry: boolean },
   ) => Effect.Effect<void, OrchestrationEffectExecutionError>;
 }
@@ -82,42 +78,47 @@ export class OrchestrationEffectExecutorV2 extends Context.Service<
   OrchestrationEffectExecutorV2Shape
 >()("t3/orchestration-v2/EffectWorker/OrchestrationEffectExecutorV2") {}
 
-export const executorLayer: Layer.Layer<
+export const layerExecutor: Layer.Layer<
   OrchestrationEffectExecutorV2,
   never,
-  | ProviderSessionManagerV2
-  | RunFinalizationService
-  | CheckpointRollbackServiceV2
-  | ProviderTurnControlServiceV2
-  | ProviderTurnStartServiceV2
-  | RuntimeRequestServiceV2
-  | ThreadTitleRegenerationService
-  | ThreadManagementService
-  | ServerSettingsService
+  | ProviderSessionManager.ProviderSessionManagerV2
+  | RunFinalizationService.RunFinalizationService
+  | CheckpointRollbackService.CheckpointRollbackServiceV2
+  | ProviderTurnControlService.ProviderTurnControlServiceV2
+  | ProviderTurnStartService.ProviderTurnStartServiceV2
+  | RuntimeRequestService.RuntimeRequestServiceV2
+  | ThreadTitleRegenerationService.ThreadTitleRegenerationService
+  | ThreadManagementService.ThreadManagementService
+  | ServerSettings.ServerSettingsService
 > = Layer.effect(
   OrchestrationEffectExecutorV2,
   Effect.gen(function* () {
-    const runFinalization = yield* RunFinalizationService;
-    const resourceCleanup = yield* ResourceCleanupService;
-    const checkpointRollback = yield* CheckpointRollbackServiceV2;
-    const providerSessions = yield* ProviderSessionManagerV2;
-    const providerTurnControl = yield* ProviderTurnControlServiceV2;
-    const providerTurnStart = yield* ProviderTurnStartServiceV2;
-    const runtimeRequests = yield* RuntimeRequestServiceV2;
-    const threadTitleRegeneration = yield* ThreadTitleRegenerationService;
-    const threads = yield* ThreadManagementService;
-    const settings = yield* ServerSettingsService;
+    const runFinalization = yield* RunFinalizationService.RunFinalizationService;
+    const resourceCleanup = yield* ResourceCleanupService.ResourceCleanupService;
+    const checkpointRollback = yield* CheckpointRollbackService.CheckpointRollbackServiceV2;
+    const providerSessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
+    const providerTurnControl = yield* ProviderTurnControlService.ProviderTurnControlServiceV2;
+    const providerTurnStart = yield* ProviderTurnStartService.ProviderTurnStartServiceV2;
+    const runtimeRequests = yield* RuntimeRequestService.RuntimeRequestServiceV2;
+    const threadTitleRegeneration =
+      yield* ThreadTitleRegenerationService.ThreadTitleRegenerationService;
+    const threads = yield* ThreadManagementService.ThreadManagementService;
+    const settings = yield* ServerSettings.ServerSettingsService;
     return OrchestrationEffectExecutorV2.of({
       execute: (effect, options) => {
         const willRetry = options?.willRetry ?? false;
         switch (effect.request.type) {
-          case "provider-runtime.continue":
-            return continueRestartedRun({
-              threadId: effect.threadId,
-              sourceRunId: effect.request.sourceRunId,
-            }).pipe(
-              Effect.provideService(ThreadManagementService, threads),
-              Effect.provideService(ServerSettingsService, settings),
+          case "provider-runtime.continue": {
+            const sourceRunId = effect.request.sourceRunId;
+            return continueRestartedRun({ threadId: effect.threadId, sourceRunId }).pipe(
+              Effect.provideService(ThreadManagementService.ThreadManagementService, threads),
+              Effect.provideService(ServerSettings.ServerSettingsService, settings),
+              // A continuation that will never run still owes a delegated parent a result.
+              Effect.tapError(() =>
+                willRetry
+                  ? Effect.void
+                  : threads.recoverDelegatedTask(effect.threadId, sourceRunId),
+              ),
               Effect.mapError(
                 (cause) =>
                   new OrchestrationEffectExecutionError({
@@ -127,6 +128,7 @@ export const executorLayer: Layer.Layer<
                   }),
               ),
             );
+          }
           case "provider-session.detach":
             return providerSessions
               .detach({
@@ -160,24 +162,73 @@ export const executorLayer: Layer.Layer<
                     }),
                 ),
               );
-          case "provider-turn.interrupt":
+          case "provider-turn.interrupt": {
+            const request = effect.request;
             return providerTurnControl
               .interrupt({
                 threadId: effect.threadId,
-                providerSessionId: effect.request.providerSessionId,
-                providerThreadId: effect.request.providerThreadId,
-                providerTurnId: effect.request.providerTurnId,
+                providerSessionId: request.providerSessionId,
+                providerThreadId: request.providerThreadId,
+                providerTurnId: request.providerTurnId,
+                ...(request.subagent === undefined
+                  ? {}
+                  : {
+                      subagent: {
+                        ...request.subagent,
+                        requestedAt: DateTime.makeUnsafe(effect.createdAt),
+                      },
+                    }),
               })
               .pipe(
+                Effect.tapError((cause) =>
+                  request.subagent === undefined
+                    ? Effect.void
+                    : Effect.logWarning("orchestration-v2.subagent-stop-failed", {
+                        effectId: effect.id,
+                        cause,
+                      }),
+                ),
+                Effect.catch((cause) =>
+                  request.subagent === undefined &&
+                  isNonRetryableProviderTurnControlFailure(
+                    request.type,
+                    Cause.pretty(Cause.fail(cause)),
+                  )
+                    ? Effect.void
+                    : Effect.fail(cause),
+                ),
+                // A targeted Stop repairs only an outcome the provider actually observed.
+                // A full-turn Stop retains its existing process-teardown repair.
+                Effect.andThen((outcome) =>
+                  request.subagent !== undefined && outcome === undefined
+                    ? Effect.void
+                    : threads.dispatch({
+                        type: "thread.background-work.settle",
+                        commandId: CommandId.make(`${effect.id}:background-work-settled`),
+                        ...(request.subagent === undefined || outcome === undefined
+                          ? {}
+                          : {
+                              subagent: {
+                                id: request.subagent.id,
+                                stoppedAt: DateTime.makeUnsafe(effect.createdAt),
+                                outcome,
+                              },
+                            }),
+                        threadId: effect.threadId,
+                        providerThreadId: request.providerThreadId,
+                        providerTurnId: request.providerTurnId,
+                      }),
+                ),
                 Effect.mapError(
                   (cause) =>
                     new OrchestrationEffectExecutionError({
                       effectId: effect.id,
-                      effectType: effect.request.type,
+                      effectType: request.type,
                       cause,
                     }),
                 ),
               );
+          }
           case "provider-turn.steer":
             return providerTurnControl
               .steer({
@@ -227,36 +278,61 @@ export const executorLayer: Layer.Layer<
                     if (message === undefined || run === undefined) return yield* error;
                     // Reuse the message identity and a stable command receipt so an outbox
                     // retry cannot append a duplicate message or start a second follow-up.
-                    yield* threads.dispatch({
-                      type: "message.dispatch",
-                      commandId: CommandId.make(`command:steer-follow-up:${effect.id}`),
-                      threadId: effect.threadId,
-                      messageId: message.id,
-                      text: message.text,
-                      ...(message.context ? { context: message.context } : {}),
-                      attachments: message.attachments,
-                      modelSelection: run.modelSelection,
-                      dispatchMode: {
-                        type:
-                          message.delegatedCompletion === undefined
-                            ? "start_immediately"
-                            : "queue_after_active",
-                      },
-                      createdBy: message.createdBy,
-                      creationSource: message.creationSource,
-                      ...(message.delegatedCompletion === undefined
-                        ? {}
-                        : { delegatedCompletion: message.delegatedCompletion }),
-                      ...(message.notification === undefined
-                        ? {}
-                        : { notification: message.notification }),
-                      ...(message.scheduledTaskId === undefined
-                        ? {}
-                        : { scheduledTaskId: message.scheduledTaskId }),
-                      ...(message.senderThreadId === undefined
-                        ? {}
-                        : { senderThreadId: message.senderThreadId }),
-                    });
+                    yield* threads
+                      .dispatch({
+                        type: "message.dispatch",
+                        commandId: CommandId.make(`command:steer-follow-up:${effect.id}`),
+                        threadId: effect.threadId,
+                        messageId: message.id,
+                        text: message.text,
+                        ...(message.context ? { context: message.context } : {}),
+                        attachments: message.attachments,
+                        // A user's follow-up starts on the thread's saved selection,
+                        // which already holds the steer's choice. A delegated
+                        // completion stays pinned to the run it reports to.
+                        ...(message.delegatedCompletion === undefined
+                          ? {}
+                          : { modelSelection: run.modelSelection }),
+                        dispatchMode: {
+                          type:
+                            message.delegatedCompletion === undefined
+                              ? "start_immediately"
+                              : "queue_after_active",
+                        },
+                        createdBy: message.createdBy,
+                        creationSource: message.creationSource,
+                        ...(message.delegatedCompletion === undefined
+                          ? {}
+                          : { delegatedCompletion: message.delegatedCompletion }),
+                        ...(message.notification === undefined
+                          ? {}
+                          : { notification: message.notification }),
+                        ...(message.scheduledTaskId === undefined
+                          ? {}
+                          : { scheduledTaskId: message.scheduledTaskId }),
+                        ...(message.senderThreadId === undefined
+                          ? {}
+                          : { senderThreadId: message.senderThreadId }),
+                      })
+                      .pipe(
+                        // The turn that just completed leaves no further retry
+                        // target once the instance is off: the completed turn
+                        // stands as the thread's result instead of going
+                        // through the outbox's bounded retry on a refusal that
+                        // retrying cannot change.
+                        Effect.catchTags({
+                          ThreadManagementProviderInstanceDisabledError: (disabledError) =>
+                            Effect.logInfo(
+                              "orchestration-v2.effect-worker.steer-follow-up-disabled",
+                              {
+                                threadId: effect.threadId,
+                                messageId: message.id,
+                                projectId: disabledError.projectId,
+                                instanceId: disabledError.instanceId,
+                              },
+                            ),
+                        }),
+                      );
                   }),
                 ),
                 Effect.mapError(
@@ -350,6 +426,29 @@ export const executorLayer: Layer.Layer<
                   : { restoreFiles: effect.request.restoreFiles }),
               })
               .pipe(
+                // The last failed attempt tells waiting clients it failed,
+                // instead of leaving them to time out. Clients get a fixed
+                // message; the worker logs the full cause for each attempt.
+                Effect.tapCause((cause) =>
+                  willRetry || Cause.hasInterruptsOnly(cause)
+                    ? Effect.void
+                    : threads
+                        .dispatch({
+                          type: "checkpoint.rollback.fail",
+                          commandId: CommandId.make(`${effect.commandId}:rollback-failed`),
+                          threadId: effect.threadId,
+                          requestId: effect.commandId,
+                          message: CheckpointRollbackService.ROLLBACK_FAILED_MESSAGE,
+                        })
+                        .pipe(
+                          Effect.catchCause((recordCause) =>
+                            Effect.logWarning("Failed to record rollback failure", {
+                              effectId: effect.id,
+                              cause: recordCause,
+                            }),
+                          ),
+                        ),
+                ),
                 Effect.mapError(
                   (cause) =>
                     new OrchestrationEffectExecutionError({
@@ -387,6 +486,17 @@ export const executorLayer: Layer.Layer<
                   }),
               ),
             );
+          case "preview.cleanup":
+            return resourceCleanup.cleanupPreviews(effect.threadId).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new OrchestrationEffectExecutionError({
+                    effectId: effect.id,
+                    effectType: effect.request.type,
+                    cause,
+                  }),
+              ),
+            );
           case "attachment.cleanup":
             return resourceCleanup.cleanupAttachments(effect.request.attachmentIds).pipe(
               Effect.mapError(
@@ -404,6 +514,23 @@ export const executorLayer: Layer.Layer<
                 threadId: effect.threadId,
                 requestId: effect.commandId,
                 kind: effect.request.kind,
+              })
+              .pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new OrchestrationEffectExecutionError({
+                      effectId: effect.id,
+                      effectType: effect.request.type,
+                      cause,
+                    }),
+                ),
+              );
+          case "delegated-tasks.stop":
+            return threads
+              .stopDelegatedTasks({
+                threadId: effect.threadId,
+                commandId: effect.commandId,
+                reason: effect.request.reason,
               })
               .pipe(
                 Effect.mapError(
@@ -459,12 +586,12 @@ export const layerWithOptions = (
 ): Layer.Layer<
   OrchestrationEffectWorkerV2,
   never,
-  EffectOutboxV2 | OrchestrationEffectExecutorV2
+  EffectOutbox.EffectOutboxV2 | OrchestrationEffectExecutorV2
 > =>
   Layer.effect(
     OrchestrationEffectWorkerV2,
     Effect.gen(function* () {
-      const outbox = yield* EffectOutboxV2;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
       const executor = yield* OrchestrationEffectExecutorV2;
       const workerId = options.workerId ?? `orchestration-v2:${process.pid}`;
       const leaseDurationMs = Math.max(1, options.leaseDurationMs ?? 30_000);
@@ -478,7 +605,10 @@ export const layerWithOptions = (
             }),
           ),
         );
-      const requeueClaim = (effect: OrchestrationEffectV2, cause: Cause.Cause<unknown>) =>
+      const requeueClaim = (
+        effect: EffectOutbox.OrchestrationEffectV2,
+        cause: Cause.Cause<unknown>,
+      ) =>
         Cause.hasInterruptsOnly(cause)
           ? Effect.void
           : outbox
@@ -508,7 +638,10 @@ export const layerWithOptions = (
                   }),
                 ),
               );
-      const terminalizeClaim = (effect: OrchestrationEffectV2, cause: Cause.Cause<unknown>) => {
+      const terminalizeClaim = (
+        effect: EffectOutbox.OrchestrationEffectV2,
+        cause: Cause.Cause<unknown>,
+      ) => {
         if (Cause.hasInterruptsOnly(cause)) return Effect.void;
         return outbox
           .fail({
@@ -544,10 +677,10 @@ export const layerWithOptions = (
           );
       };
       const recoverPostSuccessSettlement = (
-        effect: OrchestrationEffectV2,
+        effect: EffectOutbox.OrchestrationEffectV2,
         cause: Cause.Cause<unknown>,
       ) =>
-        REPLAY_SAFE_EFFECT_TYPES_AFTER_PROCESS_LOSS.some(
+        EffectOutbox.REPLAY_SAFE_EFFECT_TYPES_AFTER_PROCESS_LOSS.some(
           (effectType) => effectType === effect.request.type,
         )
           ? requeueClaim(effect, cause)
@@ -779,6 +912,6 @@ export const runDaemonWithOptions = (options: OrchestrationEffectDaemonOptions =
 
 export const runDaemon = runDaemonWithOptions();
 
-const daemonLayer: Layer.Layer<never, never, OrchestrationEffectWorkerV2> = Layer.effectDiscard(
+const layerDaemon: Layer.Layer<never, never, OrchestrationEffectWorkerV2> = Layer.effectDiscard(
   runDaemon.pipe(Effect.forkScoped),
 );

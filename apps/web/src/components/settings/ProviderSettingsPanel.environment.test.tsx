@@ -26,6 +26,8 @@ const commands = vi.hoisted(() => ({
   updateProvider: vi.fn(),
   uninstall: vi.fn(),
   acceptUrlAuth: vi.fn(),
+  canManageProviders: true,
+  canWriteSettings: true,
 }));
 
 const settingsState = vi.hoisted(() => ({
@@ -61,16 +63,6 @@ vi.mock("./settingsLayout", async (importOriginal) => {
   return {
     ...actual,
     useSettingsSearchTargetId: () => settingsSearchState.targetId,
-  };
-});
-
-vi.mock("../../i18n/I18nProvider", async () => {
-  const { translate } = await import("../../i18n/messages");
-  return {
-    useI18n: () => ({
-      t: (key: Parameters<typeof translate>[1], values?: Parameters<typeof translate>[2]) =>
-        translate("en", key, values),
-    }),
   };
 });
 
@@ -116,6 +108,8 @@ vi.mock("../../hooks/useSettings", () => ({
     settingsState.updateEnvironmentIds.push(environmentId);
     return settingsState.updateSettings;
   },
+  useUpdateEnvironmentModelPreferences: () => settingsState.updateSettings,
+  useToggleEnvironmentModelFavorite: () => () => undefined,
   usePersistEnvironmentProviderInstanceMutation: (environmentId: EnvironmentId) => {
     settingsState.mutationEnvironmentIds.push(environmentId);
     return settingsState.mutateProviderInstance;
@@ -128,13 +122,41 @@ vi.mock("../../environments/primary", () => ({
 
 vi.mock("../../state/session", () => ({
   useEnvironmentSessionState: () => ({ data: null, hasError: false, isPending: true }),
+  useEnvironmentScope: (environmentId: EnvironmentId, scope: string) =>
+    environmentId === "remote-device" &&
+    (scope === "providers:manage"
+      ? commands.canManageProviders
+      : scope === "settings:write"
+        ? commands.canWriteSettings
+        : scope === "orchestration:read"),
+  readEnvironmentScope: (environmentId: EnvironmentId, scope: string) =>
+    environmentId === "remote-device" &&
+    (scope === "providers:manage"
+      ? commands.canManageProviders
+      : scope === "settings:write"
+        ? commands.canWriteSettings
+        : scope === "orchestration:read"),
 }));
 
 vi.mock("../../state/entities", () => ({
   useProjects: () => [],
+  useServerConfigs: () => new Map(),
 }));
 
+const i18nState = vi.hoisted(() => ({ language: "en" as "en" | "zh-CN" }));
+
+vi.mock("../../i18n/I18nProvider", async () => {
+  const { translate } = await import("../../i18n/messages");
+  const t = (key: Parameters<typeof translate>[1], values?: Parameters<typeof translate>[2]) =>
+    translate(i18nState.language, key, values);
+  return {
+    useI18n: () => ({ t }),
+    useConnectionStatusCopy: () => ({}),
+  };
+});
+
 import { EnvironmentProviderSettings } from "./ProviderSettingsPanel";
+import { AddProviderInstanceDialog } from "./AddProviderInstanceDialog";
 
 const environmentId = EnvironmentId.make("remote-device");
 const codexId = ProviderInstanceId.make("codex");
@@ -219,12 +241,31 @@ describe("EnvironmentProviderSettings routing", () => {
     settingsState.mutateProviderInstance
       .mockReset()
       .mockResolvedValue({ _tag: "Success", value: {} });
+    i18nState.language = "en";
+    commands.canManageProviders = true;
+    commands.canWriteSettings = true;
     commands.refresh.mockReset().mockResolvedValue({ _tag: "Success" });
     commands.updateProvider.mockReset().mockResolvedValue({ _tag: "Success" });
     commands.uninstall.mockReset().mockResolvedValue({ _tag: "Success", value: {} });
     commands.acceptUrlAuth
       .mockReset()
       .mockResolvedValue({ _tag: "Success", value: { accepted: true } });
+  });
+
+  it("renders panel chrome in the app language", () => {
+    const hasProp = (panel: unknown, key: string, value: string) =>
+      visitElements(panel, (element) => element.props[key] === value) !== null;
+
+    let panel = renderPanel({ readOnly: true });
+    expect(hasProp(panel, "title", "Advanced")).toBe(true);
+    expect(hasProp(panel, "title", "Limited permissions")).toBe(true);
+
+    i18nState.language = "zh-CN";
+    panel = renderPanel({ readOnly: true });
+    expect(hasProp(panel, "title", "高级")).toBe(true);
+    expect(hasProp(panel, "title", "权限受限")).toBe(true);
+    expect(hasProp(panel, "children", "刷新提供商状态")).toBe(true);
+    expect(hasProp(panel, "aria-label", "增加提供商健康检查间隔")).toBe(true);
   });
 
   it("shows Codex and Claude while hiding untouched disabled provider slots", () => {
@@ -267,12 +308,13 @@ describe("EnvironmentProviderSettings routing", () => {
   it("keeps legacy provider configuration visible when disabled", () => {
     settingsState.value = {
       ...DEFAULT_UNIFIED_SETTINGS,
-      providers: {
-        ...DEFAULT_UNIFIED_SETTINGS.providers,
-        grok: {
-          ...DEFAULT_UNIFIED_SETTINGS.providers.grok,
+      providerInstances: {
+        [ProviderInstanceId.make("grok")]: {
+          driver: ProviderDriverKind.make("grok"),
           enabled: false,
-          binaryPath: "/custom/grok",
+          config: {
+            binaryPath: "/custom/grok",
+          },
         },
       },
     };
@@ -334,16 +376,19 @@ describe("EnvironmentProviderSettings routing", () => {
   });
 
   it.each([
-    ["onFavoriteModelsChange", { favorites: [{ provider: codexId, model: "chosen" }] }],
+    [
+      "onFavoriteModelsChange",
+      { setModelFavorites: [{ provider: codexId, model: "chosen", favorite: true }] },
+    ],
     [
       "onHiddenModelsChange",
-      { providerModelPreferences: { [codexId]: { hiddenModels: ["chosen"], modelOrder: [] } } },
+      { setModelsHidden: [{ provider: codexId, model: "chosen", hidden: true }] },
     ],
     [
       "onModelOrderChange",
-      { providerModelPreferences: { [codexId]: { hiddenModels: [], modelOrder: ["chosen"] } } },
+      { setProviderModelOrder: { provider: codexId, modelOrder: ["chosen"] } },
     ],
-  ])("saves %s on this device without changing the selected server", (action, expected) => {
+  ])("saves %s on the selected environment for every connected client", (action, expected) => {
     atoms.providers = [provider()];
     const panel = renderPanel();
     const editor = visitElements(
@@ -353,8 +398,8 @@ describe("EnvironmentProviderSettings routing", () => {
     expect(editor).not.toBeNull();
     if (!editor) throw new Error("Provider editor was not rendered");
     (editor.props[action] as (models: string[]) => void)(["chosen"]);
-    expect(settingsState.updateClientSettings).toHaveBeenCalledExactlyOnceWith(expected);
-    expect(settingsState.updateSettings).not.toHaveBeenCalled();
+    expect(settingsState.updateSettings).toHaveBeenCalledExactlyOnceWith(expected);
+    expect(settingsState.updateClientSettings).not.toHaveBeenCalled();
   });
 
   it("does not substitute another account when the requested instance was removed", () => {
@@ -365,6 +410,7 @@ describe("EnvironmentProviderSettings routing", () => {
   });
 
   it("keeps provider selection available while write controls are read only", () => {
+    commands.canWriteSettings = false;
     settingsState.value = {
       ...DEFAULT_UNIFIED_SETTINGS,
       providerInstances: {
@@ -398,7 +444,7 @@ describe("EnvironmentProviderSettings routing", () => {
     const notice = visitElements(panel, (element) => element.props.title === "Limited permissions");
     expect(notice).not.toBeNull();
 
-    expect(visitElements(panel, isRefreshButton)).toBeNull();
+    expect(visitElements(panel, isRefreshButton)).not.toBeNull();
     expect(visitElements(panel, isAddProviderButton)).toBeNull();
   });
 
@@ -411,6 +457,24 @@ describe("EnvironmentProviderSettings routing", () => {
     ).toBeNull();
     expect(visitElements(panel, isRefreshButton)).not.toBeNull();
     expect(visitElements(panel, isAddProviderButton)).not.toBeNull();
+  });
+
+  it("removes an open add-instance dialog when the provider grant is revoked", () => {
+    let panel = renderPanel();
+    const add = visitElements(panel, isAddProviderButton);
+    if (!add) throw new Error("Missing Add provider action.");
+    (add.props.onClick as () => void)();
+    panel = renderPanel();
+    expect(
+      visitElements(panel, (element) => element.type === AddProviderInstanceDialog),
+    ).not.toBeNull();
+
+    commands.canManageProviders = false;
+    panel = renderPanel({ readOnly: true });
+    expect(
+      visitElements(panel, (element) => element.type === AddProviderInstanceDialog),
+    ).toBeNull();
+    expect(settingsState.updateSettings).not.toHaveBeenCalled();
   });
 
   it("keeps Advanced visible when search targets the provider health interval", () => {
@@ -488,9 +552,8 @@ describe("EnvironmentProviderSettings routing", () => {
 
     const [resetMutation, resetPatch] = settingsState.mutateProviderInstance.mock.lastCall ?? [];
     expect(resetMutation).toEqual({ operation: "remove", instanceId: codexId });
-    expect(Object.keys(resetPatch ?? {}).sort()).toEqual(["providers"]);
-    expect(resetPatch).not.toHaveProperty("favorites");
-    expect(resetPatch).not.toHaveProperty("providerModelPreferences");
+    // Removing the instance is the whole reset; shared preferences stay untouched.
+    expect(resetPatch ?? {}).toEqual({});
   });
 
   it("updates one provider instance without sending a stale whole map", async () => {

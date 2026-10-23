@@ -71,7 +71,12 @@ export function deriveThreadRelationshipGraph(input: {
   const addEdge = (edge: ThreadRelationshipEdge) => {
     ensureNode(edge.sourceThreadId);
     ensureNode(edge.targetThreadId);
-    edgesByKey.set(edgeKey(edge), edge);
+    edgesByKey.set(
+      edgeKey(edge),
+      edge.kind === "subagent" && edge.status === "rolled_back"
+        ? { ...edge, status: "interrupted" }
+        : edge,
+    );
   };
 
   for (const thread of threads) {
@@ -92,11 +97,15 @@ export function deriveThreadRelationshipGraph(input: {
     const ownerThreadId = input.projection.thread.id;
     for (const subagent of input.projection.subagents) {
       if (subagent.childThreadId === null) continue;
+      const child = threadsById.get(subagent.childThreadId);
+      // The row describes the child conversation, including queued follow-ups
+      // and their outcomes. A child without an app run still uses its task.
       addEdge({
         sourceThreadId: ownerThreadId,
         targetThreadId: subagent.childThreadId,
         kind: "subagent",
-        status: subagent.status,
+        status:
+          child?.activityRunStatus ?? (child?.latestRunId != null ? child.status : subagent.status),
       });
     }
     for (const transfer of input.projection.contextTransfers) {
@@ -184,6 +193,18 @@ export function isParentThreadRelationship(
   currentThreadId: ThreadId,
 ): boolean {
   return edge.kind !== "transfer" && edge.targetThreadId === currentThreadId;
+}
+
+/** An incoming parent row shows its own activity, not the child's edge status. */
+export function threadRelationshipRowStatus(
+  graph: ThreadRelationshipGraph,
+  row: Pick<ThreadRelationshipWalkRow, "threadId" | "edge">,
+): string | null {
+  if (row.edge.kind === "transfer" || row.threadId === row.edge.targetThreadId) {
+    return row.edge.status;
+  }
+  const thread = graph.nodes.get(row.threadId)?.thread;
+  return thread?.activityRunStatus ?? thread?.status ?? null;
 }
 
 function threadCreatedAtMillis(node: ThreadRelationshipNode | undefined): number | null {

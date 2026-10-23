@@ -6,12 +6,13 @@ import type {
 import type { EnvironmentId, ProjectEntry } from "@t3tools/contracts";
 import { FileTree, useFileTree, useFileTreeSearch, useFileTreeSelector } from "@pierre/trees/react";
 import { serializeComposerFileLink } from "@t3tools/shared/composerTrigger";
-import { ChevronsDownUpIcon, ChevronsUpDownIcon } from "lucide-react";
+import { ChevronsDownUp, ChevronsUpDown } from "lucide";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { OverlayScrollbar } from "../ui/overlay-scrollbar";
 
 import { Button } from "~/components/ui/button";
 import { InputGroup, InputGroupInput } from "~/components/ui/input-group";
-import { OverlayScrollbar } from "~/components/ui/overlay-scrollbar";
+import { MorphIcon } from "~/components/MorphIcon";
 import { toastManager } from "~/components/ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 import { useComposerHandleContext } from "~/composerHandleContext";
@@ -47,10 +48,7 @@ const FILE_BROWSER_TREE_UNSAFE_CSS = `${PIERRE_TREE_UNSAFE_CSS}
     scrollbar-width: none;
     padding-inline-end: 12px;
   }
-  [data-file-tree-virtualized-scroll='true']::-webkit-scrollbar {
-    display: none;
-  }
-  /* The tree lives in a shadow root; the shared edge distances still inherit. */
+  [data-file-tree-virtualized-scroll='true']::-webkit-scrollbar { display: none; }
   [data-file-tree-virtualized-scroll='true'][data-overlay-scroll-fade] {
     mask-image: linear-gradient(to bottom, transparent,
       black var(--overlay-scroll-fade-top),
@@ -133,6 +131,7 @@ export default function FileBrowserPanel({
     ready,
     error,
     isPending,
+    loadingDirectories,
   } = useDirectoryEntries(environmentId, cwd);
   const [query, setQuery] = useState("");
   const [expandAll, setExpandAll] = useState(false);
@@ -257,6 +256,9 @@ export default function FileBrowserPanel({
     showEntryContextMenuRef.current = showEntryContextMenu;
   });
 
+  // The tree reads decorations at render time; a folder still loading its
+  // children shows a spinner in its row instead of a banner that shifts the tree.
+  const loadingDirectoriesRef = useRef(loadingDirectories);
   const treeModelRef = useRef<ReturnType<typeof useFileTree>["model"] | null>(null);
   const dragMention = useMemo(
     () =>
@@ -301,10 +303,22 @@ export default function FileBrowserPanel({
       }
     },
     paths: [],
+    renderRowDecoration: ({ item, row }) =>
+      row.kind === "directory" &&
+      row.isExpanded &&
+      loadingDirectoriesRef.current.has(item.path.replace(/\/$/, ""))
+        ? { icon: "t3-tree-icon-loading", title: "Loading…" }
+        : null,
     search: false,
     onSearchChange: (value) => setQuery(value ?? ""),
     unsafeCSS: FILE_BROWSER_TREE_UNSAFE_CSS,
   });
+  useEffect(() => {
+    if (loadingDirectoriesRef.current === loadingDirectories) return;
+    loadingDirectoriesRef.current = loadingDirectories;
+    // Re-render the rows with the current options so decorations update.
+    model.setComposition(model.getComposition());
+  }, [loadingDirectories, model]);
   const search = useFileTreeSearch(model);
   const allDirectoriesExpanded = useFileTreeSelector(model, (currentModel) =>
     areAllDirectoriesExpanded(currentModel, directoryPaths),
@@ -484,15 +498,13 @@ export default function FileBrowserPanel({
   const panelRef = useRef<HTMLDivElement | null>(null);
   const [fileTreeHost, setFileTreeHost] = useState<HTMLDivElement | null>(null);
   const [fileTreeScrollable, setFileTreeScrollable] = useState<HTMLElement | null>(null);
-  // Pierre owns the virtualized scroll node inside its shadow root. Bind the
-  // overlay after its host mounts, without introducing a second scroll owner.
   useLayoutEffect(() => {
     if (!fileTreeHost) return;
     const findScrollable = () => {
-      const next = fileTreeHost
+      const node = fileTreeHost
         .querySelector("file-tree-container")
         ?.shadowRoot?.querySelector<HTMLElement>("[data-file-tree-virtualized-scroll='true']");
-      setFileTreeScrollable(next ?? null);
+      setFileTreeScrollable(node ?? null);
     };
     findScrollable();
     const observer = new MutationObserver(findScrollable);
@@ -552,11 +564,10 @@ export default function FileBrowserPanel({
                 />
               }
             >
-              {allDirectoriesExpanded ? (
-                <ChevronsDownUpIcon className="size-3.5" />
-              ) : (
-                <ChevronsUpDownIcon className="size-3.5" />
-              )}
+              <MorphIcon
+                className="size-3.5"
+                icon={allDirectoriesExpanded ? ChevronsDownUp : ChevronsUpDown}
+              />
             </TooltipTrigger>
             <TooltipPopup>
               {expandAll || allDirectoriesExpanded ? "Collapse all folders" : "Expand all folders"}
@@ -578,7 +589,7 @@ export default function FileBrowserPanel({
           More matches available. Refine your search.
         </div>
       ) : null}
-      {(isPending || pathSearch.isPending) && (
+      {(!ready || pathSearch.isPending) && (
         <div role="status" className="px-3 py-1 text-xs text-muted-foreground">
           Loading files…
         </div>

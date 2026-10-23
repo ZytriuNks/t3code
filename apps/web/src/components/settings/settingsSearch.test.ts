@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "vite-plus/test";
-import type { MessageKey, MessageValues } from "../../i18n/messages";
-import { translate } from "../../i18n/messages";
 import { EnvironmentId } from "@t3tools/contracts";
+import { translate } from "../../i18n/messages";
 
 import {
   filterAvailableSettingsSearchItems,
@@ -11,7 +10,6 @@ import {
   isSettingsSearchScopeAvailable,
   searchableSetting,
   searchSettings,
-  settingsSearchItemTargetId,
   SETTINGS_SEARCH_ITEMS,
   type SettingsSearchItem,
 } from "./settingsSearch";
@@ -47,130 +45,35 @@ const ITEMS: ReadonlyArray<SettingsSearchItem> = [
   },
 ];
 
-const zh = (key: MessageKey, values?: MessageValues) => translate("zh-CN", key, values);
-
-describe("settingsSearchItemTargetId", () => {
-  it.each(["legacy-sidebar-project-guides", "legacy-sidebar-thread-status-dots"])(
-    "routes %s to the style selector only while its control is hidden",
-    (id) => {
-      const item = SETTINGS_SEARCH_ITEMS.find((candidate) => candidate.id === id)!;
-      expect(settingsSearchItemTargetId(item, false)).toBe("legacy-sidebar");
-      expect(settingsSearchItemTargetId(item, true)).toBe(id);
-    },
-  );
-
-  it.each([false, true])(
-    "preserves ordinary search destinations with legacy mode %s",
-    (enabled) => {
-      expect(settingsSearchItemTargetId(ITEMS[0]!, enabled)).toBe("word-wrap");
-      const theme = SETTINGS_SEARCH_ITEMS.find((item) => item.id === "theme")!;
-      expect(settingsSearchItemTargetId(theme, enabled)).toBe("appearance");
-    },
-  );
-});
-
 describe("searchSettings", () => {
-  it.each(["auto expand workspace", "工作区 自动 展开"])(
-    "finds the workspace panel preference for %s",
-    (query) => {
-      expect(searchSettings(query, SETTINGS_SEARCH_ITEMS, zh).map((item) => item.id)).toContain(
-        "auto-expand-thread-details",
-      );
-    },
-  );
-
-  it.each(["conversation structure", "对话 结构", "activity label", "活动 标签"])(
-    "finds the conversation structure setting for %s",
-    (query) => {
-      expect(searchSettings(query, SETTINGS_SEARCH_ITEMS, zh).map((item) => item.id)).toContain(
-        "conversation-structure",
-      );
-    },
-  );
-
-  it("gives localized catalog items stable typed message keys", () => {
-    for (const item of SETTINGS_SEARCH_ITEMS) {
-      if (!item.titleKey) continue;
-      expect(Object.entries(item)).toContainEqual([
-        "titleKey",
-        `settings.search.item.${item.id}.title`,
-      ]);
-      expect(Object.entries(item)).toContainEqual([
-        "localizedSearchTermsKey",
-        `settings.search.item.${item.id}.keywords`,
-      ]);
-    }
-  });
-
   it.each([
-    ["默认模型", "default-model"],
-    ["新线程 推理强度", "default-model"],
-    ["主题", "theme"],
-    ["远程 配对", "network-access"],
-    ["提供商", "providers"],
-    ["无项目 主目录", "scratch-base-directory"],
-  ])("finds %s in Simplified Chinese", (query, id) => {
-    expect(searchSettings(query, SETTINGS_SEARCH_ITEMS, zh).some((item) => item.id === id)).toBe(
-      true,
-    );
+    ["语言", "language", "/settings/general"],
+    ["不可用", "hide-unavailable-context-menu-items", "/settings/general"],
+    ["工作面板", "auto-expand-thread-details", "/settings/general"],
+    ["缩进", "legacy-sidebar-project-guides", "/settings/appearance"],
+    ["圆点", "legacy-sidebar-thread-status-dots", "/settings/appearance"],
+  ])("finds the restored preference for %s", (query, id, to) => {
+    expect(
+      searchSettings(query, SETTINGS_SEARCH_ITEMS, (key, values) =>
+        translate("zh-CN", key, values),
+      ),
+    ).toContainEqual(expect.objectContaining({ id, to }));
   });
-
-  it("keeps English and Chinese queries on the same stable target", () => {
-    expect(searchSettings("default model", SETTINGS_SEARCH_ITEMS, zh)[0]?.id).toBe("default-model");
-    expect(searchSettings("默认模型", SETTINGS_SEARCH_ITEMS, zh)[0]?.id).toBe("default-model");
-  });
-
+  it.each(["OTel", "OTLP", "telemetry export", "Grafana"])(
+    "finds environment telemetry settings for %s",
+    (query) => {
+      expect(searchSettings(query)).toContainEqual(
+        expect.objectContaining({
+          id: "telemetry-export",
+          to: "/settings/diagnostics",
+          targetId: "telemetry-export",
+          scope: "environment",
+        }),
+      );
+    },
+  );
   it.each(["send shortcut", "multiline", "new line"])("finds Send shortcut for %s", (query) => {
     expect(searchSettings(query).map((item) => item.id)).toContain("send-shortcut");
-  });
-
-  it.each([
-    "real-time output",
-    "realtime",
-    "incremental output",
-    "smooth output",
-    "平滑输出",
-    "实时输出",
-    "增量 输出",
-    "让位 动画 时长",
-  ])("finds response streaming for %s", (query) => {
-    expect(searchSettings(query, SETTINGS_SEARCH_ITEMS, zh)[0]).toMatchObject({
-      id: "response-streaming",
-      to: "/settings/general",
-    });
-  });
-
-  it.each(["thread status dots", "对话 状态 圆点"])(
-    "finds the legacy thread status dots setting for %s",
-    (query) => {
-      expect(searchSettings(query, SETTINGS_SEARCH_ITEMS, zh).map((item) => item.id)).toContain(
-        "legacy-sidebar-thread-status-dots",
-      );
-    },
-  );
-
-  it.each([
-    "project guides",
-    "项目 竖线",
-    "缩进竖线",
-    "置顶 竖线",
-    "无项目 竖线",
-    "indentation guides",
-  ])("finds the shared legacy sidebar indentation setting for %s", (query) => {
-    expect(searchSettings(query, SETTINGS_SEARCH_ITEMS, zh).map((item) => item.id)).toContain(
-      "legacy-sidebar-project-guides",
-    );
-  });
-
-  it.each([
-    ["sidebar style", "legacy-sidebar"],
-    ["侧栏 样式", "legacy-sidebar"],
-    ["项目 竖线", "legacy-sidebar-project-guides"],
-    ["thread status dots", "legacy-sidebar-thread-status-dots"],
-  ])("routes sidebar appearance searches for %s to Appearance", (query, id) => {
-    expect(
-      searchSettings(query, SETTINGS_SEARCH_ITEMS, zh).find((item) => item.id === id),
-    ).toMatchObject({ to: "/settings/appearance" });
   });
 
   it("matches titles, sections, and remembered setting details", () => {
@@ -252,6 +155,16 @@ describe("searchSettings", () => {
     expect(SETTINGS_SEARCH_ITEMS.some((item) => item.id === "quit-confirmation")).toBe(true);
     expect(searchSettings("hold to quit")).toEqual([]);
     expect(searchSettings("wsl")).toEqual([]);
+    expect(searchSettings("update track")).toEqual([]);
+  });
+
+  it("finds the About update rows", () => {
+    expect(searchSettings("check for updates").map((item) => item.id)).toContain("app-version");
+    expect(SETTINGS_SEARCH_ITEMS.find((item) => item.id === "update-track")).toMatchObject({
+      title: "Update track",
+      to: "/settings/general",
+      releaseChannelOnly: true,
+    });
   });
 
   it("hides macOS-only settings on other platforms", () => {
@@ -292,8 +205,11 @@ describe("searchSettings", () => {
       "provider-health-check-interval",
       "cursor-keychain-usage",
       "source-control-writer-model",
+      "review-guide-model",
+      "review-guide-instructions",
       "source-control-writing-style",
       "t3-connect",
+      "hold-webhooks-while-offline",
       "tailscale-https",
       "wsl-backend",
       "auto-settle-inactive-threads",
@@ -343,6 +259,24 @@ describe("searchSettings", () => {
     // Browsers without access:write still render CloudLinkRow for their host.
     const browser = filterAvailableSettingsSearchItems(availability).map((item) => item.id);
     expect(browser).toContain("publish-agent-activity");
+  });
+
+  it("offers webhook holding only while the managed tunnel is on, like its row", () => {
+    const availability = {
+      hasCloudPublicConfig: true,
+      hasEnvironment: true,
+      hasProviderSettingsEnvironment: true,
+      hasMacProviderSettingsEnvironment: false,
+      canManageLocalBackend: true,
+      isWslSettingsRowVisible: false,
+      hasThreadAutoSettlement: false,
+    };
+    const itemIds = (managedTunnelActive: boolean) =>
+      filterAvailableSettingsSearchItems({ ...availability, managedTunnelActive }).map(
+        (item) => item.id,
+      );
+    expect(itemIds(false)).not.toContain("hold-webhooks-while-offline");
+    expect(itemIds(true)).toContain("hold-webhooks-while-offline");
   });
 
   it("shows automatic settlement settings when the server supports them", () => {
@@ -395,8 +329,6 @@ describe("searchSettings", () => {
   });
 
   it("serves anchor props to panels from the catalog", () => {
-    expect(searchableSetting("time-format")).toEqual({ id: "time-format", title: "Time format" });
-    expect(searchableSetting("language")).toEqual({ id: "language", title: "Language" });
     expect(searchableSetting("word-wrap")).toEqual({ id: "word-wrap", title: "Word wrap" });
     expect(searchableSetting("archive")).toEqual({ id: "archive", title: "Archived threads" });
   });
@@ -494,6 +426,15 @@ describe("searchSettings", () => {
 });
 
 describe("settings search targets", () => {
+  it("requires an environment for the resolved telemetry export destination", () => {
+    const result = searchSettings("OpenTelemetry export").find(
+      (item) => item.id === "telemetry-export",
+    )!;
+    const target = getSettingsSearchTargetScope(result.targetId ?? result.id)!;
+    expect(isSettingsSearchScopeAvailable(target.scope, "all")).toBe(false);
+    expect(isSettingsSearchScopeAvailable(target.scope, "project")).toBe(false);
+    expect(isSettingsSearchScopeAvailable(target.scope, "environment")).toBe(true);
+  });
   it.each([
     "auto-settle-inactive-threads",
     "auto-settle-merged-threads",

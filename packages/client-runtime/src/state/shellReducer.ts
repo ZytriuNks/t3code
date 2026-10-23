@@ -1,46 +1,47 @@
-import type {
-  OrchestrationProjectShell,
-  OrchestrationV2ShellSnapshot,
-  OrchestrationV2ShellStreamItem,
+import {
+  OrchestrationV2ThreadShell,
+  ThreadPullRequestLink,
+  type OrchestrationProjectShell,
+  type OrchestrationV2ShellSnapshot,
+  type OrchestrationV2ShellStreamItem,
 } from "@t3tools/contracts";
-import * as Equal from "effect/Equal";
+import * as Schema from "effect/Schema";
 
-/** Socket decoding recreates unchanged metadata on every streaming update.
- * Share equal plain fields so model/provider selectors do not invalidate the
- * whole composer. Effect values such as DateTime keep their own equivalence.
- * This only visits the small shell, never the conversation's message bodies.
+const sameThreadShell = Schema.toEquivalence(OrchestrationV2ThreadShell);
+const sameLinks = Schema.toEquivalence(Schema.UndefinedOr(Schema.Array(ThreadPullRequestLink)));
+
+/** Whether two rows' pull request links are equal, including both absent. */
+export function sameThreadPullRequests(
+  left: OrchestrationV2ThreadShell["pullRequests"],
+  right: OrchestrationV2ThreadShell["pullRequests"],
+): boolean {
+  return left === right || sameLinks(left, right);
+}
+
+/**
+ * Keep the previous object for each row a full snapshot left unchanged, so the list only
+ * re-renders rows that changed. Links are compared apart from the rest of the row because a
+ * deferred snapshot arrives without them; such a row keeps its links until they fill in.
  */
-function retainShellReferences<T>(previous: unknown, next: T): T {
-  if (Equal.equals(previous, next)) return previous as T;
-  if (
-    previous === null ||
-    next === null ||
-    typeof previous !== "object" ||
-    typeof next !== "object"
-  )
-    return next;
-  const array = Array.isArray(next);
-  if (array !== Array.isArray(previous)) return next;
-  if (
-    !array &&
-    (Object.getPrototypeOf(previous) !== Object.prototype ||
-      Object.getPrototypeOf(next) !== Object.prototype)
-  )
-    return next;
-  const before = previous as Record<string, unknown>;
-  const after = next as Record<string, unknown>;
-  const keys = Object.keys(after);
-  let equal = Object.keys(before).length === keys.length;
-  let shared = false;
-  const fields = keys.map((key) => {
-    const value = retainShellReferences(before[key], after[key]);
-    equal &&= Object.hasOwn(before, key) && value === before[key];
-    shared ||= value !== after[key];
-    return [key, value] as const;
+export function reuseUnchangedThreadShells(
+  previous: OrchestrationV2ShellSnapshot | null,
+  next: OrchestrationV2ShellSnapshot,
+): OrchestrationV2ShellSnapshot {
+  if (previous === null || previous.threads.length === 0) return next;
+  const previousById = new Map(previous.threads.map((thread) => [thread.id, thread] as const));
+  let reused = 0;
+  const threads = next.threads.map((thread) => {
+    const prior = previousById.get(thread.id);
+    if (prior === undefined) return thread;
+    const candidate =
+      thread.pullRequests === undefined && prior.pullRequests !== undefined
+        ? { ...thread, pullRequests: prior.pullRequests }
+        : thread;
+    if (!sameThreadShell(prior, candidate)) return thread;
+    reused += 1;
+    return prior;
   });
-  if (equal) return previous as T;
-  if (!shared) return next;
-  return (array ? fields.map(([, value]) => value) : Object.fromEntries(fields)) as T;
+  return reused === 0 ? next : { ...next, threads };
 }
 
 function upsertById<T extends { readonly id: unknown }>(
@@ -162,15 +163,22 @@ export function applyShellStreamEvent(
         snapshotSequence: event.sequence,
       };
     case "thread.updated": {
-      const previous = snapshot.threads.find((thread) => thread.id === event.thread.id);
-      const thread = retainShellReferences(previous, event.thread);
+      // An unchanged shell keeps its object and the list, so subscribers that
+      // compare by reference skip the update. Only the cursor moves.
+      const existing =
+        event.location === "active"
+          ? snapshot.threads.find((thread) => thread.id === event.thread.id)
+          : undefined;
+      if (existing !== undefined && sameThreadShell(existing, event.thread)) {
+        return { ...snapshot, snapshotSequence: event.sequence };
+      }
       const withoutThread = (threads: OrchestrationV2ShellSnapshot["threads"]) =>
         threads.filter((thread) => thread.id !== event.thread.id);
       return {
         ...snapshot,
         threads:
           event.location === "active"
-            ? upsertById(snapshot.threads, thread)
+            ? upsertById(snapshot.threads, event.thread)
             : withoutThread(snapshot.threads),
         // The archive has its own bounded query/subscription. Older servers may
         // still send archive-located deltas here; remove them from the normal

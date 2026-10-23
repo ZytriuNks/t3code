@@ -5,11 +5,6 @@ import {
   SCROLLBAR_TRIANGLE_VIEWBOX,
   SCROLLBAR_TRIANGLE_DOWN_TRANSFORM,
 } from "../../lib/scrollbar-style";
-import {
-  scrollbarGeometry,
-  scrollbarOffsetAtPointer,
-  type ScrollbarGeometry,
-} from "../../lib/scrollbar-geometry";
 import { SELECTION_MULTI_CLICK_INTERVAL_MS } from "../../lib/selectionActions";
 import { collectWrappedTerminalLinkLine, extractTerminalLinks } from "../../terminal-links";
 import {
@@ -27,6 +22,7 @@ import {
 } from "./renderer";
 import symbolsFontUrl from "./fonts/SymbolsNerdFontMono-Regular.woff2?url";
 import { isMonospaceFamily } from "../../appearanceFonts";
+import { observeResize } from "../../lib/observeResize";
 
 export const DEFAULT_TERMINAL_FONT_SIZE = 12;
 const MIN_TERMINAL_FONT_SIZE = 6;
@@ -45,6 +41,7 @@ const TERMINAL_GLYPH_FALLBACKS =
 export const DEFAULT_TERMINAL_FONT_FAMILY =
   '"SF Mono", "SFMono-Regular", Menlo, Consolas, "Liberation Mono", ' + TERMINAL_GLYPH_FALLBACKS;
 const CONTENT_PADDING = 4;
+const MIN_SCROLLBAR_THUMB_HEIGHT = 18;
 /** Half a blink cycle: the visible and hidden phases are equally long. */
 const CURSOR_BLINK_INTERVAL_MS = 500;
 const TERMINAL_FONT_LOAD_TEXT = "iMW0@# .";
@@ -178,12 +175,46 @@ export function terminalContentOriginY(
   return padding + Math.max(0, slack);
 }
 
-export interface TerminalScrollbarGeometry extends ScrollbarGeometry {}
+export interface TerminalScrollbarGeometry {
+  readonly thumbHeight: number;
+  readonly thumbTop: number;
+  readonly maxOffset: number;
+}
 
-/** Terminal-flavoured aliases over the shared overlay scrollbar geometry. */
-export const terminalScrollbarGeometry = scrollbarGeometry;
+export function terminalScrollbarGeometry(
+  state: GhosttyScrollbar,
+  trackHeight: number,
+): TerminalScrollbarGeometry | null {
+  const total = Math.max(0, state.total);
+  const len = Math.max(0, Math.min(state.len, total));
+  const maxOffset = Math.max(0, total - len);
+  if (trackHeight <= 0 || len <= 0 || maxOffset === 0) return null;
+  const thumbHeight = Math.min(
+    trackHeight,
+    Math.max(MIN_SCROLLBAR_THUMB_HEIGHT, (trackHeight * len) / total),
+  );
+  const travel = Math.max(0, trackHeight - thumbHeight);
+  const offset = Math.max(0, Math.min(state.offset, maxOffset));
+  return {
+    thumbHeight,
+    thumbTop: travel * (offset / maxOffset),
+    maxOffset,
+  };
+}
 
-export const terminalScrollbarOffsetAtPointer = scrollbarOffsetAtPointer;
+export function terminalScrollbarOffsetAtPointer(
+  state: GhosttyScrollbar,
+  trackHeight: number,
+  pointerY: number,
+  pointerOffset: number,
+): number {
+  const geometry = terminalScrollbarGeometry(state, trackHeight);
+  if (geometry === null) return 0;
+  const travel = Math.max(0, trackHeight - geometry.thumbHeight);
+  if (travel === 0) return 0;
+  const thumbTop = Math.max(0, Math.min(pointerY - pointerOffset, travel));
+  return Math.round((thumbTop / travel) * geometry.maxOffset);
+}
 
 export function terminalGridCellAt(options: {
   bounds: { left: number; top: number };
@@ -514,6 +545,8 @@ export interface GhosttySelectionPosition {
 }
 
 export interface GhosttyTerminalSurfaceOptions {
+  readonly inputAriaLabel?: string;
+  readonly scrollbackAriaLabel?: string;
   readonly theme: GhosttyTheme;
   readonly font?: GhosttyTerminalFont;
   /** Read after font and WASM loading. Hosts can supply a getter for the latest value. */
@@ -523,10 +556,7 @@ export interface GhosttyTerminalSurfaceOptions {
   readonly onSelectionChange: () => void;
   readonly beforeKey: (event: KeyboardEvent) => boolean;
   readonly onLinkActivate: (text: string, event: MouseEvent) => void;
-  /** Accessible name of the hidden textarea that receives typed keys. */
-  readonly inputAriaLabel?: string;
-  /** Accessible name of the scrollback scrollbar. */
-  readonly scrollbackAriaLabel?: string;
+  readonly canActivateLink?: (text: string) => boolean;
   /**
    * A right-click the running application did not claim through mouse
    * reporting. The host owns the menu, so it also owns preventing the browser
@@ -554,10 +584,8 @@ export class GhosttyTerminalSurface {
   private fontSize: number;
   private fontEpoch = 0;
   private pendingFontEpoch: number | null = null;
-  private readonly resizeObserver: ResizeObserver;
+  private readonly stopObservingResize: () => void;
   private readonly scrollbarThumb: HTMLDivElement;
-  private readonly scrollbarUp: HTMLButtonElement;
-  private readonly scrollbarDown: HTMLButtonElement;
   private scrollbarHoldTimer: number | null = null;
   private scrollbarHeld = false;
   private snapshot: GhosttySnapshot | null = null;
@@ -613,6 +641,14 @@ export class GhosttyTerminalSurface {
   private clearSelectionAfterCopy = false;
   private primedCopySelection = "";
   private wheelRemainder = 0;
+  private touchScroll: {
+    pointerId: number;
+    startX: number;
+    startY: number;
+    lastY: number;
+    remainder: number;
+    moved: boolean;
+  } | null = null;
   private lastMouseMotionData = "";
   private mouseAnyEventTracking = false;
   private dprMedia: MediaQueryList | null = null;
@@ -639,9 +675,11 @@ export class GhosttyTerminalSurface {
     this.input = input;
     this.scrollbar = scrollbar;
     this.scrollbarThumb = scrollbarThumb;
-    this.scrollbarUp = this.createScrollbarStepButton(-1);
-    this.scrollbarDown = this.createScrollbarStepButton(1);
-    scrollbar.replaceChildren(this.scrollbarUp, scrollbarThumb, this.scrollbarDown);
+    scrollbar.replaceChildren(
+      this.createScrollbarStepButton(-1),
+      scrollbarThumb,
+      this.createScrollbarStepButton(1),
+    );
     this.context = context;
     this.core = core;
     this.mouseAnyEventTracking = core.isMouseAnyEventTracking();
@@ -652,12 +690,11 @@ export class GhosttyTerminalSurface {
     this.fontFamily = fontFamily;
     this.requestedFontFamily = options.font?.family;
     this.fontSize = terminalFontSize(options.font?.size);
-    this.resizeObserver = new ResizeObserver(() => this.fit());
     this.installEvents();
     this.watchDevicePixelRatio();
     this.reducedMotionMedia?.addEventListener("change", this.onReducedMotionChange);
     document.fonts.addEventListener("loadingdone", this.onFontsLoaded);
-    this.resizeObserver.observe(mount);
+    this.stopObservingResize = observeResize(mount, () => this.fit());
   }
 
   static async create(
@@ -666,6 +703,7 @@ export class GhosttyTerminalSurface {
   ): Promise<GhosttyTerminalSurface> {
     const canvas = document.createElement("canvas");
     canvas.className = "block size-full cursor-text";
+    canvas.style.touchAction = "pan-x pinch-zoom";
     canvas.setAttribute("aria-hidden", "true");
 
     const input = document.createElement("textarea");
@@ -679,7 +717,7 @@ export class GhosttyTerminalSurface {
 
     const scrollbar = document.createElement("div");
     scrollbar.className =
-      "group absolute top-0 right-0 bottom-0.5 z-1 flex w-3 flex-col items-end cursor-default touch-none";
+      "group absolute top-1 right-px bottom-1 z-1 flex w-[var(--app-scrollbar-width)] flex-col items-end cursor-default touch-none";
     scrollbar.setAttribute("role", "scrollbar");
     scrollbar.setAttribute("aria-label", options.scrollbackAriaLabel ?? "Terminal scrollback");
     scrollbar.setAttribute("aria-orientation", "vertical");
@@ -687,7 +725,7 @@ export class GhosttyTerminalSurface {
     scrollbar.hidden = true;
     const scrollbarThumb = document.createElement("div");
     scrollbarThumb.className =
-      "absolute right-0.5 top-0 w-[var(--app-scrollbar-width)] rounded-[3px] bg-[var(--app-scrollbar-thumb)] transition-[background-color] duration-150 ease-out group-hover:bg-[var(--app-scrollbar-thumb-hover)] group-focus-visible:bg-[var(--app-scrollbar-thumb-hover)]";
+      "absolute inset-x-px top-0 rounded-[3px] bg-[var(--app-scrollbar-thumb)] transition-[background-color] duration-[120ms] ease-[ease-out] group-hover:bg-[var(--app-scrollbar-thumb-hover)] group-focus-visible:bg-[var(--app-scrollbar-thumb-hover)]";
     scrollbar.append(scrollbarThumb);
     mount.replaceChildren(canvas, input, scrollbar);
 
@@ -781,6 +819,12 @@ export class GhosttyTerminalSurface {
     this.requestRender();
   }
 
+  /** Re-evaluate link feedback after the host's available actions change. */
+  refreshLinkActivation(): void {
+    if (this.disposed) return;
+    this.refreshHoveredLink();
+  }
+
   async setFont(font: GhosttyTerminalFont): Promise<void> {
     if (this.disposed) return;
     const fontSize = terminalFontSize(font.size);
@@ -842,6 +886,12 @@ export class GhosttyTerminalSurface {
     }
     this.applyFontMetrics();
   };
+
+  /** Replay the measured grid after the host becomes ready to resize its PTY. */
+  resendSize(): void {
+    this.resizeNotified = false;
+    this.fit();
+  }
 
   fit(): boolean {
     if (this.disposed || !this.visible) return false;
@@ -908,6 +958,22 @@ export class GhosttyTerminalSurface {
     }, 150);
   }
 
+  /**
+   * Releasing a panel, drawer, or split divider settles the size, so the PTY
+   * hears it now instead of after the debounce. Otherwise typing right after
+   * the release reaches a shell that still lays out the old width.
+   */
+  private readonly onWindowPointerRelease = () => {
+    if (this.disposed || this.resizeNotifyTimer === null) return;
+    // The drag hook writes the release position before this bubbles to window,
+    // so fit now rather than wait a frame for the observer.
+    this.fit();
+    if (this.resizeNotifyTimer === null) return;
+    window.clearTimeout(this.resizeNotifyTimer);
+    this.resizeNotifyTimer = null;
+    this.options.onResize(this.cols, this.rows);
+  };
+
   focus(): void {
     if (this.disposed || !this.visible) return;
     this.input.focus({ preventScroll: true });
@@ -957,6 +1023,21 @@ export class GhosttyTerminalSurface {
     return this.core.selectionText();
   }
 
+  /** Select the active screen's entire history, including rows outside the viewport. */
+  selectAll(): void {
+    this.clearPrimedCopy();
+    const range = this.core.selectAll();
+    this.selectionAnchorScreen = range?.start ?? null;
+    this.selectionEndScreen = range?.end ?? null;
+    this.selectionEnd = range ? this.core.screenPointToViewport(range.end.x, range.end.y) : null;
+    this.selectionMode = "cell";
+    this.selectionBase = null;
+    this.setSelectionAutoscroll(0);
+    this.options.onSelectionChange();
+    this.forceFullRender = true;
+    this.requestRender();
+  }
+
   getSelectionPosition(): GhosttySelectionPosition | null {
     if (!this.selectionAnchorScreen || !this.selectionEndScreen || !this.hasSelection())
       return null;
@@ -973,7 +1054,15 @@ export class GhosttyTerminalSurface {
     const position = this.getSelectionPosition();
     if (!position) return null;
     const viewportEnd = this.core.screenPointToViewport(position.end.x, position.end.y);
-    if (!viewportEnd) return null;
+    if (
+      !viewportEnd ||
+      viewportEnd.x < 0 ||
+      viewportEnd.x >= this.cols ||
+      viewportEnd.y < 0 ||
+      viewportEnd.y >= this.rows
+    ) {
+      return null;
+    }
     const bounds = this.canvas.getBoundingClientRect();
     return {
       right: bounds.left + CONTENT_PADDING + (viewportEnd.x + 1) * this.metrics.width,
@@ -1011,7 +1100,7 @@ export class GhosttyTerminalSurface {
     if (this.disposed) return;
     this.disposed = true;
     this.stopScrollbarHold();
-    this.resizeObserver.disconnect();
+    this.stopObservingResize();
     document.fonts.removeEventListener("loadingdone", this.onFontsLoaded);
     this.dprMedia?.removeEventListener("change", this.onDevicePixelRatioChange);
     this.dprMedia = null;
@@ -1049,6 +1138,55 @@ export class GhosttyTerminalSurface {
     if (isTerminalAltGraphText(event) || !this.options.beforeKey(event)) {
       this.suppressedKeyCodes.add(event.code);
       return;
+    }
+    // IME candidates belong to the textarea, even if the key also resembles
+    // a local shortcut. Safari signals the initial composition with code 229.
+    if (isTerminalCompositionKey(event, this.composing)) {
+      this.suppressedKeyCodes.add(event.code);
+      return;
+    }
+    const mac = isMacPlatform(navigator.platform);
+    const primaryModifier = mac ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey;
+    const selectAllShortcut =
+      event.key.toLowerCase() === "a" &&
+      primaryModifier &&
+      !event.altKey &&
+      (mac ? !event.shiftKey : event.shiftKey);
+    if (selectAllShortcut) {
+      event.preventDefault();
+      event.stopPropagation();
+      this.suppressedKeyCodes.add(event.code);
+      this.selectAll();
+      return;
+    }
+    // Shift+PageUp/Down pages history; Ctrl+Shift+Home/End (Cmd on macOS)
+    // jumps to its edges. Full-screen applications retain these keys.
+    const pageHistory =
+      event.shiftKey &&
+      !event.altKey &&
+      !event.ctrlKey &&
+      !event.metaKey &&
+      (event.key === "PageUp" || event.key === "PageDown");
+    const jumpHistory =
+      event.shiftKey &&
+      !event.altKey &&
+      primaryModifier &&
+      (event.key === "Home" || event.key === "End");
+    if ((pageHistory || jumpHistory) && !this.core.isAlternateScreen()) {
+      const state = this.readScrollbarState();
+      if (state !== null) {
+        event.preventDefault();
+        event.stopPropagation();
+        this.suppressedKeyCodes.add(event.code);
+        const delta =
+          event.key === "Home"
+            ? -state.offset
+            : event.key === "End"
+              ? state.total - state.len - state.offset
+              : Math.max(1, state.len) * (event.key === "PageUp" ? -1 : 1);
+        this.scrollViewport(delta);
+        return;
+      }
     }
     if (isTerminalCopyShortcut(event) && this.hasSelection()) {
       // A plain Ctrl+C/Cmd+C fires the browser's native copy event, caught in
@@ -1126,12 +1264,6 @@ export class GhosttyTerminalSurface {
           },
         );
       }
-      return;
-    }
-    // keyCode 229 is Safari's only signal that this keydown opens an IME
-    // composition; encoding it would double the committed text. Do not blank
-    // the textarea first: onInput leaves the in-progress candidate there.
-    if (isTerminalCompositionKey(event, this.composing)) {
       return;
     }
     this.clearPrimedCopy();
@@ -1271,6 +1403,21 @@ export class GhosttyTerminalSurface {
   }
 
   private readonly onPointerDown = (event: PointerEvent) => {
+    if (event.pointerType === "touch") {
+      event.preventDefault();
+      if (!event.isPrimary || this.touchScroll !== null) return;
+      this.touchScroll = {
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        lastY: event.clientY,
+        remainder: 0,
+        moved: false,
+      };
+      this.clearHoveredLink();
+      this.canvas.setPointerCapture(event.pointerId);
+      return;
+    }
     this.focus();
     if (shouldReportTerminalMouse(this.core.isMouseTracking(), event)) {
       const button = ghosttyMouseButton(event.button);
@@ -1355,6 +1502,25 @@ export class GhosttyTerminalSurface {
   }
 
   private readonly onPointerMove = (event: PointerEvent) => {
+    if (event.pointerType === "touch") {
+      const touch = this.touchScroll;
+      if (touch?.pointerId !== event.pointerId) return;
+      event.preventDefault();
+      touch.moved ||=
+        Math.hypot(event.clientX - touch.startX, event.clientY - touch.startY) >
+        TERMINAL_LINK_DRAG_THRESHOLD_PX;
+      if (!touch.moved) return;
+      const delta = terminalWheelDeltaRows(
+        { deltaY: touch.lastY - event.clientY, deltaMode: 0 },
+        this.metrics.height,
+        this.rows,
+        touch.remainder,
+      );
+      touch.lastY = event.clientY;
+      touch.remainder = delta.remainder;
+      this.scrollRows(delta.rows, event);
+      return;
+    }
     if (this.linkActivationPointerId === event.pointerId) {
       const origin = this.linkActivationOrigin;
       if (
@@ -1400,9 +1566,9 @@ export class GhosttyTerminalSurface {
     this.clearHoveredLink();
     this.selectionPointer = { x: event.clientX, y: event.clientY };
     const bounds = this.canvas.getBoundingClientRect();
-    this.setSelectionAutoscroll(
-      event.clientY < bounds.top ? -1 : event.clientY > bounds.bottom ? 1 : 0,
-    );
+    const top = Math.max(bounds.top, 0) + CONTENT_PADDING;
+    const bottom = Math.min(bounds.bottom, window.innerHeight) - CONTENT_PADDING;
+    this.setSelectionAutoscroll(event.clientY < top ? -1 : event.clientY > bottom ? 1 : 0);
     const cell = this.cellAt(event.clientX, event.clientY);
     if (cell.x === this.selectionEnd?.x && cell.y === this.selectionEnd.y) return;
     this.extendSelectionTo(event.clientX, event.clientY);
@@ -1495,6 +1661,26 @@ export class GhosttyTerminalSurface {
   }
 
   private readonly onPointerUp = (event: PointerEvent) => {
+    if (event.pointerType === "touch") {
+      const touch = this.touchScroll;
+      if (touch?.pointerId !== event.pointerId) return;
+      this.touchScroll = null;
+      event.preventDefault();
+      if (this.canvas.hasPointerCapture(event.pointerId)) {
+        this.canvas.releasePointerCapture(event.pointerId);
+      }
+      if (event.type === "pointercancel" || touch.moved) return;
+      this.focus();
+      if (shouldReportTerminalMouse(this.core.isMouseTracking(), event)) {
+        this.sendMouse("press", ghosttyMouseButton(0), event);
+        this.sendMouse("release", ghosttyMouseButton(0), event);
+      } else {
+        const link = this.linkAt(event.clientX, event.clientY);
+        if (link) this.options.onLinkActivate(link.text, event);
+        else this.clearSelection();
+      }
+      return;
+    }
     this.setSelectionAutoscroll(0);
     if (this.linkActivationPointerId === event.pointerId) {
       event.preventDefault();
@@ -1554,10 +1740,14 @@ export class GhosttyTerminalSurface {
       this.wheelRemainder,
     );
     this.wheelRemainder = delta.remainder;
-    if (delta.rows === 0) return;
-    const magnitude = Math.abs(delta.rows);
+    this.scrollRows(delta.rows, event);
+  };
+
+  private scrollRows(rows: number, event: MouseEvent): void {
+    if (rows === 0) return;
+    const magnitude = Math.abs(rows);
     if (shouldReportTerminalMouse(this.core.isMouseTracking(), event)) {
-      const button = delta.rows < 0 ? 4 : 5;
+      const button = rows < 0 ? 4 : 5;
       for (let index = 0; index < magnitude; index += 1) {
         this.sendMouse("press", button, event);
       }
@@ -1566,11 +1756,11 @@ export class GhosttyTerminalSurface {
     if (this.core.isAlternateScreen()) {
       // The alternate screen has no scrollback: translate wheel motion into
       // arrow keys so full-screen apps like vim and less scroll, matching xterm.
-      this.options.onData(terminalWheelArrowData(delta.rows, this.core.isApplicationCursorKeys()));
+      this.options.onData(terminalWheelArrowData(rows, this.core.isApplicationCursorKeys()));
       return;
     }
-    this.scrollViewport(delta.rows);
-  };
+    this.scrollViewport(rows);
+  }
 
   private readonly onMouseDown = (event: MouseEvent) => {
     // Cancelling the middle button here stops autoscroll while still letting
@@ -1632,7 +1822,6 @@ export class GhosttyTerminalSurface {
   };
 
   private readonly onScrollbarKeyDown = (event: KeyboardEvent) => {
-    if (event.target !== this.scrollbar) return;
     const state = this.readScrollbarState();
     if (state === null) return;
     let delta = 0;
@@ -1671,14 +1860,14 @@ export class GhosttyTerminalSurface {
       "aria-label",
       direction < 0 ? "Scroll up one line" : "Scroll down one line",
     );
-    button.className = `flex w-3 shrink-0 justify-end mr-0.5 text-[var(--app-scrollbar-thumb)] transition-colors duration-150 group-hover:text-[var(--app-scrollbar-thumb-hover)] ${direction < 0 ? "items-start" : "mt-auto items-end"}`;
+    button.className = `flex w-3 shrink-0 justify-end pr-px text-[var(--app-scrollbar-thumb)] transition-colors duration-150 group-hover:text-[var(--app-scrollbar-thumb-hover)] ${direction < 0 ? "items-start" : "mt-auto items-end"}`;
     button.style.height = `${SCROLLBAR_TRIANGLE_SIZE}px`;
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     svg.setAttribute("viewBox", SCROLLBAR_TRIANGLE_VIEWBOX);
     svg.setAttribute("aria-hidden", "true");
     svg.setAttribute(
       "class",
-      "h-[calc(var(--app-scrollbar-width)*0.911)] w-[var(--app-scrollbar-width)]",
+      "h-[calc((var(--app-scrollbar-width)-2px)*0.911)] w-[calc(var(--app-scrollbar-width)-2px)]",
     );
     const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
     path.setAttribute("d", SCROLLBAR_TRIANGLE_PATH);
@@ -1748,6 +1937,8 @@ export class GhosttyTerminalSurface {
     this.scrollbar.addEventListener("pointerup", this.onScrollbarPointerUp);
     this.scrollbar.addEventListener("pointercancel", this.onScrollbarPointerUp);
     this.scrollbar.addEventListener("keydown", this.onScrollbarKeyDown);
+    window.addEventListener("pointerup", this.onWindowPointerRelease);
+    window.addEventListener("pointercancel", this.onWindowPointerRelease);
   }
 
   private removeEvents(): void {
@@ -1774,6 +1965,8 @@ export class GhosttyTerminalSurface {
     this.scrollbar.removeEventListener("pointerup", this.onScrollbarPointerUp);
     this.scrollbar.removeEventListener("pointercancel", this.onScrollbarPointerUp);
     this.scrollbar.removeEventListener("keydown", this.onScrollbarKeyDown);
+    window.removeEventListener("pointerup", this.onWindowPointerRelease);
+    window.removeEventListener("pointercancel", this.onWindowPointerRelease);
   }
 
   private scrollViewport(deltaRows: number): void {
@@ -1811,7 +2004,10 @@ export class GhosttyTerminalSurface {
         ? null
         : terminalScrollbarGeometry(
             state,
-            Math.max(0, this.mount.clientHeight - 2 - SCROLLBAR_TRIANGLE_SIZE * 2),
+            Math.max(
+              0,
+              this.mount.clientHeight - CONTENT_PADDING * 2 - SCROLLBAR_TRIANGLE_SIZE * 2,
+            ),
           );
     this.scrollbar.hidden = geometry === null;
     if (state === null || geometry === null) return;
@@ -1977,6 +2173,11 @@ export class GhosttyTerminalSurface {
   }
 
   private linkAt(clientX: number, clientY: number): TerminalLinkWithRange | null {
+    const link = this.findLinkAt(clientX, clientY);
+    return link && this.options.canActivateLink?.(link.text) !== false ? link : null;
+  }
+
+  private findLinkAt(clientX: number, clientY: number): TerminalLinkWithRange | null {
     if (!this.snapshot) return null;
     const cell = terminalGridCellAt({
       bounds: this.canvas.getBoundingClientRect(),

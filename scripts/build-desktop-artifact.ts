@@ -4,17 +4,20 @@
 import * as NodeFSP from "node:fs/promises";
 import * as NodeCrypto from "node:crypto";
 import * as NodeModule from "node:module";
+// plist is CommonJS; Node cannot load its named exports from an ES module.
+import Plist from "plist";
 
 import {
   createPackageWithOptions,
   extractAll,
+  extractFile,
   getRawHeader,
   statFile,
   type DirectoryRecord,
 } from "@electron/asar";
 
 import { fromYaml } from "@t3tools/shared/schemaYaml";
-import { HostProcessArchitecture, HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { clerkFrontendApiHostnameFromPublishableKey } from "@t3tools/shared/relayAuth";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import rootPackageJson from "../package.json" with { type: "json" };
@@ -50,61 +53,14 @@ import type { PlatformError } from "effect/PlatformError";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
-import { Command, Flag } from "effect/unstable/cli";
-import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import { Command, Flag } from "effect/cli";
+import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 const LINUX_ICON_SIZES = [16, 22, 24, 32, 48, 64, 128, 256, 512] as const;
-// Desktop identity is derived from productName so the Alpha and Experimental
-// installers can coexist on the same machine without colliding on app id,
-// protocol scheme, NSIS package name, or userData path. The mapping table
-// below is the single source of truth.
-const DESKTOP_IDENTITY_BY_PRODUCT_NAME = {
-  "T3 Code (Alpha)": {
-    appId: "com.t3tools.t3code",
-    packageName: "t3code",
-    scheme: "t3code",
-    wmClass: "t3code",
-    executableName: "t3code",
-    installDir: "D:\\t3code\\alpha",
-    userDataCurrent: "t3code-v2",
-    userDataLegacy: "t3code",
-    linuxDesktopEntryName: "com.t3tools.T3Code.desktop",
-  },
-  "T3 Code (Experimental)": {
-    appId: "com.t3tools.t3code.experimental",
-    packageName: "t3code-experimental",
-    scheme: "t3code-experimental",
-    wmClass: "t3code-experimental",
-    executableName: "t3code-experimental",
-    installDir: "D:\\t3code\\experimental",
-    userDataCurrent: "t3code-experimental",
-    userDataLegacy: "t3code-experimental",
-    linuxDesktopEntryName: "com.t3tools.T3Code.Experimental.desktop",
-  },
-  "T3 Code (Dev)": {
-    appId: "com.t3tools.t3code.dev",
-    packageName: "t3code-dev",
-    scheme: "t3code-dev",
-    wmClass: "t3code-dev",
-    executableName: "t3code-dev",
-    installDir: "D:\\t3code\\dev",
-    userDataCurrent: "t3code-dev",
-    userDataLegacy: "T3 Code (Dev)",
-    linuxDesktopEntryName: "com.t3tools.T3Code.Development.desktop",
-  },
-} as const;
-type DesktopIdentity =
-  (typeof DESKTOP_IDENTITY_BY_PRODUCT_NAME)[keyof typeof DESKTOP_IDENTITY_BY_PRODUCT_NAME];
-const FALLBACK_DESKTOP_IDENTITY: DesktopIdentity =
-  DESKTOP_IDENTITY_BY_PRODUCT_NAME["T3 Code (Experimental)"];
+const DESKTOP_APP_ID = "com.t3tools.t3code";
+const DESKTOP_EXPERIMENTAL_APP_ID = "com.t3tools.t3code.experimental";
+const DESKTOP_DEV_APP_ID = "com.t3tools.t3code.dev";
 const APPLE_TEAM_ID_PATTERN = /^[A-Z0-9]{10}$/u;
-
-export function resolveDesktopIdentity(productName: string): DesktopIdentity {
-  return (
-    (DESKTOP_IDENTITY_BY_PRODUCT_NAME as Record<string, DesktopIdentity>)[productName] ??
-    FALLBACK_DESKTOP_IDENTITY
-  );
-}
 
 const BuildPlatform = Schema.Literals(["mac", "linux", "win"]);
 const BuildArch = Schema.Literals(["arm64", "x64", "universal"]);
@@ -129,9 +85,27 @@ const StageWorkspaceConfig = Schema.Struct({
   allowBuilds: Schema.optional(Schema.Record(Schema.String, Schema.Boolean)),
   patchedDependencies: Schema.optional(Schema.Record(Schema.String, Schema.String)),
   overrides: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+  packageExtensions: Schema.optional(
+    Schema.Record(
+      Schema.String,
+      Schema.Struct({
+        peerDependenciesMeta: Schema.Record(
+          Schema.String,
+          Schema.Struct({ optional: Schema.Boolean }),
+        ),
+      }),
+    ),
+  ),
   nodeLinker: Schema.optional(Schema.Literals(["hoisted"])),
 });
 type StageWorkspaceConfig = typeof StageWorkspaceConfig.Type;
+
+// electron-webauthn declares TypeScript as a peer only for its typings. pnpm
+// auto-installs missing peers, which would ship a compiler inside the app.
+const STAGE_PACKAGE_EXTENSIONS = {
+  "electron-webauthn": { peerDependenciesMeta: { typescript: { optional: true } } },
+  "@electron-webauthn/macos": { peerDependenciesMeta: { typescript: { optional: true } } },
+} as const;
 
 const RepoRoot = Effect.service(Path.Path).pipe(
   Effect.flatMap((path) => path.fromFileUrl(new URL("..", import.meta.url))),
@@ -140,7 +114,9 @@ const encodeJsonString = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknow
 const decodeWorkspaceConfig = Schema.decodeEffect(fromYaml(WorkspaceConfig));
 const encodeStageWorkspaceConfig = Schema.encodeEffect(fromYaml(StageWorkspaceConfig));
 
-const readWorkspaceConfig = Effect.fn("readWorkspaceConfig")(function* () {
+// Decodes the repo's pnpm-workspace.yaml. A PR CI test calls this too, so a bad
+// entry fails the PR instead of the nightly desktop build.
+export const readWorkspaceConfig = Effect.fn("readWorkspaceConfig")(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const repoRoot = yield* RepoRoot;
@@ -754,6 +730,7 @@ export class WindowsPrimaryNativeProbeError extends Schema.TaggedError<WindowsPr
 
 const WindowsPackagedPayloadValidationReason = Schema.Literals([
   "packaged-app-missing",
+  "app-identity-invalid",
   "sidecar-missing",
   "sidecar-invalid",
   "unpacked-native-missing",
@@ -775,6 +752,9 @@ export class WindowsPackagedPayloadValidationError extends Schema.TaggedError<Wi
   },
 ) {
   override get message(): string {
+    if (this.reason === "app-identity-invalid") {
+      return "Windows app.asar does not contain the expected runtime productName.";
+    }
     if (this.reason === "file-limit-exceeded") {
       return `Windows packaged payload contains ${String(this.fileCount)} files; expected at most ${String(this.fileLimit)}.`;
     }
@@ -898,7 +878,7 @@ const resolveGitCommitHash = Effect.fn("resolveGitCommitHash")(function* (repoRo
 const resolvePythonForNodeGyp = Effect.fn("resolvePythonForNodeGyp")(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const hostPlatform = yield* HostProcessPlatform;
+  const hostPlatform = yield* HostProcess.Platform;
   const env = yield* Config.all({
     configuredPython: Config.String("npm_config_python").pipe(
       Config.orElse(() => Config.String("PYTHON")),
@@ -976,10 +956,11 @@ interface StagePackageJson {
   readonly version: string;
   readonly buildVersion: string;
   readonly t3codeCommitHash: string;
-  readonly t3codeBuildStage?: string;
+  readonly t3codeWebAuthn?: MacWebAuthnEntitlements;
   readonly private: true;
   readonly packageManager: string;
   readonly description: string;
+  readonly license: string;
   readonly homepage: string;
   readonly author: string;
   readonly main: string;
@@ -1057,6 +1038,14 @@ export const WINDOWS_SERVER_ASAR_RESOURCE = "server.asar";
 // asar redirect convention). Everything else stays packed.
 export const WINDOWS_NATIVE_ASAR_UNPACK_GLOB =
   "{**/*.node,**/*.dll,**/*.exe,**/*.so,**/*.so.*,**/*.dylib}";
+// The server sidecar unpacks .node files separately, keeping only Windows ones.
+export const WINDOWS_SERVER_ASAR_UNPACK_GLOBS = [
+  "**/*.dll",
+  "**/*.exe",
+  "**/*.so",
+  "**/*.so.*",
+  "**/*.dylib",
+] as const;
 // Mirrors DESKTOP_FILE_EXCLUSIONS for the hand-packed sidecar: the Claude SDK
 // platform packages are dead weight (see above), and node_modules/.bin shims
 // are never spawned at runtime (and are symlinks on POSIX build hosts, which
@@ -1323,7 +1312,7 @@ export function resolveMacPasskeySigningConfiguration(
   }
 
   return {
-    appId: resolveDesktopIdentity(resolveDesktopProductName("")).appId,
+    appId: DESKTOP_APP_ID,
     teamId,
     rpDomains: uniqueRpDomains,
     provisioningProfilePath,
@@ -1339,12 +1328,80 @@ function escapeXml(value: string): string {
     .replaceAll("'", "&apos;");
 }
 
+/**
+ * Passkey entitlements for the in-app browser. Each is granted only when the
+ * provisioning profile authorizes it: macOS refuses to launch an app that
+ * claims a restricted entitlement its embedded profile does not carry.
+ */
+export interface MacWebAuthnEntitlements {
+  /** Keychain group for Electron's Touch ID passkeys. */
+  readonly touchIdKeychainAccessGroup: string | undefined;
+  /** Apple's managed browser entitlement, which allows passkeys for any site. */
+  readonly browserPasskeys: boolean;
+}
+
+const BROWSER_PASSKEYS_ENTITLEMENT = "com.apple.developer.web-browser.public-key-credential";
+
+const ProvisioningProfilePlist = Schema.Struct({
+  Entitlements: Schema.Struct({
+    "keychain-access-groups": Schema.optional(Schema.Array(Schema.String)),
+    [BROWSER_PASSKEYS_ENTITLEMENT]: Schema.optional(Schema.Boolean),
+  }),
+});
+const isProvisioningProfilePlist = Schema.is(ProvisioningProfilePlist);
+
+/**
+ * Reads the Entitlements dict of the XML plist a provisioning profile wraps in
+ * its CMS envelope. Anything unreadable grants nothing.
+ */
+const readProfileEntitlements = (provisioningProfile: string) => {
+  const start = provisioningProfile.indexOf("<?xml");
+  const end = provisioningProfile.indexOf("</plist>", start);
+  if (start === -1 || end === -1) return undefined;
+  try {
+    const profile: unknown = Plist.parse(provisioningProfile.slice(start, end + "</plist>".length));
+    return isProvisioningProfilePlist(profile) ? profile.Entitlements : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
+export function resolveMacWebAuthnEntitlements(
+  provisioningProfile: string,
+  configuration: Pick<MacPasskeySigningConfiguration, "appId" | "teamId">,
+): MacWebAuthnEntitlements {
+  const entitlements = readProfileEntitlements(provisioningProfile);
+  const keychainAccessGroup = `${configuration.teamId}.${configuration.appId}.webauthn`;
+  const keychainGroupAuthorized = (entitlements?.["keychain-access-groups"] ?? []).some((group) =>
+    group.endsWith("*")
+      ? keychainAccessGroup.startsWith(group.slice(0, -1))
+      : group === keychainAccessGroup,
+  );
+  return {
+    touchIdKeychainAccessGroup: keychainGroupAuthorized ? keychainAccessGroup : undefined,
+    browserPasskeys: entitlements?.[BROWSER_PASSKEYS_ENTITLEMENT] === true,
+  };
+}
+
 export function renderMacPasskeyEntitlements(
   configuration: MacPasskeySigningConfiguration,
+  webAuthn: MacWebAuthnEntitlements,
 ): string {
   const associatedDomains = configuration.rpDomains
     .map((domain) => `      <string>webcredentials:${escapeXml(domain)}</string>`)
     .join("\n");
+  const keychainAccessGroups = webAuthn.touchIdKeychainAccessGroup
+    ? `
+    <key>keychain-access-groups</key>
+    <array>
+      <string>${escapeXml(webAuthn.touchIdKeychainAccessGroup)}</string>
+    </array>`
+    : "";
+  const browserPasskeys = webAuthn.browserPasskeys
+    ? `
+    <key>${BROWSER_PASSKEYS_ENTITLEMENT}</key>
+    <true/>`
+    : "";
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -1357,7 +1414,7 @@ export function renderMacPasskeyEntitlements(
     <key>com.apple.developer.associated-domains</key>
     <array>
 ${associatedDomains}
-    </array>
+    </array>${keychainAccessGroups}${browserPasskeys}
     <key>com.apple.security.cs.allow-jit</key>
     <true/>
     <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
@@ -1585,6 +1642,7 @@ export function createStageWorkspaceConfig(input: {
       ? { patchedDependencies }
       : {}),
     ...(overrides && Object.keys(overrides).length > 0 ? { overrides } : {}),
+    packageExtensions: STAGE_PACKAGE_EXTENSIONS,
   };
 }
 
@@ -1676,7 +1734,7 @@ export const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (
   const path = yield* Path.Path;
   const repoRoot = yield* RepoRoot;
   const env = yield* BuildEnvConfig;
-  const hostPlatform = yield* HostProcessPlatform;
+  const hostPlatform = yield* HostProcess.Platform;
 
   const platform = mergeOptions(
     input.platform,
@@ -2364,7 +2422,7 @@ export const stageBrowserSecret = Effect.fn("stageBrowserSecret")(function* (inp
   // silently. `universal` is a mac-only arch the option type still admits;
   // the helper script rejects it, so it maps to the concrete x64 the Linux
   // resource monitor uses for the same request.
-  const hostPlatform = yield* HostProcessPlatform;
+  const hostPlatform = yield* HostProcess.Platform;
   if (hostPlatform !== "linux") {
     return yield* new LinuxBrowserSecretHostError({ hostPlatform });
   }
@@ -2693,8 +2751,37 @@ export function resolvePackageManagerUserAgent(packageManager: string): string {
   return `${trimmed.slice(0, versionSeparator)}/${trimmed.slice(versionSeparator + 1)}`;
 }
 
-export function resolveDesktopProductName(_version: string): string {
-  return desktopPackageJson.productName ?? "T3 Code (Experimental)";
+export function resolveDesktopProductName(version: string): string {
+  return resolveDesktopUpdateChannel(version) === "nightly"
+    ? "T3 Code (Experimental)"
+    : (desktopPackageJson.productName ?? "T3 Code");
+}
+
+export function resolveWindowsExecutableName(productName: string): string {
+  // Preserve existing shortcuts and overwrite the legacy executable in place.
+  return productName === "T3 Code (Beta)" ? "T3 Code (Alpha)" : productName;
+}
+
+export function resolveDesktopIdentity(productName: string): {
+  readonly appId: string;
+  readonly scheme: string;
+  readonly linuxWmClass: string;
+} {
+  if (productName === "T3 Code (Dev)") {
+    return {
+      appId: DESKTOP_DEV_APP_ID,
+      scheme: "t3code-dev",
+      linuxWmClass: "t3code-dev",
+    };
+  }
+  if (productName === "T3 Code (Experimental)") {
+    return {
+      appId: DESKTOP_EXPERIMENTAL_APP_ID,
+      scheme: "t3code-experimental",
+      linuxWmClass: "t3code-experimental",
+    };
+  }
+  return { appId: DESKTOP_APP_ID, scheme: "t3code", linuxWmClass: "t3code" };
 }
 
 export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
@@ -2746,6 +2833,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       ...(platform === "linux" ? LINUX_CAPTURE_EXTRA_RESOURCES : []),
       ...(platform === "linux" ? LINUX_BROWSER_SECRET_EXTRA_RESOURCES : []),
       ...(platform === "win" ? WINDOWS_SERVER_EXTRA_RESOURCES : []),
+      ...(platform === "win" ? [{ from: "apps/desktop/resources/icon.ico", to: "icon.ico" }] : []),
       ...(platform === "win" && wslRuntimeBundled ? WSL_RUNTIME_EXTRA_RESOURCES : []),
     ],
   };
@@ -2772,13 +2860,34 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       icon: "icon.icns",
       category: "public.app-category.developer-tools",
       extendInfo: {
+        // macOS 26 offers Messages/Mail codes in every text field unless opted out.
+        NSAutoFillRequiresTextContentTypeForOneTimeCodeOnMac: true,
+        NSLocalNetworkUsageDescription:
+          "T3 Code connects to devices on your local network for remote environments and commands run by terminals and coding agents.",
         NSScreenCaptureUsageDescription:
           "T3 Code captures the active window when you use the window capture shortcut.",
+        // macOS lists an app under Default web browser only when it opens web
+        // pages as documents as well as http and https links (see protocols).
+        CFBundleDocumentTypes: [
+          {
+            CFBundleTypeName: "Web page",
+            CFBundleTypeRole: "Viewer",
+            LSHandlerRank: "Alternate",
+            LSItemContentTypes: ["public.html", "public.xhtml"],
+          },
+        ],
       },
       protocols: [
         {
-          name: productName,
+          name: "T3 Code",
           schemes: [identity.scheme],
+        },
+        // Lets people choose T3 Code as their default web browser, which opens
+        // each link in a new thread's browser panel.
+        {
+          name: "Web site URL",
+          schemes: ["http", "https"],
+          role: "Viewer",
         },
       ],
       ...(signed ? { sign: path.join(repoRoot, "scripts/sign-macos.ts") } : {}),
@@ -2814,6 +2923,12 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   }
 
   if (platform === "linux") {
+    // electron-builder 26 defaults to its legacy AppImage runtime, which
+    // dynamically loads the system libfuse2 library. Pin the static runtime so
+    // the AppImage also launches on distributions that only provide FUSE 3.
+    buildConfig.toolsets = { appimage: "1.0.3" };
+    const path = yield* Path.Path;
+    const repoRoot = yield* RepoRoot;
     buildConfig.linux = {
       // The .deb is built from the same unpacked app after the AppImage.
       // electron-builder lists both in latest-linux.yml and writes
@@ -2828,20 +2943,26 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       maintainer: "T3 Tools <hello@t3.codes>",
       // electron-builder turns these into MimeType=x-scheme-handler/<scheme>;
       // in the .desktop entry (Exec already gets %U), so browsers can hand
-      // `${identity.scheme}://` OAuth callbacks to the app.
+      // t3code:// OAuth callbacks to the app.
       protocols: [
         {
-          name: productName,
+          name: "T3 Code",
           schemes: [identity.scheme],
         },
       ],
       desktop: {
         entry: {
-          StartupWMClass: identity.wmClass,
+          StartupWMClass: identity.linuxWmClass,
         },
       },
     };
     buildConfig.deb = {
+      // FPM runs outside the staged app directory, so source paths must be absolute.
+      // AppStream consumers associate this metadata with our t3code.desktop entry.
+      fpm: [
+        `${path.join(repoRoot, "apps/desktop/resources/linux/com.t3tools.t3code.metainfo.xml")}=/usr/share/metainfo/com.t3tools.t3code.metainfo.xml`,
+        `${path.join(repoRoot, "LICENSE")}=/usr/share/doc/t3code/copyright`,
+      ],
       // Electron's runtime libraries. Debian 13 and Ubuntu 24.04 renamed some
       // for 64-bit time; the old name is the fallback for older releases.
       depends: [
@@ -2865,17 +2986,21 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     // Keep blockmap-based differential downloads enabled while changing the
     // installed file topology. The optimization is in the payload shape, not
     // in trading update bandwidth for install speed.
-    // The `nsis.include` hook rewrites `$INSTDIR` to the per-stage fixed path
-    // (D:\t3code\alpha vs D:\t3code\experimental) so the Alpha and
-    // Experimental installers can coexist without colliding on the default
-    // %LOCALAPPDATA%\Programs\<productName>\ layout.
-    buildConfig.nsis = {
-      differentialPackage: true,
-      include: "apps/desktop/resources/install-dir-override.nsh",
-    };
+    buildConfig.nsis = { differentialPackage: true };
+    if (productName === "T3 Code (Dev)") {
+      buildConfig.nsis = {
+        differentialPackage: true,
+        include: "apps/desktop/resources/dev-installer.nsh",
+      };
+    }
     const winConfig: Record<string, unknown> = {
       target: [target],
       icon: "icon.ico",
+      executableName: resolveWindowsExecutableName(productName),
+      // Smart App Control validates unpacked native addons independently from
+      // the signed desktop executable. Extend release signing to every native
+      // Windows library that Electron or the server sidecar loads at runtime.
+      signExts: [".node", ".dll"],
       // Resource editing applies the product metadata and icon independently
       // of code signing. Disabling it for local unsigned builds leaves the
       // packaged executable with Electron's stock icon.
@@ -2964,11 +3089,33 @@ export const packWindowsServerAsar = Effect.fn("packWindowsServerAsar")(function
   readonly arch: typeof BuildArch.Type;
 }) {
   const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  // Native addons are unpacked only when they are Windows PE ("MZ") binaries.
+  // Signed builds Authenticode-sign every unpacked .node file, which fails on
+  // the darwin and linux prebuilds some packages (node-pty) ship alongside
+  // their win32 ones. The Windows primary never loads those, so they stay packed.
+  const unpackGlobs: string[] = [...WINDOWS_SERVER_ASAR_UNPACK_GLOBS];
+  for (const entry of yield* fs.readDirectory(input.sourceDir, { recursive: true })) {
+    if (!entry.endsWith(".node")) continue;
+    const addonPath = path.join(input.sourceDir, entry);
+    if ((yield* fs.stat(addonPath)).type !== "File") continue;
+    const bytes = yield* fs.readFile(addonPath);
+    if (bytes[0] !== 0x4d || bytes[1] !== 0x5a) continue;
+    const posixPath = entry.split(path.sep).join("/");
+    // Backslash escapes are path separators to minimatch on Windows.
+    if (/[\\*?[\]{}(),]/.test(posixPath)) {
+      return yield* new WindowsServerSidecarPackError({
+        asarPath: input.asarPath,
+        cause: new Error(`native addon path contains glob syntax: ${posixPath}`),
+      });
+    }
+    unpackGlobs.push(`**/${posixPath}`);
+  }
   yield* Effect.tryPromise({
     try: () =>
       createPackageWithOptions(input.sourceDir, input.asarPath, {
         dot: true,
-        unpack: WINDOWS_NATIVE_ASAR_UNPACK_GLOB,
+        unpack: `{${unpackGlobs.join(",")}}`,
         // glob 13 (via @electron/asar 4) matches `ignore` relative to `cwd`,
         // not against the absolute paths it crawls, so anchor it at the source.
         globOptions: {
@@ -3121,8 +3268,8 @@ export const verifyWindowsPrimaryFffNativeLoad = Effect.fn(
   readonly targetArch: typeof BuildArch.Type;
   readonly verbose: boolean;
 }) {
-  const hostPlatform = yield* HostProcessPlatform;
-  const hostArchitecture = yield* HostProcessArchitecture;
+  const hostPlatform = yield* HostProcess.Platform;
+  const hostArchitecture = yield* HostProcess.Architecture;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const executablePath = path.join(input.packagedAppDir, input.appExecutableName);
@@ -3139,10 +3286,7 @@ export const verifyWindowsPrimaryFffNativeLoad = Effect.fn(
   const probeRoot = yield* fs.makeTempDirectoryScoped({
     prefix: "t3code-windows-primary-native-probe-",
   });
-  const fffEntryPath = path.join(
-    input.asarPath,
-    "node_modules/@ff-labs/fff-node/dist/src/index.js",
-  );
+  const fffEntryPath = path.join(input.asarPath, "node_modules/@ff-labs/fff-node/dist/index.js");
   const probeEnv = { ...process.env };
   delete probeEnv.ELECTRON_NO_ASAR;
   delete probeEnv.NODE_OPTIONS;
@@ -3196,6 +3340,10 @@ export const verifyWindowsPrimaryFffNativeLoad = Effect.fn(
   );
 });
 
+const decodeWindowsAppManifest = Schema.decodeUnknownSync(
+  Schema.fromJsonString(Schema.Struct({ productName: Schema.optional(Schema.String) })),
+);
+
 export const validateWindowsPackagedPayload = Effect.fn(
   "desktopArtifact.validateWindowsPackagedPayload",
 )(function* (input: {
@@ -3238,6 +3386,24 @@ export const validateWindowsPackagedPayload = Effect.fn(
   }
 
   const resourcesDir = path.join(packagedAppDir, "resources");
+  yield* Effect.try({
+    try: () => {
+      const manifest = decodeWindowsAppManifest(
+        extractFile(path.join(resourcesDir, "app.asar"), "package.json").toString("utf8"),
+      );
+      // build.productName is stripped by electron-builder. Electron reads the
+      // top-level field before any runtime identity or profile is configured.
+      if (manifest.productName !== resolveDesktopProductName(input.appVersion)) {
+        throw new Error("Packaged runtime productName does not match the selected channel.");
+      }
+    },
+    catch: (cause) =>
+      new WindowsPackagedPayloadValidationError({
+        reason: "app-identity-invalid",
+        packagedAppDir,
+        cause,
+      }),
+  });
   const asarPath = path.join(resourcesDir, WINDOWS_SERVER_ASAR_RESOURCE);
   if (!(yield* fs.exists(asarPath).pipe(Effect.orElseSucceed(() => false)))) {
     return yield* new WindowsPackagedPayloadValidationError({
@@ -3441,7 +3607,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   const repoRoot = yield* RepoRoot;
   const path = yield* Path.Path;
   const fs = yield* FileSystem.FileSystem;
-  const hostPlatform = yield* HostProcessPlatform;
+  const hostPlatform = yield* HostProcess.Platform;
   if (hostPlatform === "linux" && options.platform === "linux") {
     yield* preflightLinuxDesktopBuild(options.arch);
   }
@@ -3512,8 +3678,6 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   });
 
   const appVersion = options.version ?? serverPackageJson.version;
-  const stageProductName = resolveDesktopProductName(appVersion);
-  const stageIdentity = resolveDesktopIdentity(stageProductName);
   const iconAssets = resolveDesktopBuildIconAssets(appVersion);
   const commitHash = yield* resolveGitCommitHash(repoRoot);
   const mkdir = options.keepStage ? fs.makeTempDirectory : fs.makeTempDirectoryScoped;
@@ -3640,32 +3804,6 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   yield* Effect.log("[desktop-artifact] Staging release app...");
   yield* fs.copy(distDirs.desktopDist, path.join(stageAppDir, "apps/desktop/dist-electron"));
   yield* fs.copy(distDirs.desktopResources, stageResourcesDir);
-  // Emit the per-stage NSIS include that forces INSTALLDIR to the fixed
-  // D:\t3code\<stage>\<productName>\ path so Alpha and Experimental
-  // installers coexist instead of sharing %LOCALAPPDATA%\Programs\<productName>\.
-  // The trailing APP_FILENAME keeps `instFilesPre` from appending another
-  // product-name segment on top of the fixed path.
-  //
-  // The two `customUnInstallCheck*` hooks skip the prior-version uninstall
-  // step entirely. Without them NSIS runs the previous build's uninstaller
-  // first; if the previous build was uninstalled, relocated, or broken the
-  // hook sees a non-zero exit code, surfaces the `Uninstall was not
-  // successful` dialog, and aborts with `SetErrorLevel 2 / Quit` — which is
-  // what blocks repeat installs on the same fork. Returning here means
-  // the new payload overwrites the existing install directory in-place,
-  // and `statev2.sqlite`, `client-settings.json`, and `keybindings.json`
-  // in the per-stage T3 home are preserved.
-  if (options.platform === "win") {
-    const installDirBase = stageIdentity.installDir.replaceAll("\\", "\\\\");
-    const installDirOverrideNsh =
-      `!macro customInit\n  StrCpy $INSTDIR "${installDirBase}\\\\${stageProductName}"\n!macroend\n` +
-      `!macro customUnInstallCheck\n  ClearErrors\n!macroend\n` +
-      `!macro customUnInstallCheckCurrentUser\n  ClearErrors\n!macroend\n`;
-    yield* fs.writeFileString(
-      path.join(stageResourcesDir, "install-dir-override.nsh"),
-      installDirOverrideNsh,
-    );
-  }
   if (options.platform === "linux") {
     const extensionDir = path.join(stageAppDir, "apps/desktop/gnome-extension");
     yield* fs.makeDirectory(extensionDir, { recursive: true });
@@ -3747,13 +3885,24 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   const macEntitlementsPath = macPasskeySigning
     ? path.join(stageAppDir, "entitlements.mac.plist")
     : undefined;
+  let macWebAuthn: MacWebAuthnEntitlements | undefined;
   if (macPasskeySigning && macEntitlementsPath) {
     if (!(yield* fs.exists(macPasskeySigning.provisioningProfilePath))) {
       return yield* new MacProvisioningProfileNotFoundError({
         provisioningProfilePath: macPasskeySigning.provisioningProfilePath,
       });
     }
-    yield* fs.writeFileString(macEntitlementsPath, renderMacPasskeyEntitlements(macPasskeySigning));
+    macWebAuthn = resolveMacWebAuthnEntitlements(
+      yield* fs.readFileString(macPasskeySigning.provisioningProfilePath),
+      macPasskeySigning,
+    );
+    yield* Effect.log(
+      `[desktop-artifact] In-app browser passkeys: Touch ID ${macWebAuthn.touchIdKeychainAccessGroup ? "enabled" : "disabled"}, browser passkeys ${macWebAuthn.browserPasskeys ? "enabled" : "disabled"}.`,
+    );
+    yield* fs.writeFileString(
+      macEntitlementsPath,
+      renderMacPasskeyEntitlements(macPasskeySigning, macWebAuthn),
+    );
   }
 
   // Windows splits dependencies per process: app.asar carries only the
@@ -3779,21 +3928,18 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
       ? path.join(stageAppDir, WINDOWS_SERVER_RESOURCE_SOURCE_DIR, WINDOWS_SERVER_ASAR_RESOURCE)
       : undefined;
   const stagePackageJson: StagePackageJson = {
-    // NSIS install directory derives from package name, not productName.
-    // Override the default %LOCALAPPDATA%\Programs\<productName>\ location
-    // with a per-stage fixed path so Alpha and Experimental can coexist.
-    // `productName` is preserved as a top-level field so Electron's
-    // `app.getName()` resolves to the stage-specific value at runtime and
-    // the userData derivation picks the matching profile.
-    name: stageIdentity.packageName,
-    productName: stageProductName,
-    t3codeBuildStage: stageIdentity.packageName,
+    name: "t3code",
+    productName: resolveDesktopProductName(appVersion),
     version: appVersion,
     buildVersion: appVersion,
     t3codeCommitHash: commitHash,
+    // Read by apps/desktop/src/preview/Passkeys.ts; must match the signed entitlements.
+    ...(macWebAuthn ? { t3codeWebAuthn: macWebAuthn } : {}),
     private: true,
     packageManager: rootPackageJson.packageManager,
-    description: "T3 Code desktop build",
+    description:
+      "T3 Code is an open-source desktop app for coding agents. Work with your existing agent subscriptions, review code changes, and run commands in your projects. Connect from desktop, web, or mobile to continue working remotely.",
+    license: "MIT",
     // Required by the .deb control file.
     homepage: "https://t3.codes",
     author: "T3 Tools",
@@ -3984,7 +4130,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   if (options.platform === "win") {
     yield* validateWindowsPackagedPayload({
       stageDistDir,
-      appExecutableName: `${resolveDesktopProductName(appVersion)}.exe`,
+      appExecutableName: `${resolveWindowsExecutableName(stagePackageJson.productName)}.exe`,
       targetArch: options.arch,
       appVersion,
       expectWslRuntime: bundlesWslRuntime({

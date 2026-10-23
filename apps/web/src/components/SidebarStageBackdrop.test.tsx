@@ -19,12 +19,16 @@ describe("SidebarStageBackdrop", () => {
     expect(resolveEnvironmentIdentificationPillLabel("Dev")).toBe("Dev");
     expect(resolveEnvironmentIdentificationPillLabel("nightly")).toBe("Nightly");
     expect(resolveEnvironmentIdentificationPillLabel("Latest")).toBeNull();
+    expect(resolveEnvironmentIdentificationPillLabel("Beta")).toBe("Beta");
     expect(resolveEnvironmentIdentificationPillLabel("Alpha")).toBe("Alpha");
     expect(resolveEnvironmentIdentificationPillLabel(" experimental ")).toBe("Experimental");
     expect(resolveEnvironmentIdentificationPillLabel("unknown")).toBeNull();
   });
 
   it.each([
+    ["Beta", "artwork", "Beta"],
+    ["Beta", "pill", "Beta"],
+    ["Beta", "none", null],
     ["Alpha", "artwork", "Alpha"],
     ["Alpha", "pill", "Alpha"],
     ["Alpha", "none", null],

@@ -7,7 +7,7 @@ import { useI18n } from "../i18n/I18nProvider";
 import { SidebarMenuSubItem, useSidebar } from "./ui/sidebar";
 import { cn } from "../lib/utils";
 import { readThreadShells } from "../state/entities";
-import { filterSidebarVisibleThreads } from "./Sidebar.logic";
+import { filterSidebarV2VisibleThreads } from "./Sidebar.logic";
 import { sortThreads } from "../lib/threadSort";
 import { buildThreadRouteParams } from "../threadRoutes";
 import { toastManager } from "./ui/toast";
@@ -48,12 +48,12 @@ export function LegacySidebarDraftRow(props: { draftId: DraftId; isActive: boole
               <button
                 type="button"
                 aria-label={t("sidebar.closeDraft")}
-                className="inline-flex h-6 min-w-6 cursor-pointer items-center justify-center rounded-md px-0.75 text-icon-muted hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
+                className="inline-flex h-6 min-w-6 cursor-pointer items-center justify-center rounded-md px-0.75 text-icon-muted hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring"
                 onClick={() => {
                   void (async () => {
                     if (props.isActive) {
                       const nextThread = sortThreads(
-                        filterSidebarVisibleThreads(readThreadShells()),
+                        filterSidebarV2VisibleThreads(readThreadShells(), null),
                         "updated_at",
                       )[0];
                       if (nextThread) {

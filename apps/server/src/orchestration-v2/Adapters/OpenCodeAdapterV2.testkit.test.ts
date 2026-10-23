@@ -1,7 +1,7 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 
-import { OPENCODE_PROVIDER } from "./OpenCodeAdapterV2.ts";
+import { OPENCODE_PROVIDER } from "../../../../../packages/provider-opencode/src/server/adapter.ts";
 import {
   OPENCODE_SDK_REPLAY_PROTOCOL,
   OpenCodeReplayController,

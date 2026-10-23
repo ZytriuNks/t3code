@@ -2,12 +2,13 @@ import { assert, describe, it } from "@effect/vitest";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
-import * as Migrator from "effect/unstable/sql/Migrator";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as Migrator from "effect/sql/Migrator";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import { migrationManifest, runMigrations } from "./Migrations.ts";
-import OrchestrationV2 from "./Migrations/054_OrchestrationV2.ts";
-import RemoveRedundantProjectionIndexes from "./Migrations/055_RemoveRedundantProjectionIndexes.ts";
+import PullRequestFilesViewed from "./Migrations/053_PullRequestFilesViewed.ts";
+import RemoveRedundantProjectionIndexes from "./Migrations/056_RemoveRedundantProjectionIndexes.ts";
+import OrchestrationV2 from "./Migrations/055_OrchestrationV2.ts";
 
 // The V2 schema is unchanged from the published September 15–16 previews.
 const seedPreview = Effect.gen(function* () {
@@ -27,41 +28,6 @@ const seedPreview = Effect.gen(function* () {
 });
 
 describe("V2 preview upgrade", () => {
-  it.effect("upgrades a database with V2 recorded at 54 and indexes at 55", () =>
-    Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient;
-      yield* runMigrations({ toMigrationInclusive: 53 });
-      yield* Migrator.make({})({
-        loader: Migrator.fromRecord({
-          "54_OrchestrationV2": OrchestrationV2,
-          "55_RemoveRedundantProjectionIndexes": RemoveRedundantProjectionIndexes,
-        }),
-      });
-      yield* sql`
-        INSERT INTO orchestration_v2_legacy_imports
-          (thread_id, source_updated_at, shell_imported_at, transcript_imported_at, imported_message_count)
-        VALUES ('preview-thread', '2026-09-15', '2026-09-15', '2026-09-16', 42)
-      `;
-      assert.deepStrictEqual(yield* runMigrations(), [
-        [54, "ProjectionThreadsAutoSettleDisabledAt"],
-      ]);
-      assert.deepStrictEqual(yield* runMigrations(), []);
-      const history = yield* sql<{ readonly migration_id: number; readonly name: string }>`
-        SELECT migration_id, name FROM effect_sql_migrations ORDER BY migration_id
-      `;
-      assert.deepStrictEqual(
-        history.map((row) => [row.migration_id, row.name] as const),
-        migrationManifest,
-      );
-      assert.deepStrictEqual(
-        yield* sql`SELECT imported_message_count FROM orchestration_v2_legacy_imports WHERE thread_id = 'preview-thread'`,
-        [{ imported_message_count: 42 }],
-      );
-      const columns = yield* sql<{ readonly name: string }>`PRAGMA table_info(projection_threads)`;
-      assert.ok(columns.some(({ name }) => name === "auto_settle_disabled_at"));
-    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
-  );
-
   it.effect("upgrades a published preview without replaying V2 or losing import progress", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
@@ -71,6 +37,12 @@ describe("V2 preview upgrade", () => {
         [53, "PullRequestFilesViewed"],
         [54, "ProjectionThreadsAutoSettleDisabledAt"],
         [56, "RemoveRedundantProjectionIndexes"],
+        [57, "ScheduledTaskWebhooks"],
+        [58, "WebhookRelayDeliveries"],
+        [59, "McpAppModelContext"],
+        [60, "ThreadSnapshotWindowIndexes"],
+        [61, "PullRequestReviewGuides"],
+        [62, "ThreadFailureLookupIndex"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
       assert.deepStrictEqual(yield* sql`SELECT * FROM orchestration_v2_legacy_imports`, imports);
@@ -92,6 +64,38 @@ describe("V2 preview upgrade", () => {
       `;
       assert.strictEqual((yield* sql`SELECT * FROM pull_request_files_viewed`).length, 1);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+  );
+
+  it.effect.each([false, true])(
+    "upgrades preview migration 54 with index cleanup %s",
+    (withIndexes) =>
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* runMigrations({ toMigrationInclusive: 52 });
+        yield* Migrator.make({})({
+          loader: Migrator.fromRecord({
+            "53_PullRequestFilesViewed": PullRequestFilesViewed,
+            "54_OrchestrationV2": OrchestrationV2,
+            ...(withIndexes
+              ? { "55_RemoveRedundantProjectionIndexes": RemoveRedundantProjectionIndexes }
+              : {}),
+          }),
+        });
+        yield* runMigrations();
+        assert.deepStrictEqual(yield* runMigrations(), []);
+        const history = yield* sql<{
+          readonly migration_id: number;
+          readonly name: string;
+        }>`SELECT migration_id, name FROM effect_sql_migrations ORDER BY migration_id`;
+        assert.deepStrictEqual(
+          history.map((row) => [row.migration_id, row.name] as const),
+          migrationManifest,
+        );
+        const columns = yield* sql<{
+          readonly name: string;
+        }>`PRAGMA table_info(projection_threads)`;
+        assert.ok(columns.some((column) => column.name === "auto_settle_disabled_at"));
+      }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 
   it.effect("rolls back schema and ledger together on failure and can retry", () =>
@@ -118,6 +122,12 @@ describe("V2 preview upgrade", () => {
         [53, "PullRequestFilesViewed"],
         [54, "ProjectionThreadsAutoSettleDisabledAt"],
         [56, "RemoveRedundantProjectionIndexes"],
+        [57, "ScheduledTaskWebhooks"],
+        [58, "WebhookRelayDeliveries"],
+        [59, "McpAppModelContext"],
+        [60, "ThreadSnapshotWindowIndexes"],
+        [61, "PullRequestReviewGuides"],
+        [62, "ThreadFailureLookupIndex"],
       ]);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );

@@ -1,10 +1,13 @@
+import { HOSTED_APP_CHANNEL } from "~/branding";
 import { isElectron } from "~/env";
 import { isMacPlatform, isWindowsPlatform, normalizeSearchText } from "~/lib/utils";
 import { STATIC_KEYBINDING_COMMANDS, type KeybindingCommand } from "@t3tools/contracts";
 import type { EnvironmentId } from "@t3tools/contracts";
 import type { EnvironmentConnectionPhase } from "@t3tools/client-runtime/connection";
-import { EN_MESSAGES, type MessageKey, type MessageValues } from "../../i18n/messages";
+import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
 import { DEFAULT_KEYBINDINGS } from "@t3tools/shared/keybindings";
+import type { MessageKey, MessageValues } from "../../i18n/messages";
+import { EN_MESSAGES } from "../../i18n/messages";
 import { commandLabel } from "./KeybindingsSettings.logic";
 import {
   validateSettingsScopeSearch,
@@ -15,6 +18,7 @@ import {
 export type SettingsPath =
   | "/settings/projects"
   | "/settings/general"
+  | "/settings/diagnostics"
   | "/settings/appearance"
   | "/settings/keybindings"
   | "/settings/snap-shot"
@@ -39,21 +43,12 @@ export type SettingsSearchScope =
   | "checkout"
   | "connections";
 
-export type SettingsSearchItemTitleKey = Extract<
-  MessageKey,
-  `settings.search.item.${string}.title`
->;
-export type SettingsSearchItemKeywordsKey = Extract<
-  MessageKey,
-  `settings.search.item.${string}.keywords`
->;
 export type SettingsTranslator = (key: MessageKey, values?: MessageValues) => string;
 
 export interface SettingsSearchItem {
   readonly id: string;
   readonly title: string;
-  readonly titleKey?: SettingsSearchItemTitleKey;
-  readonly localizedSearchTermsKey?: SettingsSearchItemKeywordsKey;
+  readonly titleKey?: MessageKey;
   readonly to: SettingsPath;
   readonly targetId?: string;
   /** Descriptions, option labels, and aliases people may remember instead of the title. */
@@ -66,6 +61,9 @@ export interface SettingsSearchItem {
   // Its row only renders on Windows desktop, so other desktop platforms must
   // not expose a result that points to a missing anchor.
   readonly windowsOnly?: boolean;
+  // Its row renders only where the release channel can change: the desktop
+  // app, or a hosted web build deployed with a channel.
+  readonly releaseChannelOnly?: boolean;
   readonly cloudOnly?: boolean;
   readonly environmentOnly?: boolean;
   readonly providerSettingsOnly?: boolean;
@@ -73,6 +71,8 @@ export interface SettingsSearchItem {
   readonly localBackendManagementOnly?: boolean;
   readonly localEnvironmentOnly?: boolean;
   readonly wslAvailableOnly?: boolean;
+  // Its row only renders while this environment's T3 Connect managed tunnel is on.
+  readonly managedTunnelOnly?: boolean;
   /**
    * Sorts after every other match. Keybinding commands mirror rows on other
    * surfaces, so "model" must still lead with Default model, not Model Picker.
@@ -80,26 +80,6 @@ export interface SettingsSearchItem {
   readonly secondary?: boolean;
   readonly requiresThreadAutoSettlement?: boolean;
   readonly requiresLegacySidebar?: boolean;
-}
-
-type SettingsSearchItemDefinition = Omit<
-  SettingsSearchItem,
-  "id" | "titleKey" | "localizedSearchTermsKey"
-> & {
-  readonly id: string;
-};
-
-function withSettingsSearchMessageKeys<const Item extends SettingsSearchItemDefinition>(
-  item: Item,
-): Item & Pick<SettingsSearchItem, "titleKey" | "localizedSearchTermsKey"> {
-  const titleKey = `settings.search.item.${item.id}.title`;
-  const localizedSearchTermsKey = `settings.search.item.${item.id}.keywords`;
-  if (!(titleKey in EN_MESSAGES) || !(localizedSearchTermsKey in EN_MESSAGES)) return item;
-  return {
-    ...item,
-    titleKey: titleKey as SettingsSearchItemTitleKey,
-    localizedSearchTermsKey: localizedSearchTermsKey as SettingsSearchItemKeywordsKey,
-  };
 }
 
 export interface SettingsSearchAvailability {
@@ -111,6 +91,7 @@ export interface SettingsSearchAvailability {
   readonly canManageLocalBackend: boolean;
   readonly isWslSettingsRowVisible: boolean;
   readonly hasThreadAutoSettlement: boolean;
+  readonly managedTunnelActive?: boolean;
 }
 
 /**
@@ -118,6 +99,7 @@ export interface SettingsSearchAvailability {
  * subtitles both render from this record, so each label exists once.
  */
 export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
+  "/settings/diagnostics": "Diagnostics",
   "/settings/projects": "Project",
   "/settings/general": "General",
   "/settings/appearance": "Appearance",
@@ -133,6 +115,7 @@ export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
 };
 
 export const SETTINGS_SECTION_MESSAGE_KEYS: Readonly<Record<SettingsPath, MessageKey>> = {
+  "/settings/diagnostics": "settings.header.diagnostics",
   "/settings/projects": "settings.section.project",
   "/settings/general": "settings.section.general",
   "/settings/appearance": "settings.section.appearance",
@@ -146,6 +129,7 @@ export const SETTINGS_SECTION_MESSAGE_KEYS: Readonly<Record<SettingsPath, Messag
   "/settings/connections": "settings.section.connections",
   "/settings/archived": "settings.section.archive",
 };
+
 /** Anchor id of the first row bound to `command` on the Keybindings page. */
 export function keybindingSearchAnchorId<Command extends KeybindingCommand>(command: Command) {
   return `keybinding-${command}` as const;
@@ -173,12 +157,91 @@ const KEYBINDING_SEARCH_ITEMS = STATIC_KEYBINDING_COMMANDS.toSorted((left, right
   };
 });
 
+/** Anchor id of a source control host's settings form on the Source Control page. */
+export function sourceControlHostSettingsSearchId(kind: string) {
+  return `source-control-host-${kind}` as const;
+}
+
+/** One result per host whose definition declares settings, searchable by its field titles. */
+const SOURCE_CONTROL_HOST_SEARCH_ITEMS = sourceControlClients.definitions.flatMap((definition) =>
+  definition.settings && definition.kind !== "github"
+    ? [
+        {
+          id: sourceControlHostSettingsSearchId(definition.kind),
+          title: `${definition.label} credentials`,
+          to: "/settings/source-control" as const,
+          searchTerms: [
+            `${definition.label} ${Object.keys(definition.settings.fields).join(" ")} token credentials sign in`,
+          ],
+          environmentOnly: true,
+          scope: "environment-defaults" as const,
+        },
+      ]
+    : [],
+);
+
 /**
  * Searchable settings and stable destinations, in result order. Rows with a
  * dedicated anchor render their id and title via `searchableSetting`; items
  * that may not be mounted point at their nearest stable section instead.
  */
-const SETTINGS_SEARCH_ITEM_DEFINITIONS = [
+export const SETTINGS_SEARCH_ITEMS = [
+  {
+    id: "language",
+    title: "Language",
+    to: "/settings/general",
+    searchTerms: ["locale system english 中文 简体中文 语言"],
+  },
+  {
+    id: "auto-expand-thread-details",
+    title: "Automatically expand workspace details",
+    to: "/settings/general",
+    searchTerms: ["workspace details panel auto expand 工作面板 工作区 面板 自动 展开"],
+  },
+  {
+    id: "hide-unavailable-context-menu-items",
+    title: "Hide unavailable context menu items",
+    to: "/settings/general",
+    searchTerms: ["right click disabled unavailable hidden 隐藏 不可用 右键 菜单"],
+  },
+  {
+    id: "scratch-base-directory",
+    title: "No-project chats base directory",
+    to: "/settings/general",
+    scope: "environment-defaults",
+    searchTerms: ["scratch chat directory folder path 无项目 对话 目录 路径"],
+  },
+  {
+    id: "legacy-sidebar-project-guides",
+    title: "Indentation guides",
+    to: "/settings/appearance",
+    requiresLegacySidebar: true,
+    searchTerms: ["legacy sidebar guides 旧版 侧栏 缩进 引导线"],
+  },
+  {
+    id: "legacy-sidebar-thread-status-dots",
+    title: "Thread status dots",
+    to: "/settings/appearance",
+    requiresLegacySidebar: true,
+    searchTerms: ["legacy sidebar status dots text 旧版 侧栏 状态 圆点 文字"],
+  },
+  {
+    id: "storage-worktree-keep-when",
+    targetId: "storage-worktrees",
+    title: "Keep worktrees with local changes",
+    to: "/settings/storage",
+    scope: "project-defaults",
+    searchTerms: [
+      "any local files uncommitted changes edited tracked files ignored env build output cleanup",
+    ],
+  },
+  {
+    id: "storage-delete-now",
+    title: "Delete now",
+    to: "/settings/storage",
+    scope: "environment-defaults",
+    searchTerms: ["storage cleanup run now results report removed kept failed"],
+  },
   {
     id: "storage-worktrees",
     title: "Worktree cleanup",
@@ -187,6 +250,13 @@ const SETTINGS_SEARCH_ITEM_DEFINITIONS = [
     searchTerms: [
       "disk storage delete deleted archived threads old inactive merged unchanged worktrees retention days project inherit off custom",
     ],
+  },
+  {
+    id: "storage-worktrees-location",
+    title: "Worktree location",
+    to: "/settings/storage",
+    scope: "environment-defaults",
+    searchTerms: ["worktree location folder directory path drive external disk"],
   },
   {
     id: "storage-artifacts",
@@ -276,7 +346,7 @@ const SETTINGS_SEARCH_ITEM_DEFINITIONS = [
     id: "environment-identification",
     title: "Environment identification",
     to: "/settings/appearance",
-    searchTerms: ["alpha experimental dev nightly artwork pill label hide none"],
+    searchTerms: ["beta experimental dev nightly artwork pill label hide none"],
     // The setting is stage-dependent, so its parent section is the stable destination.
     targetId: "appearance-interface",
   },
@@ -327,6 +397,12 @@ const SETTINGS_SEARCH_ITEM_DEFINITIONS = [
     title: "Project grouping",
     to: "/settings/general",
     searchTerms: ["combine matching repositories environments sidebar"],
+  },
+  {
+    id: "project-order",
+    title: "Project order",
+    to: "/settings/general",
+    searchTerms: ["sort projects sidebar manual created recent"],
   },
   {
     id: "snooze-limited-threads",
@@ -382,12 +458,6 @@ const SETTINGS_SEARCH_ITEM_DEFINITIONS = [
     title: "In-app notifications",
     to: "/settings/general",
     searchTerms: ["notification toast popup completion input approval failure"],
-  },
-  {
-    id: "language",
-    title: "Language",
-    to: "/settings/general",
-    searchTerms: ["locale system english simplified chinese 中文 简体中文 语言"],
   },
   {
     id: "time-format",
@@ -457,14 +527,6 @@ const SETTINGS_SEARCH_ITEM_DEFINITIONS = [
     title: "Proactive panels",
     to: "/settings/general",
     searchTerms: ["automatically open diff pull request pr right panel agent completion"],
-  },
-  {
-    id: "auto-expand-thread-details",
-    title: "Automatically expand workspace details",
-    to: "/settings/general",
-    searchTerms: [
-      "auto expand workspace thread details panel wide width toolbar popover collapse external app",
-    ],
   },
   {
     id: "skills-in-slash-menu",
@@ -550,13 +612,6 @@ const SETTINGS_SEARCH_ITEM_DEFINITIONS = [
     searchTerms: ["base directory folder browser path home"],
   },
   {
-    id: "scratch-base-directory",
-    title: "No-project chats base directory",
-    to: "/settings/general",
-    scope: "environment-defaults",
-    searchTerms: ["scratch no project chat thread working directory folder path home"],
-  },
-  {
     id: "unpin-confirmation",
     title: "Unpin confirmation",
     to: "/settings/general",
@@ -575,14 +630,6 @@ const SETTINGS_SEARCH_ITEM_DEFINITIONS = [
     searchTerms: ["ask before thread chat history"],
   },
   {
-    id: "hide-unavailable-context-menu-items",
-    title: "Hide unavailable context menu items",
-    to: "/settings/general",
-    searchTerms: [
-      "right click context menu items unavailable disabled greyed hidden hide show filter",
-    ],
-  },
-  {
     id: "quit-confirmation",
     title: "Quit shortcut",
     to: "/settings/general",
@@ -595,6 +642,40 @@ const SETTINGS_SEARCH_ITEM_DEFINITIONS = [
     to: "/settings/general",
     scope: "project-defaults",
     searchTerms: ["generated thread titles source control content default provider"],
+  },
+  {
+    id: "app-version",
+    title: "Version",
+    to: "/settings/general",
+    searchTerms: ["about check for updates download install upgrade release"],
+  },
+  {
+    id: "update-track",
+    title: "Update track",
+    to: "/settings/general",
+    searchTerms: ["release channel stable latest nightly prerelease"],
+    releaseChannelOnly: true,
+  },
+  {
+    id: "cli-command",
+    title: "t3 command",
+    to: "/settings/general",
+    searchTerms: ["cli terminal shell path install command line"],
+    desktopOnly: true,
+  },
+  {
+    id: "privacy-policy",
+    title: "Privacy policy",
+    to: "/settings/general",
+    searchTerms: ["telemetry analytics usage data tracking legal opt out"],
+  },
+  {
+    id: "telemetry-export",
+    title: "OpenTelemetry export",
+    to: "/settings/diagnostics",
+    targetId: "telemetry-export",
+    scope: "environment",
+    searchTerms: ["OTel OTLP telemetry export endpoints logs traces metrics Grafana"],
   },
   {
     id: "diagnostics",
@@ -621,25 +702,9 @@ const SETTINGS_SEARCH_ITEM_DEFINITIONS = [
   },
   {
     id: "legacy-sidebar",
-    title: "Sidebar style",
+    title: "Sidebar (legacy)",
     to: "/settings/appearance",
-    searchTerms: ["sidebar style default legacy project thread tree old flat list"],
-  },
-  {
-    id: "legacy-sidebar-project-guides",
-    title: "Indentation guides",
-    to: "/settings/appearance",
-    requiresLegacySidebar: true,
-    searchTerms: [
-      "project guides vertical lines thread tree indentation indent indentation guides left align legacy sidebar pinned no project drafts",
-    ],
-  },
-  {
-    id: "legacy-sidebar-thread-status-dots",
-    title: "Thread status dots",
-    to: "/settings/appearance",
-    requiresLegacySidebar: true,
-    searchTerms: ["thread status dots idle gray working completed indicator"],
+    searchTerms: ["project thread tree old flat list"],
   },
   {
     id: "keybindings",
@@ -647,6 +712,7 @@ const SETTINGS_SEARCH_ITEM_DEFINITIONS = [
     to: "/settings/keybindings",
     searchTerms: ["keyboard shortcuts hotkeys commands bindings json"],
   },
+  ...KEYBINDING_SEARCH_ITEMS,
   {
     id: "snap-shot-enabled",
     title: "SnapShots",
@@ -806,6 +872,12 @@ const SETTINGS_SEARCH_ITEM_DEFINITIONS = [
     searchTerms: ["links default browser in-app browser external open"],
   },
   {
+    id: "pull-request-links-open-in-app",
+    title: "Open pull requests in T3 Code",
+    to: "/settings/integrations",
+    searchTerms: ["pr links github browser external click default pull request view panel"],
+  },
+  {
     id: "browser-auto-show-floating-preview",
     title: "Auto-show floating preview",
     to: "/settings/integrations",
@@ -817,6 +889,13 @@ const SETTINGS_SEARCH_ITEM_DEFINITIONS = [
     to: "/settings/source-control",
     scope: "project-defaults",
     searchTerms: ["auto pull default branch current checkout fast forward upstream"],
+  },
+  {
+    id: "remove-agent-credits-on-merge",
+    title: "Remove agent credits when merging",
+    to: "/settings/source-control",
+    scope: "project-defaults",
+    searchTerms: ["pull request github squash co-authored-by attribution claude codex generated"],
   },
   {
     id: "pull-request-merge-method",
@@ -845,13 +924,24 @@ const SETTINGS_SEARCH_ITEM_DEFINITIONS = [
     scope: "environment-defaults",
   },
   {
-    id: "bitbucket-credentials",
-    title: "Bitbucket credentials",
+    id: "worktree-branch-naming",
+    title: "Worktree branch naming",
     to: "/settings/source-control",
-    searchTerms: ["bitbucket atlassian access token api token email credentials sign in"],
+    searchTerms: ["static semantic prefix custom prompt instructions feat fix refactor chore"],
+    environmentOnly: true,
+    scope: "project-defaults",
+  },
+  {
+    id: "github-accounts",
+    title: "GitHub accounts and token",
+    to: "/settings/source-control",
+    searchTerms: [
+      "github gh account login user host enterprise ghes switch multiple accounts disable sign in token personal access token pat api key credential",
+    ],
     environmentOnly: true,
     scope: "environment-defaults",
   },
+  ...SOURCE_CONTROL_HOST_SEARCH_ITEMS,
   {
     id: "source-control-writing-style",
     title: "Source control writing style",
@@ -879,6 +969,32 @@ const SETTINGS_SEARCH_ITEM_DEFINITIONS = [
     scope: "project-defaults",
   },
   {
+    id: "review-guides",
+    title: "Review guides (beta)",
+    to: "/settings/source-control",
+    searchTerms: ["pull request pr guided review guide tour beta experimental"],
+    environmentOnly: true,
+  },
+  {
+    id: "review-guide-model",
+    title: "Review guide model",
+    to: "/settings/source-control",
+    // Hidden until review guides are on, so a search lands on the switch that shows it.
+    targetId: "review-guides",
+    searchTerms: ["pull request pr guided review guide brief maintainer"],
+    environmentOnly: true,
+    scope: "project-defaults",
+  },
+  {
+    id: "review-guide-instructions",
+    title: "Review guide instructions",
+    to: "/settings/source-control",
+    targetId: "review-guides",
+    searchTerms: ["pull request pr guided review guide preferences taste prompt custom"],
+    environmentOnly: true,
+    scope: "project-defaults",
+  },
+  {
     id: "project-actions",
     title: "Actions",
     to: "/settings/projects",
@@ -890,7 +1006,6 @@ const SETTINGS_SEARCH_ITEM_DEFINITIONS = [
     to: "/settings/connections",
     targetId: "connections-environment",
     searchTerms: ["machine glyph sidebar mac mini studio laptop desktop server cloud vm"],
-    localBackendManagementOnly: true,
   },
   {
     id: "local-environment",
@@ -940,6 +1055,16 @@ const SETTINGS_SEARCH_ITEM_DEFINITIONS = [
     cloudOnly: true,
   },
   {
+    id: "hold-webhooks-while-offline",
+    localEnvironmentOnly: true,
+    title: "Hold webhooks while offline",
+    to: "/settings/connections",
+    targetId: "connections-environment",
+    searchTerms: ["webhook automations offline queue mailbox t3 connect"],
+    cloudOnly: true,
+    managedTunnelOnly: true,
+  },
+  {
     id: "publish-agent-activity",
     localEnvironmentOnly: true,
     title: "Publish agent activity",
@@ -982,19 +1107,14 @@ const SETTINGS_SEARCH_ITEM_DEFINITIONS = [
     to: "/settings/archived",
     searchTerms: ["restore reopen deleted history projects"],
   },
-] as const satisfies ReadonlyArray<SettingsSearchItemDefinition>;
+] as const satisfies ReadonlyArray<SettingsSearchItem>;
 
-export const SETTINGS_SEARCH_ITEMS: ReadonlyArray<SettingsSearchItem> =
-  SETTINGS_SEARCH_ITEM_DEFINITIONS.flatMap((item) => {
-    const setting = withSettingsSearchMessageKeys(item);
-    return item.id === "keybindings" ? [setting, ...KEYBINDING_SEARCH_ITEMS] : [setting];
-  });
-
-export type SettingsSearchItemId = (typeof SETTINGS_SEARCH_ITEM_DEFINITIONS)[number]["id"];
+export type SettingsSearchItemId = (typeof SETTINGS_SEARCH_ITEMS)[number]["id"];
 
 const SEARCH_ITEMS_BY_ID = new Map(SETTINGS_SEARCH_ITEMS.map((item) => [item.id, item] as const));
 
 const SETTINGS_CATEGORY_SCOPES: Readonly<Record<SettingsPath, SettingsSearchScope | null>> = {
+  "/settings/diagnostics": "environment",
   "/settings/projects": "project",
   "/settings/general": null,
   "/settings/appearance": null,
@@ -1011,8 +1131,10 @@ const SETTINGS_CATEGORY_SCOPES: Readonly<Record<SettingsPath, SettingsSearchScop
   "/settings/archived": "project-defaults",
 };
 
+/** Search keeps the selected target. A missing row can explain its owning scope instead. */
 export function settingsSearchItemTitle(item: SettingsSearchItem, t?: SettingsTranslator): string {
-  return t && item.titleKey ? t(item.titleKey) : item.title;
+  const key = item.titleKey ?? `settings.search.item.${item.id}.title`;
+  return t && key in EN_MESSAGES ? t(key as MessageKey) : item.title;
 }
 
 export function settingsSearchItemTargetId(
@@ -1024,7 +1146,6 @@ export function settingsSearchItemTargetId(
     : (item.targetId ?? item.id);
 }
 
-/** Search keeps the selected target. A missing row can explain its owning scope instead. */
 export function getSettingsSearchTargetScope(targetId: string, t?: SettingsTranslator) {
   const items: readonly SettingsSearchItem[] = SETTINGS_SEARCH_ITEMS;
   const item =
@@ -1143,7 +1264,8 @@ export function filterAvailableSettingsSearchItems(
       (!item.localBackendManagementOnly || availability.canManageLocalBackend) &&
       (!item.localEnvironmentOnly || !availability.localEnvironmentDisabled) &&
       (!item.wslAvailableOnly || availability.isWslSettingsRowVisible) &&
-      (!item.requiresThreadAutoSettlement || availability.hasThreadAutoSettlement),
+      (!item.requiresThreadAutoSettlement || availability.hasThreadAutoSettlement) &&
+      (!item.managedTunnelOnly || availability.managedTunnelActive === true),
   );
 }
 
@@ -1160,38 +1282,37 @@ export function searchSettings(
   return items
     .flatMap((item, index) => {
       if (!isElectron && item.desktopOnly === true) return [];
+      if (item.releaseChannelOnly && !isElectron && HOSTED_APP_CHANNEL === null) return [];
       if (item.macOnly && !isMacPlatform(platform)) return [];
       if (item.windowsOnly && !isWindowsPlatform(platform)) return [];
 
-      const englishTitle = normalizeSearchText(item.title);
-      const localizedTitle = normalizeSearchText(settingsSearchItemTitle(item, t));
-      const titles = [...new Set([englishTitle, localizedTitle])];
+      const title = normalizeSearchText(settingsSearchItemTitle(item, t));
+      const keywordsKey = `settings.search.item.${item.id}.keywords`;
       const fields = [
-        ...titles,
-        normalizeSearchText(SETTINGS_SECTION_LABELS[item.to]),
-        ...(item.searchTerms ?? []).map(normalizeSearchText),
-        ...(t ? [normalizeSearchText(t(SETTINGS_SECTION_MESSAGE_KEYS[item.to]))] : []),
-        ...(t && item.localizedSearchTermsKey
-          ? [normalizeSearchText(t(item.localizedSearchTermsKey))]
+        title,
+        ...(t && keywordsKey in EN_MESSAGES
+          ? [normalizeSearchText(t(keywordsKey as MessageKey))]
           : []),
+        normalizeSearchText(
+          t ? t(SETTINGS_SECTION_MESSAGE_KEYS[item.to]) : SETTINGS_SECTION_LABELS[item.to],
+        ),
+        ...(item.searchTerms ?? []).map(normalizeSearchText),
       ];
       if (!queryTokens.every((token) => fields.some((field) => field.includes(token)))) return [];
 
       const exactPhraseField = fields.findIndex((field) => field.includes(normalizedQuery));
-      const titleRank = Math.max(
-        ...titles.map((title) =>
-          title === normalizedQuery
-            ? 5
-            : title.startsWith(normalizedQuery)
-              ? 4
-              : title.includes(normalizedQuery)
-                ? 3
-                : queryTokens.every((token) => title.includes(token))
-                  ? 2
-                  : 0,
-        ),
-      );
-      const rank = titleRank > 0 ? titleRank : exactPhraseField >= 0 ? 1 : 0;
+      const rank =
+        title === normalizedQuery
+          ? 5
+          : title.startsWith(normalizedQuery)
+            ? 4
+            : title.includes(normalizedQuery)
+              ? 3
+              : queryTokens.every((token) => title.includes(token))
+                ? 2
+                : exactPhraseField >= 0
+                  ? 1
+                  : 0;
       return [{ item, index, rank }];
     })
     .toSorted(

@@ -2,9 +2,9 @@ import { describe, expect, it } from "vite-plus/test";
 import { MessageId, NodeId, ProviderDriverKind, ThreadId, TurnItemId } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import { makeAssistantStreamingFilter, splitBufferedAssistantText } from "./assistantStreaming.ts";
-import type { ProviderAdapterV2Event } from "./ProviderAdapter.ts";
+import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 
-const message = (text: string, streaming = true): ProviderAdapterV2Event => ({
+const message = (text: string, streaming = true): ProviderAdapter.ProviderAdapterV2Event => ({
   type: "message.updated",
   driver: ProviderDriverKind.make("codex"),
   message: {
@@ -27,7 +27,7 @@ const turnItem = (
   text: string,
   streaming = true,
   type: "assistant_message" | "reasoning" = "assistant_message",
-): ProviderAdapterV2Event => ({
+): ProviderAdapter.ProviderAdapterV2Event => ({
   type: "turn_item.updated",
   driver: ProviderDriverKind.make("codex"),
   turnItem: {
@@ -52,32 +52,18 @@ const turnItem = (
 });
 
 describe("V2 assistant streaming", () => {
-  it.each(["realtime", "smooth"] as const)(
-    "delivers unfinished assistant content immediately in %s mode and preserves final text",
-    (mode) => {
-      const filter = makeAssistantStreamingFilter(mode);
-      const events = [
-        { kind: "messages", makeEvent: message },
-        { kind: "assistant turn items", makeEvent: turnItem },
-        {
-          kind: "reasoning",
-          makeEvent: (text: string, streaming = true) => turnItem(text, streaming, "reasoning"),
-        },
-      ];
-      for (const { makeEvent } of events) {
-        const partial = makeEvent("中文");
-        const openFence = makeEvent("中文🙂\n\n```ts\nconst value = ");
-        const rapidUpdate = makeEvent("中文🙂\n\n```ts\nconst value = 1;\n");
-        const final = makeEvent("中文🙂\n\n```ts\nconst value = 1;\n```\nDone.", false);
-
-        expect(filter(partial, 0)).toEqual(partial);
-        expect(filter(openFence, 50)).toEqual(openFence);
-        expect(filter(rapidUpdate, 100)).toEqual(rapidUpdate);
-        expect(filter(final, 150)).toEqual(final);
-      }
-    },
-  );
-
+  it.each(["realtime", "smooth"] as const)("forwards every %s update without buffering", (mode) => {
+    const filter = makeAssistantStreamingFilter(mode);
+    for (const event of [
+      message("partial"),
+      message("partial text"),
+      turnItem("thought", true, "reasoning"),
+      turnItem("answer"),
+      message("done", false),
+    ]) {
+      expect(filter(event, 0)).toBe(event);
+    }
+  });
   it("delivers completed paragraphs, coalesces rapid updates, and flushes final text", () => {
     const filter = makeAssistantStreamingFilter("paragraph");
     expect(filter(message("First"), 0)).toBeNull();
@@ -130,16 +116,11 @@ describe("V2 assistant streaming", () => {
     },
   );
 
-  it.each([
-    { mode: "turn", showRunning: false },
-    { mode: "paragraph", showRunning: false },
-    { mode: "realtime", showRunning: true },
-    { mode: "smooth", showRunning: true },
-  ] as const)(
-    "controls running assistant nodes in $mode mode while delivering tool and completed nodes",
-    ({ mode, showRunning }) => {
+  it.each(["turn", "paragraph"] as const)(
+    "suppresses running assistant nodes in %s mode while delivering tool and completed nodes",
+    (mode) => {
       const filter = makeAssistantStreamingFilter(mode);
-      const running: Extract<ProviderAdapterV2Event, { type: "node.updated" }> = {
+      const running: Extract<ProviderAdapter.ProviderAdapterV2Event, { type: "node.updated" }> = {
         type: "node.updated",
         driver: ProviderDriverKind.make("codex"),
         node: {
@@ -160,11 +141,22 @@ describe("V2 assistant streaming", () => {
           completedAt: null,
         },
       };
-      expect(filter(running, 0)).toEqual(showRunning ? running : null);
+      expect(filter(running, 0)).toBeNull();
       const completed = { ...running, node: { ...running.node, status: "completed" as const } };
       expect(filter(completed, 1)).toBe(completed);
       const tool = { ...running, node: { ...running.node, kind: "tool_call" as const } };
       expect(filter(tool, 2)).toBe(tool);
     },
   );
+});
+
+it("holds a streamed section heading until its content has a boundary", () => {
+  expect(splitBufferedAssistantText("Intro\n\n## Results\n\n")).toEqual({
+    ready: "Intro\n\n",
+    rest: "## Results\n\n",
+  });
+  expect(splitBufferedAssistantText("**Results**\n\nBody\n\nNext")).toEqual({
+    ready: "**Results**\n\nBody\n\n",
+    rest: "Next",
+  });
 });

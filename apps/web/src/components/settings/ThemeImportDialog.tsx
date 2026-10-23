@@ -123,7 +123,7 @@ function ThemeJsonEditor({
   }, []);
 
   return (
-    <div className="relative overflow-hidden rounded-xl border border-input bg-background shadow-xs/5 focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/24">
+    <div className="relative overflow-hidden rounded-xl border border-input bg-background shadow-xs/5 focus-within:border-ring focus-within:ring-3 focus-within:ring-inset focus-within:ring-ring/24">
       {isPlainText ? null : (
         <pre
           ref={highlightRef}
@@ -477,7 +477,7 @@ export function ThemeImportDialog({
           <div className="flex items-center gap-3" aria-hidden>
             <div className="h-px flex-1 bg-border" />
             <span className="text-muted-foreground text-2xs uppercase tracking-wider">
-              or import a file
+              {t("settings.appearance.theme.orImportFile")}
             </span>
             <div className="h-px flex-1 bg-border" />
           </div>

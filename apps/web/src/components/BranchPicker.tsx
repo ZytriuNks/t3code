@@ -1,4 +1,3 @@
-import { ScrollFrame } from "~/components/ui/scroll-frame";
 import type { VcsRef } from "@t3tools/contracts";
 import { LegendList, type LegendListRef } from "@legendapp/list/react";
 import {
@@ -18,6 +17,7 @@ import { shouldLoadNextBranchPageAfterScroll } from "../state/paginatedBranches"
 import { RefreshIcon } from "./ui/refresh-icon";
 import { Switch } from "./ui/switch";
 import { getVirtualizedScrollFadeClassName } from "./ui/scroll-area";
+import { ScrollFrame } from "./ui/scroll-frame";
 import {
   Combobox,
   ComboboxEmpty,
@@ -217,7 +217,7 @@ export function BranchPicker({
                     maybeFetchNextBranchPage();
                   }}
                   className={cn(
-                    "max-h-56 scrollbar-gutter-stable overflow-x-hidden overscroll-y-contain px-1 pt-2 pb-1",
+                    "max-h-56 overflow-x-hidden overscroll-y-contain ps-1 pe-0 pt-2 pb-1",
                     getVirtualizedScrollFadeClassName({
                       top: showTopBranchScrollFade,
                       bottom: showBottomBranchScrollFade,
@@ -267,6 +267,7 @@ export function BranchPickerRefItem({
   projectCwd: activeProjectCwd,
   index,
   value,
+  disabled,
   onClick,
   onContextMenu,
 }: {
@@ -274,6 +275,7 @@ export function BranchPickerRefItem({
   projectCwd: string | null;
   index: number;
   value?: string;
+  disabled?: boolean;
   onClick: ComponentProps<typeof ComboboxItem>["onClick"];
   onContextMenu?: ComponentProps<typeof ComboboxItem>["onContextMenu"];
 }) {
@@ -291,6 +293,7 @@ export function BranchPickerRefItem({
           : null;
   return (
     <ComboboxItem
+      disabled={disabled}
       hideIndicator
       key={itemValue}
       index={index}
@@ -300,7 +303,7 @@ export function BranchPickerRefItem({
     >
       <div className="flex w-full min-w-0 items-center justify-between gap-2">
         <MiddleTruncate value={itemValue} className="flex-1" />
-        {badge && <span className="shrink-0 text-[10px] text-muted-foreground/45">{badge}</span>}
+        {badge && <span className="shrink-0 text-3xs text-muted-foreground/45">{badge}</span>}
       </div>
     </ComboboxItem>
   );

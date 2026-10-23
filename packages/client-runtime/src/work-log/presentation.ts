@@ -18,6 +18,7 @@ import { resolveMediaSource } from "@t3tools/client-runtime/media-source";
 import { parseChangeRequestUrl } from "@t3tools/shared/changeRequestUrl";
 import { isWorkspaceImagePreviewPath } from "@t3tools/shared/filePreview";
 import { formatTokens } from "@t3tools/shared/usageFormat";
+import { classifyToolActivity } from "@t3tools/shared/toolActivity";
 import { toolOutputIndicatesFailure } from "@t3tools/shared/toolOutput";
 
 import {
@@ -37,8 +38,11 @@ export function toolItemForDisplay(item: OrchestrationV2TurnItem): Orchestration
       return displayItem;
     }
     case "file_change": {
-      const { diffStr: _diffStr, oldStr: _oldStr, newStr: _newStr, ...displayItem } = item;
-      return displayItem;
+      const { diffStr, oldStr: _oldStr, newStr: _newStr, ...displayItem } = item;
+      // A failed edit's diffStr holds the provider's error, not a diff.
+      return item.status === "failed" && diffStr?.trim()
+        ? { ...displayItem, diffStr }
+        : displayItem;
     }
     default:
       return item;
@@ -84,6 +88,8 @@ export type ToolGroupAction =
   | "link-pr"
   | "unlink-pr"
   | "list-prs"
+  | "watch-pr"
+  | "unwatch-pr"
   | "read"
   | "edit"
   | "command"
@@ -155,7 +161,9 @@ function resolveT3McpToolPresentation(
   const actionKind =
     definition.summaryAction === "link-pr" ||
     definition.summaryAction === "unlink-pr" ||
-    definition.summaryAction === "list-prs"
+    definition.summaryAction === "list-prs" ||
+    definition.summaryAction === "watch-pr" ||
+    definition.summaryAction === "unwatch-pr"
       ? definition.summaryAction
       : undefined;
   const payload = asRecord(data);
@@ -424,16 +432,45 @@ export function toolGroupAction(entry: WorkLogPresentationEntry): ToolGroupActio
   if (presentation?.icon === "browser") return "browser";
   if (presentation?.icon === "device") return "device";
   if (entry.requestKind === "file-read" || entry.viewedImagePath !== undefined) return "read";
-  if (
-    entry.itemType === "dynamic_tool" &&
-    /^read(?:\s+file)?$/i.test(normalizeCompactToolLabel(entry.toolTitle ?? entry.label))
-  ) {
-    return "read";
+  // Approvals and questions describe requested work, not work that ran.
+  if (entry.itemType === "approval_request" || entry.itemType === "user_input_request") {
+    return workLogEntryIsToolLike(entry) ? "other" : "update";
   }
-  if (entry.itemType === "file_change" || (entry.changedFiles?.length ?? 0) > 0) return "edit";
-  if (entry.itemType === "command_execution" || entry.command) return "command";
+  const data = asRecord(entry.toolData) ?? {};
+  const toolName =
+    entry.structuredPayload?.type === "dynamic_tool"
+      ? entry.structuredPayload.toolName
+      : typeof data.toolName === "string"
+        ? data.toolName
+        : entry.toolTitle;
+  const classified = classifyToolActivity({
+    itemType:
+      entry.itemType === "command_execution" ||
+      entry.itemType === "file_change" ||
+      entry.itemType === "web_search"
+        ? entry.itemType
+        : entry.itemType === "dynamic_tool"
+          ? "dynamic_tool_call"
+          : undefined,
+    title: entry.toolTitle ?? entry.label,
+    data: {
+      ...data,
+      ...(toolName ? { toolName } : {}),
+    },
+  });
+  if (classified === "read") return "read";
+  if (classified === "file_change" || entry.itemType === "file_change") return "edit";
+  if (classified === "command" || entry.itemType === "command_execution" || entry.command) {
+    return "command";
+  }
+  if (classified === "search") {
+    return entry.itemType === "web_search" && !workLogEntryIsLocalCodeSearch(entry)
+      ? "search"
+      : "code-search";
+  }
   if (workLogEntryIsLocalCodeSearch(entry)) return "code-search";
   if (entry.itemType === "web_search") return "search";
+  if ((entry.changedFiles?.length ?? 0) > 0) return "edit";
   return workLogEntryIsToolLike(entry) ? "other" : "update";
 }
 
@@ -509,6 +546,10 @@ function toolGroupActionLabel(action: ToolGroupAction, count: number): string {
       return `Linked ${count} ${count === 1 ? "pull request" : "pull requests"}`;
     case "unlink-pr":
       return `Unlinked ${count} ${count === 1 ? "pull request" : "pull requests"}`;
+    case "watch-pr":
+      return `Watching ${count} ${count === 1 ? "pull request" : "pull requests"}`;
+    case "unwatch-pr":
+      return `Stopped watching ${count} ${count === 1 ? "pull request" : "pull requests"}`;
     case "list-prs":
       return count === 1
         ? "Checked linked pull requests"
@@ -568,6 +609,7 @@ function summaryActionPriority(action: ToolGroupAction | T3McpToolSummaryAction)
     case "thread-create":
     case "thread-send":
     case "thread-interrupt":
+    case "workflow-stop":
     case "schedule-create":
     case "schedule-update":
     case "schedule-delete":
@@ -655,7 +697,7 @@ export function summarizeToolGroup(entries: ReadonlyArray<WorkLogPresentationEnt
   const labels = selected.map(({ label }) => label);
   if (sources.size > 0) {
     const sourceValues = [...sources.values()];
-    const sourceNames = sourceValues.map((source) => source.name);
+    const sourceNames = [...new Set(sourceValues.map((source) => source.name))];
     const formattedNames =
       sourceNames.length < 2
         ? sourceNames[0]!
@@ -664,7 +706,7 @@ export function summarizeToolGroup(entries: ReadonlyArray<WorkLogPresentationEnt
           : `${sourceNames.slice(0, -1).join(", ")}, and ${sourceNames.at(-1)}`;
     const allIntegrations = sourceValues.every((source) => source.kind === "integration");
     labels.unshift(
-      `Used ${formattedNames}${allIntegrations ? ` ${sources.size === 1 ? "integration" : "integrations"}` : ""}`,
+      `Used ${formattedNames}${allIntegrations ? ` ${sourceNames.length === 1 ? "integration" : "integrations"}` : ""}`,
     );
   }
   const sourcedCount = entries.filter(
@@ -712,4 +754,24 @@ export function toolGroupSummaryKind(
     }),
   );
   return fallbackKinds.size === 1 ? fallbackKinds.values().next().value! : "mixed";
+}
+
+/**
+ * Plain-text line for the latest thought in the live activity row. A
+ * bold-only opening line (the Codex summary heading) wins; otherwise this is
+ * the first sentence of the reasoning text. Web and mobile both render it.
+ */
+export function liveThoughtLine(markdown: string): string {
+  const heading = /^\s*\*\*([^*\r\n]+)\*\*[ \t]*\r?(?:\n|$)/.exec(markdown)?.[1];
+  const text = (heading ?? markdown)
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/^[ \t]*(?:#{1,6}|[-*+]|\d+\.)[ \t]+/gm, "")
+    .replace(/`+|\*\*|~~/g, "")
+    .replace(/(^|[^\w*])[*_]([^*_\n]+)[*_](?![\w*])/g, "$1$2")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (heading !== undefined) return text;
+  // Cut after the first . ? or ! (plus a closing quote or paren) that a space follows.
+  const end = /[.?!]["'”’)]?(?=\s)/.exec(text);
+  return end ? text.slice(0, end.index + end[0].length) : text;
 }

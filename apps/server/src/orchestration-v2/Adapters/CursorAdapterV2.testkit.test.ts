@@ -6,13 +6,13 @@ import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Schema from "effect/Schema";
 
-import { buildRuntimeInstructions } from "../../provider/RuntimeInstructions.ts";
-import { materializeReplayTranscriptRuntimeInstructions } from "../testkit/ReplayTranscriptNdjson.ts";
+import { buildRuntimeInstructions } from "@t3tools/provider-core/server/runtimeInstructions";
+import { materializeReplayTranscriptRuntimeInstructions } from "../testkit/ReplayRuntimeInstructions.ts";
 import {
   CURSOR_AGENT_SDK_PROTOCOL,
   CURSOR_PROVIDER,
   CursorAgentSdkRunnerError,
-} from "./CursorAgentSdk.ts";
+} from "@t3tools/provider-cursor/server/CursorAgentSdk";
 import {
   CursorReplayFrameMismatchError,
   CursorOrchestratorReplayHarness,

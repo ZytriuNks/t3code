@@ -14,6 +14,7 @@ const state = vi.hoisted(() => ({
   result: null as { readonly agents: ReadonlyArray<AcpRegistrySearchAgent> } | null,
   error: null as string | null,
   isPending: false,
+  canManage: true,
   refresh: vi.fn(),
   search: vi.fn(() => atoms.search),
   prepare: vi.fn(),
@@ -53,6 +54,11 @@ vi.mock("../../state/server", () => ({
   },
 }));
 
+vi.mock("../../state/session", () => ({
+  useEnvironmentScope: () => state.canManage,
+  readEnvironmentScope: () => state.canManage,
+}));
+
 vi.mock("../../state/query", () => ({
   useEnvironmentQuery: () => ({
     data: state.result,
@@ -66,8 +72,7 @@ vi.mock("../../state/use-atom-command", () => ({
   useAtomCommand: () => state.prepare,
 }));
 
-vi.mock("@t3tools/client-runtime/state/runtime", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@t3tools/client-runtime/state/runtime")>()),
+vi.mock("@t3tools/client-runtime/state/runtime", () => ({
   isAtomCommandInterrupted: () => false,
   squashAtomCommandFailure: () => new Error("Prepare failed."),
 }));
@@ -130,6 +135,7 @@ function findByAriaLabel(
 
 describe("AcpRegistrySearchStep", () => {
   beforeEach(() => {
+    state.canManage = true;
     vi.useFakeTimers();
     hooks.reset();
     state.result = null;
@@ -274,6 +280,16 @@ describe("AcpRegistrySearchStep", () => {
       version: "2.0.0",
       distribution: "binary",
     });
+  });
+
+  it("rechecks the grant before preparing an agent", async () => {
+    state.result = { agents: [gemini] };
+    const onPrepared = vi.fn();
+    const add = findByAriaLabel(render({ onPrepared }), "Add Gemini CLI");
+    state.canManage = false;
+    await (add.props.onClick as () => void)();
+    expect(state.prepare).not.toHaveBeenCalled();
+    expect(onPrepared).not.toHaveBeenCalled();
   });
 
   it("ignores a stale prepare completion", async () => {

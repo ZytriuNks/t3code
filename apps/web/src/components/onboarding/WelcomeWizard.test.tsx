@@ -14,6 +14,12 @@ const mocks = vi.hoisted(() => ({
   config: null as { settings: typeof DEFAULT_UNIFIED_SETTINGS } | null,
   projects: [] as Array<{ id: string; environmentId: string; workspaceRoot: string }>,
 }));
+vi.mock("../../state/session", () => ({
+  useEnvironmentScope: () => true,
+  useEnvironmentsWithScope: (environments: Array<{ environmentId: string }>) =>
+    new Set(environments.map((entry) => entry.environmentId)),
+  readEnvironmentScope: () => true,
+}));
 vi.mock("../../state/agentSessions", () => ({ agentSessionImport: "import" }));
 vi.mock("../../state/projects", () => ({ projectEnvironment: { create: "create" } }));
 vi.mock("../../state/use-atom-command", () => ({
@@ -34,6 +40,7 @@ vi.mock("../../state/environments", () => {
     environmentId: "test-env",
     label: "Computer",
     connection: { phase: "connected" },
+    entry: { enabled: true },
   };
   return {
     useEnvironments: () => ({ environments: [environment] }),

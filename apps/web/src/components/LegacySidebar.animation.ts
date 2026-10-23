@@ -1,5 +1,5 @@
 import { autoAnimate } from "@formkit/auto-animate";
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback } from "react";
 
 export const LEGACY_SIDEBAR_LIST_ANIMATION_OPTIONS = {
   duration: 180,
@@ -7,11 +7,9 @@ export const LEGACY_SIDEBAR_LIST_ANIMATION_OPTIONS = {
 } as const;
 
 export function useLegacySidebarListAnimation() {
-  const controllerRef = useRef<ReturnType<typeof autoAnimate> | null>(null);
-  const ref = useCallback((node: HTMLElement | null) => {
-    controllerRef.current?.destroy?.();
-    controllerRef.current = node ? autoAnimate(node, LEGACY_SIDEBAR_LIST_ANIMATION_OPTIONS) : null;
+  return useCallback((node: HTMLElement | null) => {
+    if (!node) return;
+    const controller = autoAnimate(node, LEGACY_SIDEBAR_LIST_ANIMATION_OPTIONS);
+    return () => controller.destroy?.();
   }, []);
-  useEffect(() => () => controllerRef.current?.destroy?.(), []);
-  return ref;
 }

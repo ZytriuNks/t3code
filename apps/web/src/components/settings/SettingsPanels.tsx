@@ -1,17 +1,21 @@
+import { useI18n } from "../../i18n/I18nProvider";
+import type { MessageKey } from "../../i18n/messages";
 import { SettingsGroup } from "./SettingsGroup";
+import { useScopedSettingsWriteAllowed } from "./useScopedSettings";
 import { Spinner } from "~/components/ui/spinner";
 import { NotificationSettings } from "./NotificationSettings";
+import { PRIVACY_POLICY_URL } from "../../legalLinks";
 import { ArchiveIcon, ArchiveX, CheckIcon, ChevronRightIcon, SettingsIcon } from "lucide-react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import type { CSSProperties, ReactNode } from "react";
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { useCallback, useId, useEffect, useMemo, useRef, useState } from "react";
 import {
   type BackgroundActivityProfile,
   type DesktopUpdateChannel,
   ProviderDriverKind,
   type ProviderInstanceId,
   type ScopedThreadRef,
-  type ServerSettings,
+  ServerSettings,
   type SidebarProjectGroupingMode,
 } from "@t3tools/contracts";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
@@ -25,10 +29,8 @@ import {
   DEFAULT_ENVIRONMENT_IDENTIFICATION_MODE,
   DEFAULT_UNIFIED_SETTINGS,
   type ChatWidth,
-  type ConversationStructure,
   type DiffLayout,
   type EnvironmentIdentificationMode,
-  type LanguagePreference,
   MAX_APPEARANCE_CONTRAST,
   MAX_CODE_FONT_SIZE,
   MAX_GLASS_OPACITY,
@@ -45,16 +47,20 @@ import {
   MIN_PROMPT_FONT_SIZE,
   MIN_SIDEBAR_AUTO_SETTLE_AFTER_DAYS,
   type ResponseStreamingMode,
+  type ConversationStructure,
+  type TimestampFormat,
   MIN_TERMINAL_FONT_SIZE,
   type QuitConfirmationMode,
-  type TimestampFormat,
+  SidebarProjectSortOrder,
 } from "@t3tools/contracts/settings";
 import { resolveServerBackgroundActivitySettings } from "@t3tools/shared/backgroundActivitySettings";
 import { createModelSelection } from "@t3tools/shared/model";
 import * as Duration from "effect/Duration";
 import * as Equal from "effect/Equal";
 import * as Schema from "effect/Schema";
-import { APP_VERSION, HOSTED_APP_CHANNEL } from "../../branding";
+import { APP_VERSION, HOSTED_APP_CHANNEL, HOSTED_APP_CHANNEL_LABEL } from "../../branding";
+import { IS_NIGHTLY_BUILD, NightlyMobileBetaRow } from "../NightlyMobileBeta";
+import { CliCommandSettingsRow } from "./CliCommandSettingsRow";
 import {
   canCheckForUpdate,
   type DesktopUpdateCopy,
@@ -92,6 +98,7 @@ import { useDesktopUpdateState } from "../../state/desktopUpdate";
 import {
   getCustomModelOptionsByInstance,
   resolveAppModelSelectionState,
+  selectsPlanAgent,
 } from "../../modelSelection";
 import {
   applyProviderInstanceSettings,
@@ -162,17 +169,17 @@ import {
   SettingResetButton,
   SettingsPageContainer,
   SettingsRow,
-  type SettingsRowCopy,
-  SettingsRowCopyProvider,
   SettingsSection,
+  SettingsRowCopyProvider,
+  type SettingsRowCopy,
   useSettingsSearchTarget,
   useSettingsSearchTargetId,
 } from "./settingsLayout";
 import { searchableSetting } from "./settingsSearch";
+import { isProjectScopedSettingKey, type ScopedSettingsPatch } from "./scopedSettings";
 import { ProjectFavicon } from "../ProjectFavicon";
 import { PanelAnimationsPreview } from "./PanelAnimationsPreview";
-import { useI18n } from "../../i18n/I18nProvider";
-import type { MessageKey } from "../../i18n/messages";
+import { ForkSidebarPreferences } from "./ForkPreferencesSettings";
 
 const ENVIRONMENT_IDENTIFICATION_LABEL_KEYS: Record<EnvironmentIdentificationMode, MessageKey> = {
   artwork: "settings.appearance.environmentIdentification.option.artwork",
@@ -194,11 +201,128 @@ const RESPONSE_STREAMING_MODE_DESCRIPTION_KEYS: Record<ResponseStreamingMode, Me
   smooth: "settings.general.streaming.smoothDescription",
 };
 
-const TIMESTAMP_FORMAT_LABEL_KEYS = {
+const INHERITED_RUNTIME_MODE_LABEL_KEYS: Readonly<Record<string, MessageKey>> = {
+  "approval-required": "settings.row.copy.settingValue.runtimeMode.approvalRequired",
+  "auto-accept-edits": "settings.row.copy.settingValue.runtimeMode.autoAcceptEdits",
+  auto: "settings.row.copy.settingValue.runtimeMode.auto",
+  "full-access": "settings.row.copy.settingValue.runtimeMode.fullAccess",
+};
+const INHERITED_RESPONSE_STREAMING_MODE_LABEL_KEYS: Readonly<Record<string, MessageKey>> = {
+  turn: "settings.row.copy.settingValue.streamingMode.turn",
+  paragraph: "settings.row.copy.settingValue.streamingMode.paragraph",
+  realtime: "settings.row.copy.settingValue.streamingMode.realtime",
+  smooth: "settings.row.copy.settingValue.streamingMode.smooth",
+  token: "settings.row.copy.settingValue.streamingMode.token",
+};
+const SMOOTH_OUTPUT_MODE_LABEL_KEYS: Readonly<Record<string, MessageKey>> = {
+  character: "settings.general.streaming.unit.character",
+  token: "settings.general.streaming.unit.token",
+  auto: "settings.general.streaming.unit.auto",
+};
+
+const SMOOTH_OUTPUT_LINE_MODE_LABEL_KEYS: Readonly<Record<string, MessageKey>> = {
+  adaptive: "settings.general.streaming.lines.adaptive",
+  parallel: "settings.general.streaming.lines.parallel",
+};
+
+const INHERITED_WORKTREE_SUBMODULE_LABEL_KEYS: Readonly<Record<string, MessageKey>> = {
+  recursive: "settings.general.submodules.recursive",
+  "top-level": "settings.general.submodules.topLevel",
+  none: "settings.general.submodules.none",
+};
+
+function inheritedSettingValueLabel(
+  key: keyof ServerSettings,
+  value: string,
+  t: (key: MessageKey) => string,
+): string {
+  const messageKey =
+    key === "defaultRuntimeMode"
+      ? INHERITED_RUNTIME_MODE_LABEL_KEYS[value]
+      : key === "responseStreamingMode"
+        ? INHERITED_RESPONSE_STREAMING_MODE_LABEL_KEYS[value]
+        : key === "smoothOutputMode"
+          ? SMOOTH_OUTPUT_MODE_LABEL_KEYS[value]
+          : key === "smoothOutputLineMode"
+            ? SMOOTH_OUTPUT_LINE_MODE_LABEL_KEYS[value]
+            : key === "worktreeSubmodules"
+              ? INHERITED_WORKTREE_SUBMODULE_LABEL_KEYS[value]
+              : undefined;
+  return messageKey === undefined ? value : t(messageKey);
+}
+
+function useSettingsPanelCopy(): SettingsRowCopy {
+  const { t } = useI18n();
+  return useMemo(
+    () => ({
+      settingValueLabel: (key, value) => inheritedSettingValueLabel(key, value, t),
+      resetToInheritedTooltip: t("settings.row.copy.inheritedTooltip"),
+      resetToDefaultTooltip: t("settings.row.copy.defaultTooltip"),
+      resetToInheritedLabel: (label) => t("settings.row.copy.inheritedLabel", { label }),
+      resetToDefaultLabel: (label) => t("settings.row.copy.defaultLabel", { label }),
+      overrideFallbackLabel: t("settings.row.copy.overrideFallbackLabel"),
+      reconnectSelectedEnvironment: t("settings.row.copy.reconnectSelectedEnvironment"),
+      selectEnvironment: t("settings.row.copy.selectEnvironment"),
+      mixedAcrossEnvironments: t("settings.row.copy.mixedAcrossEnvironments"),
+      overriddenForProject: t("settings.row.copy.overriddenForProject"),
+      inheritedFrom: (source) => t("settings.row.copy.inheritedFrom", { source }),
+      setOnEnvironment: t("settings.row.copy.setOnEnvironment"),
+      builtInDefault: t("settings.row.copy.builtInDefault"),
+      layerProject: t("settings.row.copy.layerProject"),
+      layerEnvironment: t("settings.row.copy.layerEnvironment"),
+      layerDefault: t("settings.row.copy.layerDefault"),
+      inherits: t("settings.row.copy.inherits"),
+      on: t("settings.row.copy.on"),
+      off: t("settings.row.copy.off"),
+      dayCount: (count) =>
+        t(count === 1 ? "settings.row.copy.dayCountOne" : "settings.row.copy.dayCountOther", {
+          count,
+        }),
+      lastSelected: t("settings.row.copy.lastSelected"),
+      never: t("settings.row.copy.never"),
+      automatic: t("settings.row.copy.automatic"),
+      textGenerationModel: t("settings.row.copy.textGenerationModel"),
+      notSet: t("settings.row.copy.notSet"),
+      empty: t("settings.row.copy.empty"),
+      itemCount: (count) =>
+        t(count === 1 ? "settings.row.copy.itemCountOne" : "settings.row.copy.itemCountOther", {
+          count,
+        }),
+      custom: t("settings.row.copy.custom"),
+      envModeLocal: t("settings.general.workspace.mode.local"),
+      envModeWorktree: t("settings.general.workspace.mode.worktree"),
+      overriddenBy: t("settings.row.copy.overriddenBy"),
+      resetOverride: (count) =>
+        t(
+          count === 1
+            ? "settings.row.copy.resetOverrideOne"
+            : "settings.row.copy.resetOverrideOther",
+        ),
+      projectOverrideSummary: (summary, count) =>
+        t(
+          count === 1
+            ? "settings.row.copy.projectOverrideSummaryOne"
+            : "settings.row.copy.projectOverrideSummaryOther",
+          { summary, count },
+        ),
+      showSourceLabel: (summary) => t("settings.row.copy.showSourceLabel", { summary }),
+    }),
+    [t],
+  );
+}
+
+const SIDEBAR_PROJECT_SORT_ORDER_LABELS: Record<SidebarProjectSortOrder, string> = {
+  updated_at: "Last user message",
+  created_at: "Created at",
+  manual: "Manual",
+};
+const isSidebarProjectSortOrder = Schema.is(SidebarProjectSortOrder);
+
+const TIMESTAMP_FORMAT_LABEL_KEYS: Readonly<Record<TimestampFormat, MessageKey>> = {
   locale: "settings.general.timeFormat.locale",
   "12-hour": "settings.general.timeFormat.12Hour",
   "24-hour": "settings.general.timeFormat.24Hour",
-} satisfies Record<TimestampFormat, MessageKey>;
+};
 
 const CHAT_WIDTH_LABELS: Record<ChatWidth, string> = {
   comfortable: "Comfortable",
@@ -239,68 +363,8 @@ const BACKGROUND_ACTIVITY_PROFILE_DESCRIPTION_KEYS: Record<BackgroundActivityPro
     performance: "settings.general.backgroundActivity.performanceDescription",
     "battery-saver": "settings.general.backgroundActivity.batterySaverDescription",
   };
-
 const ADVANCED_BACKGROUND_ACTIVITY_DESCRIPTION_KEY: MessageKey =
   "settings.general.backgroundActivity.advancedDescription";
-
-/**
- * The permissions and streaming pickers label their options with their own
- * friendly copy; the inheritance popover shows the stored value, so General
- * maps the two project-scoped enums onto labels of its own. The English
- * dictionary keeps those labels identical to the stored enum, and every other
- * setting key keeps the raw stored string.
- */
-const INHERITED_RUNTIME_MODE_LABEL_KEYS: Readonly<Record<string, MessageKey>> = {
-  "approval-required": "settings.row.copy.settingValue.runtimeMode.approvalRequired",
-  "auto-accept-edits": "settings.row.copy.settingValue.runtimeMode.autoAcceptEdits",
-  auto: "settings.row.copy.settingValue.runtimeMode.auto",
-  "full-access": "settings.row.copy.settingValue.runtimeMode.fullAccess",
-};
-
-const INHERITED_RESPONSE_STREAMING_MODE_LABEL_KEYS: Readonly<Record<string, MessageKey>> = {
-  turn: "settings.row.copy.settingValue.streamingMode.turn",
-  paragraph: "settings.row.copy.settingValue.streamingMode.paragraph",
-  realtime: "settings.row.copy.settingValue.streamingMode.realtime",
-  smooth: "settings.row.copy.settingValue.streamingMode.smooth",
-  token: "settings.row.copy.settingValue.streamingMode.token",
-};
-
-const SMOOTH_OUTPUT_MODE_LABEL_KEYS: Readonly<Record<string, MessageKey>> = {
-  character: "settings.general.streaming.unit.character",
-  token: "settings.general.streaming.unit.token",
-  auto: "settings.general.streaming.unit.auto",
-};
-
-const SMOOTH_OUTPUT_LINE_MODE_LABEL_KEYS: Readonly<Record<string, MessageKey>> = {
-  adaptive: "settings.general.streaming.lines.adaptive",
-  parallel: "settings.general.streaming.lines.parallel",
-};
-
-const INHERITED_WORKTREE_SUBMODULE_LABEL_KEYS: Readonly<Record<string, MessageKey>> = {
-  recursive: "settings.general.submodules.recursive",
-  "top-level": "settings.general.submodules.topLevel",
-  none: "settings.general.submodules.none",
-};
-
-function inheritedSettingValueLabel(
-  key: keyof ServerSettings,
-  value: string,
-  t: (key: MessageKey) => string,
-): string {
-  const messageKey =
-    key === "defaultRuntimeMode"
-      ? INHERITED_RUNTIME_MODE_LABEL_KEYS[value]
-      : key === "responseStreamingMode"
-        ? INHERITED_RESPONSE_STREAMING_MODE_LABEL_KEYS[value]
-        : key === "smoothOutputMode"
-          ? SMOOTH_OUTPUT_MODE_LABEL_KEYS[value]
-          : key === "smoothOutputLineMode"
-            ? SMOOTH_OUTPUT_LINE_MODE_LABEL_KEYS[value]
-            : key === "worktreeSubmodules"
-              ? INHERITED_WORKTREE_SUBMODULE_LABEL_KEYS[value]
-              : undefined;
-  return messageKey === undefined ? value : t(messageKey);
-}
 
 const DEFAULT_DRIVER_KIND = ProviderDriverKind.make("codex");
 const BACKGROUND_ACTIVITY_BOOLEAN_OVERRIDES: ReadonlyArray<{
@@ -508,28 +572,19 @@ function backgroundActivityProfileSettings(profile: BackgroundActivityProfile) {
   };
 }
 
-function AboutVersionTitle() {
+function AboutVersionTitle({ version }: { readonly version: string }) {
   const { t } = useI18n();
   return (
     <span className="inline-flex items-baseline gap-2">
-      <span>Version</span>
-      <code className="text-2xs font-medium text-muted-foreground">{APP_VERSION}</code>
+      <span>{t("settings.general.version.title")}</span>
+      <code className="text-2xs font-medium text-muted-foreground">{version}</code>
     </span>
   );
 }
 
-function AboutVersionSection() {
+export function AboutVersionSection() {
   const { t } = useI18n();
   const updateState = useDesktopUpdateState();
-  const [isChangingUpdateChannel, setIsChangingUpdateChannel] = useState(false);
-  const [isUpdateActionPending, setIsUpdateActionPending] = useState(false);
-
-  const hasDesktopBridge = typeof window !== "undefined" && Boolean(window.desktopBridge);
-  const selectedUpdateChannel = updateState?.channel ?? "latest";
-  const selectedHostedAppChannel = hasDesktopBridge ? null : HOSTED_APP_CHANNEL;
-
-  // Versions and raw updater messages stay verbatim; only the fixed wording of
-  // the tooltips and the install prompt comes from the dictionary.
   const updateCopy = useMemo<DesktopUpdateCopy>(
     () => ({
       availableTooltip: (version) =>
@@ -559,6 +614,15 @@ function AboutVersionSection() {
     }),
     [t],
   );
+  const [isChangingUpdateChannel, setIsChangingUpdateChannel] = useState(false);
+  const [isUpdateActionPending, setIsUpdateActionPending] = useState(false);
+
+  const hasDesktopBridge = typeof window !== "undefined" && Boolean(window.desktopBridge);
+  const selectedUpdateChannel = updateState?.channel ?? "latest";
+  const selectedHostedAppChannel = hasDesktopBridge ? null : HOSTED_APP_CHANNEL;
+  // Show the beta app links as soon as someone picks Nightly, before the update installs.
+  const showNightlyMobileBeta =
+    IS_NIGHTLY_BUILD || (hasDesktopBridge && selectedUpdateChannel === "nightly");
 
   const handleUpdateChannelChange = useCallback(
     (channel: DesktopUpdateChannel) => {
@@ -682,9 +746,6 @@ function AboutVersionSection() {
           stackedThreadToast({
             type: "error",
             title: t("settings.general.version.checkFailed"),
-            // Nothing came back from the bridge, so the build may well support
-            // updates: keep this distinct from the unsupported-build copy the
-            // `checked: false` branch above uses.
             description:
               error instanceof Error
                 ? error.message
@@ -692,7 +753,7 @@ function AboutVersionSection() {
           }),
         );
       });
-  }, [isUpdateActionPending, t, updateCopy, updateState]);
+  }, [isUpdateActionPending, updateState, t, updateCopy]);
 
   const action = updateState ? resolveDesktopUpdateButtonAction(updateState) : "none";
   const buttonTooltip = updateState ? getDesktopUpdateButtonTooltip(updateState, updateCopy) : null;
@@ -722,7 +783,8 @@ function AboutVersionSection() {
   return (
     <>
       <SettingsRow
-        title={<AboutVersionTitle />}
+        id={searchableSetting("app-version", t).id}
+        title={<AboutVersionTitle version={updateState?.currentVersion ?? APP_VERSION} />}
         description={description}
         control={
           <Tooltip>
@@ -744,7 +806,7 @@ function AboutVersionSection() {
       />
       {hasDesktopBridge ? (
         <SettingsRow
-          title={t("settings.general.version.updateTrack")}
+          {...searchableSetting("update-track", t)}
           description={t("settings.general.version.updateTrackDescription")}
           control={
             <Select
@@ -756,13 +818,11 @@ function AboutVersionSection() {
               <SelectTrigger
                 size="sm"
                 className="w-full sm:w-40"
-                aria-label={t("settings.general.version.updateTrackAriaLabel")}
+                aria-label={t("settings.general.version.updateTrack")}
                 disabled={isChangingUpdateChannel}
               >
                 <SelectValue>
-                  {selectedUpdateChannel === "nightly"
-                    ? t("settings.general.version.nightly")
-                    : t("settings.general.version.stable")}
+                  {selectedUpdateChannel === "nightly" ? "Nightly" : "Stable"}
                 </SelectValue>
               </SelectTrigger>
               <SelectPopup align="end" alignItemWithTrigger={false}>
@@ -778,7 +838,7 @@ function AboutVersionSection() {
         />
       ) : selectedHostedAppChannel ? (
         <SettingsRow
-          title={t("settings.general.version.updateTrack")}
+          {...searchableSetting("update-track", t)}
           description={t("settings.general.version.hostedTrackDescription")}
           control={
             <Select
@@ -793,13 +853,9 @@ function AboutVersionSection() {
               <SelectTrigger
                 size="sm"
                 className="w-full sm:w-40"
-                aria-label={t("settings.general.version.updateTrackAriaLabel")}
+                aria-label={t("settings.general.version.updateTrack")}
               >
-                <SelectValue>
-                  {selectedHostedAppChannel === "nightly"
-                    ? t("settings.general.version.nightly")
-                    : t("settings.general.version.latest")}
-                </SelectValue>
+                <SelectValue>{HOSTED_APP_CHANNEL_LABEL}</SelectValue>
               </SelectTrigger>
               <SelectPopup align="end" alignItemWithTrigger={false}>
                 <SelectItem hideIndicator value="latest">
@@ -813,39 +869,70 @@ function AboutVersionSection() {
           }
         />
       ) : null}
+      {showNightlyMobileBeta ? <NightlyMobileBetaRow /> : null}
+      {hasDesktopBridge ? <CliCommandSettingsRow /> : null}
     </>
   );
 }
 
-/**
- * The typography and browser helpers in `SettingsPanels.logic.ts` report the
- * rows that differ from the defaults with their English labels. The restore
- * dialog maps those labels back to the dictionary so the list it confirms
- * follows the page language instead of mixing languages.
- */
 const RESTORE_LABEL_MESSAGE_KEYS: Readonly<Record<string, MessageKey>> = {
+  Theme: "settings.restore.label.theme",
+  "Follow system": "settings.restore.label.followSystem",
+  "Theme mix": "settings.restore.label.themeMix",
+  Contrast: "settings.restore.label.contrast",
+  "Glass opacity": "settings.restore.label.glassOpacity",
+  "Diff colors": "settings.restore.label.diffColors",
+  "Panel animations": "settings.restore.label.panelAnimations",
+  "Environment identification": "settings.restore.label.environmentIdentification",
+  Language: "settings.restore.label.language",
+  "Time format": "settings.restore.label.timeFormat",
+  "Thread notifications": "settings.restore.label.threadNotifications",
+  "In-app notifications": "settings.restore.label.inAppNotifications",
+  "Visible threads": "settings.restore.label.visibleThreads",
+  "Project Grouping": "settings.restore.label.projectGrouping",
+  "Auto-settle inactive threads": "settings.restore.label.autoSettleInactive",
+  "Auto-settle merged threads": "settings.restore.label.autoSettleMerged",
+  "Auto-resume limited threads": "settings.restore.label.autoResumeLimitedThreads",
+  "Snooze limited threads": "settings.restore.label.snoozeLimitedThreads",
+  "Word wrap": "settings.restore.label.wordWrap",
   "Interface font": "settings.restore.label.interfaceFont",
   "Prompt font": "settings.restore.label.promptFont",
   "Code font": "settings.restore.label.codeFont",
   "Terminal font": "settings.restore.label.terminalFont",
+  "Default diff file state": "settings.restore.label.defaultDiffFileState",
+  "Diff whitespace changes": "settings.restore.label.diffWhitespaceChanges",
+  "Diff layout": "settings.restore.label.diffLayout",
+  "Proactive panels": "settings.restore.label.proactivePanels",
+  "Show skills in slash menu": "settings.restore.label.skillsInSlashMenu",
+  "Collapse composer on scroll": "settings.restore.label.composerCollapse",
+  "Follow-up behavior": "settings.restore.label.followUpBehavior",
+  "Context window indicator": "settings.restore.label.contextWindowIndicator",
+  "Response streaming": "settings.restore.label.responseStreaming",
+  "Provider update checks": "settings.restore.label.providerUpdateChecks",
+  "Continue threads after restarts": "settings.restore.label.continueThreads",
+  "Background activity": "settings.restore.label.backgroundActivity",
+  "New thread mode": "settings.restore.label.defaultThreadEnvMode",
+  "New worktrees start from origin": "settings.restore.label.newWorktreesStartFromOrigin",
+  "Add project base directory": "settings.restore.label.addProjectBaseDirectory",
+  "Unpin confirmation": "settings.restore.label.unpinConfirmation",
+  "Archive confirmation": "settings.restore.label.archiveConfirmation",
+  "Delete confirmation": "settings.restore.label.deleteConfirmation",
+  "Quit shortcut": "settings.restore.label.quitShortcut",
+  "Text generation model": "settings.restore.label.textGenerationModel",
+  "Agent browser access": "settings.restore.label.agentBrowserAccess",
   "Browser viewport": "settings.restore.label.browserViewport",
   "Browser zoom": "settings.restore.label.browserZoom",
   "Browser appearance": "settings.restore.label.browserAppearance",
   "Recording frame rate": "settings.restore.label.recordingFrameRate",
   "Open links in": "settings.restore.label.openLinksIn",
   "Floating preview": "settings.restore.label.floatingPreview",
+  "No-project chats base directory": "settings.search.item.scratch-base-directory.title",
+  "Automatically expand workspace details": "settings.search.item.auto-expand-thread-details.title",
+  "Composer context": "settings.search.item.composer-context.title",
+  "Rich text composer": "settings.search.item.composer-rich-text.title",
+  "Send shortcut": "settings.search.item.send-shortcut.title",
+  "Conversation structure": "settings.search.item.conversation-structure.title",
 };
-
-function localizeRestoreLabels(
-  labels: readonly string[],
-  t: (key: MessageKey) => string,
-): string[] {
-  return labels.map((label) => {
-    const key = RESTORE_LABEL_MESSAGE_KEYS[label];
-    return key === undefined ? label : t(key);
-  });
-}
-
 export function useSettingsRestore(onRestored?: () => void) {
   const { t } = useI18n();
   const {
@@ -857,7 +944,20 @@ export function useSettingsRestore(onRestored?: () => void) {
     clearThemeHalves,
     themeHalves,
   } = useTheme();
-  const settings = useScopedSettings();
+  const scopedSettings = useScopedSettings();
+  const { scope } = useSettingsScope();
+  const isProjectScope = scope.kind === "project" || scope.kind === "checkout";
+  // Environment-only values are not part of a project's reset or its confirmation summary.
+  const settings = isProjectScope
+    ? {
+        ...scopedSettings,
+        ...Object.fromEntries(
+          Object.entries(DEFAULT_UNIFIED_SETTINGS).filter(
+            ([key]) => Object.hasOwn(ServerSettings.fields, key) && !isProjectScopedSettingKey(key),
+          ),
+        ),
+      }
+    : scopedSettings;
   const updateSettings = useUpdateScopedSettings();
 
   const isTextGenerationModelDirty = !Equal.equals(
@@ -867,181 +967,207 @@ export function useSettingsRestore(onRestored?: () => void) {
   const isBackgroundActivityDirty = hasChangedBackgroundActivitySettings(settings);
 
   const changedSettingLabels = useMemo(
-    () => [
-      ...(theme !== "system" ? [t("settings.restore.label.theme")] : []),
-      ...(!followSystem ? [t("settings.restore.label.followSystem")] : []),
-      ...(themeHalves !== null ? [t("settings.restore.label.themeMix")] : []),
-      ...(settings.appearanceContrast !== DEFAULT_UNIFIED_SETTINGS.appearanceContrast
-        ? [t("settings.restore.label.contrast")]
-        : []),
-      ...(settings.glassOpacity !== DEFAULT_UNIFIED_SETTINGS.glassOpacity
-        ? [t("settings.restore.label.glassOpacity")]
-        : []),
-      ...(settings.diffColorScheme !== DEFAULT_UNIFIED_SETTINGS.diffColorScheme
-        ? [t("settings.restore.label.diffColors")]
-        : []),
-      ...(settings.chatWidth !== DEFAULT_UNIFIED_SETTINGS.chatWidth ? ["Chat width"] : []),
-      ...(settings.panelAnimationDurationMs !== DEFAULT_UNIFIED_SETTINGS.panelAnimationDurationMs
-        ? [t("settings.restore.label.panelAnimations")]
-        : []),
-      ...(settings.environmentIdentificationMode !==
-      DEFAULT_UNIFIED_SETTINGS.environmentIdentificationMode
-        ? [t("settings.restore.label.environmentIdentification")]
-        : []),
-      ...(settings.language !== DEFAULT_UNIFIED_SETTINGS.language
-        ? [t("settings.restore.label.language")]
-        : []),
-      ...(settings.timestampFormat !== DEFAULT_UNIFIED_SETTINGS.timestampFormat
-        ? [t("settings.restore.label.timeFormat")]
-        : []),
-      ...(settings.notificationMode !== DEFAULT_UNIFIED_SETTINGS.notificationMode
-        ? [t("settings.restore.label.threadNotifications")]
-        : []),
-      ...(settings.inAppNotificationsEnabled !== DEFAULT_UNIFIED_SETTINGS.inAppNotificationsEnabled
-        ? [t("settings.restore.label.inAppNotifications")]
-        : []),
-      ...(settings.sidebarThreadPreviewCount !== DEFAULT_UNIFIED_SETTINGS.sidebarThreadPreviewCount
-        ? [t("settings.restore.label.visibleThreads")]
-        : []),
-      ...(settings.sidebarProjectGroupingMode !==
-      DEFAULT_UNIFIED_SETTINGS.sidebarProjectGroupingMode
-        ? [t("settings.restore.label.projectGrouping")]
-        : []),
-      ...(settings.sidebarWorkingShelfEnabled !==
-      DEFAULT_UNIFIED_SETTINGS.sidebarWorkingShelfEnabled
-        ? ["Working section"]
-        : []),
-      ...(settings.sidebarAutoSettleAfterDays !==
-      DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleAfterDays
-        ? [t("settings.restore.label.autoSettleInactive")]
-        : []),
-      ...(settings.sidebarAutoSettleOnMerge !== DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleOnMerge
-        ? [t("settings.restore.label.autoSettleMerged")]
-        : []),
-      ...(settings.autoResumeLimitedThreads !== DEFAULT_UNIFIED_SETTINGS.autoResumeLimitedThreads
-        ? [t("settings.restore.label.autoResumeLimitedThreads")]
-        : []),
-      ...(settings.snoozeLimitedThreads !== DEFAULT_UNIFIED_SETTINGS.snoozeLimitedThreads
-        ? [t("settings.restore.label.snoozeLimitedThreads")]
-        : []),
-      ...(settings.wordWrap !== DEFAULT_UNIFIED_SETTINGS.wordWrap
-        ? [t("settings.restore.label.wordWrap")]
-        : []),
-      ...(settings.persistComposerContextStrip !==
-      DEFAULT_UNIFIED_SETTINGS.persistComposerContextStrip
-        ? [t("settings.search.item.composer-context.title")]
-        : []),
-      ...localizeRestoreLabels(getChangedTypographySettingLabels(settings), t),
-      ...(settings.diffFilesCollapsed !== DEFAULT_UNIFIED_SETTINGS.diffFilesCollapsed
-        ? [t("settings.restore.label.defaultDiffFileState")]
-        : []),
-      ...(settings.diffIgnoreWhitespace !== DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace
-        ? [t("settings.restore.label.diffWhitespaceChanges")]
-        : []),
-      ...(settings.diffLayout !== DEFAULT_UNIFIED_SETTINGS.diffLayout
-        ? [t("settings.restore.label.diffLayout")]
-        : []),
-      ...(settings.proactivePanelsEnabled !== DEFAULT_UNIFIED_SETTINGS.proactivePanelsEnabled
-        ? [t("settings.restore.label.proactivePanels")]
-        : []),
-      ...(settings.autoExpandThreadDetailsPanel !==
-      DEFAULT_UNIFIED_SETTINGS.autoExpandThreadDetailsPanel
-        ? [t("settings.search.item.auto-expand-thread-details.title")]
-        : []),
-      ...(settings.showSkillsInSlashMenu !== DEFAULT_UNIFIED_SETTINGS.showSkillsInSlashMenu
-        ? [t("settings.restore.label.skillsInSlashMenu")]
-        : []),
-      ...(settings.composerCollapseOnScroll !== DEFAULT_UNIFIED_SETTINGS.composerCollapseOnScroll
-        ? [t("settings.restore.label.composerCollapse")]
-        : []),
-      ...(settings.composerRichTextEnabled !== DEFAULT_UNIFIED_SETTINGS.composerRichTextEnabled
-        ? [t("settings.search.item.composer-rich-text.title")]
-        : []),
-      ...(settings.sendShortcut !== DEFAULT_UNIFIED_SETTINGS.sendShortcut
-        ? [t("settings.search.item.send-shortcut.title")]
-        : []),
-      ...(settings.followUpBehavior !== DEFAULT_UNIFIED_SETTINGS.followUpBehavior
-        ? [t("settings.restore.label.followUpBehavior")]
-        : []),
-      ...(settings.contextWindowMeterEnabled !== DEFAULT_UNIFIED_SETTINGS.contextWindowMeterEnabled
-        ? [t("settings.restore.label.contextWindowIndicator")]
-        : []),
-      ...(settings.responseStreamingMode !== DEFAULT_UNIFIED_SETTINGS.responseStreamingMode
-        ? [t("settings.restore.label.responseStreaming")]
-        : []),
-      ...(settings.conversationStructure !== DEFAULT_UNIFIED_SETTINGS.conversationStructure
-        ? [t("settings.search.item.conversation-structure.title")]
-        : []),
-      ...(settings.conversationStructureThinkingLabel !==
-      DEFAULT_UNIFIED_SETTINGS.conversationStructureThinkingLabel
-        ? [t("settings.general.conversation.thinkingLabel.title")]
-        : []),
-      ...(settings.conversationStructureIdleLabel !==
-      DEFAULT_UNIFIED_SETTINGS.conversationStructureIdleLabel
-        ? [t("settings.general.conversation.idleLabel.title")]
-        : []),
-      ...(settings.smoothOutputMode !== DEFAULT_UNIFIED_SETTINGS.smoothOutputMode
-        ? [t("settings.general.streaming.unit.title")]
-        : []),
-      ...(settings.smoothOutputLineMode !== DEFAULT_UNIFIED_SETTINGS.smoothOutputLineMode
-        ? [t("settings.general.streaming.lines.title")]
-        : []),
-      ...(settings.footnotesAutoCollapse !== DEFAULT_UNIFIED_SETTINGS.footnotesAutoCollapse
-        ? [t("settings.general.footnotesAutoCollapse.title")]
-        : []),
-      ...(settings.smoothTextFadeDurationMs !== DEFAULT_UNIFIED_SETTINGS.smoothTextFadeDurationMs
-        ? [t("settings.general.streaming.fade.title")]
-        : []),
-      ...(settings.smoothTextYieldDurationMs !== DEFAULT_UNIFIED_SETTINGS.smoothTextYieldDurationMs
-        ? [t("settings.general.streaming.yield.title")]
-        : []),
-      ...(settings.smoothMarkdownPreload !== DEFAULT_UNIFIED_SETTINGS.smoothMarkdownPreload
-        ? [t("settings.general.streaming.preload.title")]
-        : []),
-      ...(settings.enableProviderUpdateChecks !==
-      DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks
-        ? [t("settings.restore.label.providerUpdateChecks")]
-        : []),
-      ...(settings.continueThreadsAfterServerUpdate !==
-      DEFAULT_UNIFIED_SETTINGS.continueThreadsAfterServerUpdate
-        ? [t("settings.restore.label.continueThreads")]
-        : []),
-      ...(isBackgroundActivityDirty ? [t("settings.restore.label.backgroundActivity")] : []),
-      ...(settings.defaultThreadEnvMode !== DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode
-        ? [t("settings.restore.label.defaultThreadEnvMode")]
-        : []),
-      ...(settings.newWorktreesStartFromOrigin !==
-      DEFAULT_UNIFIED_SETTINGS.newWorktreesStartFromOrigin
-        ? [t("settings.restore.label.newWorktreesStartFromOrigin")]
-        : []),
-      ...(settings.addProjectBaseDirectory !== DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory
-        ? [t("settings.restore.label.addProjectBaseDirectory")]
-        : []),
-      ...(settings.scratchBaseDirectory !== DEFAULT_UNIFIED_SETTINGS.scratchBaseDirectory
-        ? [t("settings.search.item.scratch-base-directory.title")]
-        : []),
-      ...(settings.confirmThreadUnpin !== DEFAULT_UNIFIED_SETTINGS.confirmThreadUnpin
-        ? [t("settings.restore.label.unpinConfirmation")]
-        : []),
-      ...(settings.confirmThreadArchive !== DEFAULT_UNIFIED_SETTINGS.confirmThreadArchive
-        ? [t("settings.restore.label.archiveConfirmation")]
-        : []),
-      ...(settings.confirmThreadDelete !== DEFAULT_UNIFIED_SETTINGS.confirmThreadDelete
-        ? [t("settings.restore.label.deleteConfirmation")]
-        : []),
-      ...(settings.confirmQuit !== DEFAULT_UNIFIED_SETTINGS.confirmQuit
-        ? [t("settings.restore.label.quitShortcut")]
-        : []),
-      ...(isTextGenerationModelDirty ? [t("settings.restore.label.textGenerationModel")] : []),
-      ...localizeRestoreLabels(getChangedBrowserSettingLabels(settings), t),
-      ...(settings.enableAgentBrowserAccess !== DEFAULT_UNIFIED_SETTINGS.enableAgentBrowserAccess
-        ? [t("settings.restore.label.agentBrowserAccess")]
-        : []),
-    ],
+    () =>
+      [
+        ...(theme !== "system" ? ["Theme"] : []),
+        ...(!followSystem ? ["Follow system"] : []),
+        ...(themeHalves !== null ? ["Theme mix"] : []),
+        ...(settings.appearanceContrast !== DEFAULT_UNIFIED_SETTINGS.appearanceContrast
+          ? ["Contrast"]
+          : []),
+        ...(settings.glassOpacity !== DEFAULT_UNIFIED_SETTINGS.glassOpacity
+          ? ["Glass opacity"]
+          : []),
+        ...(settings.diffColorScheme !== DEFAULT_UNIFIED_SETTINGS.diffColorScheme
+          ? ["Diff colors"]
+          : []),
+        ...(settings.chatWidth !== DEFAULT_UNIFIED_SETTINGS.chatWidth ? ["Chat width"] : []),
+        ...(settings.panelAnimationDurationMs !== DEFAULT_UNIFIED_SETTINGS.panelAnimationDurationMs
+          ? ["Panel animations"]
+          : []),
+        ...(settings.environmentIdentificationMode !==
+        DEFAULT_UNIFIED_SETTINGS.environmentIdentificationMode
+          ? ["Environment identification"]
+          : []),
+        ...(settings.language !== DEFAULT_UNIFIED_SETTINGS.language ? ["Language"] : []),
+        ...(settings.autoExpandThreadDetailsPanel !==
+        DEFAULT_UNIFIED_SETTINGS.autoExpandThreadDetailsPanel
+          ? ["Automatically expand workspace details"]
+          : []),
+        ...(settings.hideUnavailableContextMenuItems !==
+        DEFAULT_UNIFIED_SETTINGS.hideUnavailableContextMenuItems
+          ? ["Hide unavailable context menu items"]
+          : []),
+        ...(settings.scratchBaseDirectory !== DEFAULT_UNIFIED_SETTINGS.scratchBaseDirectory
+          ? ["No-project chats base directory"]
+          : []),
+        ...(settings.legacySidebarEnabled !== DEFAULT_UNIFIED_SETTINGS.legacySidebarEnabled
+          ? ["Sidebar (legacy)"]
+          : []),
+        ...(settings.legacySidebarProjectGuides !==
+        DEFAULT_UNIFIED_SETTINGS.legacySidebarProjectGuides
+          ? ["Indentation guides"]
+          : []),
+        ...(settings.legacySidebarThreadStatusDots !==
+        DEFAULT_UNIFIED_SETTINGS.legacySidebarThreadStatusDots
+          ? ["Thread status dots"]
+          : []),
+        ...(settings.legacySidebarHideStatusLabels !==
+        DEFAULT_UNIFIED_SETTINGS.legacySidebarHideStatusLabels
+          ? ["Hide thread status labels"]
+          : []),
+        ...(settings.timestampFormat !== DEFAULT_UNIFIED_SETTINGS.timestampFormat
+          ? ["Time format"]
+          : []),
+        ...(settings.notificationMode !== DEFAULT_UNIFIED_SETTINGS.notificationMode
+          ? ["Thread notifications"]
+          : []),
+        ...(settings.inAppNotificationsEnabled !==
+        DEFAULT_UNIFIED_SETTINGS.inAppNotificationsEnabled
+          ? ["In-app notifications"]
+          : []),
+        ...(settings.sidebarThreadPreviewCount !==
+        DEFAULT_UNIFIED_SETTINGS.sidebarThreadPreviewCount
+          ? ["Visible threads"]
+          : []),
+        ...(settings.sidebarProjectGroupingMode !==
+        DEFAULT_UNIFIED_SETTINGS.sidebarProjectGroupingMode
+          ? ["Project Grouping"]
+          : []),
+        ...(settings.sidebarProjectSortOrder !== DEFAULT_UNIFIED_SETTINGS.sidebarProjectSortOrder
+          ? ["Project order"]
+          : []),
+        ...(settings.sidebarWorkingShelfEnabled !==
+        DEFAULT_UNIFIED_SETTINGS.sidebarWorkingShelfEnabled
+          ? ["Working section"]
+          : []),
+        ...(settings.sidebarAutoSettleAfterDays !==
+        DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleAfterDays
+          ? ["Auto-settle inactive threads"]
+          : []),
+        ...(settings.sidebarAutoSettleKeepPullRequests !==
+        DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleKeepPullRequests
+          ? ["Keep threads with a PR"]
+          : []),
+        ...(settings.sidebarAutoSettleOnMerge !== DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleOnMerge
+          ? ["Auto-settle merged threads"]
+          : []),
+        ...(settings.autoResumeLimitedThreads !== DEFAULT_UNIFIED_SETTINGS.autoResumeLimitedThreads
+          ? ["Auto-resume limited threads"]
+          : []),
+        ...(settings.snoozeLimitedThreads !== DEFAULT_UNIFIED_SETTINGS.snoozeLimitedThreads
+          ? ["Snooze limited threads"]
+          : []),
+        ...(settings.wordWrap !== DEFAULT_UNIFIED_SETTINGS.wordWrap ? ["Word wrap"] : []),
+        ...(settings.persistComposerContextStrip !==
+        DEFAULT_UNIFIED_SETTINGS.persistComposerContextStrip
+          ? ["Composer context"]
+          : []),
+        ...getChangedTypographySettingLabels(settings),
+        ...(settings.diffFilesCollapsed !== DEFAULT_UNIFIED_SETTINGS.diffFilesCollapsed
+          ? ["Default diff file state"]
+          : []),
+        ...(settings.diffIgnoreWhitespace !== DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace
+          ? ["Diff whitespace changes"]
+          : []),
+        ...(settings.diffLayout !== DEFAULT_UNIFIED_SETTINGS.diffLayout ? ["Diff layout"] : []),
+        ...(settings.proactivePanelsEnabled !== DEFAULT_UNIFIED_SETTINGS.proactivePanelsEnabled
+          ? ["Proactive panels"]
+          : []),
+        ...(settings.showSkillsInSlashMenu !== DEFAULT_UNIFIED_SETTINGS.showSkillsInSlashMenu
+          ? ["Show skills in slash menu"]
+          : []),
+        ...(settings.composerCollapseOnScroll !== DEFAULT_UNIFIED_SETTINGS.composerCollapseOnScroll
+          ? ["Collapse composer on scroll"]
+          : []),
+        ...(settings.composerRichTextEnabled !== DEFAULT_UNIFIED_SETTINGS.composerRichTextEnabled
+          ? ["Rich text composer"]
+          : []),
+        ...(settings.sendShortcut !== DEFAULT_UNIFIED_SETTINGS.sendShortcut
+          ? ["Send shortcut"]
+          : []),
+        ...(settings.followUpBehavior !== DEFAULT_UNIFIED_SETTINGS.followUpBehavior
+          ? ["Follow-up behavior"]
+          : []),
+        ...(settings.contextWindowMeterEnabled !==
+        DEFAULT_UNIFIED_SETTINGS.contextWindowMeterEnabled
+          ? ["Context window indicator"]
+          : []),
+        ...(settings.responseStreamingMode !== DEFAULT_UNIFIED_SETTINGS.responseStreamingMode
+          ? ["Response streaming"]
+          : []),
+        ...(settings.conversationStructure !== DEFAULT_UNIFIED_SETTINGS.conversationStructure
+          ? [t("settings.search.item.conversation-structure.title")]
+          : []),
+        ...(settings.conversationStructureThinkingLabel !==
+        DEFAULT_UNIFIED_SETTINGS.conversationStructureThinkingLabel
+          ? [t("settings.general.conversation.thinkingLabel.title")]
+          : []),
+        ...(settings.conversationStructureIdleLabel !==
+        DEFAULT_UNIFIED_SETTINGS.conversationStructureIdleLabel
+          ? [t("settings.general.conversation.idleLabel.title")]
+          : []),
+        ...(settings.smoothOutputMode !== DEFAULT_UNIFIED_SETTINGS.smoothOutputMode
+          ? [t("settings.general.streaming.unit.title")]
+          : []),
+        ...(settings.smoothOutputLineMode !== DEFAULT_UNIFIED_SETTINGS.smoothOutputLineMode
+          ? [t("settings.general.streaming.lines.title")]
+          : []),
+        ...(settings.footnotesAutoCollapse !== DEFAULT_UNIFIED_SETTINGS.footnotesAutoCollapse
+          ? [t("settings.general.footnotesAutoCollapse.title")]
+          : []),
+        ...(settings.smoothTextFadeDurationMs !== DEFAULT_UNIFIED_SETTINGS.smoothTextFadeDurationMs
+          ? [t("settings.general.streaming.fade.title")]
+          : []),
+        ...(settings.smoothTextYieldDurationMs !==
+        DEFAULT_UNIFIED_SETTINGS.smoothTextYieldDurationMs
+          ? [t("settings.general.streaming.yield.title")]
+          : []),
+        ...(settings.smoothMarkdownPreload !== DEFAULT_UNIFIED_SETTINGS.smoothMarkdownPreload
+          ? [t("settings.general.streaming.preload.title")]
+          : []),
+        ...(settings.enableProviderUpdateChecks !==
+        DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks
+          ? ["Provider update checks"]
+          : []),
+        ...(settings.continueThreadsAfterServerUpdate !==
+        DEFAULT_UNIFIED_SETTINGS.continueThreadsAfterServerUpdate
+          ? ["Continue threads after restarts"]
+          : []),
+        ...(isBackgroundActivityDirty ? ["Background activity"] : []),
+        ...(settings.defaultThreadEnvMode !== DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode
+          ? ["New thread mode"]
+          : []),
+        ...(settings.newWorktreesStartFromOrigin !==
+        DEFAULT_UNIFIED_SETTINGS.newWorktreesStartFromOrigin
+          ? ["New worktrees start from origin"]
+          : []),
+        ...(settings.addProjectBaseDirectory !== DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory
+          ? ["Add project base directory"]
+          : []),
+        ...(settings.confirmThreadUnpin !== DEFAULT_UNIFIED_SETTINGS.confirmThreadUnpin
+          ? ["Unpin confirmation"]
+          : []),
+        ...(settings.confirmThreadArchive !== DEFAULT_UNIFIED_SETTINGS.confirmThreadArchive
+          ? ["Archive confirmation"]
+          : []),
+        ...(settings.confirmThreadDelete !== DEFAULT_UNIFIED_SETTINGS.confirmThreadDelete
+          ? ["Delete confirmation"]
+          : []),
+        ...(settings.confirmQuit !== DEFAULT_UNIFIED_SETTINGS.confirmQuit ? ["Quit shortcut"] : []),
+        ...(isTextGenerationModelDirty ? ["Text generation model"] : []),
+        ...getChangedBrowserSettingLabels(settings),
+        ...(settings.enableAgentBrowserAccess !== DEFAULT_UNIFIED_SETTINGS.enableAgentBrowserAccess
+          ? ["Agent browser access"]
+          : []),
+      ].map((label) => {
+        const key = RESTORE_LABEL_MESSAGE_KEYS[label];
+        return key === undefined ? label : t(key);
+      }),
     [
       isTextGenerationModelDirty,
-      isBackgroundActivityDirty,
       t,
+      isBackgroundActivityDirty,
       settings.browserDefaultViewport,
       settings.browserDefaultZoomFactor,
       settings.browserDefaultAppearance,
@@ -1050,6 +1176,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.browserRecordingShowMousePresses,
       settings.browserLinkTarget,
       settings.browserAutoShowFloatingPreview,
+      settings.pullRequestLinksOpenInApp,
       settings.appearanceContrast,
       settings.diffColorScheme,
       settings.chatWidth,
@@ -1063,14 +1190,12 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.sendShortcut,
       settings.followUpBehavior,
       settings.addProjectBaseDirectory,
-      settings.scratchBaseDirectory,
       settings.defaultThreadEnvMode,
       settings.newWorktreesStartFromOrigin,
       settings.diffFilesCollapsed,
       settings.diffIgnoreWhitespace,
       settings.diffLayout,
       settings.proactivePanelsEnabled,
-      settings.autoExpandThreadDetailsPanel,
       settings.environmentIdentificationMode,
       settings.contextWindowMeterEnabled,
       settings.fontFamilyCode,
@@ -1084,27 +1209,37 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.glassOpacity,
       settings.panelAnimationDurationMs,
       settings.responseStreamingMode,
-      settings.conversationStructure,
-      settings.conversationStructureThinkingLabel,
-      settings.conversationStructureIdleLabel,
       settings.smoothOutputMode,
       settings.smoothOutputLineMode,
       settings.smoothMarkdownPreload,
       settings.smoothTextFadeDurationMs,
       settings.smoothTextYieldDurationMs,
       settings.footnotesAutoCollapse,
+      settings.conversationStructure,
+      settings.conversationStructureThinkingLabel,
+      settings.conversationStructureIdleLabel,
+
       settings.persistComposerContextStrip,
       settings.enableProviderUpdateChecks,
       settings.continueThreadsAfterServerUpdate,
       settings.sidebarAutoSettleAfterDays,
+      settings.sidebarAutoSettleKeepPullRequests,
       settings.sidebarAutoSettleOnMerge,
       settings.autoResumeLimitedThreads,
       settings.snoozeLimitedThreads,
       settings.sidebarProjectGroupingMode,
+      settings.sidebarProjectSortOrder,
       settings.sidebarWorkingShelfEnabled,
       settings.sidebarThreadPreviewCount,
       settings.showSkillsInSlashMenu,
       settings.language,
+      settings.autoExpandThreadDetailsPanel,
+      settings.hideUnavailableContextMenuItems,
+      settings.scratchBaseDirectory,
+      settings.legacySidebarEnabled,
+      settings.legacySidebarProjectGuides,
+      settings.legacySidebarThreadStatusDots,
+      settings.legacySidebarHideStatusLabels,
       settings.timestampFormat,
       settings.notificationMode,
       settings.inAppNotificationsEnabled,
@@ -1178,11 +1313,18 @@ export function useSettingsRestore(onRestored?: () => void) {
       notifyThemeRestoreFailure();
       return;
     }
-    updateSettings({
+    const resetPatch: ScopedSettingsPatch = {
       appearanceContrast: DEFAULT_UNIFIED_SETTINGS.appearanceContrast,
-      language: DEFAULT_UNIFIED_SETTINGS.language,
       diffColorScheme: DEFAULT_UNIFIED_SETTINGS.diffColorScheme,
       chatWidth: DEFAULT_UNIFIED_SETTINGS.chatWidth,
+      language: DEFAULT_UNIFIED_SETTINGS.language,
+      autoExpandThreadDetailsPanel: DEFAULT_UNIFIED_SETTINGS.autoExpandThreadDetailsPanel,
+      hideUnavailableContextMenuItems: DEFAULT_UNIFIED_SETTINGS.hideUnavailableContextMenuItems,
+      scratchBaseDirectory: DEFAULT_UNIFIED_SETTINGS.scratchBaseDirectory,
+      legacySidebarEnabled: DEFAULT_UNIFIED_SETTINGS.legacySidebarEnabled,
+      legacySidebarProjectGuides: DEFAULT_UNIFIED_SETTINGS.legacySidebarProjectGuides,
+      legacySidebarThreadStatusDots: DEFAULT_UNIFIED_SETTINGS.legacySidebarThreadStatusDots,
+      legacySidebarHideStatusLabels: DEFAULT_UNIFIED_SETTINGS.legacySidebarHideStatusLabels,
       timestampFormat: DEFAULT_UNIFIED_SETTINGS.timestampFormat,
       notificationMode: DEFAULT_UNIFIED_SETTINGS.notificationMode,
       inAppNotificationsEnabled: DEFAULT_UNIFIED_SETTINGS.inAppNotificationsEnabled,
@@ -1192,7 +1334,6 @@ export function useSettingsRestore(onRestored?: () => void) {
       diffIgnoreWhitespace: DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace,
       diffLayout: DEFAULT_UNIFIED_SETTINGS.diffLayout,
       proactivePanelsEnabled: DEFAULT_UNIFIED_SETTINGS.proactivePanelsEnabled,
-      autoExpandThreadDetailsPanel: DEFAULT_UNIFIED_SETTINGS.autoExpandThreadDetailsPanel,
       showSkillsInSlashMenu: DEFAULT_UNIFIED_SETTINGS.showSkillsInSlashMenu,
       composerCollapseOnScroll: DEFAULT_UNIFIED_SETTINGS.composerCollapseOnScroll,
       composerRichTextEnabled: DEFAULT_UNIFIED_SETTINGS.composerRichTextEnabled,
@@ -1204,22 +1345,25 @@ export function useSettingsRestore(onRestored?: () => void) {
       panelAnimationDurationMs: DEFAULT_UNIFIED_SETTINGS.panelAnimationDurationMs,
       sidebarThreadPreviewCount: DEFAULT_UNIFIED_SETTINGS.sidebarThreadPreviewCount,
       sidebarProjectGroupingMode: DEFAULT_UNIFIED_SETTINGS.sidebarProjectGroupingMode,
+      sidebarProjectSortOrder: DEFAULT_UNIFIED_SETTINGS.sidebarProjectSortOrder,
       sidebarWorkingShelfEnabled: DEFAULT_UNIFIED_SETTINGS.sidebarWorkingShelfEnabled,
       sidebarAutoSettleAfterDays: DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleAfterDays,
+      sidebarAutoSettleKeepPullRequests: DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleKeepPullRequests,
       sidebarAutoSettleOnMerge: DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleOnMerge,
       autoResumeLimitedThreads: DEFAULT_UNIFIED_SETTINGS.autoResumeLimitedThreads,
       snoozeLimitedThreads: DEFAULT_UNIFIED_SETTINGS.snoozeLimitedThreads,
       responseStreamingMode: DEFAULT_UNIFIED_SETTINGS.responseStreamingMode,
-      conversationStructure: DEFAULT_UNIFIED_SETTINGS.conversationStructure,
-      conversationStructureThinkingLabel:
-        DEFAULT_UNIFIED_SETTINGS.conversationStructureThinkingLabel,
-      conversationStructureIdleLabel: DEFAULT_UNIFIED_SETTINGS.conversationStructureIdleLabel,
       smoothOutputMode: DEFAULT_UNIFIED_SETTINGS.smoothOutputMode,
       smoothOutputLineMode: DEFAULT_UNIFIED_SETTINGS.smoothOutputLineMode,
       smoothMarkdownPreload: DEFAULT_UNIFIED_SETTINGS.smoothMarkdownPreload,
       smoothTextFadeDurationMs: DEFAULT_UNIFIED_SETTINGS.smoothTextFadeDurationMs,
       smoothTextYieldDurationMs: DEFAULT_UNIFIED_SETTINGS.smoothTextYieldDurationMs,
       footnotesAutoCollapse: DEFAULT_UNIFIED_SETTINGS.footnotesAutoCollapse,
+      conversationStructure: DEFAULT_UNIFIED_SETTINGS.conversationStructure,
+      conversationStructureThinkingLabel:
+        DEFAULT_UNIFIED_SETTINGS.conversationStructureThinkingLabel,
+      conversationStructureIdleLabel: DEFAULT_UNIFIED_SETTINGS.conversationStructureIdleLabel,
+
       enableProviderUpdateChecks: DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks,
       continueThreadsAfterServerUpdate: DEFAULT_UNIFIED_SETTINGS.continueThreadsAfterServerUpdate,
       backgroundActivity: DEFAULT_UNIFIED_SETTINGS.backgroundActivity,
@@ -1229,7 +1373,6 @@ export function useSettingsRestore(onRestored?: () => void) {
       defaultThreadEnvMode: DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode,
       newWorktreesStartFromOrigin: DEFAULT_UNIFIED_SETTINGS.newWorktreesStartFromOrigin,
       addProjectBaseDirectory: DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory,
-      scratchBaseDirectory: DEFAULT_UNIFIED_SETTINGS.scratchBaseDirectory,
       confirmThreadArchive: DEFAULT_UNIFIED_SETTINGS.confirmThreadArchive,
       confirmThreadDelete: DEFAULT_UNIFIED_SETTINGS.confirmThreadDelete,
       confirmThreadUnpin: DEFAULT_UNIFIED_SETTINGS.confirmThreadUnpin,
@@ -1251,23 +1394,35 @@ export function useSettingsRestore(onRestored?: () => void) {
       browserRecordingShowMousePresses: DEFAULT_UNIFIED_SETTINGS.browserRecordingShowMousePresses,
       browserLinkTarget: DEFAULT_UNIFIED_SETTINGS.browserLinkTarget,
       browserAutoShowFloatingPreview: DEFAULT_UNIFIED_SETTINGS.browserAutoShowFloatingPreview,
+      pullRequestLinksOpenInApp: DEFAULT_UNIFIED_SETTINGS.pullRequestLinksOpenInApp,
       // Re-granted like any other default. The confirmation dialog lists it by
       // name, so a user restoring defaults is told the agent regains access
       // rather than discovering it later.
       enableAgentBrowserAccess: DEFAULT_UNIFIED_SETTINGS.enableAgentBrowserAccess,
-    });
+    };
+    updateSettings(
+      isProjectScope
+        ? Object.fromEntries(
+            Object.entries(resetPatch).filter(
+              ([key]) =>
+                !Object.hasOwn(ServerSettings.fields, key) || isProjectScopedSettingKey(key),
+            ),
+          )
+        : resetPatch,
+    );
     onRestored?.();
   }, [
     changedSettingLabels,
     clearThemeHalves,
+    isProjectScope,
     onRestored,
     setFollowSystem,
     setTheme,
     setThemeHalf,
-    t,
     theme,
     themeHalves,
     updateSettings,
+    t,
   ]);
 
   return {
@@ -1284,6 +1439,7 @@ function BackgroundActivityAdvancedDialog({
   readonly onOpenChange: (open: boolean) => void;
 }) {
   const { t } = useI18n();
+  const canWriteSettings = useScopedSettingsWriteAllowed();
   const settings = useScopedSettings();
   const updateSettings = useUpdateScopedSettings();
   const resolvedBackgroundActivity = resolveServerBackgroundActivitySettings(settings);
@@ -1302,7 +1458,7 @@ function BackgroundActivityAdvancedDialog({
   );
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open && canWriteSettings} onOpenChange={onOpenChange}>
       <DialogPopup className="max-w-xl">
         <DialogHeader>
           <DialogTitle>{t("settings.general.backgroundActivity.title")}</DialogTitle>
@@ -1311,7 +1467,10 @@ function BackgroundActivityAdvancedDialog({
           </DialogDescription>
         </DialogHeader>
         <DialogPanel>
-          <div className="overflow-hidden rounded-xl border bg-card text-card-foreground">
+          <fieldset
+            disabled={!canWriteSettings}
+            className="min-w-0 overflow-hidden rounded-xl border bg-card text-card-foreground"
+          >
             <div className="flex flex-col gap-3 border-b px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
               <div className="min-w-0 space-y-1">
                 <div className="text-sm font-medium">
@@ -1346,13 +1505,13 @@ function BackgroundActivityAdvancedDialog({
                 </SelectTrigger>
                 <SelectPopup align="end" alignItemWithTrigger={false}>
                   <SelectItem hideIndicator value="balanced">
-                    {t(BACKGROUND_ACTIVITY_PROFILE_LABEL_KEYS.balanced)}
+                    {t("settings.general.backgroundActivity.balanced")}
                   </SelectItem>
                   <SelectItem hideIndicator value="performance">
-                    {t(BACKGROUND_ACTIVITY_PROFILE_LABEL_KEYS.performance)}
+                    {t("settings.general.backgroundActivity.performance")}
                   </SelectItem>
                   <SelectItem hideIndicator value="battery-saver">
-                    {t(BACKGROUND_ACTIVITY_PROFILE_LABEL_KEYS["battery-saver"])}
+                    {t("settings.general.backgroundActivity.batterySaver")}
                   </SelectItem>
                 </SelectPopup>
               </Select>
@@ -1414,7 +1573,8 @@ function BackgroundActivityAdvancedDialog({
                   {t("settings.general.backgroundActivity.providerHealthInterval")}
                 </div>
                 <p className="text-xs leading-relaxed text-muted-foreground">
-                  {t("settings.general.backgroundActivity.providerHealthIntervalDescription")}
+                  Refresh provider availability, versions, and auth state. Model catalog updates
+                  follow Provider update checks.
                 </p>
               </div>
               <div className="flex shrink-0 items-center gap-2">
@@ -1571,38 +1731,36 @@ function BackgroundActivityAdvancedDialog({
             </div>
 
             <div className="grid gap-0 border-t sm:grid-cols-2">
-              {BACKGROUND_ACTIVITY_BOOLEAN_OVERRIDES.map(({ key, labelKey }) => {
-                const label = t(labelKey);
-                return (
-                  <label
-                    key={key}
-                    className="flex items-center justify-between gap-3 border-b px-4 py-3 last:border-b-0 sm:border-r sm:even:border-r-0"
-                  >
-                    <span className="text-sm font-medium">{label}</span>
-                    <Switch
-                      checked={resolvedBackgroundActivity[key]}
-                      onCheckedChange={(checked) =>
-                        updateSettings(
-                          backgroundActivityOverrideSettings(
-                            settings.backgroundActivity,
-                            resolvedBackgroundActivity,
-                            {
-                              [key]: Boolean(checked),
-                            },
-                          ),
-                        )
-                      }
-                      aria-label={label}
-                    />
-                  </label>
-                );
-              })}
+              {BACKGROUND_ACTIVITY_BOOLEAN_OVERRIDES.map(({ key, labelKey }) => (
+                <label
+                  key={key}
+                  className="flex items-center justify-between gap-3 border-b px-4 py-3 last:border-b-0 sm:border-r sm:even:border-r-0"
+                >
+                  <span className="text-sm font-medium">{t(labelKey)}</span>
+                  <Switch
+                    checked={resolvedBackgroundActivity[key]}
+                    onCheckedChange={(checked) =>
+                      updateSettings(
+                        backgroundActivityOverrideSettings(
+                          settings.backgroundActivity,
+                          resolvedBackgroundActivity,
+                          {
+                            [key]: Boolean(checked),
+                          },
+                        ),
+                      )
+                    }
+                    aria-label={t(labelKey)}
+                  />
+                </label>
+              ))}
             </div>
-          </div>
+          </fieldset>
         </DialogPanel>
         <DialogFooter>
           <Button
             variant="outline"
+            disabled={!canWriteSettings}
             onClick={() => updateSettings(resetBackgroundActivitySettings())}
           >
             {t("settings.general.backgroundActivity.resetAll")}
@@ -1616,187 +1774,9 @@ function BackgroundActivityAdvancedDialog({
   );
 }
 
-/**
- * The words the settings rows share. A panel that translates itself mounts
- * this on `SettingsRowCopyProvider`, so the reset affordances, tooltips, and
- * inheritance summaries follow the app language; panels that do not keep the
- * English defaults.
- */
-function useSettingsPanelCopy(): SettingsRowCopy {
-  const { t } = useI18n();
-  return useMemo(
-    () => ({
-      settingValueLabel: (key, value) => inheritedSettingValueLabel(key, value, t),
-      resetToInheritedTooltip: t("settings.row.copy.inheritedTooltip"),
-      resetToDefaultTooltip: t("settings.row.copy.defaultTooltip"),
-      resetToInheritedLabel: (label) => t("settings.row.copy.inheritedLabel", { label }),
-      resetToDefaultLabel: (label) => t("settings.row.copy.defaultLabel", { label }),
-      overrideFallbackLabel: t("settings.row.copy.overrideFallbackLabel"),
-      reconnectSelectedEnvironment: t("settings.row.copy.reconnectSelectedEnvironment"),
-      selectEnvironment: t("settings.row.copy.selectEnvironment"),
-      mixedAcrossEnvironments: t("settings.row.copy.mixedAcrossEnvironments"),
-      overriddenForProject: t("settings.row.copy.overriddenForProject"),
-      inheritedFrom: (source) => t("settings.row.copy.inheritedFrom", { source }),
-      setOnEnvironment: t("settings.row.copy.setOnEnvironment"),
-      builtInDefault: t("settings.row.copy.builtInDefault"),
-      layerProject: t("settings.row.copy.layerProject"),
-      layerEnvironment: t("settings.row.copy.layerEnvironment"),
-      layerDefault: t("settings.row.copy.layerDefault"),
-      inherits: t("settings.row.copy.inherits"),
-      on: t("settings.row.copy.on"),
-      off: t("settings.row.copy.off"),
-      dayCount: (count) =>
-        t(count === 1 ? "settings.row.copy.dayCountOne" : "settings.row.copy.dayCountOther", {
-          count,
-        }),
-      lastSelected: t("settings.row.copy.lastSelected"),
-      never: t("settings.row.copy.never"),
-      automatic: t("settings.row.copy.automatic"),
-      textGenerationModel: t("settings.row.copy.textGenerationModel"),
-      notSet: t("settings.row.copy.notSet"),
-      empty: t("settings.row.copy.empty"),
-      itemCount: (count) =>
-        t(count === 1 ? "settings.row.copy.itemCountOne" : "settings.row.copy.itemCountOther", {
-          count,
-        }),
-      custom: t("settings.row.copy.custom"),
-      envModeLocal: t("settings.general.workspace.mode.local"),
-      envModeWorktree: t("settings.general.workspace.mode.worktree"),
-      overriddenBy: t("settings.row.copy.overriddenBy"),
-      resetOverride: (count) =>
-        t(
-          count === 1
-            ? "settings.row.copy.resetOverrideOne"
-            : "settings.row.copy.resetOverrideOther",
-        ),
-      projectOverrideSummary: (summary, count) =>
-        t(
-          count === 1
-            ? "settings.row.copy.projectOverrideSummaryOne"
-            : "settings.row.copy.projectOverrideSummaryOther",
-          { summary, count },
-        ),
-      showSourceLabel: (summary) => t("settings.row.copy.showSourceLabel", { summary }),
-    }),
-    [t],
-  );
-}
-
-function SidebarAppearanceSettingsSection() {
-  const { t } = useI18n();
-  const settings = useScopedSettings();
-  const updateSettings = useUpdateScopedSettings();
-  const sidebarStyleOptions = [
-    { value: "default", label: t("settings.appearance.sidebar.option.default") },
-    { value: "legacy", label: t("settings.appearance.sidebar.option.legacy") },
-  ];
-  const threadStatusDotOptions = [
-    { value: "off", label: t("settings.appearance.sidebarThreadStatusDots.off") },
-    { value: "labels", label: t("settings.appearance.sidebarThreadStatusDots.labels") },
-    { value: "dots", label: t("settings.appearance.sidebarThreadStatusDots.dots") },
-  ];
-  const threadStatusDotMode = settings.legacySidebarThreadStatusDots
-    ? settings.legacySidebarHideStatusLabels
-      ? "dots"
-      : "labels"
-    : "off";
-
-  return (
-    <SettingsSection id="sidebar-appearance" title={t("settings.appearance.sidebar.title")}>
-      <Collapsible open={settings.legacySidebarEnabled}>
-        <SettingsRow
-          {...searchableSetting("legacy-sidebar", t)}
-          description={t("settings.appearance.sidebar.description")}
-          control={
-            <Select
-              items={sidebarStyleOptions}
-              value={settings.legacySidebarEnabled ? "legacy" : "default"}
-              onValueChange={(value) => {
-                if (value === "default" || value === "legacy") {
-                  updateSettings({ legacySidebarEnabled: value === "legacy" });
-                }
-              }}
-            >
-              <SelectTrigger size="sm" aria-label={searchableSetting("legacy-sidebar", t).title}>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectPopup align="end" alignItemWithTrigger={false}>
-                {sidebarStyleOptions.map(({ value, label }) => (
-                  <SelectItem hideIndicator key={value} value={value}>
-                    {label}
-                  </SelectItem>
-                ))}
-              </SelectPopup>
-            </Select>
-          }
-        />
-        <CollapsiblePanel>
-          <SettingsRow
-            className="border-t border-border/50"
-            {...searchableSetting("legacy-sidebar-project-guides", t)}
-            description={t("settings.appearance.sidebarProjectGuides.description")}
-            control={
-              <Switch
-                checked={settings.legacySidebarProjectGuides}
-                onCheckedChange={(checked) =>
-                  updateSettings({ legacySidebarProjectGuides: Boolean(checked) })
-                }
-                aria-label={searchableSetting("legacy-sidebar-project-guides", t).title}
-              />
-            }
-          />
-          <SettingsRow
-            className="border-t border-border/50"
-            {...searchableSetting("legacy-sidebar-thread-status-dots", t)}
-            description={t("settings.appearance.sidebarThreadStatusDots.description")}
-            control={
-              <Select
-                items={threadStatusDotOptions}
-                value={threadStatusDotMode}
-                onValueChange={(value) => {
-                  if (value === "off" || value === "labels" || value === "dots") {
-                    updateSettings({
-                      legacySidebarThreadStatusDots: value !== "off",
-                      legacySidebarHideStatusLabels: value === "dots",
-                    });
-                  }
-                }}
-              >
-                <SelectTrigger
-                  size="sm"
-                  aria-label={searchableSetting("legacy-sidebar-thread-status-dots", t).title}
-                >
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectPopup align="end" alignItemWithTrigger={false}>
-                  {threadStatusDotOptions.map(({ value, label }) => (
-                    <SelectItem hideIndicator key={value} value={value}>
-                      {label}
-                    </SelectItem>
-                  ))}
-                </SelectPopup>
-              </Select>
-            }
-          />
-        </CollapsiblePanel>
-      </Collapsible>
-    </SettingsSection>
-  );
-}
-
 export function AppearanceSettingsPanel() {
-  const copy = useSettingsPanelCopy();
-  return (
-    <SettingsPageContainer>
-      <SettingsRowCopyProvider copy={copy}>
-        <AppearanceSettingsRows />
-      </SettingsRowCopyProvider>
-    </SettingsPageContainer>
-  );
-}
-
-function AppearanceSettingsRows() {
   const { t } = useI18n();
+  const copy = useSettingsPanelCopy();
   const {
     appearanceMode,
     refreshTheme,
@@ -1836,323 +1816,357 @@ function AppearanceSettingsRows() {
   } as CSSProperties;
 
   return (
-    <>
-      <SettingsSection
-        id="appearance"
-        title={t("settings.appearance.colorsAndThemes.title")}
-        variant="plain"
-        hideTitle
-      >
-        <div id={searchableSetting("theme").id}>
-          <ThemeLibrary
-            appearanceMode={appearanceMode}
-            customThemes={customThemes}
-            initialAppearance={resolvedTheme}
-            refreshTheme={refreshTheme}
-            isImportOpen={isImportThemeOpen}
-            setAppearanceMode={setAppearanceMode}
-            setTheme={setTheme}
-            setThemeHalf={setThemeHalf}
-            theme={theme}
-            themeHalves={themeHalves}
-            onImportOpenChange={setIsImportThemeOpen}
-          />
-        </div>
-      </SettingsSection>
+    <SettingsPageContainer>
+      <SettingsRowCopyProvider copy={copy}>
+        <SettingsSection
+          id="appearance"
+          title={t("settings.appearance.colorsAndThemes.title")}
+          variant="plain"
+          hideTitle
+        >
+          <div id={searchableSetting("theme", t).id}>
+            <ThemeLibrary
+              appearanceMode={appearanceMode}
+              customThemes={customThemes}
+              initialAppearance={resolvedTheme}
+              refreshTheme={refreshTheme}
+              isImportOpen={isImportThemeOpen}
+              setAppearanceMode={setAppearanceMode}
+              setTheme={setTheme}
+              setThemeHalf={setThemeHalf}
+              theme={theme}
+              themeHalves={themeHalves}
+              onImportOpenChange={setIsImportThemeOpen}
+            />
+          </div>
+        </SettingsSection>
 
-      <SettingsSection id="appearance-interface" title={t("settings.appearance.interface.title")}>
-        <SettingsRow
-          {...searchableSetting("setting-appearance-contrast", t)}
-          description={t("settings.appearance.contrast.description")}
-          resetAction={
-            settings.appearanceContrast !== DEFAULT_UNIFIED_SETTINGS.appearanceContrast ? (
-              <SettingResetButton
-                label={t("settings.appearance.contrast.resetLabel")}
-                onClick={() =>
-                  updateSettings({
-                    appearanceContrast: DEFAULT_UNIFIED_SETTINGS.appearanceContrast,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <div className="flex w-full items-center gap-3 sm:w-52">
-              <output
-                className="min-w-12 rounded-md bg-muted px-2 py-1 text-center font-mono text-xs font-medium tabular-nums text-foreground"
-                htmlFor="appearance-contrast"
-              >
-                {settings.appearanceContrast}%
-              </output>
-              <input
-                aria-label={searchableSetting("setting-appearance-contrast", t).title}
-                className="settings-slider min-w-0 flex-1"
-                id="appearance-contrast"
-                max={MAX_APPEARANCE_CONTRAST}
-                min={MIN_APPEARANCE_CONTRAST}
-                onChange={(event) => {
-                  const appearanceContrast = Number(event.currentTarget.value);
-                  if (
-                    Number.isInteger(appearanceContrast) &&
-                    appearanceContrast >= MIN_APPEARANCE_CONTRAST &&
-                    appearanceContrast <= MAX_APPEARANCE_CONTRAST
-                  ) {
-                    updateSettings({ appearanceContrast });
-                  }
-                }}
-                step={5}
-                style={appearanceContrastSliderStyle}
-                type="range"
-                value={settings.appearanceContrast}
-              />
-            </div>
-          }
-        />
-
-        <SettingsRow
-          {...searchableSetting("setting-glass-opacity", t)}
-          description={t("settings.appearance.glassOpacity.description")}
-          resetAction={
-            settings.glassOpacity !== DEFAULT_UNIFIED_SETTINGS.glassOpacity ? (
-              <SettingResetButton
-                label={t("settings.appearance.glassOpacity.resetLabel")}
-                onClick={() =>
-                  updateSettings({ glassOpacity: DEFAULT_UNIFIED_SETTINGS.glassOpacity })
-                }
-              />
-            ) : null
-          }
-          control={
-            <div className="flex w-full items-center gap-3 sm:w-52">
-              <output
-                className="min-w-12 rounded-md bg-muted px-2 py-1 text-center font-mono text-xs font-medium tabular-nums text-foreground"
-                htmlFor="glass-opacity"
-              >
-                {settings.glassOpacity}%
-              </output>
-              <input
-                aria-label={searchableSetting("setting-glass-opacity", t).title}
-                className="settings-slider min-w-0 flex-1"
-                id="glass-opacity"
-                max={MAX_GLASS_OPACITY}
-                min={MIN_GLASS_OPACITY}
-                onChange={(event) => {
-                  const glassOpacity = Number(event.currentTarget.value);
-                  if (
-                    Number.isInteger(glassOpacity) &&
-                    glassOpacity >= MIN_GLASS_OPACITY &&
-                    glassOpacity <= MAX_GLASS_OPACITY
-                  ) {
-                    updateSettings({ glassOpacity });
-                  }
-                }}
-                step={5}
-                style={glassOpacitySliderStyle}
-                type="range"
-                value={settings.glassOpacity}
-              />
-            </div>
-          }
-        />
-
-        {showEnvironmentIdentification ? (
+        <SettingsSection id="appearance-interface" title={t("settings.appearance.interface.title")}>
           <SettingsRow
-            {...searchableSetting("environment-identification", t)}
-            description={t("settings.appearance.environmentIdentification.description")}
+            {...searchableSetting("setting-appearance-contrast", t)}
+            description={t("settings.appearance.contrast.description")}
             resetAction={
-              settings.environmentIdentificationMode !== DEFAULT_ENVIRONMENT_IDENTIFICATION_MODE ? (
+              settings.appearanceContrast !== DEFAULT_UNIFIED_SETTINGS.appearanceContrast ? (
                 <SettingResetButton
-                  label={t("settings.appearance.environmentIdentification.resetLabel")}
+                  label={t("settings.appearance.contrast.resetLabel")}
                   onClick={() =>
                     updateSettings({
-                      environmentIdentificationMode: DEFAULT_ENVIRONMENT_IDENTIFICATION_MODE,
+                      appearanceContrast: DEFAULT_UNIFIED_SETTINGS.appearanceContrast,
                     })
                   }
                 />
               ) : null
             }
             control={
-              <Select
-                value={settings.environmentIdentificationMode}
-                onValueChange={(value) => {
-                  if (value === "artwork" || value === "pill" || value === "none") {
-                    updateSettings({ environmentIdentificationMode: value });
-                  }
-                }}
-              >
-                <SelectTrigger
-                  size="sm"
-                  className="w-full sm:w-40"
-                  aria-label={searchableSetting("environment-identification", t).title}
-                >
-                  <SelectValue>
-                    {t(
-                      ENVIRONMENT_IDENTIFICATION_LABEL_KEYS[settings.environmentIdentificationMode],
-                    )}
-                  </SelectValue>
-                </SelectTrigger>
-                <SelectPopup align="end" alignItemWithTrigger={false}>
-                  {Object.entries(ENVIRONMENT_IDENTIFICATION_LABEL_KEYS).map(
-                    ([value, labelKey]) => (
-                      <SelectItem hideIndicator key={value} value={value}>
-                        {t(labelKey)}
-                      </SelectItem>
-                    ),
-                  )}
-                </SelectPopup>
-              </Select>
-            }
-          />
-        ) : null}
-
-        <SettingsRow
-          {...searchableSetting("diff-color-scheme", t)}
-          description={t("settings.appearance.diffColors.description")}
-          resetAction={
-            settings.diffColorScheme !== DEFAULT_UNIFIED_SETTINGS.diffColorScheme ? (
-              <SettingResetButton
-                label={t("settings.appearance.diffColors.resetLabel")}
-                onClick={() =>
-                  updateSettings({ diffColorScheme: DEFAULT_UNIFIED_SETTINGS.diffColorScheme })
-                }
-              />
-            ) : null
-          }
-          control={
-            <div className="w-full sm:w-40">
-              <Select
-                value={settings.diffColorScheme}
-                onValueChange={(value) => {
-                  if (value === "red-green" || value === "blue-orange")
-                    updateSettings({ diffColorScheme: value });
-                }}
-              >
-                <SelectTrigger
-                  size="sm"
-                  className="w-full min-w-0"
-                  aria-label={searchableSetting("diff-color-scheme", t).title}
-                >
-                  <span
-                    aria-hidden="true"
-                    className={
-                      settings.diffColorScheme === "blue-orange"
-                        ? "flex shrink-0 flex-row-reverse gap-1"
-                        : "flex shrink-0 gap-1"
-                    }
-                  >
-                    <span className="size-2 rounded-full bg-diff-deletion" />
-                    <span className="size-2 rounded-full bg-diff-addition" />
-                  </span>
-                  <SelectValue>
-                    {settings.diffColorScheme === "blue-orange"
-                      ? t("settings.appearance.diffColors.option.blueOrange")
-                      : t("settings.appearance.diffColors.option.redGreen")}
-                  </SelectValue>
-                </SelectTrigger>
-                <SelectPopup align="end" alignItemWithTrigger={false}>
-                  <SelectItem value="red-green">
-                    {t("settings.appearance.diffColors.option.redGreenDefault")}
-                  </SelectItem>
-                  <SelectItem value="blue-orange">
-                    {t("settings.appearance.diffColors.option.blueOrange")}
-                  </SelectItem>
-                </SelectPopup>
-              </Select>
-            </div>
-          }
-        />
-        <SettingsRow
-          {...searchableSetting("chat-width")}
-          description="Set how wide messages and the composer can grow on large screens."
-          resetAction={
-            settings.chatWidth !== DEFAULT_UNIFIED_SETTINGS.chatWidth ? (
-              <SettingResetButton
-                label="chat width"
-                onClick={() => updateSettings({ chatWidth: DEFAULT_UNIFIED_SETTINGS.chatWidth })}
-              />
-            ) : null
-          }
-          control={
-            <div className="w-full sm:w-40">
-              <Select
-                value={settings.chatWidth}
-                onValueChange={(value) => {
-                  if (value === "comfortable" || value === "wide" || value === "full")
-                    updateSettings({ chatWidth: value });
-                }}
-              >
-                <SelectTrigger size="sm" className="w-full min-w-0" aria-label="Chat width">
-                  <SelectValue>{CHAT_WIDTH_LABELS[settings.chatWidth]}</SelectValue>
-                </SelectTrigger>
-                <SelectPopup align="end" alignItemWithTrigger={false}>
-                  <SelectItem value="comfortable">Comfortable (default)</SelectItem>
-                  <SelectItem value="wide">Wide</SelectItem>
-                  <SelectItem value="full">Full</SelectItem>
-                </SelectPopup>
-              </Select>
-            </div>
-          }
-        />
-      </SettingsSection>
-
-      <SidebarAppearanceSettingsSection />
-
-      <SettingsSection id="motion" title={t("settings.appearance.motion.title")}>
-        <SettingsRow
-          {...searchableSetting("panel-animations", t)}
-          description={t("settings.appearance.panelAnimations.description")}
-          control={
-            <div className="grid w-full grid-cols-[5rem_minmax(0,1fr)] items-center gap-3 sm:w-auto sm:grid-cols-[7rem_13rem] sm:gap-4">
-              <PanelAnimationsPreview durationMs={settings.panelAnimationDurationMs} />
-              <div className="flex w-full items-center gap-3">
+              <div className="flex w-full items-center gap-3 sm:w-52">
                 <output
-                  className="min-w-16 rounded-md bg-muted px-2 py-1 text-center font-mono text-xs font-medium tabular-nums text-foreground"
-                  htmlFor="panel-animation-duration"
+                  className="min-w-12 rounded-md bg-muted px-2 py-1 text-center font-mono text-xs font-medium tabular-nums text-foreground"
+                  htmlFor="appearance-contrast"
                 >
-                  {settings.panelAnimationDurationMs} ms
+                  {settings.appearanceContrast}%
                 </output>
                 <input
-                  aria-label={t("settings.appearance.panelAnimations.durationAriaLabel")}
+                  aria-label={t("settings.restore.label.contrast")}
                   className="settings-slider min-w-0 flex-1"
-                  id="panel-animation-duration"
-                  max={MAX_PANEL_ANIMATION_DURATION_MS}
-                  min={MIN_PANEL_ANIMATION_DURATION_MS}
+                  id="appearance-contrast"
+                  max={MAX_APPEARANCE_CONTRAST}
+                  min={MIN_APPEARANCE_CONTRAST}
                   onChange={(event) => {
-                    const panelAnimationDurationMs = Number(event.currentTarget.value);
+                    const appearanceContrast = Number(event.currentTarget.value);
                     if (
-                      Number.isInteger(panelAnimationDurationMs) &&
-                      panelAnimationDurationMs >= MIN_PANEL_ANIMATION_DURATION_MS &&
-                      panelAnimationDurationMs <= MAX_PANEL_ANIMATION_DURATION_MS
+                      Number.isInteger(appearanceContrast) &&
+                      appearanceContrast >= MIN_APPEARANCE_CONTRAST &&
+                      appearanceContrast <= MAX_APPEARANCE_CONTRAST
                     ) {
-                      updateSettings({ panelAnimationDurationMs });
+                      updateSettings({ appearanceContrast });
                     }
                   }}
-                  step={25}
-                  style={panelAnimationDurationSliderStyle}
+                  step={5}
+                  style={appearanceContrastSliderStyle}
                   type="range"
-                  value={settings.panelAnimationDurationMs}
+                  value={settings.appearanceContrast}
                 />
               </div>
-            </div>
-          }
-          resetAction={
-            settings.panelAnimationDurationMs !==
-            DEFAULT_UNIFIED_SETTINGS.panelAnimationDurationMs ? (
-              <SettingResetButton
-                label={t("settings.appearance.panelAnimations.resetLabel")}
-                onClick={() =>
-                  updateSettings({
-                    panelAnimationDurationMs: DEFAULT_UNIFIED_SETTINGS.panelAnimationDurationMs,
-                  })
-                }
-              />
-            ) : null
-          }
-        />
-      </SettingsSection>
+            }
+          />
 
-      <TypographySection />
-    </>
+          <SettingsRow
+            {...searchableSetting("setting-glass-opacity", t)}
+            description={t("settings.appearance.glassOpacity.description")}
+            resetAction={
+              settings.glassOpacity !== DEFAULT_UNIFIED_SETTINGS.glassOpacity ? (
+                <SettingResetButton
+                  label={t("settings.appearance.glassOpacity.resetLabel")}
+                  onClick={() =>
+                    updateSettings({ glassOpacity: DEFAULT_UNIFIED_SETTINGS.glassOpacity })
+                  }
+                />
+              ) : null
+            }
+            control={
+              <div className="flex w-full items-center gap-3 sm:w-52">
+                <output
+                  className="min-w-12 rounded-md bg-muted px-2 py-1 text-center font-mono text-xs font-medium tabular-nums text-foreground"
+                  htmlFor="glass-opacity"
+                >
+                  {settings.glassOpacity}%
+                </output>
+                <input
+                  aria-label={t("settings.restore.label.glassOpacity")}
+                  className="settings-slider min-w-0 flex-1"
+                  id="glass-opacity"
+                  max={MAX_GLASS_OPACITY}
+                  min={MIN_GLASS_OPACITY}
+                  onChange={(event) => {
+                    const glassOpacity = Number(event.currentTarget.value);
+                    if (
+                      Number.isInteger(glassOpacity) &&
+                      glassOpacity >= MIN_GLASS_OPACITY &&
+                      glassOpacity <= MAX_GLASS_OPACITY
+                    ) {
+                      updateSettings({ glassOpacity });
+                    }
+                  }}
+                  step={5}
+                  style={glassOpacitySliderStyle}
+                  type="range"
+                  value={settings.glassOpacity}
+                />
+              </div>
+            }
+          />
+
+          {showEnvironmentIdentification ? (
+            <SettingsRow
+              {...searchableSetting("environment-identification", t)}
+              description={t("settings.appearance.environmentIdentification.description")}
+              resetAction={
+                settings.environmentIdentificationMode !==
+                DEFAULT_ENVIRONMENT_IDENTIFICATION_MODE ? (
+                  <SettingResetButton
+                    label={t("settings.appearance.environmentIdentification.resetLabel")}
+                    onClick={() =>
+                      updateSettings({
+                        environmentIdentificationMode: DEFAULT_ENVIRONMENT_IDENTIFICATION_MODE,
+                      })
+                    }
+                  />
+                ) : null
+              }
+              control={
+                <Select
+                  value={settings.environmentIdentificationMode}
+                  onValueChange={(value) => {
+                    if (value === "artwork" || value === "pill" || value === "none") {
+                      updateSettings({ environmentIdentificationMode: value });
+                    }
+                  }}
+                >
+                  <SelectTrigger
+                    size="sm"
+                    className="w-full sm:w-40"
+                    aria-label={t("settings.restore.label.environmentIdentification")}
+                  >
+                    <SelectValue>
+                      {t(
+                        ENVIRONMENT_IDENTIFICATION_LABEL_KEYS[
+                          settings.environmentIdentificationMode
+                        ],
+                      )}
+                    </SelectValue>
+                  </SelectTrigger>
+                  <SelectPopup align="end" alignItemWithTrigger={false}>
+                    {Object.entries(ENVIRONMENT_IDENTIFICATION_LABEL_KEYS).map(
+                      ([value, labelKey]) => (
+                        <SelectItem hideIndicator key={value} value={value}>
+                          {t(labelKey)}
+                        </SelectItem>
+                      ),
+                    )}
+                  </SelectPopup>
+                </Select>
+              }
+            />
+          ) : null}
+
+          <SettingsRow
+            {...searchableSetting("diff-color-scheme", t)}
+            description={t("settings.appearance.diffColors.description")}
+            resetAction={
+              settings.diffColorScheme !== DEFAULT_UNIFIED_SETTINGS.diffColorScheme ? (
+                <SettingResetButton
+                  label={t("settings.appearance.diffColors.resetLabel")}
+                  onClick={() =>
+                    updateSettings({ diffColorScheme: DEFAULT_UNIFIED_SETTINGS.diffColorScheme })
+                  }
+                />
+              ) : null
+            }
+            control={
+              <div className="w-full sm:w-40">
+                <Select
+                  value={settings.diffColorScheme}
+                  onValueChange={(value) => {
+                    if (value === "red-green" || value === "blue-orange")
+                      updateSettings({ diffColorScheme: value });
+                  }}
+                >
+                  <SelectTrigger
+                    size="sm"
+                    className="w-full min-w-0"
+                    aria-label={t("settings.restore.label.diffColors")}
+                  >
+                    <span
+                      aria-hidden="true"
+                      className={
+                        settings.diffColorScheme === "blue-orange"
+                          ? "flex shrink-0 flex-row-reverse gap-1"
+                          : "flex shrink-0 gap-1"
+                      }
+                    >
+                      <span className="size-2 rounded-full bg-diff-deletion" />
+                      <span className="size-2 rounded-full bg-diff-addition" />
+                    </span>
+                    <SelectValue>
+                      {settings.diffColorScheme === "blue-orange"
+                        ? t("settings.appearance.diffColors.option.blueOrange")
+                        : t("settings.appearance.diffColors.option.redGreen")}
+                    </SelectValue>
+                  </SelectTrigger>
+                  <SelectPopup align="end" alignItemWithTrigger={false}>
+                    <SelectItem value="red-green">
+                      {t("settings.appearance.diffColors.option.redGreenDefault")}
+                    </SelectItem>
+                    <SelectItem value="blue-orange">
+                      {t("settings.appearance.diffColors.option.blueOrange")}
+                    </SelectItem>
+                  </SelectPopup>
+                </Select>
+              </div>
+            }
+          />
+
+          <SettingsRow
+            {...searchableSetting("composer-context", t)}
+            description={t("settings.general.composerContext.description")}
+            resetAction={
+              settings.persistComposerContextStrip !==
+              DEFAULT_UNIFIED_SETTINGS.persistComposerContextStrip ? (
+                <SettingResetButton
+                  label={t("settings.general.composerContext.resetLabel")}
+                  onClick={() =>
+                    updateSettings({
+                      persistComposerContextStrip:
+                        DEFAULT_UNIFIED_SETTINGS.persistComposerContextStrip,
+                    })
+                  }
+                />
+              ) : null
+            }
+            control={
+              <Switch
+                checked={settings.persistComposerContextStrip}
+                onCheckedChange={(checked) =>
+                  updateSettings({ persistComposerContextStrip: Boolean(checked) })
+                }
+                aria-label={t("settings.general.composerContext.ariaLabel")}
+              />
+            }
+          />
+
+          <SettingsRow
+            {...searchableSetting("chat-width", t)}
+            description="Set how wide messages and the composer can grow on large screens."
+            resetAction={
+              settings.chatWidth !== DEFAULT_UNIFIED_SETTINGS.chatWidth ? (
+                <SettingResetButton
+                  label="chat width"
+                  onClick={() => updateSettings({ chatWidth: DEFAULT_UNIFIED_SETTINGS.chatWidth })}
+                />
+              ) : null
+            }
+            control={
+              <div className="w-full sm:w-40">
+                <Select
+                  value={settings.chatWidth}
+                  onValueChange={(value) => {
+                    if (value === "comfortable" || value === "wide" || value === "full")
+                      updateSettings({ chatWidth: value });
+                  }}
+                >
+                  <SelectTrigger size="sm" className="w-full min-w-0" aria-label="Chat width">
+                    <SelectValue>{CHAT_WIDTH_LABELS[settings.chatWidth]}</SelectValue>
+                  </SelectTrigger>
+                  <SelectPopup align="end" alignItemWithTrigger={false}>
+                    <SelectItem value="comfortable">Comfortable (default)</SelectItem>
+                    <SelectItem value="wide">Wide</SelectItem>
+                    <SelectItem value="full">Full</SelectItem>
+                  </SelectPopup>
+                </Select>
+              </div>
+            }
+          />
+        </SettingsSection>
+
+        <ForkSidebarPreferences />
+
+        <SettingsSection id="motion" title={t("settings.appearance.motion.title")}>
+          <SettingsRow
+            {...searchableSetting("panel-animations", t)}
+            description={t("settings.appearance.panelAnimations.description")}
+            control={
+              <div className="grid w-full grid-cols-[5rem_minmax(0,1fr)] items-center gap-3 sm:w-auto sm:grid-cols-[7rem_13rem] sm:gap-4">
+                <PanelAnimationsPreview durationMs={settings.panelAnimationDurationMs} />
+                <div className="flex w-full items-center gap-3">
+                  <output
+                    className="min-w-16 rounded-md bg-muted px-2 py-1 text-center font-mono text-xs font-medium tabular-nums text-foreground"
+                    htmlFor="panel-animation-duration"
+                  >
+                    {settings.panelAnimationDurationMs} ms
+                  </output>
+                  <input
+                    aria-label={t("settings.appearance.panelAnimations.durationAriaLabel")}
+                    className="settings-slider min-w-0 flex-1"
+                    id="panel-animation-duration"
+                    max={MAX_PANEL_ANIMATION_DURATION_MS}
+                    min={MIN_PANEL_ANIMATION_DURATION_MS}
+                    onChange={(event) => {
+                      const panelAnimationDurationMs = Number(event.currentTarget.value);
+                      if (
+                        Number.isInteger(panelAnimationDurationMs) &&
+                        panelAnimationDurationMs >= MIN_PANEL_ANIMATION_DURATION_MS &&
+                        panelAnimationDurationMs <= MAX_PANEL_ANIMATION_DURATION_MS
+                      ) {
+                        updateSettings({ panelAnimationDurationMs });
+                      }
+                    }}
+                    step={25}
+                    style={panelAnimationDurationSliderStyle}
+                    type="range"
+                    value={settings.panelAnimationDurationMs}
+                  />
+                </div>
+              </div>
+            }
+            resetAction={
+              settings.panelAnimationDurationMs !==
+              DEFAULT_UNIFIED_SETTINGS.panelAnimationDurationMs ? (
+                <SettingResetButton
+                  label={t("settings.appearance.panelAnimations.resetLabel")}
+                  onClick={() =>
+                    updateSettings({
+                      panelAnimationDurationMs: DEFAULT_UNIFIED_SETTINGS.panelAnimationDurationMs,
+                    })
+                  }
+                />
+              ) : null
+            }
+          />
+        </SettingsSection>
+
+        <TypographySection />
+      </SettingsRowCopyProvider>
+    </SettingsPageContainer>
   );
 }
 
@@ -2352,7 +2366,7 @@ function FontSmoothingRow() {
         <Switch
           checked={settings.fontSmoothing}
           onCheckedChange={(checked) => updateSettings({ fontSmoothing: Boolean(checked) })}
-          aria-label={searchableSetting("font-smoothing", t).title}
+          aria-label={t("settings.search.item.font-smoothing.title")}
         />
       }
     />
@@ -2774,7 +2788,7 @@ function LegacyFeaturesSection() {
       <Collapsible open={open} onOpenChange={setOpen}>
         <CollapsibleTrigger className="group flex min-h-8 w-full items-center gap-2 px-3 sm:px-4">
           <h2 className="text-sm font-normal text-foreground/70 transition-colors group-hover:text-foreground">
-            Legacy features
+            {t("settings.general.legacy.title")}
           </h2>
           <ChevronRightIcon className="size-4 text-muted-foreground transition-transform duration-200 group-data-panel-open:rotate-90" />
         </CollapsibleTrigger>
@@ -2789,7 +2803,7 @@ function LegacyFeaturesSection() {
                   onCheckedChange={(checked) => {
                     updateSettings({ planModeEnabled: Boolean(checked) });
                   }}
-                  aria-label={searchableSetting("legacy-plan-mode", t).title}
+                  aria-label={t("settings.search.item.legacy-plan-mode.title")}
                 />
               }
             />
@@ -2802,7 +2816,7 @@ function LegacyFeaturesSection() {
                   onCheckedChange={(checked) =>
                     updateSettings({ contextWindowMeterEnabled: Boolean(checked) })
                   }
-                  aria-label={searchableSetting("legacy-context-window-indicator", t).title}
+                  aria-label={t("settings.search.item.legacy-context-window-indicator.title")}
                 />
               }
             />
@@ -2814,18 +2828,8 @@ function LegacyFeaturesSection() {
 }
 
 export function GeneralSettingsPanel() {
-  const copy = useSettingsPanelCopy();
-  return (
-    <SettingsPageContainer>
-      <SettingsRowCopyProvider copy={copy}>
-        <GeneralSettingsRows />
-      </SettingsRowCopyProvider>
-    </SettingsPageContainer>
-  );
-}
-
-function GeneralSettingsRows() {
   const { t } = useI18n();
+  const copy = useSettingsPanelCopy();
   const modifierLabel = isMacPlatform(navigator.platform) ? "⌘" : "Ctrl";
   const sendShortcutOptions = [
     { value: "enter", label: t("settings.general.sendShortcut.enter") },
@@ -2841,7 +2845,7 @@ function GeneralSettingsRows() {
   const settings = useScopedSettings();
   const updateSettings = useUpdateScopedSettings();
   const navigate = useNavigate();
-  const { scope, environment, connectedEnvironments } = useSettingsScope();
+  const { scope, environment, connectedEnvironments, target } = useSettingsScope();
   // The representative environment supplies the provider list for pickers;
   // a fanned-out model choice is validated against every target before it
   // is written. Per-machine tuning (background activity overrides) still
@@ -2850,11 +2854,6 @@ function GeneralSettingsRows() {
   const isEnvironmentScope = scope.environmentIds.length === 1 && environmentId !== null;
   const hasServerTargets = connectedEnvironments.length > 0;
   const [backgroundActivityDialogOpen, setBackgroundActivityDialogOpen] = useState(false);
-  const languageLabels: Record<LanguagePreference, string> = {
-    system: t("settings.language.system"),
-    en: t("settings.language.english"),
-    "zh-CN": t("settings.language.simplifiedChinese"),
-  };
   const mixedResponseStreamingMode = useScopedSettingsMixed(["responseStreamingMode"]);
   const mixedSmoothOutputMode = useScopedSettingsMixed(["smoothOutputMode"]);
   const mixedSmoothOutputLineMode = useScopedSettingsMixed(["smoothOutputLineMode"]);
@@ -2873,6 +2872,7 @@ function GeneralSettingsRows() {
   const mixedConversationStructureThinkingLabel = useScopedSettingsMixed([
     "conversationStructureThinkingLabel",
   ]);
+
   const lastEnabledProjectGroupingMode = useRef<SidebarProjectGroupingMode>(
     readLastEnabledProjectGroupingMode(),
   );
@@ -2882,6 +2882,9 @@ function GeneralSettingsRows() {
     connectedEnvironments.every(
       (target) => target.serverConfig?.environment.capabilities.threadAutoSettlement === true,
     );
+  const supportsAutoSettlementScope = connectedEnvironments.every(
+    (target) => target.serverConfig?.environment.capabilities.threadAutoSettlementScope === true,
+  );
   const supportsRestartContinuation =
     connectedEnvironments.length > 0 &&
     connectedEnvironments.every(
@@ -2899,7 +2902,11 @@ function GeneralSettingsRows() {
   const textGenModel = textGenerationModelSelection.model;
   const textGenModelOptions = textGenerationModelSelection.options;
   const textGenerationModelInstanceEntries = sortProviderInstanceEntries(
-    applyProviderInstanceSettings(deriveProviderInstanceEntries(textGenerationProviders), settings),
+    applyProviderInstanceSettings(
+      deriveProviderInstanceEntries(textGenerationProviders),
+      settings,
+      target?.projectId ?? null,
+    ),
   );
   const hasTextGenerationProvider = textGenerationModelInstanceEntries.some(
     (entry) => entry.enabled && entry.isAvailable,
@@ -2929,6 +2936,11 @@ function GeneralSettingsRows() {
   const mixedBackgroundActivity = useScopedSettingsMixed(["backgroundActivity"]);
   const mixedAddProjectBaseDirectory = useScopedSettingsMixed(["addProjectBaseDirectory"]);
   const mixedScratchBaseDirectory = useScopedSettingsMixed(["scratchBaseDirectory"]);
+  const languageLabels = {
+    system: t("settings.language.system"),
+    en: t("settings.language.english"),
+    "zh-CN": t("settings.language.simplifiedChinese"),
+  };
   const mixedTextGenerationModel = useScopedSettingsMixed(["textGenerationModelSelection"]);
   const backgroundActivityDescription =
     backgroundActivityProfileOption === "advanced"
@@ -2942,1243 +2954,667 @@ function GeneralSettingsRows() {
   );
 
   return (
-    <>
-      <ProjectDefaultsSettings category="general" />
-      <SettingsSection id="organization" title={t("settings.general.section.organization")}>
-        <SettingsRow
-          {...searchableSetting("project-grouping", t)}
-          description={t("settings.general.projectGrouping.description")}
-          resetAction={
-            settings.sidebarProjectGroupingMode !==
-            DEFAULT_UNIFIED_SETTINGS.sidebarProjectGroupingMode ? (
-              <SettingResetButton
-                label={t("settings.general.projectGrouping.resetLabel")}
-                onClick={() =>
-                  updateSettings({
-                    sidebarProjectGroupingMode: DEFAULT_UNIFIED_SETTINGS.sidebarProjectGroupingMode,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Switch
-              checked={isProjectGroupingEnabled(settings.sidebarProjectGroupingMode)}
-              onCheckedChange={(checked) => {
-                if (!checked && settings.sidebarProjectGroupingMode !== "separate") {
-                  lastEnabledProjectGroupingMode.current = settings.sidebarProjectGroupingMode;
-                  rememberEnabledProjectGroupingMode(settings.sidebarProjectGroupingMode);
-                }
-                updateSettings({
-                  sidebarProjectGroupingMode: projectGroupingModeFromToggle(
-                    checked,
-                    lastEnabledProjectGroupingMode.current,
-                  ),
-                });
-              }}
-              aria-label={t("settings.general.projectGrouping.ariaLabel")}
-            />
-          }
-        />
-
-        <SettingsRow
-          serverScoped
-          {...searchableSetting("auto-resume-limited-threads", t)}
-          description={t("settings.general.autoResumeLimitedThreads.description")}
-          settingKeys={["autoResumeLimitedThreads"]}
-          control={
-            <ScopedSwitch
-              settingKeys={["autoResumeLimitedThreads"]}
-              checked={settings.autoResumeLimitedThreads}
-              onCheckedChange={(checked) =>
-                updateSettings({ autoResumeLimitedThreads: Boolean(checked) })
-              }
-              aria-label={t("settings.general.autoResumeLimitedThreads.ariaLabel")}
-            />
-          }
-        />
-        <SettingsRow
-          serverScoped
-          {...searchableSetting("snooze-limited-threads", t)}
-          description={t("settings.general.snoozeLimitedThreads.description")}
-          settingKeys={["snoozeLimitedThreads"]}
-          control={
-            <ScopedSwitch
-              settingKeys={["snoozeLimitedThreads"]}
-              checked={settings.snoozeLimitedThreads}
-              onCheckedChange={(checked) =>
-                updateSettings({ snoozeLimitedThreads: Boolean(checked) })
-              }
-              aria-label={t("settings.general.snoozeLimitedThreads.ariaLabel")}
-            />
-          }
-        />
-        <SettingsRow
-          {...searchableSetting("working-shelf", t)}
-          description={t("settings.general.workingShelf.description")}
-          resetAction={
-            settings.sidebarWorkingShelfEnabled !==
-            DEFAULT_UNIFIED_SETTINGS.sidebarWorkingShelfEnabled ? (
-              <SettingResetButton
-                label={t("settings.general.workingShelf.label")}
-                onClick={() =>
-                  updateSettings({
-                    sidebarWorkingShelfEnabled: DEFAULT_UNIFIED_SETTINGS.sidebarWorkingShelfEnabled,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Switch
-              checked={settings.sidebarWorkingShelfEnabled}
-              onCheckedChange={(checked) =>
-                updateSettings({ sidebarWorkingShelfEnabled: Boolean(checked) })
-              }
-              aria-label={t("settings.general.workingShelf.label")}
-            />
-          }
-        />
-
-        {supportsAutoSettlement ? (
-          <>
-            <SettingsRow
-              serverScoped
-              settingKeys={["sidebarAutoSettleOnMerge"]}
-              {...searchableSetting("auto-settle-merged-threads", t)}
-              description={t("settings.general.autoSettleMerged.description")}
-              resetAction={
-                settings.sidebarAutoSettleOnMerge !==
-                DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleOnMerge ? (
-                  <SettingResetButton
-                    label={t("settings.general.autoSettleMerged.resetLabel")}
-                    onClick={() =>
-                      updateSettings({
-                        sidebarAutoSettleOnMerge: DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleOnMerge,
-                      })
-                    }
-                  />
-                ) : null
-              }
-              control={
-                <ScopedSwitch
-                  settingKeys={["sidebarAutoSettleOnMerge"]}
-                  checked={settings.sidebarAutoSettleOnMerge}
-                  onCheckedChange={(checked) =>
-                    updateSettings({ sidebarAutoSettleOnMerge: Boolean(checked) })
-                  }
-                  aria-label={t("settings.general.autoSettleMerged.ariaLabel")}
-                />
-              }
-            />
-
-            <SettingsRow
-              serverScoped
-              settingKeys={["sidebarAutoSettleAfterDays"]}
-              {...searchableSetting("auto-settle-inactive-threads", t)}
-              description={t("settings.general.autoSettleInactive.description")}
-              resetAction={
-                settings.sidebarAutoSettleAfterDays !==
-                DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleAfterDays ? (
-                  <SettingResetButton
-                    label={t("settings.general.autoSettleInactive.resetLabel")}
-                    onClick={() =>
-                      updateSettings({
-                        sidebarAutoSettleAfterDays:
-                          DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleAfterDays,
-                      })
-                    }
-                  />
-                ) : null
-              }
-              control={
-                <ScopedSwitch
-                  settingKeys={["sidebarAutoSettleAfterDays"]}
-                  checked={settings.sidebarAutoSettleAfterDays !== null}
-                  onCheckedChange={(checked) =>
+    <SettingsPageContainer>
+      <SettingsRowCopyProvider copy={copy}>
+        <ProjectDefaultsSettings category="general" />
+        <SettingsSection id="organization" title={t("settings.general.section.organization")}>
+          <SettingsRow
+            {...searchableSetting("project-grouping", t)}
+            description={t("settings.general.projectGrouping.description")}
+            resetAction={
+              settings.sidebarProjectGroupingMode !==
+              DEFAULT_UNIFIED_SETTINGS.sidebarProjectGroupingMode ? (
+                <SettingResetButton
+                  label={t("settings.general.projectGrouping.resetLabel")}
+                  onClick={() =>
                     updateSettings({
-                      sidebarAutoSettleAfterDays: checked ? AUTO_SETTLE_DEFAULT_DAYS : null,
+                      sidebarProjectGroupingMode:
+                        DEFAULT_UNIFIED_SETTINGS.sidebarProjectGroupingMode,
                     })
                   }
-                  aria-label={t("settings.general.autoSettleInactive.ariaLabel")}
                 />
-              }
-            />
-            {settings.sidebarAutoSettleAfterDays !== null ? (
-              <SettingsRow
-                serverScoped
-                settingKeys={["sidebarAutoSettleAfterDays"]}
-                title={searchableSetting("days-before-auto-settle", t).title}
-                description={t("settings.general.autoSettleDays.description")}
-                control={
-                  <AutoSettleDaysInput
-                    value={settings.sidebarAutoSettleAfterDays}
-                    onCommit={(days) => updateSettings({ sidebarAutoSettleAfterDays: days })}
-                  />
-                }
-              />
-            ) : null}
-          </>
-        ) : null}
-      </SettingsSection>
-
-      <SettingsSection id="behavior" title={t("settings.general.section.behavior")}>
-        <NotificationSettings />
-        <SettingsRow
-          {...searchableSetting("in-app-notifications", t)}
-          description={t("settings.general.inAppNotifications.description")}
-          control={
-            <Switch
-              checked={settings.inAppNotificationsEnabled}
-              onCheckedChange={(checked) => updateSettings({ inAppNotificationsEnabled: checked })}
-              aria-label={t("settings.general.inAppNotifications.ariaLabel")}
-            />
-          }
-        />
-        <SettingsRow
-          id={searchableSetting("language", t).id}
-          title={t("settings.language.title")}
-          description={t("settings.language.description")}
-          resetAction={
-            settings.language !== DEFAULT_UNIFIED_SETTINGS.language ? (
-              <SettingResetButton
-                label={t("settings.language.title")}
-                onClick={() => updateSettings({ language: DEFAULT_UNIFIED_SETTINGS.language })}
-              />
-            ) : null
-          }
-          control={
-            <Select
-              value={settings.language}
-              onValueChange={(value) => {
-                if (value === "system" || value === "en" || value === "zh-CN") {
-                  updateSettings({ language: value });
-                }
-              }}
-            >
-              <SelectTrigger
-                size="sm"
-                className="w-full sm:w-40"
-                aria-label={t("settings.language.title")}
-              >
-                <SelectValue>{languageLabels[settings.language]}</SelectValue>
-              </SelectTrigger>
-              <SelectPopup align="end" alignItemWithTrigger={false}>
-                <SelectItem hideIndicator value="system">
-                  {languageLabels.system}
-                </SelectItem>
-                <SelectItem hideIndicator value="en">
-                  {languageLabels.en}
-                </SelectItem>
-                <SelectItem hideIndicator value="zh-CN">
-                  {languageLabels["zh-CN"]}
-                </SelectItem>
-              </SelectPopup>
-            </Select>
-          }
-        />
-        <SettingsRow
-          {...searchableSetting("time-format", t)}
-          description={t("settings.general.timeFormat.description")}
-          resetAction={
-            settings.timestampFormat !== DEFAULT_UNIFIED_SETTINGS.timestampFormat ? (
-              <SettingResetButton
-                label={t("settings.general.timeFormat.resetLabel")}
-                onClick={() =>
-                  updateSettings({
-                    timestampFormat: DEFAULT_UNIFIED_SETTINGS.timestampFormat,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Select
-              value={settings.timestampFormat}
-              onValueChange={(value) => {
-                if (value === "locale" || value === "12-hour" || value === "24-hour") {
-                  updateSettings({ timestampFormat: value });
-                }
-              }}
-            >
-              <SelectTrigger
-                size="sm"
-                className="w-full sm:w-40"
-                aria-label={t("settings.general.timeFormat.ariaLabel")}
-              >
-                <SelectValue>
-                  {t(TIMESTAMP_FORMAT_LABEL_KEYS[settings.timestampFormat])}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectPopup align="end" alignItemWithTrigger={false}>
-                <SelectItem hideIndicator value="locale">
-                  {t(TIMESTAMP_FORMAT_LABEL_KEYS.locale)}
-                </SelectItem>
-                <SelectItem hideIndicator value="12-hour">
-                  {t(TIMESTAMP_FORMAT_LABEL_KEYS["12-hour"])}
-                </SelectItem>
-                <SelectItem hideIndicator value="24-hour">
-                  {t(TIMESTAMP_FORMAT_LABEL_KEYS["24-hour"])}
-                </SelectItem>
-              </SelectPopup>
-            </Select>
-          }
-        />
-        <SettingsRow
-          {...searchableSetting("hide-whitespace-changes", t)}
-          description={t("settings.general.hideWhitespace.description")}
-          resetAction={
-            settings.diffIgnoreWhitespace !== DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace ? (
-              <SettingResetButton
-                label={t("settings.general.hideWhitespace.resetLabel")}
-                onClick={() =>
-                  updateSettings({
-                    diffIgnoreWhitespace: DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Switch
-              checked={settings.diffIgnoreWhitespace}
-              onCheckedChange={(checked) =>
-                updateSettings({ diffIgnoreWhitespace: Boolean(checked) })
-              }
-              aria-label={t("settings.general.hideWhitespace.ariaLabel")}
-            />
-          }
-        />
-        <SettingsRow
-          {...searchableSetting("default-diff-file-state", t)}
-          description={t("settings.general.diffFileState.description")}
-          resetAction={
-            settings.diffFilesCollapsed !== DEFAULT_UNIFIED_SETTINGS.diffFilesCollapsed ? (
-              <SettingResetButton
-                label={t("settings.general.diffFileState.resetLabel")}
-                onClick={() =>
-                  updateSettings({
-                    diffFilesCollapsed: DEFAULT_UNIFIED_SETTINGS.diffFilesCollapsed,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Select
-              value={settings.diffFilesCollapsed ? "collapsed" : "expanded"}
-              onValueChange={(value) => {
-                if (value === "expanded" || value === "collapsed") {
-                  updateSettings({ diffFilesCollapsed: value === "collapsed" });
-                }
-              }}
-            >
-              <SelectTrigger
-                size="sm"
-                className="w-full sm:w-40"
-                aria-label={t("settings.general.diffFileState.ariaLabel")}
-              >
-                <SelectValue>
-                  {settings.diffFilesCollapsed
-                    ? t("settings.general.diffFileState.collapsed")
-                    : t("settings.general.diffFileState.expanded")}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectPopup align="end" alignItemWithTrigger={false}>
-                <SelectItem hideIndicator value="expanded">
-                  {t("settings.general.diffFileState.expanded")}
-                </SelectItem>
-                <SelectItem hideIndicator value="collapsed">
-                  {t("settings.general.diffFileState.collapsed")}
-                </SelectItem>
-              </SelectPopup>
-            </Select>
-          }
-        />
-        <SettingsRow
-          {...searchableSetting("diff-layout", t)}
-          description={t("settings.general.diffLayout.description")}
-          resetAction={
-            settings.diffLayout !== DEFAULT_UNIFIED_SETTINGS.diffLayout ? (
-              <SettingResetButton
-                label={t("settings.general.diffLayout.resetLabel")}
-                onClick={() => updateSettings({ diffLayout: DEFAULT_UNIFIED_SETTINGS.diffLayout })}
-              />
-            ) : null
-          }
-          control={
-            <Select
-              value={settings.diffLayout}
-              onValueChange={(value) => {
-                if (value === "stacked" || value === "split") {
-                  updateSettings({ diffLayout: value });
-                }
-              }}
-            >
-              <SelectTrigger
-                size="sm"
-                className="w-full sm:w-40"
-                aria-label={t("settings.general.diffLayout.ariaLabel")}
-              >
-                <SelectValue>{t(DIFF_LAYOUT_LABEL_KEYS[settings.diffLayout])}</SelectValue>
-              </SelectTrigger>
-              <SelectPopup align="end" alignItemWithTrigger={false}>
-                <SelectItem hideIndicator value="stacked">
-                  {t(DIFF_LAYOUT_LABEL_KEYS.stacked)}
-                </SelectItem>
-                <SelectItem hideIndicator value="split">
-                  {t(DIFF_LAYOUT_LABEL_KEYS.split)}
-                </SelectItem>
-              </SelectPopup>
-            </Select>
-          }
-        />
-
-        <SettingsRow
-          {...searchableSetting("proactive-panels", t)}
-          description={t("settings.general.proactivePanels.description")}
-          resetAction={
-            settings.proactivePanelsEnabled !== DEFAULT_UNIFIED_SETTINGS.proactivePanelsEnabled ? (
-              <SettingResetButton
-                label={t("settings.general.proactivePanels.resetLabel")}
-                onClick={() =>
-                  updateSettings({
-                    proactivePanelsEnabled: DEFAULT_UNIFIED_SETTINGS.proactivePanelsEnabled,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Switch
-              checked={settings.proactivePanelsEnabled}
-              onCheckedChange={(checked) =>
-                updateSettings({ proactivePanelsEnabled: Boolean(checked) })
-              }
-              aria-label={t("settings.general.proactivePanels.ariaLabel")}
-            />
-          }
-        />
-
-        <SettingsRow
-          {...searchableSetting("auto-expand-thread-details", t)}
-          description={t("settings.general.autoExpandThreadDetails.description")}
-          resetAction={
-            settings.autoExpandThreadDetailsPanel !==
-            DEFAULT_UNIFIED_SETTINGS.autoExpandThreadDetailsPanel ? (
-              <SettingResetButton
-                label={t("settings.search.item.auto-expand-thread-details.title")}
-                onClick={() =>
-                  updateSettings({
-                    autoExpandThreadDetailsPanel:
-                      DEFAULT_UNIFIED_SETTINGS.autoExpandThreadDetailsPanel,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Switch
-              checked={settings.autoExpandThreadDetailsPanel}
-              onCheckedChange={(checked) =>
-                updateSettings({ autoExpandThreadDetailsPanel: Boolean(checked) })
-              }
-              aria-label={t("settings.search.item.auto-expand-thread-details.title")}
-            />
-          }
-        />
-
-        <SettingsRow
-          {...searchableSetting("skills-in-slash-menu", t)}
-          description={t("settings.general.skillsInSlashMenu.description")}
-          resetAction={
-            settings.showSkillsInSlashMenu !== DEFAULT_UNIFIED_SETTINGS.showSkillsInSlashMenu ? (
-              <SettingResetButton
-                label={t("settings.general.skillsInSlashMenu.resetLabel")}
-                onClick={() =>
-                  updateSettings({
-                    showSkillsInSlashMenu: DEFAULT_UNIFIED_SETTINGS.showSkillsInSlashMenu,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Switch
-              checked={settings.showSkillsInSlashMenu}
-              onCheckedChange={(checked) =>
-                updateSettings({ showSkillsInSlashMenu: Boolean(checked) })
-              }
-              aria-label={t("settings.general.skillsInSlashMenu.ariaLabel")}
-            />
-          }
-        />
-
-        <SettingsRow
-          {...searchableSetting("composer-rich-text", t)}
-          description={t("settings.general.richText.description")}
-          resetAction={
-            settings.composerRichTextEnabled !==
-            DEFAULT_UNIFIED_SETTINGS.composerRichTextEnabled ? (
-              <SettingResetButton
-                label={t("settings.general.richText.resetLabel")}
-                onClick={() =>
-                  updateSettings({
-                    composerRichTextEnabled: DEFAULT_UNIFIED_SETTINGS.composerRichTextEnabled,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Switch
-              checked={settings.composerRichTextEnabled}
-              onCheckedChange={(checked) =>
-                updateSettings({ composerRichTextEnabled: Boolean(checked) })
-              }
-              aria-label={t("settings.general.richText.ariaLabel")}
-            />
-          }
-        />
-
-        <SettingsRow
-          {...searchableSetting("composer-collapse", t)}
-          description={t("settings.general.composerCollapse.description")}
-          resetAction={
-            settings.composerCollapseOnScroll !==
-            DEFAULT_UNIFIED_SETTINGS.composerCollapseOnScroll ? (
-              <SettingResetButton
-                label={t("settings.general.composerCollapse.resetLabel")}
-                onClick={() =>
-                  updateSettings({
-                    composerCollapseOnScroll: DEFAULT_UNIFIED_SETTINGS.composerCollapseOnScroll,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Switch
-              checked={settings.composerCollapseOnScroll}
-              onCheckedChange={(checked) =>
-                updateSettings({ composerCollapseOnScroll: Boolean(checked) })
-              }
-              aria-label={t("settings.general.composerCollapse.ariaLabel")}
-            />
-          }
-        />
-
-        <SettingsRow
-          {...searchableSetting("send-shortcut", t)}
-          description={t("settings.general.sendShortcut.description")}
-          resetAction={
-            settings.sendShortcut !== DEFAULT_UNIFIED_SETTINGS.sendShortcut ? (
-              <SettingResetButton
-                label={t("settings.general.sendShortcut.resetLabel")}
-                onClick={() =>
-                  updateSettings({ sendShortcut: DEFAULT_UNIFIED_SETTINGS.sendShortcut })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Select
-              value={settings.sendShortcut}
-              onValueChange={(value) => {
-                const option = sendShortcutOptions.find((option) => option.value === value);
-                if (option) updateSettings({ sendShortcut: option.value });
-              }}
-            >
-              <SelectTrigger
-                size="sm"
-                className="w-auto min-w-0 max-w-full"
-                aria-label={t("settings.general.sendShortcut.ariaLabel")}
-              >
-                <SelectValue>
-                  {
-                    sendShortcutOptions.find((option) => option.value === settings.sendShortcut)
-                      ?.label
+              ) : null
+            }
+            control={
+              <Switch
+                checked={isProjectGroupingEnabled(settings.sidebarProjectGroupingMode)}
+                onCheckedChange={(checked) => {
+                  if (!checked && settings.sidebarProjectGroupingMode !== "separate") {
+                    lastEnabledProjectGroupingMode.current = settings.sidebarProjectGroupingMode;
+                    rememberEnabledProjectGroupingMode(settings.sidebarProjectGroupingMode);
                   }
-                </SelectValue>
-              </SelectTrigger>
-              <SelectPopup align="end" alignItemWithTrigger={false}>
-                {sendShortcutOptions.map((option) => (
-                  <SelectItem key={option.value} value={option.value}>
-                    <span className="flex items-center justify-between gap-4">
-                      {option.label}
-                      {settings.sendShortcut === option.value && <CheckIcon aria-hidden="true" />}
-                    </span>
-                  </SelectItem>
-                ))}
-              </SelectPopup>
-            </Select>
-          }
-        />
-
-        <SettingsRow
-          {...searchableSetting("follow-up-behavior", t)}
-          description={`${t("settings.general.followUpBehavior.description")} ${
-            settings.sendShortcut === "mod-enter-multiline"
-              ? t("settings.general.followUpBehavior.oppositeSingleAndMultiline", {
-                  modifier: modifierLabel,
-                })
-              : t("settings.general.followUpBehavior.opposite", {
-                  modifier: modifierLabel,
-                  shift: settings.sendShortcut === "mod-enter" ? " + Shift" : "",
-                })
-          }`}
-          resetAction={
-            settings.followUpBehavior !== DEFAULT_UNIFIED_SETTINGS.followUpBehavior ? (
-              <SettingResetButton
-                label={t("settings.general.followUpBehavior.resetLabel")}
-                onClick={() =>
                   updateSettings({
-                    followUpBehavior: DEFAULT_UNIFIED_SETTINGS.followUpBehavior,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Select
-              value={settings.followUpBehavior}
-              onValueChange={(value) => {
-                if (value === "queue" || value === "steer") {
-                  updateSettings({ followUpBehavior: value });
-                }
-              }}
-            >
-              <SelectTrigger
-                size="sm"
-                className="w-auto min-w-0"
-                aria-label={t("settings.search.item.follow-up-behavior.title")}
-              >
-                <SelectValue>
-                  {settings.followUpBehavior === "queue"
-                    ? t("settings.general.followUpBehavior.option.queue")
-                    : t("settings.general.followUpBehavior.option.steer")}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectPopup align="end" alignItemWithTrigger={false}>
-                <SelectItem value="queue">
-                  {t("settings.general.followUpBehavior.option.queue")}
-                </SelectItem>
-                <SelectItem value="steer">
-                  {t("settings.general.followUpBehavior.option.steer")}
-                </SelectItem>
-              </SelectPopup>
-            </Select>
-          }
-        />
-
-        <SettingsRow
-          serverScoped
-          settingKeys={["enableProviderUpdateChecks"]}
-          {...searchableSetting("provider-update-checks", t)}
-          description={t("settings.general.providerUpdateChecks.description")}
-          resetAction={
-            settings.enableProviderUpdateChecks !==
-            DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks ? (
-              <SettingResetButton
-                label={t("settings.general.providerUpdateChecks.resetLabel")}
-                onClick={() =>
-                  updateSettings({
-                    enableProviderUpdateChecks: DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <ScopedSwitch
-              settingKeys={["enableProviderUpdateChecks"]}
-              checked={settings.enableProviderUpdateChecks}
-              onCheckedChange={(checked) =>
-                updateSettings({ enableProviderUpdateChecks: Boolean(checked) })
-              }
-              aria-label={t("settings.general.providerUpdateChecks.ariaLabel")}
-            />
-          }
-        />
-
-        <SettingsRow
-          {...searchableSetting("continue-threads-after-server-update", t)}
-          serverScoped
-          settingKeys={["continueThreadsAfterServerUpdate"]}
-          description={t("settings.general.continueThreads.description")}
-          status={
-            !supportsRestartContinuation
-              ? t("settings.general.continueThreads.unsupported")
-              : undefined
-          }
-          resetAction={
-            supportsRestartContinuation &&
-            settings.continueThreadsAfterServerUpdate !==
-              DEFAULT_UNIFIED_SETTINGS.continueThreadsAfterServerUpdate ? (
-              <SettingResetButton
-                label={t("settings.general.continueThreads.resetLabel")}
-                onClick={() =>
-                  updateSettings({
-                    continueThreadsAfterServerUpdate:
-                      DEFAULT_UNIFIED_SETTINGS.continueThreadsAfterServerUpdate,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <ScopedSwitch
-              settingKeys={["continueThreadsAfterServerUpdate"]}
-              checked={settings.continueThreadsAfterServerUpdate}
-              disabled={!supportsRestartContinuation}
-              onCheckedChange={(checked) =>
-                updateSettings({ continueThreadsAfterServerUpdate: Boolean(checked) })
-              }
-              aria-label={t("settings.general.continueThreads.ariaLabel")}
-            />
-          }
-        />
-
-        <SettingsRow
-          serverScoped
-          settingKeys={["backgroundActivity"]}
-          id={searchableSetting("background-activity", t).id}
-          title={
-            <span className="inline-flex items-center gap-1.5">
-              {searchableSetting("background-activity", t).title}
-              <PolicyTooltip
-                detailsLabel={t("settings.general.backgroundActivity.policyDetailsLabel")}
-              >
-                {t("settings.general.backgroundActivity.tooltip")}
-              </PolicyTooltip>
-            </span>
-          }
-          description={backgroundActivityDescription}
-          resetAction={
-            canResetBackgroundActivity ? (
-              <SettingResetButton
-                label={t("settings.general.backgroundActivity.resetLabel")}
-                onClick={() => updateSettings(resetBackgroundActivitySettings())}
-              />
-            ) : null
-          }
-          control={
-            <>
-              <Select
-                value={mixedBackgroundActivity ? null : backgroundActivityProfileOption}
-                onValueChange={(value) => {
-                  if (value === "advanced") {
-                    if (isEnvironmentScope) setBackgroundActivityDialogOpen(true);
-                    return;
-                  }
-                  if (
-                    value === "balanced" ||
-                    value === "performance" ||
-                    value === "battery-saver"
-                  ) {
-                    updateSettings(backgroundActivityProfileSettings(value));
-                  }
+                    sidebarProjectGroupingMode: projectGroupingModeFromToggle(
+                      checked,
+                      lastEnabledProjectGroupingMode.current,
+                    ),
+                  });
                 }}
-              >
-                <SelectTrigger
-                  size="sm"
-                  className="w-full sm:w-40"
-                  aria-label={t("settings.general.backgroundActivity.ariaLabel")}
-                >
-                  <SelectValue>
-                    {(value: BackgroundActivityProfileOption | null) =>
-                      value === null
-                        ? t("settings.general.backgroundActivity.mixedValue")
-                        : t(BACKGROUND_ACTIVITY_PROFILE_OPTION_LABEL_KEYS[value])
-                    }
-                  </SelectValue>
-                </SelectTrigger>
-                <SelectPopup align="end" alignItemWithTrigger={false}>
-                  <SelectItem hideIndicator value="balanced">
-                    {t(BACKGROUND_ACTIVITY_PROFILE_LABEL_KEYS.balanced)}
-                  </SelectItem>
-                  <SelectItem hideIndicator value="performance">
-                    {t(BACKGROUND_ACTIVITY_PROFILE_LABEL_KEYS.performance)}
-                  </SelectItem>
-                  <SelectItem hideIndicator value="battery-saver">
-                    {t(BACKGROUND_ACTIVITY_PROFILE_LABEL_KEYS["battery-saver"])}
-                  </SelectItem>
-                  <SelectItem hideIndicator value="advanced" disabled={!isEnvironmentScope}>
-                    {isEnvironmentScope
-                      ? t(BACKGROUND_ACTIVITY_PROFILE_OPTION_LABEL_KEYS.advanced)
-                      : t("settings.general.backgroundActivity.advancedOneEnvironment")}
-                  </SelectItem>
-                </SelectPopup>
-              </Select>
-              {backgroundActivityProfileOption === "advanced" && isEnvironmentScope ? (
-                <Tooltip>
-                  <TooltipTrigger
-                    render={
-                      <Button
-                        size="icon-sm"
-                        variant="outline"
-                        aria-label={t("settings.general.backgroundActivity.configureAriaLabel")}
-                        onClick={() => setBackgroundActivityDialogOpen(true)}
-                      >
-                        <SettingsIcon className="size-4" />
-                      </Button>
-                    }
-                  />
-                  <TooltipPopup side="top">
-                    {t("settings.general.backgroundActivity.configureTooltip")}
-                  </TooltipPopup>
-                </Tooltip>
-              ) : null}
-              <BackgroundActivityAdvancedDialog
-                open={backgroundActivityDialogOpen && isEnvironmentScope}
-                onOpenChange={setBackgroundActivityDialogOpen}
+                aria-label={t("settings.general.projectGrouping.ariaLabel")}
               />
-            </>
-          }
-        />
-      </SettingsSection>
-
-      <SettingsSection
-        id="projects-and-threads"
-        title={t("settings.general.section.projectsAndThreads")}
-      >
-        <SettingsRow
-          serverScoped
-          settingKeys={["newWorktreesStartFromOrigin"]}
-          {...searchableSetting("start-from-origin", t)}
-          description={t("settings.general.startFromOrigin.description")}
-          resetAction={
-            settings.newWorktreesStartFromOrigin !==
-            DEFAULT_UNIFIED_SETTINGS.newWorktreesStartFromOrigin ? (
-              <SettingResetButton
-                label={t("settings.general.startFromOrigin.resetLabel")}
-                onClick={() =>
-                  updateSettings({
-                    newWorktreesStartFromOrigin:
-                      DEFAULT_UNIFIED_SETTINGS.newWorktreesStartFromOrigin,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <ScopedSwitch
-              settingKeys={["newWorktreesStartFromOrigin"]}
-              checked={settings.newWorktreesStartFromOrigin}
-              onCheckedChange={(checked) =>
-                updateSettings({ newWorktreesStartFromOrigin: Boolean(checked) })
-              }
-              aria-label={t("settings.general.startFromOrigin.ariaLabel")}
-            />
-          }
-        />
-        <SettingsRow
-          serverScoped
-          settingKeys={["addProjectBaseDirectory"]}
-          {...searchableSetting("add-project-starts-in", t)}
-          description={t("settings.general.addProjectBaseDirectory.description")}
-          resetAction={
-            settings.addProjectBaseDirectory !==
-            DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory ? (
-              <SettingResetButton
-                label={t("settings.general.addProjectBaseDirectory.resetLabel")}
-                onClick={() =>
-                  updateSettings({
-                    addProjectBaseDirectory: DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <DraftInput
-              size="sm"
-              className="w-full sm:w-72"
-              value={mixedAddProjectBaseDirectory ? "" : settings.addProjectBaseDirectory}
-              onCommit={(next) => updateSettings({ addProjectBaseDirectory: next })}
-              placeholder={mixedAddProjectBaseDirectory ? t("settings.general.mixed") : "~/"}
-              spellCheck={false}
-              aria-label={t("settings.general.addProjectBaseDirectory.ariaLabel")}
-            />
-          }
-        />
-        <SettingsRow
-          serverScoped
-          settingKeys={["scratchBaseDirectory"]}
-          {...searchableSetting("scratch-base-directory", t)}
-          description={t("settings.general.scratchBaseDirectory.description")}
-          resetAction={
-            settings.scratchBaseDirectory !== DEFAULT_UNIFIED_SETTINGS.scratchBaseDirectory ? (
-              <SettingResetButton
-                label={t("settings.search.item.scratch-base-directory.title")}
-                onClick={() =>
-                  updateSettings({
-                    scratchBaseDirectory: DEFAULT_UNIFIED_SETTINGS.scratchBaseDirectory,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <DraftInput
-              size="sm"
-              className="w-full sm:w-72"
-              value={mixedScratchBaseDirectory ? "" : settings.scratchBaseDirectory}
-              onCommit={(next) => updateSettings({ scratchBaseDirectory: next })}
-              placeholder={
-                mixedScratchBaseDirectory
-                  ? t("settings.general.mixed")
-                  : t("settings.general.scratchBaseDirectory.placeholder")
-              }
-              spellCheck={false}
-              aria-label={t("settings.search.item.scratch-base-directory.title")}
-            />
-          }
-        />
-      </SettingsSection>
-
-      <SettingsSection id="confirmations" title={t("settings.general.section.confirmations")}>
-        <SettingsRow
-          {...searchableSetting("unpin-confirmation", t)}
-          description={t("settings.general.confirmUnpin.description")}
-          resetAction={
-            settings.confirmThreadUnpin !== DEFAULT_UNIFIED_SETTINGS.confirmThreadUnpin ? (
-              <SettingResetButton
-                label={t("settings.general.confirmUnpin.resetLabel")}
-                onClick={() =>
-                  updateSettings({
-                    confirmThreadUnpin: DEFAULT_UNIFIED_SETTINGS.confirmThreadUnpin,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Switch
-              checked={settings.confirmThreadUnpin}
-              onCheckedChange={(checked) =>
-                updateSettings({ confirmThreadUnpin: Boolean(checked) })
-              }
-              aria-label={t("settings.general.confirmUnpin.ariaLabel")}
-            />
-          }
-        />
-
-        <SettingsRow
-          {...searchableSetting("archive-confirmation", t)}
-          description={t("settings.general.confirmArchive.description")}
-          resetAction={
-            settings.confirmThreadArchive !== DEFAULT_UNIFIED_SETTINGS.confirmThreadArchive ? (
-              <SettingResetButton
-                label={t("settings.general.confirmArchive.resetLabel")}
-                onClick={() =>
-                  updateSettings({
-                    confirmThreadArchive: DEFAULT_UNIFIED_SETTINGS.confirmThreadArchive,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Switch
-              checked={settings.confirmThreadArchive}
-              onCheckedChange={(checked) =>
-                updateSettings({ confirmThreadArchive: Boolean(checked) })
-              }
-              aria-label={t("settings.general.confirmArchive.ariaLabel")}
-            />
-          }
-        />
-
-        <SettingsRow
-          {...searchableSetting("delete-confirmation", t)}
-          description={t("settings.general.confirmDelete.description")}
-          resetAction={
-            settings.confirmThreadDelete !== DEFAULT_UNIFIED_SETTINGS.confirmThreadDelete ? (
-              <SettingResetButton
-                label={t("settings.general.confirmDelete.resetLabel")}
-                onClick={() =>
-                  updateSettings({
-                    confirmThreadDelete: DEFAULT_UNIFIED_SETTINGS.confirmThreadDelete,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Switch
-              checked={settings.confirmThreadDelete}
-              onCheckedChange={(checked) =>
-                updateSettings({ confirmThreadDelete: Boolean(checked) })
-              }
-              aria-label={t("settings.general.confirmDelete.ariaLabel")}
-            />
-          }
-        />
-
-        <SettingsRow
-          {...searchableSetting("hide-unavailable-context-menu-items", t)}
-          description={t("settings.general.hideUnavailableContextMenuItems.description")}
-          resetAction={
-            settings.hideUnavailableContextMenuItems !==
-            DEFAULT_UNIFIED_SETTINGS.hideUnavailableContextMenuItems ? (
-              <SettingResetButton
-                label={t("settings.general.hideUnavailableContextMenuItems.resetLabel")}
-                onClick={() =>
-                  updateSettings({
-                    hideUnavailableContextMenuItems:
-                      DEFAULT_UNIFIED_SETTINGS.hideUnavailableContextMenuItems,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Switch
-              checked={settings.hideUnavailableContextMenuItems}
-              onCheckedChange={(checked) =>
-                updateSettings({ hideUnavailableContextMenuItems: Boolean(checked) })
-              }
-              aria-label={t("settings.general.hideUnavailableContextMenuItems.ariaLabel")}
-            />
-          }
-        />
-
-        {isElectron ? (
+            }
+          />
           <SettingsRow
-            {...searchableSetting("quit-confirmation", t)}
-            description={t("settings.general.confirmQuit.description")}
+            {...searchableSetting("project-order", t)}
+            description="Order of projects in the sidebar project picker and command palette."
             resetAction={
-              settings.confirmQuit !== DEFAULT_UNIFIED_SETTINGS.confirmQuit ? (
+              settings.sidebarProjectSortOrder !==
+              DEFAULT_UNIFIED_SETTINGS.sidebarProjectSortOrder ? (
                 <SettingResetButton
-                  label={t("settings.general.confirmQuit.resetLabel")}
+                  label="project order"
                   onClick={() =>
-                    updateSettings({ confirmQuit: DEFAULT_UNIFIED_SETTINGS.confirmQuit })
+                    updateSettings({
+                      sidebarProjectSortOrder: DEFAULT_UNIFIED_SETTINGS.sidebarProjectSortOrder,
+                    })
                   }
                 />
               ) : null
             }
             control={
               <Select
-                value={settings.confirmQuit}
+                value={settings.sidebarProjectSortOrder}
                 onValueChange={(value) => {
-                  if (value === "direct" || value === "hold" || value === "double-click") {
-                    updateSettings({ confirmQuit: value });
+                  if (isSidebarProjectSortOrder(value)) {
+                    updateSettings({ sidebarProjectSortOrder: value });
                   }
                 }}
               >
-                <SelectTrigger
-                  size="sm"
-                  className="w-full sm:w-40"
-                  aria-label={t("settings.general.confirmQuit.ariaLabel")}
-                >
+                <SelectTrigger size="sm" className="w-full sm:w-44" aria-label="Project order">
                   <SelectValue>
-                    {t(QUIT_CONFIRMATION_MODE_LABEL_KEYS[settings.confirmQuit])}
+                    {SIDEBAR_PROJECT_SORT_ORDER_LABELS[settings.sidebarProjectSortOrder]}
                   </SelectValue>
                 </SelectTrigger>
                 <SelectPopup align="end" alignItemWithTrigger={false}>
-                  {Object.entries(QUIT_CONFIRMATION_MODE_LABEL_KEYS).map(([value, labelKey]) => (
-                    <SelectItem hideIndicator key={value} value={value}>
-                      {t(labelKey)}
+                  {SidebarProjectSortOrder.literals.map((sortOrder) => (
+                    <SelectItem hideIndicator key={sortOrder} value={sortOrder}>
+                      {SIDEBAR_PROJECT_SORT_ORDER_LABELS[sortOrder]}
                     </SelectItem>
                   ))}
                 </SelectPopup>
               </Select>
             }
           />
-        ) : null}
-      </SettingsSection>
 
-      <SettingsSection
-        id="conversation-structure-section"
-        title={t("settings.general.section.conversation")}
-      >
-        <SettingsRow
-          serverScoped
-          settingKeys={["conversationStructure"]}
-          {...searchableSetting("conversation-structure", t)}
-          description={
-            mixedConversationStructure
-              ? t("settings.row.copy.mixedAcrossEnvironments")
-              : t("settings.general.conversation.structure.description")
-          }
-          resetAction={
-            settings.conversationStructure !== DEFAULT_UNIFIED_SETTINGS.conversationStructure ? (
-              <SettingResetButton
-                label={t("settings.general.conversation.structure.resetLabel")}
-                onClick={() =>
-                  selectConversationStructure(DEFAULT_UNIFIED_SETTINGS.conversationStructure)
+          <SettingsRow
+            serverScoped
+            {...searchableSetting("auto-resume-limited-threads", t)}
+            description={t("settings.general.autoResumeLimitedThreads.description")}
+            settingKeys={["autoResumeLimitedThreads"]}
+            control={
+              <ScopedSwitch
+                settingKeys={["autoResumeLimitedThreads"]}
+                checked={settings.autoResumeLimitedThreads}
+                onCheckedChange={(checked) =>
+                  updateSettings({ autoResumeLimitedThreads: Boolean(checked) })
+                }
+                aria-label={t("settings.restore.label.autoResumeLimitedThreads")}
+              />
+            }
+          />
+          <SettingsRow
+            serverScoped
+            {...searchableSetting("snooze-limited-threads", t)}
+            description={t("settings.general.snoozeLimitedThreads.description")}
+            settingKeys={["snoozeLimitedThreads"]}
+            control={
+              <ScopedSwitch
+                settingKeys={["snoozeLimitedThreads"]}
+                checked={settings.snoozeLimitedThreads}
+                onCheckedChange={(checked) =>
+                  updateSettings({ snoozeLimitedThreads: Boolean(checked) })
+                }
+                aria-label={t("settings.restore.label.snoozeLimitedThreads")}
+              />
+            }
+          />
+
+          <SettingsRow
+            {...searchableSetting("working-shelf", t)}
+            description={t("settings.general.workingShelf.description")}
+            resetAction={
+              settings.sidebarWorkingShelfEnabled !==
+              DEFAULT_UNIFIED_SETTINGS.sidebarWorkingShelfEnabled ? (
+                <SettingResetButton
+                  label="working section"
+                  onClick={() =>
+                    updateSettings({
+                      sidebarWorkingShelfEnabled:
+                        DEFAULT_UNIFIED_SETTINGS.sidebarWorkingShelfEnabled,
+                    })
+                  }
+                />
+              ) : null
+            }
+            control={
+              <Switch
+                checked={settings.sidebarWorkingShelfEnabled}
+                onCheckedChange={(checked) =>
+                  updateSettings({ sidebarWorkingShelfEnabled: Boolean(checked) })
+                }
+                aria-label={t("settings.general.workingShelf.label")}
+              />
+            }
+          />
+
+          {supportsAutoSettlement ? (
+            <>
+              <SettingsRow
+                serverScoped
+                settingKeys={["sidebarAutoSettleOnMerge"]}
+                {...searchableSetting("auto-settle-merged-threads", t)}
+                description={t("settings.general.autoSettleMerged.description")}
+                resetAction={
+                  settings.sidebarAutoSettleOnMerge !==
+                  DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleOnMerge ? (
+                    <SettingResetButton
+                      label={t("settings.general.autoSettleMerged.resetLabel")}
+                      onClick={() =>
+                        updateSettings({
+                          sidebarAutoSettleOnMerge:
+                            DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleOnMerge,
+                        })
+                      }
+                    />
+                  ) : null
+                }
+                control={
+                  <ScopedSwitch
+                    settingKeys={["sidebarAutoSettleOnMerge"]}
+                    checked={settings.sidebarAutoSettleOnMerge}
+                    onCheckedChange={(checked) =>
+                      updateSettings({ sidebarAutoSettleOnMerge: Boolean(checked) })
+                    }
+                    aria-label={t("settings.restore.label.autoSettleMerged")}
+                  />
                 }
               />
-            ) : null
-          }
-          control={
-            <Select
-              value={mixedConversationStructure ? null : settings.conversationStructure}
-              onValueChange={(value) => {
-                if (value === "default" || value === "restructured") {
-                  selectConversationStructure(value);
+
+              <SettingsRow
+                serverScoped
+                settingKeys={["sidebarAutoSettleAfterDays"]}
+                {...searchableSetting("auto-settle-inactive-threads", t)}
+                description={t("settings.general.autoSettleInactive.description")}
+                resetAction={
+                  settings.sidebarAutoSettleAfterDays !==
+                  DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleAfterDays ? (
+                    <SettingResetButton
+                      label={t("settings.general.autoSettleInactive.resetLabel")}
+                      onClick={() =>
+                        updateSettings({
+                          sidebarAutoSettleAfterDays:
+                            DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleAfterDays,
+                        })
+                      }
+                    />
+                  ) : null
                 }
-              }}
-            >
-              <SelectTrigger
-                size="sm"
-                className="w-full sm:w-56"
-                aria-label={t("settings.general.conversation.structure.description")}
-              >
-                <SelectValue>
-                  {(value: ConversationStructure | null) =>
-                    value === null
-                      ? t("settings.row.copy.mixedAcrossEnvironments")
-                      : t(
-                          value === "restructured"
-                            ? "settings.general.conversation.structure.restructured"
-                            : "settings.general.conversation.structure.default",
-                        )
+                control={
+                  <ScopedSwitch
+                    settingKeys={["sidebarAutoSettleAfterDays"]}
+                    checked={settings.sidebarAutoSettleAfterDays !== null}
+                    onCheckedChange={(checked) =>
+                      updateSettings({
+                        sidebarAutoSettleAfterDays: checked ? AUTO_SETTLE_DEFAULT_DAYS : null,
+                      })
+                    }
+                    aria-label={t("settings.restore.label.autoSettleInactive")}
+                  />
+                }
+              />
+              {settings.sidebarAutoSettleAfterDays !== null ? (
+                <SettingsRow
+                  serverScoped
+                  settingKeys={["sidebarAutoSettleAfterDays"]}
+                  title={searchableSetting("days-before-auto-settle", t).title}
+                  description={t("settings.general.autoSettleDays.description")}
+                  control={
+                    <AutoSettleDaysInput
+                      value={settings.sidebarAutoSettleAfterDays}
+                      onCommit={(days) => updateSettings({ sidebarAutoSettleAfterDays: days })}
+                    />
                   }
-                </SelectValue>
-              </SelectTrigger>
-              <SelectPopup align="end" alignItemWithTrigger={false}>
-                <SelectItem hideIndicator value="default">
-                  {t("settings.general.conversation.structure.default")}
-                </SelectItem>
-                <SelectItem hideIndicator value="restructured">
-                  {t("settings.general.conversation.structure.restructured")}
-                </SelectItem>
-              </SelectPopup>
-            </Select>
-          }
-        />
-        <SettingsRow
-          serverScoped
-          settingKeys={["responseStreamingMode"]}
-          {...searchableSetting("response-streaming", t)}
-          description={
-            mixedResponseStreamingMode
-              ? t("settings.general.streaming.mixed")
-              : !smoothOutputAvailable
-                ? `${t(RESPONSE_STREAMING_MODE_DESCRIPTION_KEYS[settings.responseStreamingMode])} ${t("settings.general.streaming.requiresRestructured")}`
-                : t(RESPONSE_STREAMING_MODE_DESCRIPTION_KEYS[settings.responseStreamingMode])
-          }
-          resetAction={
-            settings.responseStreamingMode !== DEFAULT_UNIFIED_SETTINGS.responseStreamingMode ? (
-              <SettingResetButton
-                label={t("settings.general.streaming.resetLabel")}
-                onClick={() =>
-                  updateSettings({
-                    responseStreamingMode: DEFAULT_UNIFIED_SETTINGS.responseStreamingMode,
+                />
+              ) : null}
+              {settings.sidebarAutoSettleAfterDays !== null && supportsAutoSettlementScope ? (
+                <SettingsRow
+                  serverScoped
+                  settingKeys={["sidebarAutoSettleKeepPullRequests"]}
+                  title="Keep threads with a PR"
+                  description="Inactivity does not settle threads with a pull request. Merge and close still do."
+                  control={
+                    <ScopedSwitch
+                      settingKeys={["sidebarAutoSettleKeepPullRequests"]}
+                      checked={settings.sidebarAutoSettleKeepPullRequests}
+                      onCheckedChange={(checked) =>
+                        updateSettings({ sidebarAutoSettleKeepPullRequests: checked })
+                      }
+                      aria-label="Keep threads with a PR"
+                    />
+                  }
+                />
+              ) : null}
+            </>
+          ) : null}
+        </SettingsSection>
+
+        <SettingsSection id="behavior" title={t("settings.general.section.behavior")}>
+          <NotificationSettings />
+          <SettingsRow
+            {...searchableSetting("in-app-notifications", t)}
+            description={t("settings.general.inAppNotifications.description")}
+            control={
+              <Switch
+                checked={settings.inAppNotificationsEnabled}
+                onCheckedChange={(checked) =>
+                  updateSettings({ inAppNotificationsEnabled: checked })
+                }
+                aria-label={t("settings.restore.label.inAppNotifications")}
+              />
+            }
+          />
+          <SettingsRow
+            id={searchableSetting("language", t).id}
+            title={t("settings.language.title")}
+            description={t("settings.language.description")}
+            resetAction={
+              settings.language !== DEFAULT_UNIFIED_SETTINGS.language ? (
+                <SettingResetButton
+                  label={t("settings.language.title")}
+                  onClick={() => updateSettings({ language: DEFAULT_UNIFIED_SETTINGS.language })}
+                />
+              ) : null
+            }
+            control={
+              <Select
+                value={settings.language}
+                onValueChange={(value) => {
+                  if (value === "system" || value === "en" || value === "zh-CN") {
+                    updateSettings({ language: value });
+                  }
+                }}
+              >
+                <SelectTrigger
+                  size="sm"
+                  className="w-full sm:w-40"
+                  aria-label={t("settings.language.title")}
+                >
+                  <SelectValue>{languageLabels[settings.language]}</SelectValue>
+                </SelectTrigger>
+                <SelectPopup align="end" alignItemWithTrigger={false}>
+                  <SelectItem hideIndicator value="system">
+                    {languageLabels.system}
+                  </SelectItem>
+                  <SelectItem hideIndicator value="en">
+                    {languageLabels.en}
+                  </SelectItem>
+                  <SelectItem hideIndicator value="zh-CN">
+                    {languageLabels["zh-CN"]}
+                  </SelectItem>
+                </SelectPopup>
+              </Select>
+            }
+          />
+
+          <SettingsRow
+            {...searchableSetting("time-format", t)}
+            description={t("settings.general.timeFormat.description")}
+            resetAction={
+              settings.timestampFormat !== DEFAULT_UNIFIED_SETTINGS.timestampFormat ? (
+                <SettingResetButton
+                  label={t("settings.general.timeFormat.resetLabel")}
+                  onClick={() =>
+                    updateSettings({
+                      timestampFormat: DEFAULT_UNIFIED_SETTINGS.timestampFormat,
+                    })
+                  }
+                />
+              ) : null
+            }
+            control={
+              <Select
+                value={settings.timestampFormat}
+                onValueChange={(value) => {
+                  if (value === "locale" || value === "12-hour" || value === "24-hour") {
+                    updateSettings({ timestampFormat: value });
+                  }
+                }}
+              >
+                <SelectTrigger
+                  size="sm"
+                  className="w-full sm:w-40"
+                  aria-label={t("settings.general.timeFormat.ariaLabel")}
+                >
+                  <SelectValue>
+                    {t(TIMESTAMP_FORMAT_LABEL_KEYS[settings.timestampFormat])}
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectPopup align="end" alignItemWithTrigger={false}>
+                  <SelectItem hideIndicator value="locale">
+                    {t(TIMESTAMP_FORMAT_LABEL_KEYS.locale)}
+                  </SelectItem>
+                  <SelectItem hideIndicator value="12-hour">
+                    {t(TIMESTAMP_FORMAT_LABEL_KEYS["12-hour"])}
+                  </SelectItem>
+                  <SelectItem hideIndicator value="24-hour">
+                    {t(TIMESTAMP_FORMAT_LABEL_KEYS["24-hour"])}
+                  </SelectItem>
+                </SelectPopup>
+              </Select>
+            }
+          />
+          <SettingsRow
+            {...searchableSetting("hide-whitespace-changes", t)}
+            description={t("settings.general.hideWhitespace.description")}
+            resetAction={
+              settings.diffIgnoreWhitespace !== DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace ? (
+                <SettingResetButton
+                  label={t("settings.general.hideWhitespace.resetLabel")}
+                  onClick={() =>
+                    updateSettings({
+                      diffIgnoreWhitespace: DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace,
+                    })
+                  }
+                />
+              ) : null
+            }
+            control={
+              <Switch
+                checked={settings.diffIgnoreWhitespace}
+                onCheckedChange={(checked) =>
+                  updateSettings({ diffIgnoreWhitespace: Boolean(checked) })
+                }
+                aria-label={t("settings.general.hideWhitespace.ariaLabel")}
+              />
+            }
+          />
+          <SettingsRow
+            {...searchableSetting("default-diff-file-state", t)}
+            description={t("settings.general.diffFileState.description")}
+            resetAction={
+              settings.diffFilesCollapsed !== DEFAULT_UNIFIED_SETTINGS.diffFilesCollapsed ? (
+                <SettingResetButton
+                  label={t("settings.general.diffFileState.resetLabel")}
+                  onClick={() =>
+                    updateSettings({
+                      diffFilesCollapsed: DEFAULT_UNIFIED_SETTINGS.diffFilesCollapsed,
+                    })
+                  }
+                />
+              ) : null
+            }
+            control={
+              <Select
+                value={settings.diffFilesCollapsed ? "collapsed" : "expanded"}
+                onValueChange={(value) => {
+                  if (value === "expanded" || value === "collapsed") {
+                    updateSettings({ diffFilesCollapsed: value === "collapsed" });
+                  }
+                }}
+              >
+                <SelectTrigger
+                  size="sm"
+                  className="w-full sm:w-40"
+                  aria-label={t("settings.restore.label.defaultDiffFileState")}
+                >
+                  <SelectValue>
+                    {settings.diffFilesCollapsed
+                      ? t("settings.general.diffFileState.collapsed")
+                      : t("settings.general.diffFileState.expanded")}
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectPopup align="end" alignItemWithTrigger={false}>
+                  <SelectItem hideIndicator value="expanded">
+                    {t("settings.general.diffFileState.expanded")}
+                  </SelectItem>
+                  <SelectItem hideIndicator value="collapsed">
+                    {t("settings.general.diffFileState.collapsed")}
+                  </SelectItem>
+                </SelectPopup>
+              </Select>
+            }
+          />
+          <SettingsRow
+            {...searchableSetting("diff-layout", t)}
+            description={t("settings.general.diffLayout.description")}
+            resetAction={
+              settings.diffLayout !== DEFAULT_UNIFIED_SETTINGS.diffLayout ? (
+                <SettingResetButton
+                  label={t("settings.general.diffLayout.resetLabel")}
+                  onClick={() =>
+                    updateSettings({ diffLayout: DEFAULT_UNIFIED_SETTINGS.diffLayout })
+                  }
+                />
+              ) : null
+            }
+            control={
+              <Select
+                value={settings.diffLayout}
+                onValueChange={(value) => {
+                  if (value === "stacked" || value === "split") {
+                    updateSettings({ diffLayout: value });
+                  }
+                }}
+              >
+                <SelectTrigger
+                  size="sm"
+                  className="w-full sm:w-40"
+                  aria-label={t("settings.restore.label.diffLayout")}
+                >
+                  <SelectValue>{t(DIFF_LAYOUT_LABEL_KEYS[settings.diffLayout])}</SelectValue>
+                </SelectTrigger>
+                <SelectPopup align="end" alignItemWithTrigger={false}>
+                  <SelectItem hideIndicator value="stacked">
+                    {t(DIFF_LAYOUT_LABEL_KEYS.stacked)}
+                  </SelectItem>
+                  <SelectItem hideIndicator value="split">
+                    {t(DIFF_LAYOUT_LABEL_KEYS.split)}
+                  </SelectItem>
+                </SelectPopup>
+              </Select>
+            }
+          />
+
+          <SettingsRow
+            {...searchableSetting("proactive-panels", t)}
+            description="Open linked pull requests first. Otherwise, open Changes for edits to at least 3 files or 50 lines."
+            resetAction={
+              settings.proactivePanelsEnabled !==
+              DEFAULT_UNIFIED_SETTINGS.proactivePanelsEnabled ? (
+                <SettingResetButton
+                  label={t("settings.general.proactivePanels.resetLabel")}
+                  onClick={() =>
+                    updateSettings({
+                      proactivePanelsEnabled: DEFAULT_UNIFIED_SETTINGS.proactivePanelsEnabled,
+                    })
+                  }
+                />
+              ) : null
+            }
+            control={
+              <Switch
+                checked={settings.proactivePanelsEnabled}
+                onCheckedChange={(checked) =>
+                  updateSettings({ proactivePanelsEnabled: Boolean(checked) })
+                }
+                aria-label={t("settings.restore.label.proactivePanels")}
+              />
+            }
+          />
+
+          <SettingsRow
+            {...searchableSetting("auto-expand-thread-details", t)}
+            description={t("settings.general.autoExpandThreadDetails.description")}
+            resetAction={
+              settings.autoExpandThreadDetailsPanel !==
+              DEFAULT_UNIFIED_SETTINGS.autoExpandThreadDetailsPanel ? (
+                <SettingResetButton
+                  label={t("settings.search.item.auto-expand-thread-details.title")}
+                  onClick={() =>
+                    updateSettings({
+                      autoExpandThreadDetailsPanel:
+                        DEFAULT_UNIFIED_SETTINGS.autoExpandThreadDetailsPanel,
+                    })
+                  }
+                />
+              ) : null
+            }
+            control={
+              <Switch
+                checked={settings.autoExpandThreadDetailsPanel}
+                onCheckedChange={(checked) =>
+                  updateSettings({ autoExpandThreadDetailsPanel: Boolean(checked) })
+                }
+                aria-label={t("settings.search.item.auto-expand-thread-details.title")}
+              />
+            }
+          />
+
+          <SettingsRow
+            {...searchableSetting("skills-in-slash-menu", t)}
+            description={t("settings.general.skillsInSlashMenu.description")}
+            resetAction={
+              settings.showSkillsInSlashMenu !== DEFAULT_UNIFIED_SETTINGS.showSkillsInSlashMenu ? (
+                <SettingResetButton
+                  label={t("settings.general.skillsInSlashMenu.resetLabel")}
+                  onClick={() =>
+                    updateSettings({
+                      showSkillsInSlashMenu: DEFAULT_UNIFIED_SETTINGS.showSkillsInSlashMenu,
+                    })
+                  }
+                />
+              ) : null
+            }
+            control={
+              <Switch
+                checked={settings.showSkillsInSlashMenu}
+                onCheckedChange={(checked) =>
+                  updateSettings({ showSkillsInSlashMenu: Boolean(checked) })
+                }
+                aria-label={t("settings.restore.label.skillsInSlashMenu")}
+              />
+            }
+          />
+
+          <SettingsRow
+            {...searchableSetting("composer-rich-text", t)}
+            description={t("settings.general.richText.description")}
+            resetAction={
+              settings.composerRichTextEnabled !==
+              DEFAULT_UNIFIED_SETTINGS.composerRichTextEnabled ? (
+                <SettingResetButton
+                  label={t("settings.general.richText.resetLabel")}
+                  onClick={() =>
+                    updateSettings({
+                      composerRichTextEnabled: DEFAULT_UNIFIED_SETTINGS.composerRichTextEnabled,
+                    })
+                  }
+                />
+              ) : null
+            }
+            control={
+              <Switch
+                checked={settings.composerRichTextEnabled}
+                onCheckedChange={(checked) =>
+                  updateSettings({ composerRichTextEnabled: Boolean(checked) })
+                }
+                aria-label={t("settings.general.richText.ariaLabel")}
+              />
+            }
+          />
+
+          <SettingsRow
+            {...searchableSetting("composer-collapse", t)}
+            description={t("settings.general.composerCollapse.description")}
+            resetAction={
+              settings.composerCollapseOnScroll !==
+              DEFAULT_UNIFIED_SETTINGS.composerCollapseOnScroll ? (
+                <SettingResetButton
+                  label={t("settings.general.composerCollapse.resetLabel")}
+                  onClick={() =>
+                    updateSettings({
+                      composerCollapseOnScroll: DEFAULT_UNIFIED_SETTINGS.composerCollapseOnScroll,
+                    })
+                  }
+                />
+              ) : null
+            }
+            control={
+              <Switch
+                checked={settings.composerCollapseOnScroll}
+                onCheckedChange={(checked) =>
+                  updateSettings({ composerCollapseOnScroll: Boolean(checked) })
+                }
+                aria-label={t("settings.restore.label.composerCollapse")}
+              />
+            }
+          />
+
+          <SettingsRow
+            {...searchableSetting("send-shortcut", t)}
+            description={t("settings.general.sendShortcut.description")}
+            resetAction={
+              settings.sendShortcut !== DEFAULT_UNIFIED_SETTINGS.sendShortcut ? (
+                <SettingResetButton
+                  label={t("settings.general.sendShortcut.resetLabel")}
+                  onClick={() =>
+                    updateSettings({ sendShortcut: DEFAULT_UNIFIED_SETTINGS.sendShortcut })
+                  }
+                />
+              ) : null
+            }
+            control={
+              <Select
+                value={settings.sendShortcut}
+                onValueChange={(value) => {
+                  const option = sendShortcutOptions.find((option) => option.value === value);
+                  if (option) updateSettings({ sendShortcut: option.value });
+                }}
+              >
+                <SelectTrigger
+                  size="sm"
+                  className="w-auto min-w-0 max-w-full"
+                  aria-label={t("settings.general.sendShortcut.ariaLabel")}
+                >
+                  <SelectValue>
+                    {
+                      sendShortcutOptions.find((option) => option.value === settings.sendShortcut)
+                        ?.label
+                    }
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectPopup align="end" alignItemWithTrigger={false}>
+                  {sendShortcutOptions.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>
+                      <span className="flex items-center justify-between gap-4">
+                        {option.label}
+                        {settings.sendShortcut === option.value && <CheckIcon aria-hidden="true" />}
+                      </span>
+                    </SelectItem>
+                  ))}
+                </SelectPopup>
+              </Select>
+            }
+          />
+
+          <SettingsRow
+            {...searchableSetting("follow-up-behavior", t)}
+            description={`${t("settings.general.followUpBehavior.description")} ${
+              settings.sendShortcut === "mod-enter-multiline"
+                ? t("settings.general.followUpBehavior.oppositeSingleAndMultiline", {
+                    modifier: modifierLabel,
                   })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Select
-              value={mixedResponseStreamingMode ? null : settings.responseStreamingMode}
-              onValueChange={(value) => {
-                if (
-                  value === "turn" ||
-                  value === "paragraph" ||
-                  value === "realtime" ||
-                  value === "smooth"
-                ) {
-                  updateSettings({ responseStreamingMode: value });
-                }
-              }}
-            >
-              <SelectTrigger
-                size="sm"
-                className="w-full sm:w-56"
-                aria-label={t("settings.general.streaming.ariaLabel")}
-              >
-                <SelectValue>
-                  {(value: ResponseStreamingMode | null) =>
-                    value === null
-                      ? t("settings.general.streaming.mixedValue")
-                      : t(RESPONSE_STREAMING_MODE_LABEL_KEYS[value])
-                  }
-                </SelectValue>
-              </SelectTrigger>
-              <SelectPopup align="end" alignItemWithTrigger={false}>
-                <SelectItem hideIndicator value="turn">
-                  {t(RESPONSE_STREAMING_MODE_LABEL_KEYS.turn)}
-                </SelectItem>
-                <SelectItem hideIndicator value="paragraph">
-                  {t(RESPONSE_STREAMING_MODE_LABEL_KEYS.paragraph)}
-                </SelectItem>
-                <SelectItem hideIndicator value="realtime">
-                  {t(RESPONSE_STREAMING_MODE_LABEL_KEYS.realtime)}
-                </SelectItem>
-                <SelectItem hideIndicator value="smooth" disabled={!smoothOutputAvailable}>
-                  {t(RESPONSE_STREAMING_MODE_LABEL_KEYS.smooth)}
-                </SelectItem>
-              </SelectPopup>
-            </Select>
-          }
-        />
-        {!mixedResponseStreamingMode && settings.responseStreamingMode === "smooth" && (
-          <SettingsRow
-            id="smooth-output-mode"
-            serverScoped
-            settingKeys={["smoothOutputMode"]}
-            title={t("settings.general.streaming.unit.title")}
-            description={t("settings.general.streaming.unit.description")}
+                : t("settings.general.followUpBehavior.opposite", {
+                    modifier: modifierLabel,
+                    shift: settings.sendShortcut === "mod-enter" ? " + Shift" : "",
+                  })
+            }`}
             resetAction={
-              settings.smoothOutputMode !== DEFAULT_UNIFIED_SETTINGS.smoothOutputMode ? (
+              settings.followUpBehavior !== DEFAULT_UNIFIED_SETTINGS.followUpBehavior ? (
                 <SettingResetButton
-                  label={t("settings.general.streaming.unit.title")}
-                  onClick={() =>
-                    updateSettings({ smoothOutputMode: DEFAULT_UNIFIED_SETTINGS.smoothOutputMode })
-                  }
-                />
-              ) : null
-            }
-            control={
-              <Select
-                value={mixedSmoothOutputMode ? null : settings.smoothOutputMode}
-                onValueChange={(value) => {
-                  if (value === "character" || value === "token" || value === "auto")
-                    updateSettings({ smoothOutputMode: value });
-                }}
-              >
-                <SelectTrigger size="sm" aria-label={t("settings.general.streaming.unit.title")}>
-                  <SelectValue>
-                    {(value: string | null) =>
-                      value === null
-                        ? t("settings.general.streaming.mixedValue")
-                        : t(SMOOTH_OUTPUT_MODE_LABEL_KEYS[value]!)
-                    }
-                  </SelectValue>
-                </SelectTrigger>
-                <SelectPopup align="end" alignItemWithTrigger={false}>
-                  <SelectItem hideIndicator value="character">
-                    {t("settings.general.streaming.unit.character")}
-                  </SelectItem>
-                  <SelectItem hideIndicator value="token">
-                    {t("settings.general.streaming.unit.token")}
-                  </SelectItem>
-                  <SelectItem hideIndicator value="auto">
-                    {t("settings.general.streaming.unit.auto")}
-                  </SelectItem>
-                </SelectPopup>
-              </Select>
-            }
-          />
-        )}
-        {!mixedResponseStreamingMode && settings.responseStreamingMode === "smooth" && (
-          <SettingsRow
-            id="smooth-output-lines"
-            serverScoped
-            settingKeys={["smoothOutputLineMode"]}
-            title={t("settings.general.streaming.lines.title")}
-            description={t("settings.general.streaming.lines.description")}
-            resetAction={
-              settings.smoothOutputLineMode !== DEFAULT_UNIFIED_SETTINGS.smoothOutputLineMode ? (
-                <SettingResetButton
-                  label={t("settings.general.streaming.lines.title")}
+                  label={t("settings.general.followUpBehavior.resetLabel")}
                   onClick={() =>
                     updateSettings({
-                      smoothOutputLineMode: DEFAULT_UNIFIED_SETTINGS.smoothOutputLineMode,
+                      followUpBehavior: DEFAULT_UNIFIED_SETTINGS.followUpBehavior,
                     })
                   }
                 />
@@ -4186,119 +3622,48 @@ function GeneralSettingsRows() {
             }
             control={
               <Select
-                value={mixedSmoothOutputLineMode ? null : settings.smoothOutputLineMode}
+                value={settings.followUpBehavior}
                 onValueChange={(value) => {
-                  if (value === "adaptive" || value === "parallel")
-                    updateSettings({ smoothOutputLineMode: value });
+                  if (value === "queue" || value === "steer") {
+                    updateSettings({ followUpBehavior: value });
+                  }
                 }}
               >
-                <SelectTrigger size="sm" aria-label={t("settings.general.streaming.lines.title")}>
+                <SelectTrigger
+                  size="sm"
+                  className="w-auto min-w-0"
+                  aria-label={t("settings.restore.label.followUpBehavior")}
+                >
                   <SelectValue>
-                    {(value: string | null) =>
-                      value === null
-                        ? t("settings.general.streaming.mixedValue")
-                        : t(SMOOTH_OUTPUT_LINE_MODE_LABEL_KEYS[value]!)
-                    }
+                    {settings.followUpBehavior === "queue" ? "Queue" : "Steer"}
                   </SelectValue>
                 </SelectTrigger>
                 <SelectPopup align="end" alignItemWithTrigger={false}>
-                  <SelectItem hideIndicator value="adaptive">
-                    {t("settings.general.streaming.lines.adaptive")}
+                  <SelectItem value="queue">
+                    {t("settings.general.followUpBehavior.option.queue")}
                   </SelectItem>
-                  <SelectItem hideIndicator value="parallel">
-                    {t("settings.general.streaming.lines.parallel")}
+                  <SelectItem value="steer">
+                    {t("settings.general.followUpBehavior.option.steer")}
                   </SelectItem>
                 </SelectPopup>
               </Select>
             }
           />
-        )}
-        {!mixedResponseStreamingMode && settings.responseStreamingMode === "smooth" && (
+
           <SettingsRow
-            id="smooth-text-yield-duration"
             serverScoped
-            settingKeys={["smoothTextYieldDurationMs"]}
-            title={t("settings.general.streaming.yield.title")}
-            description={t("settings.general.streaming.yield.description")}
+            settingKeys={["enableProviderUpdateChecks"]}
+            {...searchableSetting("provider-update-checks", t)}
+            description="Check installed provider CLIs for newer available versions and fetch model catalog updates. When off, new models may not appear."
             resetAction={
-              mixedSmoothTextYieldDuration ||
-              settings.smoothTextYieldDurationMs !==
-                DEFAULT_UNIFIED_SETTINGS.smoothTextYieldDurationMs ? (
+              settings.enableProviderUpdateChecks !==
+              DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks ? (
                 <SettingResetButton
-                  label={t("settings.general.streaming.yield.title")}
+                  label={t("settings.general.providerUpdateChecks.resetLabel")}
                   onClick={() =>
                     updateSettings({
-                      smoothTextYieldDurationMs: DEFAULT_UNIFIED_SETTINGS.smoothTextYieldDurationMs,
-                    })
-                  }
-                />
-              ) : null
-            }
-            control={
-              <SmoothTextYieldDurationSlider
-                value={mixedSmoothTextYieldDuration ? null : settings.smoothTextYieldDurationMs}
-                onCommit={(value) => updateSettings({ smoothTextYieldDurationMs: value })}
-                ariaLabel={t("settings.general.streaming.yield.title")}
-                formatValue={(value) =>
-                  value === null
-                    ? t("settings.general.streaming.mixedValue")
-                    : t("settings.general.streaming.yield.value", { value })
-                }
-              />
-            }
-          />
-        )}
-        {!mixedResponseStreamingMode && settings.responseStreamingMode === "smooth" && (
-          <SettingsRow
-            id="smooth-text-fade-duration"
-            serverScoped
-            settingKeys={["smoothTextFadeDurationMs"]}
-            title={t("settings.general.streaming.fade.title")}
-            description={t("settings.general.streaming.fade.description")}
-            resetAction={
-              mixedSmoothTextFadeDuration ||
-              settings.smoothTextFadeDurationMs !==
-                DEFAULT_UNIFIED_SETTINGS.smoothTextFadeDurationMs ? (
-                <SettingResetButton
-                  label={t("settings.general.streaming.fade.title")}
-                  onClick={() =>
-                    updateSettings({
-                      smoothTextFadeDurationMs: DEFAULT_UNIFIED_SETTINGS.smoothTextFadeDurationMs,
-                    })
-                  }
-                />
-              ) : null
-            }
-            control={
-              <SmoothTextFadeDurationSlider
-                value={mixedSmoothTextFadeDuration ? null : settings.smoothTextFadeDurationMs}
-                onCommit={(value) => updateSettings({ smoothTextFadeDurationMs: value })}
-                ariaLabel={t("settings.general.streaming.fade.title")}
-                formatValue={(value) =>
-                  value === null
-                    ? t("settings.general.streaming.mixedValue")
-                    : value === 0
-                      ? t("settings.general.streaming.fade.off")
-                      : t("settings.general.streaming.fade.value", { value })
-                }
-              />
-            }
-          />
-        )}
-        {!mixedResponseStreamingMode && settings.responseStreamingMode === "smooth" && (
-          <SettingsRow
-            id="smooth-markdown-preload"
-            serverScoped
-            settingKeys={["smoothMarkdownPreload"]}
-            title={t("settings.general.streaming.preload.title")}
-            description={t("settings.general.streaming.preload.description")}
-            resetAction={
-              settings.smoothMarkdownPreload !== DEFAULT_UNIFIED_SETTINGS.smoothMarkdownPreload ? (
-                <SettingResetButton
-                  label={t("settings.general.streaming.preload.title")}
-                  onClick={() =>
-                    updateSettings({
-                      smoothMarkdownPreload: DEFAULT_UNIFIED_SETTINGS.smoothMarkdownPreload,
+                      enableProviderUpdateChecks:
+                        DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks,
                     })
                   }
                 />
@@ -4306,284 +3671,1025 @@ function GeneralSettingsRows() {
             }
             control={
               <ScopedSwitch
-                settingKeys={["smoothMarkdownPreload"]}
-                checked={settings.smoothMarkdownPreload}
+                settingKeys={["enableProviderUpdateChecks"]}
+                checked={settings.enableProviderUpdateChecks}
                 onCheckedChange={(checked) =>
-                  updateSettings({ smoothMarkdownPreload: Boolean(checked) })
+                  updateSettings({ enableProviderUpdateChecks: Boolean(checked) })
                 }
-                aria-label={t("settings.general.streaming.preload.title")}
+                aria-label={t("settings.general.providerUpdateChecks.ariaLabel")}
               />
             }
           />
-        )}
-        <SettingsRow
-          id="footnotes-auto-collapse"
-          serverScoped
-          settingKeys={["footnotesAutoCollapse"]}
-          title={t("settings.general.footnotesAutoCollapse.title")}
-          description={t("settings.general.footnotesAutoCollapse.description")}
-          resetAction={
-            settings.footnotesAutoCollapse !== DEFAULT_UNIFIED_SETTINGS.footnotesAutoCollapse ? (
-              <SettingResetButton
-                label={t("settings.general.footnotesAutoCollapse.title")}
-                onClick={() =>
-                  updateSettings({
-                    footnotesAutoCollapse: DEFAULT_UNIFIED_SETTINGS.footnotesAutoCollapse,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <ScopedSwitch
-              settingKeys={["footnotesAutoCollapse"]}
-              checked={settings.footnotesAutoCollapse}
-              onCheckedChange={(checked) =>
-                updateSettings({ footnotesAutoCollapse: Boolean(checked) })
-              }
-              aria-label={t("settings.general.footnotesAutoCollapse.title")}
-            />
-          }
-        />
-        <SettingsRow
-          serverScoped
-          settingKeys={["conversationStructureThinkingLabel"]}
-          {...searchableSetting("conversation-thinking-label", t)}
-          description={t("settings.general.conversation.thinkingLabel.description")}
-          resetAction={
-            settings.conversationStructureThinkingLabel !==
-            DEFAULT_UNIFIED_SETTINGS.conversationStructureThinkingLabel ? (
-              <SettingResetButton
-                label={t("settings.general.conversation.thinkingLabel.resetLabel")}
-                onClick={() =>
-                  updateSettings({
-                    conversationStructureThinkingLabel:
-                      DEFAULT_UNIFIED_SETTINGS.conversationStructureThinkingLabel,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <DraftInput
-              size="sm"
-              className="w-full sm:w-72"
-              value={
-                mixedConversationStructureThinkingLabel
-                  ? ""
-                  : settings.conversationStructureThinkingLabel
-              }
-              // Empty means the built-in label, which follows the app language.
-              onCommit={(next) =>
-                updateSettings({ conversationStructureThinkingLabel: next.trim() })
-              }
-              placeholder={
-                mixedConversationStructureThinkingLabel
-                  ? t("settings.general.mixed")
-                  : t("chat.liveActivity.thinkingDefault")
-              }
-              aria-label={t("settings.general.conversation.thinkingLabel.ariaLabel")}
-            />
-          }
-        />
-        <SettingsRow
-          serverScoped
-          settingKeys={["conversationStructureIdleLabel"]}
-          {...searchableSetting("conversation-idle-label", t)}
-          description={t("settings.general.conversation.idleLabel.description")}
-          resetAction={
-            settings.conversationStructureIdleLabel !==
-            DEFAULT_UNIFIED_SETTINGS.conversationStructureIdleLabel ? (
-              <SettingResetButton
-                label={t("settings.general.conversation.idleLabel.resetLabel")}
-                onClick={() =>
-                  updateSettings({
-                    conversationStructureIdleLabel:
-                      DEFAULT_UNIFIED_SETTINGS.conversationStructureIdleLabel,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <DraftInput
-              size="sm"
-              className="w-full sm:w-72"
-              value={
-                mixedConversationStructureIdleLabel ? "" : settings.conversationStructureIdleLabel
-              }
-              onCommit={(next) => updateSettings({ conversationStructureIdleLabel: next.trim() })}
-              placeholder={
-                mixedConversationStructureIdleLabel
-                  ? t("settings.general.mixed")
-                  : t("chat.liveActivity.idleDefault")
-              }
-              disabled={settings.conversationStructure !== "restructured"}
-              aria-label={t("settings.general.conversation.idleLabel.ariaLabel")}
-            />
-          }
-        />
-      </SettingsSection>
 
-      <SettingsSection id="text-generation" title={t("settings.general.section.textGeneration")}>
-        <SettingsRow
-          serverScoped
-          settingKeys={["textGenerationModelSelection"]}
-          {...searchableSetting("text-generation-model", t)}
-          description={t("settings.general.textGeneration.description")}
-          resetAction={
-            hasServerTargets && isTextGenerationModelDirty ? (
-              <SettingResetButton
-                label={t("settings.general.textGeneration.resetLabel")}
-                onClick={() =>
-                  updateSettings({
-                    textGenerationModelSelection:
-                      DEFAULT_UNIFIED_SETTINGS.textGenerationModelSelection,
-                  })
+          <SettingsRow
+            {...searchableSetting("continue-threads-after-server-update", t)}
+            serverScoped
+            settingKeys={["continueThreadsAfterServerUpdate"]}
+            description={t("settings.general.continueThreads.description")}
+            status={
+              !supportsRestartContinuation
+                ? t("settings.general.continueThreads.unsupported")
+                : undefined
+            }
+            resetAction={
+              supportsRestartContinuation &&
+              settings.continueThreadsAfterServerUpdate !==
+                DEFAULT_UNIFIED_SETTINGS.continueThreadsAfterServerUpdate ? (
+                <SettingResetButton
+                  label={t("settings.general.continueThreads.resetLabel")}
+                  onClick={() =>
+                    updateSettings({
+                      continueThreadsAfterServerUpdate:
+                        DEFAULT_UNIFIED_SETTINGS.continueThreadsAfterServerUpdate,
+                    })
+                  }
+                />
+              ) : null
+            }
+            control={
+              <ScopedSwitch
+                settingKeys={["continueThreadsAfterServerUpdate"]}
+                checked={settings.continueThreadsAfterServerUpdate}
+                disabled={!supportsRestartContinuation}
+                onCheckedChange={(checked) =>
+                  updateSettings({ continueThreadsAfterServerUpdate: Boolean(checked) })
                 }
+                aria-label={t("settings.restore.label.continueThreads")}
               />
-            ) : null
-          }
-          control={
-            !hasServerTargets ? (
-              <span className="text-sm text-muted-foreground">
-                {t("settings.general.textGeneration.connectEnvironment")}
+            }
+          />
+
+          <SettingsRow
+            serverScoped
+            settingKeys={["backgroundActivity"]}
+            id={searchableSetting("background-activity", t).id}
+            title={
+              <span className="inline-flex items-center gap-1.5">
+                {searchableSetting("background-activity", t).title}
+                <PolicyTooltip
+                  detailsLabel={t("settings.general.backgroundActivity.policyDetailsLabel")}
+                >
+                  {t("settings.general.backgroundActivity.tooltip")}
+                </PolicyTooltip>
               </span>
-            ) : !hasTextGenerationProvider ? (
-              <span className="text-sm text-muted-foreground">
-                {t("settings.general.textGeneration.noProviders")}
-              </span>
-            ) : (
-              <div className="flex flex-wrap items-center justify-end gap-1.5">
-                <ProviderModelPicker
-                  activeInstanceId={textGenInstanceId}
-                  model={textGenModel}
-                  lockedProvider={null}
-                  instanceEntries={textGenerationModelInstanceEntries}
-                  modelOptionsByInstance={textGenerationModelOptionsByInstance}
-                  triggerClassName={SETTINGS_PICKER_TRIGGER_CLASSNAME}
-                  {...(mixedTextGenerationModel
-                    ? { triggerLabel: t("settings.general.mixed") }
-                    : {})}
-                  getModelDisabledReason={textGenerationModelDisabledReason}
-                  {...(environmentId
-                    ? {
-                        onOpenProviderSetup: (instanceId: ProviderInstanceId) => {
-                          void navigate({
-                            to: "/settings/providers",
-                            search: { environmentId, instanceId },
-                          });
-                        },
-                      }
-                    : {})}
-                  onInstanceModelChange={(instanceId, model) => {
-                    const reason = textGenerationModelDisabledReason(instanceId, model);
-                    if (reason) {
-                      toastManager.add({
-                        type: "error",
-                        title: t("settings.general.textGeneration.notSaved"),
-                        description: reason,
-                      });
+            }
+            description={backgroundActivityDescription}
+            resetAction={
+              canResetBackgroundActivity ? (
+                <SettingResetButton
+                  label={t("settings.general.backgroundActivity.resetLabel")}
+                  onClick={() => updateSettings(resetBackgroundActivitySettings())}
+                />
+              ) : null
+            }
+            control={
+              <>
+                <Select
+                  value={mixedBackgroundActivity ? null : backgroundActivityProfileOption}
+                  onValueChange={(value) => {
+                    if (value === "advanced") {
+                      if (isEnvironmentScope) setBackgroundActivityDialogOpen(true);
                       return;
                     }
-                    updateSettings({
-                      textGenerationModelSelection: resolveAppModelSelectionState(
-                        {
-                          ...settings,
-                          textGenerationModelSelection: createModelSelection(instanceId, model),
-                        },
-                        textGenerationProviders,
-                      ),
-                    });
-                  }}
-                />
-                {textGenInstanceEntry ? (
-                  <TraitsPicker
-                    provider={textGenProvider}
-                    models={
-                      // Use the exact instance's models (rather than the
-                      // first-kind-match) so a custom text-gen instance like
-                      // `codex_personal` gets its own model list, not the
-                      // default Codex one.
-                      textGenInstanceEntry?.models ?? []
+                    if (
+                      value === "balanced" ||
+                      value === "performance" ||
+                      value === "battery-saver"
+                    ) {
+                      updateSettings(backgroundActivityProfileSettings(value));
                     }
+                  }}
+                >
+                  <SelectTrigger
+                    size="sm"
+                    className="w-full sm:w-40"
+                    aria-label={t("settings.general.backgroundActivity.ariaLabel")}
+                  >
+                    <SelectValue>
+                      {(value: BackgroundActivityProfileOption | null) =>
+                        value === null
+                          ? t("settings.general.backgroundActivity.mixedValue")
+                          : t(BACKGROUND_ACTIVITY_PROFILE_OPTION_LABEL_KEYS[value])
+                      }
+                    </SelectValue>
+                  </SelectTrigger>
+                  <SelectPopup align="end" alignItemWithTrigger={false}>
+                    <SelectItem hideIndicator value="balanced">
+                      {t("settings.general.backgroundActivity.balanced")}
+                    </SelectItem>
+                    <SelectItem hideIndicator value="performance">
+                      {t("settings.general.backgroundActivity.performance")}
+                    </SelectItem>
+                    <SelectItem hideIndicator value="battery-saver">
+                      {t("settings.general.backgroundActivity.batterySaver")}
+                    </SelectItem>
+                    <SelectItem hideIndicator value="advanced" disabled={!isEnvironmentScope}>
+                      {isEnvironmentScope
+                        ? t("settings.general.backgroundActivity.advanced")
+                        : t("settings.general.backgroundActivity.advancedOneEnvironment")}
+                    </SelectItem>
+                  </SelectPopup>
+                </Select>
+                {backgroundActivityProfileOption === "advanced" && isEnvironmentScope ? (
+                  <Tooltip>
+                    <TooltipTrigger
+                      render={
+                        <Button
+                          size="icon-sm"
+                          variant="outline"
+                          aria-label={t("settings.general.backgroundActivity.configureAriaLabel")}
+                          onClick={() => setBackgroundActivityDialogOpen(true)}
+                        >
+                          <SettingsIcon className="size-4" />
+                        </Button>
+                      }
+                    />
+                    <TooltipPopup side="top">
+                      {t("settings.general.backgroundActivity.configureTooltip")}
+                    </TooltipPopup>
+                  </Tooltip>
+                ) : null}
+                <BackgroundActivityAdvancedDialog
+                  open={backgroundActivityDialogOpen && isEnvironmentScope}
+                  onOpenChange={setBackgroundActivityDialogOpen}
+                />
+              </>
+            }
+          />
+        </SettingsSection>
+
+        <SettingsSection
+          id="projects-and-threads"
+          title={t("settings.general.section.projectsAndThreads")}
+        >
+          <SettingsRow
+            serverScoped
+            settingKeys={["newWorktreesStartFromOrigin"]}
+            {...searchableSetting("start-from-origin", t)}
+            description={t("settings.general.startFromOrigin.description")}
+            resetAction={
+              settings.newWorktreesStartFromOrigin !==
+              DEFAULT_UNIFIED_SETTINGS.newWorktreesStartFromOrigin ? (
+                <SettingResetButton
+                  label={t("settings.general.startFromOrigin.resetLabel")}
+                  onClick={() =>
+                    updateSettings({
+                      newWorktreesStartFromOrigin:
+                        DEFAULT_UNIFIED_SETTINGS.newWorktreesStartFromOrigin,
+                    })
+                  }
+                />
+              ) : null
+            }
+            control={
+              <ScopedSwitch
+                settingKeys={["newWorktreesStartFromOrigin"]}
+                checked={settings.newWorktreesStartFromOrigin}
+                onCheckedChange={(checked) =>
+                  updateSettings({ newWorktreesStartFromOrigin: Boolean(checked) })
+                }
+                aria-label={t("settings.general.startFromOrigin.ariaLabel")}
+              />
+            }
+          />
+          <SettingsRow
+            serverScoped
+            settingKeys={["addProjectBaseDirectory"]}
+            {...searchableSetting("add-project-starts-in", t)}
+            description={t("settings.general.addProjectBaseDirectory.description")}
+            resetAction={
+              settings.addProjectBaseDirectory !==
+              DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory ? (
+                <SettingResetButton
+                  label={t("settings.general.addProjectBaseDirectory.resetLabel")}
+                  onClick={() =>
+                    updateSettings({
+                      addProjectBaseDirectory: DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory,
+                    })
+                  }
+                />
+              ) : null
+            }
+            control={
+              <DraftInput
+                size="sm"
+                className="w-full sm:w-72"
+                value={mixedAddProjectBaseDirectory ? "" : settings.addProjectBaseDirectory}
+                onCommit={(next) => updateSettings({ addProjectBaseDirectory: next })}
+                placeholder={mixedAddProjectBaseDirectory ? "Mixed" : "~/"}
+                spellCheck={false}
+                aria-label={t("settings.restore.label.addProjectBaseDirectory")}
+              />
+            }
+          />
+          <SettingsRow
+            serverScoped
+            settingKeys={["scratchBaseDirectory"]}
+            {...searchableSetting("scratch-base-directory", t)}
+            description={t("settings.general.scratchBaseDirectory.description")}
+            resetAction={
+              settings.scratchBaseDirectory !== DEFAULT_UNIFIED_SETTINGS.scratchBaseDirectory ? (
+                <SettingResetButton
+                  label={t("settings.search.item.scratch-base-directory.title")}
+                  onClick={() =>
+                    updateSettings({
+                      scratchBaseDirectory: DEFAULT_UNIFIED_SETTINGS.scratchBaseDirectory,
+                    })
+                  }
+                />
+              ) : null
+            }
+            control={
+              <DraftInput
+                size="sm"
+                className="w-full sm:w-72"
+                value={mixedScratchBaseDirectory ? "" : settings.scratchBaseDirectory}
+                onCommit={(next) => updateSettings({ scratchBaseDirectory: next })}
+                placeholder={
+                  mixedScratchBaseDirectory
+                    ? t("settings.general.mixed")
+                    : t("settings.general.scratchBaseDirectory.placeholder")
+                }
+                spellCheck={false}
+                aria-label={t("settings.search.item.scratch-base-directory.title")}
+              />
+            }
+          />
+        </SettingsSection>
+
+        <SettingsSection id="confirmations" title={t("settings.general.section.confirmations")}>
+          <SettingsRow
+            {...searchableSetting("unpin-confirmation", t)}
+            description={t("settings.general.confirmUnpin.description")}
+            resetAction={
+              settings.confirmThreadUnpin !== DEFAULT_UNIFIED_SETTINGS.confirmThreadUnpin ? (
+                <SettingResetButton
+                  label={t("settings.general.confirmUnpin.resetLabel")}
+                  onClick={() =>
+                    updateSettings({
+                      confirmThreadUnpin: DEFAULT_UNIFIED_SETTINGS.confirmThreadUnpin,
+                    })
+                  }
+                />
+              ) : null
+            }
+            control={
+              <Switch
+                checked={settings.confirmThreadUnpin}
+                onCheckedChange={(checked) =>
+                  updateSettings({ confirmThreadUnpin: Boolean(checked) })
+                }
+                aria-label={t("settings.general.confirmUnpin.ariaLabel")}
+              />
+            }
+          />
+
+          <SettingsRow
+            {...searchableSetting("archive-confirmation", t)}
+            description={t("settings.general.confirmArchive.description")}
+            resetAction={
+              settings.confirmThreadArchive !== DEFAULT_UNIFIED_SETTINGS.confirmThreadArchive ? (
+                <SettingResetButton
+                  label={t("settings.general.confirmArchive.resetLabel")}
+                  onClick={() =>
+                    updateSettings({
+                      confirmThreadArchive: DEFAULT_UNIFIED_SETTINGS.confirmThreadArchive,
+                    })
+                  }
+                />
+              ) : null
+            }
+            control={
+              <Switch
+                checked={settings.confirmThreadArchive}
+                onCheckedChange={(checked) =>
+                  updateSettings({ confirmThreadArchive: Boolean(checked) })
+                }
+                aria-label={t("settings.general.confirmArchive.ariaLabel")}
+              />
+            }
+          />
+
+          <SettingsRow
+            {...searchableSetting("delete-confirmation", t)}
+            description={t("settings.general.confirmDelete.description")}
+            resetAction={
+              settings.confirmThreadDelete !== DEFAULT_UNIFIED_SETTINGS.confirmThreadDelete ? (
+                <SettingResetButton
+                  label={t("settings.general.confirmDelete.resetLabel")}
+                  onClick={() =>
+                    updateSettings({
+                      confirmThreadDelete: DEFAULT_UNIFIED_SETTINGS.confirmThreadDelete,
+                    })
+                  }
+                />
+              ) : null
+            }
+            control={
+              <Switch
+                checked={settings.confirmThreadDelete}
+                onCheckedChange={(checked) =>
+                  updateSettings({ confirmThreadDelete: Boolean(checked) })
+                }
+                aria-label={t("settings.general.confirmDelete.ariaLabel")}
+              />
+            }
+          />
+
+          <SettingsRow
+            {...searchableSetting("hide-unavailable-context-menu-items", t)}
+            description={t("settings.general.hideUnavailableContextMenuItems.description")}
+            resetAction={
+              settings.hideUnavailableContextMenuItems !==
+              DEFAULT_UNIFIED_SETTINGS.hideUnavailableContextMenuItems ? (
+                <SettingResetButton
+                  label={t("settings.general.hideUnavailableContextMenuItems.resetLabel")}
+                  onClick={() =>
+                    updateSettings({
+                      hideUnavailableContextMenuItems:
+                        DEFAULT_UNIFIED_SETTINGS.hideUnavailableContextMenuItems,
+                    })
+                  }
+                />
+              ) : null
+            }
+            control={
+              <Switch
+                checked={settings.hideUnavailableContextMenuItems}
+                onCheckedChange={(checked) =>
+                  updateSettings({ hideUnavailableContextMenuItems: Boolean(checked) })
+                }
+                aria-label={t("settings.general.hideUnavailableContextMenuItems.ariaLabel")}
+              />
+            }
+          />
+
+          {isElectron ? (
+            <SettingsRow
+              {...searchableSetting("quit-confirmation", t)}
+              description={t("settings.general.confirmQuit.description")}
+              resetAction={
+                settings.confirmQuit !== DEFAULT_UNIFIED_SETTINGS.confirmQuit ? (
+                  <SettingResetButton
+                    label={t("settings.general.confirmQuit.resetLabel")}
+                    onClick={() =>
+                      updateSettings({ confirmQuit: DEFAULT_UNIFIED_SETTINGS.confirmQuit })
+                    }
+                  />
+                ) : null
+              }
+              control={
+                <Select
+                  value={settings.confirmQuit}
+                  onValueChange={(value) => {
+                    if (value === "direct" || value === "hold" || value === "double-click") {
+                      updateSettings({ confirmQuit: value });
+                    }
+                  }}
+                >
+                  <SelectTrigger
+                    size="sm"
+                    className="w-full sm:w-40"
+                    aria-label={t("settings.general.confirmQuit.ariaLabel")}
+                  >
+                    <SelectValue>
+                      {t(QUIT_CONFIRMATION_MODE_LABEL_KEYS[settings.confirmQuit])}
+                    </SelectValue>
+                  </SelectTrigger>
+                  <SelectPopup align="end" alignItemWithTrigger={false}>
+                    {(["direct", "hold", "double-click"] as const).map((value) => (
+                      <SelectItem hideIndicator key={value} value={value}>
+                        {t(QUIT_CONFIRMATION_MODE_LABEL_KEYS[value])}
+                      </SelectItem>
+                    ))}
+                  </SelectPopup>
+                </Select>
+              }
+            />
+          ) : null}
+        </SettingsSection>
+
+        <SettingsSection
+          id="conversation-structure-section"
+          title={t("settings.general.section.conversation")}
+        >
+          <SettingsRow
+            serverScoped
+            settingKeys={["conversationStructure"]}
+            {...searchableSetting("conversation-structure", t)}
+            description={
+              mixedConversationStructure
+                ? t("settings.row.copy.mixedAcrossEnvironments")
+                : t("settings.general.conversation.structure.description")
+            }
+            resetAction={
+              settings.conversationStructure !== DEFAULT_UNIFIED_SETTINGS.conversationStructure ? (
+                <SettingResetButton
+                  label={t("settings.general.conversation.structure.resetLabel")}
+                  onClick={() =>
+                    selectConversationStructure(DEFAULT_UNIFIED_SETTINGS.conversationStructure)
+                  }
+                />
+              ) : null
+            }
+            control={
+              <Select
+                value={mixedConversationStructure ? null : settings.conversationStructure}
+                onValueChange={(value) => {
+                  if (value === "default" || value === "restructured") {
+                    selectConversationStructure(value);
+                  }
+                }}
+              >
+                <SelectTrigger
+                  size="sm"
+                  className="w-full sm:w-56"
+                  aria-label={t("settings.general.conversation.structure.description")}
+                >
+                  <SelectValue>
+                    {(value: ConversationStructure | null) =>
+                      value === null
+                        ? t("settings.row.copy.mixedAcrossEnvironments")
+                        : t(
+                            value === "restructured"
+                              ? "settings.general.conversation.structure.restructured"
+                              : "settings.general.conversation.structure.default",
+                          )
+                    }
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectPopup align="end" alignItemWithTrigger={false}>
+                  <SelectItem hideIndicator value="default">
+                    {t("settings.general.conversation.structure.default")}
+                  </SelectItem>
+                  <SelectItem hideIndicator value="restructured">
+                    {t("settings.general.conversation.structure.restructured")}
+                  </SelectItem>
+                </SelectPopup>
+              </Select>
+            }
+          />
+          <SettingsRow
+            serverScoped
+            settingKeys={["responseStreamingMode"]}
+            {...searchableSetting("response-streaming", t)}
+            description={
+              mixedResponseStreamingMode
+                ? t("settings.general.streaming.mixed")
+                : !smoothOutputAvailable
+                  ? `${t(RESPONSE_STREAMING_MODE_DESCRIPTION_KEYS[settings.responseStreamingMode])} ${t("settings.general.streaming.requiresRestructured")}`
+                  : t(RESPONSE_STREAMING_MODE_DESCRIPTION_KEYS[settings.responseStreamingMode])
+            }
+            resetAction={
+              settings.responseStreamingMode !== DEFAULT_UNIFIED_SETTINGS.responseStreamingMode ? (
+                <SettingResetButton
+                  label={t("settings.general.streaming.resetLabel")}
+                  onClick={() =>
+                    updateSettings({
+                      responseStreamingMode: DEFAULT_UNIFIED_SETTINGS.responseStreamingMode,
+                    })
+                  }
+                />
+              ) : null
+            }
+            control={
+              <Select
+                value={mixedResponseStreamingMode ? null : settings.responseStreamingMode}
+                onValueChange={(value) => {
+                  if (
+                    value === "turn" ||
+                    value === "paragraph" ||
+                    value === "realtime" ||
+                    value === "smooth"
+                  ) {
+                    updateSettings({ responseStreamingMode: value });
+                  }
+                }}
+              >
+                <SelectTrigger
+                  size="sm"
+                  className="w-full sm:w-56"
+                  aria-label={t("settings.general.streaming.ariaLabel")}
+                >
+                  <SelectValue>
+                    {(value: ResponseStreamingMode | null) =>
+                      value === null
+                        ? t("settings.general.streaming.mixedValue")
+                        : t(RESPONSE_STREAMING_MODE_LABEL_KEYS[value])
+                    }
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectPopup align="end" alignItemWithTrigger={false}>
+                  <SelectItem hideIndicator value="turn">
+                    {t(RESPONSE_STREAMING_MODE_LABEL_KEYS.turn)}
+                  </SelectItem>
+                  <SelectItem hideIndicator value="paragraph">
+                    {t(RESPONSE_STREAMING_MODE_LABEL_KEYS.paragraph)}
+                  </SelectItem>
+                  <SelectItem hideIndicator value="realtime">
+                    {t(RESPONSE_STREAMING_MODE_LABEL_KEYS.realtime)}
+                  </SelectItem>
+                  <SelectItem hideIndicator value="smooth" disabled={!smoothOutputAvailable}>
+                    {t(RESPONSE_STREAMING_MODE_LABEL_KEYS.smooth)}
+                  </SelectItem>
+                </SelectPopup>
+              </Select>
+            }
+          />
+          {!mixedResponseStreamingMode && settings.responseStreamingMode === "smooth" && (
+            <SettingsRow
+              id="smooth-output-mode"
+              serverScoped
+              settingKeys={["smoothOutputMode"]}
+              title={t("settings.general.streaming.unit.title")}
+              description={t("settings.general.streaming.unit.description")}
+              resetAction={
+                settings.smoothOutputMode !== DEFAULT_UNIFIED_SETTINGS.smoothOutputMode ? (
+                  <SettingResetButton
+                    label={t("settings.general.streaming.unit.title")}
+                    onClick={() =>
+                      updateSettings({
+                        smoothOutputMode: DEFAULT_UNIFIED_SETTINGS.smoothOutputMode,
+                      })
+                    }
+                  />
+                ) : null
+              }
+              control={
+                <Select
+                  value={mixedSmoothOutputMode ? null : settings.smoothOutputMode}
+                  onValueChange={(value) => {
+                    if (value === "character" || value === "token" || value === "auto")
+                      updateSettings({ smoothOutputMode: value });
+                  }}
+                >
+                  <SelectTrigger size="sm" aria-label={t("settings.general.streaming.unit.title")}>
+                    <SelectValue>
+                      {(value: string | null) =>
+                        value === null
+                          ? t("settings.general.streaming.mixedValue")
+                          : t(SMOOTH_OUTPUT_MODE_LABEL_KEYS[value]!)
+                      }
+                    </SelectValue>
+                  </SelectTrigger>
+                  <SelectPopup align="end" alignItemWithTrigger={false}>
+                    <SelectItem hideIndicator value="character">
+                      {t("settings.general.streaming.unit.character")}
+                    </SelectItem>
+                    <SelectItem hideIndicator value="token">
+                      {t("settings.general.streaming.unit.token")}
+                    </SelectItem>
+                    <SelectItem hideIndicator value="auto">
+                      {t("settings.general.streaming.unit.auto")}
+                    </SelectItem>
+                  </SelectPopup>
+                </Select>
+              }
+            />
+          )}
+          {!mixedResponseStreamingMode && settings.responseStreamingMode === "smooth" && (
+            <SettingsRow
+              id="smooth-output-lines"
+              serverScoped
+              settingKeys={["smoothOutputLineMode"]}
+              title={t("settings.general.streaming.lines.title")}
+              description={t("settings.general.streaming.lines.description")}
+              resetAction={
+                settings.smoothOutputLineMode !== DEFAULT_UNIFIED_SETTINGS.smoothOutputLineMode ? (
+                  <SettingResetButton
+                    label={t("settings.general.streaming.lines.title")}
+                    onClick={() =>
+                      updateSettings({
+                        smoothOutputLineMode: DEFAULT_UNIFIED_SETTINGS.smoothOutputLineMode,
+                      })
+                    }
+                  />
+                ) : null
+              }
+              control={
+                <Select
+                  value={mixedSmoothOutputLineMode ? null : settings.smoothOutputLineMode}
+                  onValueChange={(value) => {
+                    if (value === "adaptive" || value === "parallel")
+                      updateSettings({ smoothOutputLineMode: value });
+                  }}
+                >
+                  <SelectTrigger size="sm" aria-label={t("settings.general.streaming.lines.title")}>
+                    <SelectValue>
+                      {(value: string | null) =>
+                        value === null
+                          ? t("settings.general.streaming.mixedValue")
+                          : t(SMOOTH_OUTPUT_LINE_MODE_LABEL_KEYS[value]!)
+                      }
+                    </SelectValue>
+                  </SelectTrigger>
+                  <SelectPopup align="end" alignItemWithTrigger={false}>
+                    <SelectItem hideIndicator value="adaptive">
+                      {t("settings.general.streaming.lines.adaptive")}
+                    </SelectItem>
+                    <SelectItem hideIndicator value="parallel">
+                      {t("settings.general.streaming.lines.parallel")}
+                    </SelectItem>
+                  </SelectPopup>
+                </Select>
+              }
+            />
+          )}
+          {!mixedResponseStreamingMode && settings.responseStreamingMode === "smooth" && (
+            <SettingsRow
+              id="smooth-text-yield-duration"
+              serverScoped
+              settingKeys={["smoothTextYieldDurationMs"]}
+              title={t("settings.general.streaming.yield.title")}
+              description={t("settings.general.streaming.yield.description")}
+              resetAction={
+                mixedSmoothTextYieldDuration ||
+                settings.smoothTextYieldDurationMs !==
+                  DEFAULT_UNIFIED_SETTINGS.smoothTextYieldDurationMs ? (
+                  <SettingResetButton
+                    label={t("settings.general.streaming.yield.title")}
+                    onClick={() =>
+                      updateSettings({
+                        smoothTextYieldDurationMs:
+                          DEFAULT_UNIFIED_SETTINGS.smoothTextYieldDurationMs,
+                      })
+                    }
+                  />
+                ) : null
+              }
+              control={
+                <SmoothTextYieldDurationSlider
+                  value={mixedSmoothTextYieldDuration ? null : settings.smoothTextYieldDurationMs}
+                  onCommit={(value) => updateSettings({ smoothTextYieldDurationMs: value })}
+                  ariaLabel={t("settings.general.streaming.yield.title")}
+                  formatValue={(value) =>
+                    value === null
+                      ? t("settings.general.streaming.mixedValue")
+                      : t("settings.general.streaming.yield.value", { value })
+                  }
+                />
+              }
+            />
+          )}
+          {!mixedResponseStreamingMode && settings.responseStreamingMode === "smooth" && (
+            <SettingsRow
+              id="smooth-text-fade-duration"
+              serverScoped
+              settingKeys={["smoothTextFadeDurationMs"]}
+              title={t("settings.general.streaming.fade.title")}
+              description={t("settings.general.streaming.fade.description")}
+              resetAction={
+                mixedSmoothTextFadeDuration ||
+                settings.smoothTextFadeDurationMs !==
+                  DEFAULT_UNIFIED_SETTINGS.smoothTextFadeDurationMs ? (
+                  <SettingResetButton
+                    label={t("settings.general.streaming.fade.title")}
+                    onClick={() =>
+                      updateSettings({
+                        smoothTextFadeDurationMs: DEFAULT_UNIFIED_SETTINGS.smoothTextFadeDurationMs,
+                      })
+                    }
+                  />
+                ) : null
+              }
+              control={
+                <SmoothTextFadeDurationSlider
+                  value={mixedSmoothTextFadeDuration ? null : settings.smoothTextFadeDurationMs}
+                  onCommit={(value) => updateSettings({ smoothTextFadeDurationMs: value })}
+                  ariaLabel={t("settings.general.streaming.fade.title")}
+                  formatValue={(value) =>
+                    value === null
+                      ? t("settings.general.streaming.mixedValue")
+                      : value === 0
+                        ? t("settings.general.streaming.fade.off")
+                        : t("settings.general.streaming.fade.value", { value })
+                  }
+                />
+              }
+            />
+          )}
+          {!mixedResponseStreamingMode && settings.responseStreamingMode === "smooth" && (
+            <SettingsRow
+              id="smooth-markdown-preload"
+              serverScoped
+              settingKeys={["smoothMarkdownPreload"]}
+              title={t("settings.general.streaming.preload.title")}
+              description={t("settings.general.streaming.preload.description")}
+              resetAction={
+                settings.smoothMarkdownPreload !==
+                DEFAULT_UNIFIED_SETTINGS.smoothMarkdownPreload ? (
+                  <SettingResetButton
+                    label={t("settings.general.streaming.preload.title")}
+                    onClick={() =>
+                      updateSettings({
+                        smoothMarkdownPreload: DEFAULT_UNIFIED_SETTINGS.smoothMarkdownPreload,
+                      })
+                    }
+                  />
+                ) : null
+              }
+              control={
+                <ScopedSwitch
+                  settingKeys={["smoothMarkdownPreload"]}
+                  checked={settings.smoothMarkdownPreload}
+                  onCheckedChange={(checked) =>
+                    updateSettings({ smoothMarkdownPreload: Boolean(checked) })
+                  }
+                  aria-label={t("settings.general.streaming.preload.title")}
+                />
+              }
+            />
+          )}
+          <SettingsRow
+            id="footnotes-auto-collapse"
+            serverScoped
+            settingKeys={["footnotesAutoCollapse"]}
+            title={t("settings.general.footnotesAutoCollapse.title")}
+            description={t("settings.general.footnotesAutoCollapse.description")}
+            resetAction={
+              settings.footnotesAutoCollapse !== DEFAULT_UNIFIED_SETTINGS.footnotesAutoCollapse ? (
+                <SettingResetButton
+                  label={t("settings.general.footnotesAutoCollapse.title")}
+                  onClick={() =>
+                    updateSettings({
+                      footnotesAutoCollapse: DEFAULT_UNIFIED_SETTINGS.footnotesAutoCollapse,
+                    })
+                  }
+                />
+              ) : null
+            }
+            control={
+              <ScopedSwitch
+                settingKeys={["footnotesAutoCollapse"]}
+                checked={settings.footnotesAutoCollapse}
+                onCheckedChange={(checked) =>
+                  updateSettings({ footnotesAutoCollapse: Boolean(checked) })
+                }
+                aria-label={t("settings.general.footnotesAutoCollapse.title")}
+              />
+            }
+          />
+          <SettingsRow
+            serverScoped
+            settingKeys={["conversationStructureThinkingLabel"]}
+            {...searchableSetting("conversation-thinking-label", t)}
+            description={t("settings.general.conversation.thinkingLabel.description")}
+            resetAction={
+              settings.conversationStructureThinkingLabel !==
+              DEFAULT_UNIFIED_SETTINGS.conversationStructureThinkingLabel ? (
+                <SettingResetButton
+                  label={t("settings.general.conversation.thinkingLabel.resetLabel")}
+                  onClick={() =>
+                    updateSettings({
+                      conversationStructureThinkingLabel:
+                        DEFAULT_UNIFIED_SETTINGS.conversationStructureThinkingLabel,
+                    })
+                  }
+                />
+              ) : null
+            }
+            control={
+              <DraftInput
+                size="sm"
+                className="w-full sm:w-72"
+                value={
+                  mixedConversationStructureThinkingLabel
+                    ? ""
+                    : settings.conversationStructureThinkingLabel
+                }
+                // Empty means the built-in label, which follows the app language.
+                onCommit={(next) =>
+                  updateSettings({ conversationStructureThinkingLabel: next.trim() })
+                }
+                placeholder={
+                  mixedConversationStructureThinkingLabel
+                    ? t("settings.general.mixed")
+                    : t("chat.liveActivity.thinkingDefault")
+                }
+                aria-label={t("settings.general.conversation.thinkingLabel.ariaLabel")}
+              />
+            }
+          />
+          <SettingsRow
+            serverScoped
+            settingKeys={["conversationStructureIdleLabel"]}
+            {...searchableSetting("conversation-idle-label", t)}
+            description={t("settings.general.conversation.idleLabel.description")}
+            resetAction={
+              settings.conversationStructureIdleLabel !==
+              DEFAULT_UNIFIED_SETTINGS.conversationStructureIdleLabel ? (
+                <SettingResetButton
+                  label={t("settings.general.conversation.idleLabel.resetLabel")}
+                  onClick={() =>
+                    updateSettings({
+                      conversationStructureIdleLabel:
+                        DEFAULT_UNIFIED_SETTINGS.conversationStructureIdleLabel,
+                    })
+                  }
+                />
+              ) : null
+            }
+            control={
+              <DraftInput
+                size="sm"
+                className="w-full sm:w-72"
+                value={
+                  mixedConversationStructureIdleLabel ? "" : settings.conversationStructureIdleLabel
+                }
+                onCommit={(next) => updateSettings({ conversationStructureIdleLabel: next.trim() })}
+                placeholder={
+                  mixedConversationStructureIdleLabel
+                    ? t("settings.general.mixed")
+                    : t("chat.liveActivity.idleDefault")
+                }
+                disabled={settings.conversationStructure !== "restructured"}
+                aria-label={t("settings.general.conversation.idleLabel.ariaLabel")}
+              />
+            }
+          />
+        </SettingsSection>
+
+        <SettingsSection id="text-generation" title={t("settings.general.section.textGeneration")}>
+          <SettingsRow
+            serverScoped
+            settingKeys={["textGenerationModelSelection"]}
+            {...searchableSetting("text-generation-model", t)}
+            description={t("settings.general.textGeneration.description")}
+            resetAction={
+              hasServerTargets && isTextGenerationModelDirty ? (
+                <SettingResetButton
+                  label={t("settings.general.textGeneration.resetLabel")}
+                  onClick={() =>
+                    updateSettings({
+                      textGenerationModelSelection:
+                        DEFAULT_UNIFIED_SETTINGS.textGenerationModelSelection,
+                    })
+                  }
+                />
+              ) : null
+            }
+            control={
+              !hasServerTargets ? (
+                <span className="text-sm text-muted-foreground">
+                  {t("settings.general.textGeneration.connectEnvironment")}
+                </span>
+              ) : !hasTextGenerationProvider ? (
+                <span className="text-sm text-muted-foreground">
+                  {t("settings.general.textGeneration.noProviders")}
+                </span>
+              ) : (
+                <div className="flex flex-wrap items-center justify-end gap-1.5">
+                  <ProviderModelPicker
+                    environmentId={environmentId}
+                    activeInstanceId={textGenInstanceId}
                     model={textGenModel}
-                    prompt=""
-                    onPromptChange={() => {}}
-                    modelOptions={textGenModelOptions}
-                    allowPromptInjectedEffort={false}
-                    planModeEnabled={settings.planModeEnabled}
+                    lockedProvider={null}
+                    instanceEntries={textGenerationModelInstanceEntries}
+                    modelOptionsByInstance={textGenerationModelOptionsByInstance}
                     triggerClassName={SETTINGS_PICKER_TRIGGER_CLASSNAME}
-                    onModelOptionsChange={(nextOptions) => {
+                    {...(mixedTextGenerationModel ? { triggerLabel: "Mixed" } : {})}
+                    getModelDisabledReason={textGenerationModelDisabledReason}
+                    {...(environmentId
+                      ? {
+                          onOpenProviderSetup: (instanceId: ProviderInstanceId) => {
+                            void navigate({
+                              to: "/settings/providers",
+                              search: { environmentId, instanceId },
+                            });
+                          },
+                        }
+                      : {})}
+                    onInstanceModelChange={(instanceId, model) => {
+                      const reason = textGenerationModelDisabledReason(instanceId, model);
+                      if (reason) {
+                        toastManager.add({
+                          type: "error",
+                          title: t("settings.general.textGeneration.notSaved"),
+                          description: reason,
+                        });
+                        return;
+                      }
                       updateSettings({
                         textGenerationModelSelection: resolveAppModelSelectionState(
                           {
                             ...settings,
-                            textGenerationModelSelection: createModelSelection(
-                              textGenInstanceId,
-                              textGenModel,
-                              nextOptions,
-                            ),
+                            textGenerationModelSelection: createModelSelection(instanceId, model),
                           },
                           textGenerationProviders,
                         ),
                       });
                     }}
                   />
-                ) : null}
-              </div>
-            )
-          }
-        />
-      </SettingsSection>
-
-      <SettingsSection id="about" title={t("settings.general.section.about")}>
-        {isElectron || HOSTED_APP_CHANNEL ? (
-          <AboutVersionSection />
-        ) : (
-          <SettingsRow
-            title={<AboutVersionTitle />}
-            description={t("settings.general.version.description")}
+                  {textGenInstanceEntry ? (
+                    <TraitsPicker
+                      provider={textGenProvider}
+                      models={
+                        // Use the exact instance's models (rather than the
+                        // first-kind-match) so a custom text-gen instance like
+                        // `codex_personal` gets its own model list, not the
+                        // default Codex one.
+                        textGenInstanceEntry?.models ?? []
+                      }
+                      model={textGenModel}
+                      prompt=""
+                      onPromptChange={() => {}}
+                      modelOptions={textGenModelOptions}
+                      allowPromptInjectedEffort={false}
+                      planModeEnabled={
+                        settings.planModeEnabled || selectsPlanAgent(textGenModelOptions)
+                      }
+                      triggerClassName={SETTINGS_PICKER_TRIGGER_CLASSNAME}
+                      onModelOptionsChange={(nextOptions) => {
+                        updateSettings({
+                          textGenerationModelSelection: resolveAppModelSelectionState(
+                            {
+                              ...settings,
+                              textGenerationModelSelection: createModelSelection(
+                                textGenInstanceId,
+                                textGenModel,
+                                nextOptions,
+                              ),
+                            },
+                            textGenerationProviders,
+                          ),
+                        });
+                      }}
+                    />
+                  ) : null}
+                </div>
+              )
+            }
           />
-        )}
-      </SettingsSection>
-      <SettingsSection title={t("settings.general.section.diagnostics")}>
-        <SettingsRow
-          {...searchableSetting("diagnostics", t)}
-          description={
-            isEnvironmentScope
-              ? t("settings.general.diagnostics.oneEnvironment")
-              : t("settings.general.diagnostics.multipleEnvironments")
-          }
-          control={
-            <Button
-              render={
-                <Link to="/settings/diagnostics" search={{ machine: environmentId ?? undefined }} />
-              }
-              size="sm"
-              variant="outline"
-            >
-              {t("settings.general.diagnostics.view")}
-            </Button>
-          }
-        />
-        <SettingsRow
-          {...searchableSetting("open-source-licenses", t)}
-          description={t("settings.general.licenses.description")}
-          control={
-            <Button
-              render={<Link to="/settings/open-source-licenses" />}
-              size="sm"
-              variant="outline"
-            >
-              {t("settings.general.licenses.view")}
-            </Button>
-          }
-        />
-      </SettingsSection>
+        </SettingsSection>
 
-      <LegacyFeaturesSection />
-    </>
+        <SettingsSection id="about" title={t("settings.general.section.about")}>
+          {isElectron || HOSTED_APP_CHANNEL ? (
+            <AboutVersionSection />
+          ) : (
+            <>
+              <SettingsRow
+                id={searchableSetting("app-version", t).id}
+                title={<AboutVersionTitle version={APP_VERSION} />}
+                description={t("settings.general.version.description")}
+              />
+              {IS_NIGHTLY_BUILD ? <NightlyMobileBetaRow /> : null}
+            </>
+          )}
+          <SettingsRow
+            {...searchableSetting("privacy-policy", t)}
+            description="How we handle your data, including the anonymous usage data T3 Code collects."
+            control={
+              <Button
+                render={<a href={PRIVACY_POLICY_URL} target="_blank" rel="noreferrer noopener" />}
+                size="sm"
+                variant="outline"
+              >
+                View policy
+              </Button>
+            }
+          />
+        </SettingsSection>
+        <SettingsSection title={t("settings.general.section.diagnostics")}>
+          <SettingsRow
+            {...searchableSetting("diagnostics", t)}
+            description={
+              isEnvironmentScope
+                ? t("settings.general.diagnostics.oneEnvironment")
+                : t("settings.general.diagnostics.multipleEnvironments")
+            }
+            control={
+              <Button
+                render={
+                  <Link
+                    to="/settings/diagnostics"
+                    search={{ machine: environmentId ?? undefined }}
+                  />
+                }
+                size="sm"
+                variant="outline"
+              >
+                {t("settings.general.diagnostics.view")}
+              </Button>
+            }
+          />
+          <SettingsRow
+            {...searchableSetting("open-source-licenses", t)}
+            description={t("settings.general.licenses.description")}
+            control={
+              <Button
+                render={<Link to="/settings/open-source-licenses" />}
+                size="sm"
+                variant="outline"
+              >
+                {t("settings.general.licenses.view")}
+              </Button>
+            }
+          />
+        </SettingsSection>
+
+        <LegacyFeaturesSection />
+      </SettingsRowCopyProvider>
+    </SettingsPageContainer>
   );
 }
 
@@ -4707,7 +4813,7 @@ export function ArchivedThreadsPanel() {
         }
       }
     },
-    [confirmAndDeleteThread, refreshArchivedThreads, t, unarchiveThread],
+    [confirmAndDeleteThread, refreshArchivedThreads, unarchiveThread, t],
   );
 
   return (
@@ -4783,7 +4889,7 @@ export function ArchivedThreadsPanel() {
                     {t("settings.archive.archivedAt", {
                       value: formatArchivedRelativeTime(thread.archivedAt ?? thread.createdAt, t),
                     })}
-                    {" \u00b7 "}
+                    {" · "}
                     {t("settings.archive.createdAt", {
                       value: formatArchivedRelativeTime(thread.createdAt, t),
                     })}

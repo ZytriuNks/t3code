@@ -1,51 +1,29 @@
+import { formatProviderSkillDisplayName } from "@t3tools/shared/inlineSkills";
 import { Children, cloneElement, isValidElement, type ReactNode } from "react";
-import type { ServerProviderSkill } from "@t3tools/contracts";
-import { formatProviderSkillDisplayName } from "@t3tools/client-runtime/providerSkills";
+import { matchInlineSkills, type InlineSkill } from "@t3tools/shared/inlineSkills";
 
 import { SKILL_CHIP_ICON_SVG } from "../composerInlineChip";
 import { ContextChip, ContextChipLabel } from "../ContextChip";
 
-const SKILL_TOKEN_REGEX =
-  /(^|\s)\p{Sc}(?![0-9][0-9_]*(?:[kKmMbBtT]|[eE][0-9]+)?(?:\s|$))(?=[a-zA-Z0-9:_-]*[a-zA-Z])([a-zA-Z0-9][a-zA-Z0-9:_-]*)(?=\s|$)/gu;
-
-type InlineSkill = Pick<ServerProviderSkill, "name" | "displayName">;
-
-/** Shared token/label decisions for live rendering and inert inline layout. */
 export function skillInlineMatches(text: string, skills: ReadonlyArray<InlineSkill>) {
-  const matches: { start: number; end: number; rawText: string; label: string }[] = [];
-  for (const match of text.matchAll(SKILL_TOKEN_REGEX)) {
-    const prefix = match[1] ?? "";
-    const name = match[2] ?? "";
-    const start = (match.index ?? 0) + prefix.length;
-    const rawText = `$${name}`;
-    const skill = skills.find((candidate) => candidate.name === name);
-    if (!skill) {
-      continue;
-    }
-
-    matches.push({
-      start,
-      end: (match.index ?? 0) + match[0].length,
-      rawText,
-      label: formatProviderSkillDisplayName(skill),
-    });
-  }
-  return matches;
+  return Array.from(matchInlineSkills(text, skills), ({ start, end, rawText, skill }) => ({
+    start,
+    end,
+    rawText,
+    label: formatProviderSkillDisplayName(skill),
+  }));
 }
 
 export function SkillInlineText(props: { text: string; skills: ReadonlyArray<InlineSkill> }) {
   const nodes: ReactNode[] = [];
   let cursor = 0;
-  for (const match of skillInlineMatches(props.text, props.skills)) {
-    if (match.start > cursor) nodes.push(props.text.slice(cursor, match.start));
-    nodes.push(
-      <SkillChip
-        key={`${match.start}:${match.rawText.slice(1)}`}
-        label={match.label}
-        rawText={match.rawText}
-      />,
-    );
-    cursor = match.end;
+
+  for (const { start, end, skill, rawText } of matchInlineSkills(props.text, props.skills)) {
+    if (start > cursor) {
+      nodes.push(props.text.slice(cursor, start));
+    }
+    nodes.push(<SkillChip key={`${start}:${skill.name}`} skill={skill} rawText={rawText} />);
+    cursor = end;
   }
 
   if (cursor === 0) {
@@ -85,11 +63,11 @@ export function renderSkillInlineMarkdownChildren(
   });
 }
 
-function SkillChip(props: { label: string; rawText: string }) {
+function SkillChip(props: { skill: InlineSkill; rawText: string }) {
   return (
     <ContextChip kind="skill" data-markdown-copy={props.rawText}>
       <SkillChipIcon />
-      <ContextChipLabel>{props.label}</ContextChipLabel>
+      <ContextChipLabel>{formatProviderSkillDisplayName(props.skill)}</ContextChipLabel>
     </ContextChip>
   );
 }

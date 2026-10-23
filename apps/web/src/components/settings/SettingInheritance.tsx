@@ -12,7 +12,7 @@ import * as Equal from "effect/Equal";
 import { cn } from "../../lib/utils";
 import type { EnvironmentPresentation } from "../../state/environments";
 import { EnvironmentMachineIcon } from "../EnvironmentMachineIcon";
-import { resolveEnvModeLabel, WORKTREE_SUBMODULES_LABELS } from "../BranchToolbar.logic";
+import { WORKTREE_SUBMODULES_LABELS } from "../BranchToolbar.logic";
 import { PULL_REQUEST_MERGE_METHOD_LABELS } from "../pullRequest/pullRequestDetail.logic";
 import { Button, InlineButton } from "../ui/button";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
@@ -28,17 +28,7 @@ interface InheritanceLayer {
   readonly set: boolean;
 }
 
-/**
- * Words and value formatters for the resolution chain. Pages that translate
- * themselves provide a copy; every other page keeps the defaults below, so its
- * popover renders exactly as it did before.
- */
 export interface SettingInheritanceCopy {
-  /**
-   * Labels a stored string setting value before the chain renders it. Pages
-   * that translate an enum setting provide a mapping; the identity default
-   * keeps the stored value, so single-language pages render as before.
-   */
   readonly settingValueLabel?: (key: keyof ServerSettings, value: string) => string;
   readonly layerProject: string;
   readonly layerEnvironment: string;
@@ -113,9 +103,11 @@ function formatValue(
           ? copy.automatic
           : key === "sourceControlWriterModelSelection"
             ? copy.textGenerationModel
-            : key === "defaultThreadEnvMode" || key === "worktreeSubmodules"
-              ? copy.inherits
-              : copy.notSet;
+            : key === "reviewGuideModelSelection"
+              ? "Source control writer model"
+              : key === "defaultThreadEnvMode" || key === "worktreeSubmodules"
+                ? copy.inherits
+                : copy.notSet;
   }
   if (typeof value === "boolean") return value ? copy.on : copy.off;
   if (typeof value === "number") {
@@ -242,7 +234,6 @@ export function SettingInheritance({
   /** At environment scope: projects whose own value hides the environment's. */
   overridingProjects?: readonly SettingOverridingProject[];
   onClearOverrides?: (entries: readonly ProjectOverrideEntry[]) => void;
-  /** Localized words for the chain; defaults keep the English copy. */
   copy?: SettingInheritanceCopy;
 }) {
   const key = keys[0];

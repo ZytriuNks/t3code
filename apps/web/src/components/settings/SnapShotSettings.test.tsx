@@ -24,7 +24,22 @@ vi.mock("react/compiler-runtime", async () => {
   const { reactHookHarness } = await import("../../test/reactHookHarness");
   return { c: reactHookHarness.useMemoCache };
 });
+vi.mock("../../i18n/I18nProvider", async () => {
+  const { translate } = await import("../../i18n/messages");
+  return {
+    useI18n: () => ({
+      t: (
+        key: import("../../i18n/messages").MessageKey,
+        values?: import("../../i18n/messages").MessageValues,
+      ) => translate("en", key, values),
+    }),
+  };
+});
 vi.mock("@effect/atom-react", () => ({ useAtomValue: () => [] }));
+vi.mock("../../state/environments", () => ({
+  usePrimaryEnvironmentId: () => null,
+  useEnvironments: () => [],
+}));
 vi.mock("../../state/server", () => ({ primaryServerKeybindingsAtom: {} }));
 vi.mock("./SettingsScopeContext", () => ({ useOptionalSettingsScope: () => null }));
 vi.mock("./SettingsScopeSentence", () => ({ SettingsScopeSentence: () => null }));

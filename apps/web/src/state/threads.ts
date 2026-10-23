@@ -9,14 +9,9 @@ import {
   type EnvironmentThreadState,
   createThreadEnvironmentAtoms,
 } from "@t3tools/client-runtime/state/threads";
-import type {
-  EnvironmentId,
-  OrchestrationV2ShellThreadStatus,
-  OrchestrationV2ThreadShell,
-  ThreadId,
-} from "@t3tools/contracts";
+import type { EnvironmentId, OrchestrationV2ThreadShell, ThreadId } from "@t3tools/contracts";
 import * as Option from "effect/Option";
-import { AsyncResult, Atom } from "effect/unstable/reactivity";
+import { AsyncResult, Atom } from "effect/reactivity";
 
 import { environmentCatalog } from "../connection/catalog";
 import { connectionAtomRuntime } from "../connection/runtime";
@@ -55,19 +50,21 @@ export function useEnvironmentThread(
   return state;
 }
 
+const isRunning = (status: string) =>
+  status === "preparing" || status === "queued" || status === "starting" || status === "running";
+
 type KeptThreads = ReadonlyMap<EnvironmentId, ReadonlySet<ThreadId>>;
 
-function isRunActive(status: OrchestrationV2ShellThreadStatus): boolean {
-  return status === "preparing" || status === "starting" || status === "running";
-}
-
+// True once a thread's own stream no longer needs to stay open: it is in sync
+// and shows a settled session, or it cannot progress (deleted or failed). A
+// stream that is still loading or reconnecting keeps waiting for the stop.
 function isDetailDone<E>(result: AsyncResult.AsyncResult<EnvironmentThreadState, E>): boolean {
   if (!AsyncResult.isSuccess(result)) return true;
   const { status, data, error } = result.value;
   if (status === "deleted" || Option.isSome(error)) return true;
   return (
     status === "live" &&
-    !Option.exists(data, (thread) => thread.runs.some((run) => isRunActive(run.status)))
+    !Option.exists(data, (thread) => thread.runs.some((run) => isRunning(run.status)))
   );
 }
 
@@ -84,14 +81,7 @@ export function createRunningThreadKeepAliveAtom<E>(input: {
   readonly environmentIdsAtom: Atom.Atom<ReadonlyArray<EnvironmentId>>;
   readonly threadsAtom: (
     environmentId: EnvironmentId,
-  ) => Atom.Atom<
-    ReadonlyArray<
-      Pick<
-        OrchestrationV2ThreadShell,
-        "id" | "status" | "activityRunStatus" | "pendingBackgroundTasks"
-      >
-    >
-  >;
+  ) => Atom.Atom<ReadonlyArray<Pick<OrchestrationV2ThreadShell, "id" | "status">>>;
   readonly stateAtom: (
     environmentId: EnvironmentId,
     threadId: ThreadId,
@@ -103,10 +93,7 @@ export function createRunningThreadKeepAliveAtom<E>(input: {
     let previous: ReadonlyArray<ThreadId> = [];
     return Atom.make((get) => {
       const running = get(input.threadsAtom(environmentId)).flatMap((thread) =>
-        (thread.pendingBackgroundTasks?.length ?? 0) === 0 &&
-        isRunActive(thread.activityRunStatus ?? thread.status)
-          ? [thread.id]
-          : [],
+        isRunning(thread.status) ? [thread.id] : [],
       );
       if (arrayElementsEqual(previous, running)) return previous;
       previous = running;

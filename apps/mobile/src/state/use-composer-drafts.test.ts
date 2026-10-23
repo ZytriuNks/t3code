@@ -195,6 +195,7 @@ import {
   undoComposerDraftMergeState,
 } from "./use-composer-drafts";
 import { retainComposerAttachmentFileForPreview } from "../lib/composerAttachmentPreviewRetention";
+import { prepareThreadContinuationDraft } from "../features/threads/prepare-thread-continuation-draft";
 
 const DRAFT: ComposerDraft = {
   text: "hello",
@@ -240,6 +241,127 @@ function contextDraft(start: number, count: number): ComposerDraft {
 }
 
 describe("mobile composer drafts", () => {
+  it("prepares independent native-child context without sending or replacing existing drafts", async () => {
+    await waitForComposerDraftsLoaded();
+    const environmentId = EnvironmentId.make("continuation-environment");
+    const project = { environmentId, projectId: ProjectId.make("continuation-project") };
+    const sourceThread = { environmentId, threadId: ThreadId.make("native-child") };
+    const existingKey = createNewTaskDraft(project);
+    const sourceKey = `${environmentId}:${sourceThread.threadId}`;
+    setComposerDraftText(existingKey, "Keep my existing work");
+    setComposerDraftText(sourceKey, "Leave the source draft alone");
+    const existingBefore = getComposerDraftSnapshot(existingKey);
+    const sourceBefore = getComposerDraftSnapshot(sourceKey);
+    const outboxBefore = appAtomRegistry.get(threadOutboxManager.queuedMessagesByThreadKeyAtom);
+
+    const key = await prepareThreadContinuationDraft({
+      sourceThread,
+      sourceTitle: "Native child",
+      project,
+      canContinue: () => true,
+    });
+
+    expect(key).not.toBeNull();
+    expect(key).not.toBe(existingKey);
+    const prepared = getComposerDraftSnapshot(key!);
+    expect(prepared.project).toMatchObject(project);
+    expect(prepared.text).toContain("t3-context://v1/thread/");
+    expect(prepared.context?.records).toMatchObject([
+      { kind: "thread", environmentId, threadId: sourceThread.threadId, title: "Native child" },
+    ]);
+    expect(prepared).not.toHaveProperty("providerThreadId");
+    expect(getComposerDraftSnapshot(existingKey)).toEqual(existingBefore);
+    expect(getComposerDraftSnapshot(sourceKey)).toEqual(sourceBefore);
+    expect(appAtomRegistry.get(threadOutboxManager.queuedMessagesByThreadKeyAtom)).toEqual(
+      outboxBefore,
+    );
+  });
+
+  it("does not prepare a continuation without current operate permission", async () => {
+    const environmentId = EnvironmentId.make("continuation-environment");
+    const before = appAtomRegistry.get(composerDraftsAtom);
+    expect(
+      await prepareThreadContinuationDraft({
+        sourceThread: { environmentId, threadId: ThreadId.make("native-child") },
+        sourceTitle: "Native child",
+        project: { environmentId, projectId: ProjectId.make("continuation-project") },
+        canContinue: () => false,
+      }),
+    ).toBeNull();
+    expect(appAtomRegistry.get(composerDraftsAtom)).toEqual(before);
+  });
+
+  it("does not prepare continuation across environments", async () => {
+    const before = appAtomRegistry.get(composerDraftsAtom);
+    expect(
+      await prepareThreadContinuationDraft({
+        sourceThread: {
+          environmentId: EnvironmentId.make("source-environment"),
+          threadId: ThreadId.make("native-child"),
+        },
+        sourceTitle: "Native child",
+        project: {
+          environmentId: EnvironmentId.make("other-environment"),
+          projectId: ProjectId.make("continuation-project"),
+        },
+        canContinue: () => true,
+      }),
+    ).toBeNull();
+    expect(appAtomRegistry.get(composerDraftsAtom)).toEqual(before);
+  });
+
+  it("rechecks continuation permission after composer drafts finish loading", async () => {
+    composerDraftFileMocks.blockRead();
+    let allowed = true;
+    const canContinue = vi.fn(() => allowed);
+    const environmentId = EnvironmentId.make("continuation-environment");
+    try {
+      const result = prepareThreadContinuationDraft({
+        sourceThread: { environmentId, threadId: ThreadId.make("native-child") },
+        sourceTitle: "Native child",
+        project: { environmentId, projectId: ProjectId.make("continuation-project") },
+        canContinue,
+      });
+      allowed = false;
+      composerDraftFileMocks.releaseRead();
+      expect(await result).toBeNull();
+      expect(canContinue.mock.calls.length).toBeGreaterThan(1);
+      expect(appAtomRegistry.get(composerDraftsAtom)).toEqual({});
+    } finally {
+      composerDraftFileMocks.releaseRead();
+    }
+  });
+
+  it("does not replace drafts if continuation storage cannot be loaded", async () => {
+    composerDraftFileMocks.setReadError(new Error("Storage unavailable"));
+    const environmentId = EnvironmentId.make("continuation-environment");
+    await expect(
+      prepareThreadContinuationDraft({
+        sourceThread: { environmentId, threadId: ThreadId.make("native-child") },
+        sourceTitle: "Native child",
+        project: { environmentId, projectId: ProjectId.make("continuation-project") },
+        canContinue: () => true,
+      }),
+    ).rejects.toBeInstanceOf(ComposerDraftPersistenceError);
+    expect(appAtomRegistry.get(composerDraftsAtom)).toEqual({});
+  });
+
+  it("restores a PR checkout source after restarting the composer", () => {
+    const draft: ComposerDraft = {
+      text: "Address feedback",
+      attachments: [],
+      workspaceSelection: {
+        mode: "worktree",
+        branch: "fork/feature",
+        worktreePath: null,
+        startFromOrigin: false,
+        pullRequestReference: "https://github.com/acme/repo/pull/123",
+      },
+    };
+    expect(
+      decodePersistedComposerState({ schemaVersion: 1, drafts: { task: draft } }).drafts.task,
+    ).toEqual(draft);
+  });
   it.each([false, true])(
     "restores visible file chips from legacy drafts (archived: %s)",
     async (archived) => {

@@ -5,13 +5,20 @@ import type {
 } from "@t3tools/client-runtime/state/thread-requests";
 import { turnItemIsWorkspacePreparation } from "@t3tools/client-runtime/state/turn-item-presentation";
 import { formatSubagentDisplayTitle } from "@t3tools/client-runtime/state/subagent-display";
+import { isLiveSubagentTurnItem } from "@t3tools/client-runtime/state/subagentRuntime";
 import { extractToolActivityPresentation } from "@t3tools/client-runtime/work-log/tool-presentation";
+import {
+  turnItemDetailRevision,
+  turnItemHasDetail,
+  turnItemNeedsDetailFetch,
+} from "@t3tools/client-runtime/work-log/item-detail";
 import {
   commandDisplayText,
   commandProgramName,
 } from "@t3tools/client-runtime/work-log/command-label";
 import {
   contextCompactionLabel,
+  liveThoughtLine,
   toolItemForDisplay,
   workEntryDisplayIndicatesToolFailure,
   liveActivityToolStatus,
@@ -35,19 +42,33 @@ import type {
   OrchestrationV2Actor,
   OrchestrationV2CreationSource,
   OrchestrationV2ExecutionNode,
-  OrchestrationMessage,
+  OrchestrationMessageContext,
   OrchestrationV2ProjectedTurnItem,
   OrchestrationV2RunAttempt,
   OrchestrationV2RunStatus,
   OrchestrationV2TurnItem,
   OrchestrationV2UserMessageInputIntent,
-  RunId,
   RunAttemptId,
   ScheduledTaskId,
+  TurnItemId,
 } from "@t3tools/contracts";
-import { ThreadId } from "@t3tools/contracts";
+import { RunId, ThreadId } from "@t3tools/contracts";
+import {
+  classifyToolActivity,
+  collectToolFilePaths,
+  dynamicToolTitle,
+  isJavaScriptReplTool,
+  formatReadToolLabel,
+  formatSearchToolLabel,
+} from "@t3tools/shared/toolActivity";
 import { formatDuration } from "@t3tools/shared/orchestrationTiming";
-import { compactDynamicToolOutput } from "@t3tools/shared/toolOutput";
+import type { HtmlRenderReference } from "@t3tools/shared/htmlRender";
+import type { McpAppReference } from "@t3tools/shared/mcpApp";
+import {
+  compactDynamicToolOutput,
+  htmlRenderFromToolItem,
+  mcpAppFromToolItem,
+} from "@t3tools/shared/toolOutput";
 import * as DateTime from "effect/DateTime";
 
 export type PendingApproval = ThreadPendingApproval;
@@ -68,6 +89,8 @@ export interface ThreadFeedActivity {
   readonly summary: string;
   readonly detail: string | null;
   readonly canExpand: boolean;
+  /** Expanding fetches the withheld input and output with getTurnItem. */
+  readonly fetchesDetail: boolean;
   readonly getFullDetail: () => string | null;
   readonly getCopyText: () => string;
   readonly icon:
@@ -75,11 +98,13 @@ export interface ThreadFeedActivity {
     | "alert"
     | "browser"
     | "computer"
+    | "code"
     | "check"
     | "command"
     | "edit"
     | "eye"
     | "globe"
+    | "search"
     | "hammer"
     | "lock"
     | "message"
@@ -117,6 +142,18 @@ export interface ThreadFeedMessage {
   readonly projectedItem?: OrchestrationV2ProjectedTurnItem;
 }
 
+/** A message shown before the server has it: a pending creation or local feedback. */
+export interface LocalThreadMessage {
+  readonly id: MessageId;
+  readonly role: string;
+  readonly text: string;
+  readonly context?: OrchestrationMessageContext | undefined;
+  readonly attachments?: ReadonlyArray<ChatAttachment> | undefined;
+  readonly streaming: boolean;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
 type RawThreadFeedEntry =
   | {
       readonly type: "message";
@@ -130,12 +167,32 @@ type RawThreadFeedEntry =
       readonly createdAt: string;
       readonly runId: RunId | null;
       readonly activity: ThreadFeedActivity;
+    }
+  | {
+      /** A page a completed `html_render` call published, shown in place of its work row. */
+      readonly type: "html-render";
+      readonly id: string;
+      readonly createdAt: string;
+      readonly runId: RunId | null;
+      readonly render: HtmlRenderReference;
+    }
+  | {
+      /** An MCP App a completed tool call captured, hosted in place of its work row. */
+      readonly type: "mcp-app";
+      readonly id: string;
+      readonly createdAt: string;
+      readonly runId: RunId | null;
+      /** The thread and item that own the app; a fork's inherited app is its source's. */
+      readonly sourceThreadId: ThreadId;
+      readonly itemId: TurnItemId;
+      readonly revision: string;
+      readonly app: McpAppReference;
     };
 
 export type ThreadFeedEntry = ThreadFeedEntryContent & { readonly continuesWorkLog?: boolean };
 
 type ThreadFeedEntryContent =
-  | Extract<RawThreadFeedEntry, { type: "message" }>
+  | Extract<RawThreadFeedEntry, { type: "message" | "html-render" | "mcp-app" }>
   | {
       readonly type: "activity-group";
       readonly id: string;
@@ -159,6 +216,8 @@ type ThreadFeedEntryContent =
       readonly hasFailure: boolean;
       readonly live: boolean;
       readonly shimmer: boolean;
+      /** First sentence of the latest thought, shown above the live status line. */
+      readonly thought?: string;
     }
   | {
       readonly type: "run-fold";
@@ -206,9 +265,32 @@ export function workEntryRowLabel(entry: WorkLogPresentationEntry, expanded = fa
   const presentation = resolveWorkEntryToolPresentation(entry);
   if (presentation) return presentation.displayName;
   if (entry.command?.trim()) return compactWorkEntryText(commandDisplayText(entry.command));
+  const action = toolGroupAction(entry);
+  const isToolRead = action === "read" && entry.itemType === "dynamic_tool";
+  if (action === "code-search" || action === "search") {
+    const toolData =
+      entry.toolData !== null &&
+      typeof entry.toolData === "object" &&
+      !Array.isArray(entry.toolData)
+        ? (entry.toolData as Record<string, unknown>)
+        : undefined;
+    // Adapters title file searches with their target; the item keeps only the pattern.
+    const searchLabel =
+      entry.itemType === "file_search" ? entry.label : formatSearchToolLabel(toolData);
+    if (searchLabel) return searchLabel;
+  }
+  if (isToolRead) {
+    const [firstPath] = entry.changedFiles ?? collectToolFilePaths(entry.toolData);
+    if (firstPath) {
+      return formatReadToolLabel(firstPath, Math.max(0, (entry.changedFiles?.length ?? 1) - 1));
+    }
+    if (!expanded) return "Read file";
+  }
   const preview =
     entry.command ??
-    entry.detail ??
+    (isToolRead || (!expanded && (action === "code-search" || action === "search"))
+      ? null
+      : entry.detail) ??
     (entry.changedFiles?.length
       ? entry.changedFiles.length === 1
         ? entry.changedFiles[0]!
@@ -229,7 +311,7 @@ const projectedEntriesCache = new WeakMap<
   }
 >();
 const localMessageEntriesCache = new WeakMap<
-  OrchestrationMessage,
+  LocalThreadMessage,
   Extract<RawThreadFeedEntry, { readonly type: "message" }>
 >();
 const activityGroupsCache = new WeakMap<ThreadFeedActivity, ThreadFeedActivityGroup>();
@@ -261,6 +343,13 @@ export function isContextCompactionActivityGroup(entry: ThreadFeedActivityGroup)
 export function isContextHandoffActivityGroup(entry: ThreadFeedActivityGroup): boolean {
   return (
     entry.activities.length === 1 && entry.activities[0]?.projectedItem.item.type === "handoff"
+  );
+}
+
+export function isSecretRequestActivityGroup(entry: ThreadFeedActivityGroup): boolean {
+  return (
+    entry.activities.length === 1 &&
+    entry.activities[0]?.projectedItem.item.type === "secret_request"
   );
 }
 
@@ -312,8 +401,12 @@ function resolvePendingUserInputAnswer(
 ): string | ReadonlyArray<string> | null {
   if (draft?.attachmentsBlocked) return null;
   const customAnswer =
-    question.allowCustomAnswer === false ? null : normalizeDraftAnswer(draft?.customAnswer);
-  if (customAnswer) {
+    question.allowCustomAnswer === false
+      ? null
+      : question.initialAnswer !== undefined
+        ? (draft?.customAnswer ?? null)
+        : normalizeDraftAnswer(draft?.customAnswer);
+  if (customAnswer !== null && customAnswer.length > 0) {
     return customAnswer;
   }
 
@@ -321,12 +414,12 @@ function resolvePendingUserInputAnswer(
   if (question.multiSelect) {
     return selectedOptionValues.length > 0
       ? selectedOptionValues
-      : question.allowCustomAnswer !== false && (draft?.attachmentCount ?? 0) > 0
-        ? ""
-        : null;
+      : (customAnswer ??
+          (question.allowCustomAnswer !== false && (draft?.attachmentCount ?? 0) > 0 ? "" : null));
   }
   return (
     selectedOptionValues[0] ??
+    customAnswer ??
     (question.allowCustomAnswer !== false && (draft?.attachmentCount ?? 0) > 0 ? "" : null)
   );
 }
@@ -363,7 +456,13 @@ function itemIsToolLike(item: OrchestrationV2TurnItem): boolean {
 }
 
 function itemIsProminent(item: OrchestrationV2TurnItem): boolean {
-  return item.type === "fork" || item.type === "thread_created" || item.type === "system_notice";
+  return (
+    item.type === "fork" ||
+    item.type === "thread_created" ||
+    item.type === "system_notice" ||
+    // An answerable card: it must stand alone and never fold away with the run.
+    item.type === "secret_request"
+  );
 }
 
 function itemStatus(item: OrchestrationV2TurnItem): ThreadFeedActivity["status"] {
@@ -413,7 +512,34 @@ function itemWorkLogTone(item: OrchestrationV2TurnItem): WorkLogPresentationEntr
 }
 
 function itemIcon(item: OrchestrationV2TurnItem): ThreadFeedActivity["icon"] {
-  if (item.type === "notification") return "zap";
+  if (item.type === "notification") {
+    const source = item.source;
+    switch (source.kind) {
+      case "subagent":
+      case "delegated_task":
+        return "hammer";
+      case "command":
+        return "command";
+      case "monitor":
+        return "eye";
+      case "background_task":
+      case "system":
+        return "zap";
+      default:
+        source satisfies never;
+        return "zap";
+    }
+  }
+  if (item.type === "dynamic_tool") {
+    const classified = classifyToolActivity({
+      itemType: "dynamic_tool_call",
+      data: { toolName: item.toolName ?? undefined, input: item.input },
+    });
+    if (classified === "read") {
+      return "eye";
+    }
+    if (classified === "search") return "search";
+  }
   switch (item.type) {
     case "reasoning":
       return "agent";
@@ -422,7 +548,7 @@ function itemIcon(item: OrchestrationV2TurnItem): ThreadFeedActivity["icon"] {
     case "file_change":
       return "edit";
     case "file_search":
-      return "eye";
+      return "search";
     case "web_search":
       return "globe";
     case "approval_request":
@@ -432,7 +558,7 @@ function itemIcon(item: OrchestrationV2TurnItem): ThreadFeedActivity["icon"] {
     case "assistant_message":
       return "message";
     case "dynamic_tool":
-      return "wrench";
+      return isJavaScriptReplTool(item.toolName) ? "code" : "wrench";
     case "subagent":
       return "hammer";
     case "run_interrupt_request":
@@ -454,6 +580,8 @@ function itemIcon(item: OrchestrationV2TurnItem): ThreadFeedActivity["icon"] {
     case "fork":
     case "thread_created":
       return "zap";
+    case "secret_request":
+      return "lock";
   }
 }
 
@@ -471,7 +599,10 @@ function itemSummary(
   if (item.type === "notification") return item.summary;
   if (item.type === "system_notice") return item.message;
   if (item.type === "compaction") return contextCompactionLabel(item);
-  const title = item.title?.trim();
+  const title =
+    (item.type === "dynamic_tool"
+      ? dynamicToolTitle(item.toolName, item.input, item.title)
+      : undefined) ?? item.title?.trim();
   if (item.type === "subagent") return formatSubagentDisplayTitle(title || "Subagent");
   if (title) return toolPresentation?.displayName ?? capitalizePhrase(title);
   switch (item.type) {
@@ -484,7 +615,7 @@ function itemSummary(
         ? `Changed ${item.changes.length} files`
         : `Changed ${item.fileName}`;
     case "file_search":
-      return "Searched files";
+      return item.title?.trim() || formatSearchToolLabel(item) || "Searched files";
     case "web_search":
       return "Searched the web";
     case "approval_request":
@@ -505,8 +636,22 @@ function itemSummary(
       return "Thread forked";
     case "thread_created":
       return "Thread created";
-    case "dynamic_tool":
+    case "secret_request":
+      return item.label;
+    case "dynamic_tool": {
+      const classified = classifyToolActivity({
+        itemType: "dynamic_tool_call",
+        data: { toolName: item.toolName ?? undefined, input: item.input },
+      });
+      if (classified === "read") {
+        const [path] = collectToolFilePaths({ input: item.input });
+        return formatReadToolLabel(path ?? "");
+      }
+      if (classified === "search") {
+        return formatSearchToolLabel({ input: item.input }) ?? item.toolName ?? "Tool call";
+      }
       return toolPresentation?.displayName ?? item.toolName ?? "Tool call";
+    }
     case "proposed_plan":
       return "Proposed plan";
     case "todo_list":
@@ -550,6 +695,8 @@ function itemPreview(item: OrchestrationV2TurnItem): string | null {
     case "fork":
     case "thread_created":
       return item.targetThreadId;
+    case "secret_request":
+      return item.reason || null;
     case "subagent":
       return item.result ?? item.progress ?? item.prompt;
     case "dynamic_tool":
@@ -639,6 +786,23 @@ function toWorkLogEntry(
   }
 }
 
+/** Expanded detail for a row, from its wire item or the full item from getTurnItem. */
+export function formatItemFullDetail(
+  row: OrchestrationV2ProjectedTurnItem,
+  item: OrchestrationV2TurnItem,
+): string {
+  return JSON.stringify(
+    {
+      visibility: row.visibility,
+      sourceThreadId: row.sourceThreadId,
+      sourceItemId: row.sourceItemId,
+      item: toolItemForDisplay(item),
+    },
+    null,
+    2,
+  );
+}
+
 function toFeedActivity(
   row: OrchestrationV2ProjectedTurnItem,
   attemptId: RunAttemptId | null,
@@ -649,17 +813,16 @@ function toFeedActivity(
   const detail = item.type === "notification" ? null : itemPreview(item);
   const createdAt = DateTime.formatIso(item.startedAt ?? item.updatedAt);
   const workEntry = toWorkLogEntry(item, createdAt, summary, detail);
+  const readPaths =
+    item.type === "dynamic_tool" && toolGroupAction(workEntry) === "read"
+      ? collectToolFilePaths(item)
+      : null;
   const getFullDetail = memoizeValue(() =>
-    JSON.stringify(
-      {
-        visibility: row.visibility,
-        sourceThreadId: row.sourceThreadId,
-        sourceItemId: row.sourceItemId,
-        item: toolItemForDisplay(item),
-      },
-      null,
-      2,
-    ),
+    readPaths
+      ? readPaths.join("\n") || null
+      : item.type === "notification"
+        ? item.detail?.trim() || null
+        : formatItemFullDetail(row, item),
   );
   const getCopyText = memoizeValue(() =>
     [summary, detail, getFullDetail()]
@@ -676,7 +839,13 @@ function toFeedActivity(
     attemptId,
     summary,
     detail,
-    canExpand: !(item.type === "error" && item.status === "failed"),
+    canExpand:
+      !(item.type === "error" && item.status === "failed") &&
+      (readPaths
+        ? readPaths.length > 0 || turnItemNeedsDetailFetch(item)
+        : turnItemHasDetail(item) || workEntry.questionAnswer !== undefined),
+    // Read rows show their paths, then the fetched file contents.
+    fetchesDetail: turnItemNeedsDetailFetch(item),
     getFullDetail,
     getCopyText,
     icon: workEntry.toolSurface ?? itemIcon(item),
@@ -882,48 +1051,68 @@ export function failedFeedRunIds(
   return failed;
 }
 
+/**
+ * A prompt without a run (a provider-native subagent, or a turn imported from
+ * V1) folds its response like a run. `runlessWorkActive` keeps the latest
+ * runless response open; V2 work must not reopen imported turns.
+ */
 function deriveThreadFeedRunFolds(
   feed: ReadonlyArray<ThreadFeedEntry>,
   latestRun: ThreadFeedLatestRun | null,
+  runlessWorkActive: boolean,
+  feedFailedRunIds: ReadonlySet<RunId>,
 ): ReadonlyMap<string, ThreadFeedRunFold> {
   const firstAssistantMessageIdByRun = new Map<RunId, string>();
   const terminalAssistantMessageIdByRun = new Map<RunId, string>();
   const interruptedRunIds = new Set<RunId>();
-  for (const entry of feed) {
-    if (entry.type === "message" && entry.message.role === "assistant" && entry.message.runId) {
-      if (!firstAssistantMessageIdByRun.has(entry.message.runId)) {
-        firstAssistantMessageIdByRun.set(entry.message.runId, entry.id);
-      }
-      terminalAssistantMessageIdByRun.set(entry.message.runId, entry.id);
-    }
+  const failedRunIds = new Set(feedFailedRunIds);
+  const promptIndexByRunId = new Map<RunId, number>();
+  for (const [index, entry] of feed.entries()) {
+    // A steer joins a run that already started, maybe from a promptless wake.
     if (
-      entry.type === "activity-group" &&
-      entry.runId !== null &&
-      entry.activities.some(
-        (activity) => activity.projectedItem.item.type === "run_interrupt_result",
-      )
+      entry.type !== "message" ||
+      entry.message.role !== "user" ||
+      entry.message.inputIntent === "steer" ||
+      entry.message.inputIntent === "promoted_queued_to_steer"
     ) {
-      interruptedRunIds.add(entry.runId);
+      continue;
     }
+    const runId = entry.message.runId;
+    if (runId != null && !promptIndexByRunId.has(runId)) promptIndexByRunId.set(runId, index);
   }
-
   const groupsByRunId = new Map<
     RunId,
     { entries: ThreadFeedEntry[]; startBoundary: string | null }
   >();
+  // Fold state is keyed by run, so each runless prompt lends its response a
+  // stable key of its own. Decide per prompt, not per thread: a V1 thread's
+  // first V2 run must not unfold every imported turn above it.
+  let runlessKey: RunId | null = null;
+  let responseKey: RunId | null = null;
   let pendingUserBoundary: string | null = null;
-  for (const entry of feed) {
+  for (const [index, entry] of feed.entries()) {
     if (entry.type === "message" && entry.message.role === "user") {
       pendingUserBoundary = entry.message.createdAt;
+      runlessKey = entry.message.runId == null ? RunId.make(`runless:${entry.id}`) : null;
+      responseKey = entry.message.runId ?? runlessKey;
       continue;
     }
-    const runId =
+    const ownRunId =
       entry.type === "message" && entry.message.role === "assistant"
-        ? entry.message.runId
-        : entry.type === "activity-group"
-          ? entry.runId
+        ? (entry.message.runId ?? runlessKey)
+        : entry.type === "activity-group" ||
+            entry.type === "html-render" ||
+            entry.type === "mcp-app"
+          ? (entry.runId ?? runlessKey)
           : null;
-    if (!runId) continue;
+    if (!ownRunId) continue;
+    // Resuming a subagent moves its item to the resuming run, but the item
+    // keeps its place in the turn that started it. It folds with that turn,
+    // so the later run's fold still opens under its own prompt.
+    const runId =
+      responseKey !== null && (promptIndexByRunId.get(ownRunId) ?? -1) > index
+        ? responseKey
+        : ownRunId;
     let group = groupsByRunId.get(runId);
     if (!group) {
       group = { entries: [], startBoundary: pendingUserBoundary };
@@ -931,14 +1120,33 @@ function deriveThreadFeedRunFolds(
       groupsByRunId.set(runId, group);
     }
     group.entries.push(entry);
+    if (entry.type === "message") {
+      if (!firstAssistantMessageIdByRun.has(runId)) {
+        firstAssistantMessageIdByRun.set(runId, entry.id);
+      }
+      terminalAssistantMessageIdByRun.set(runId, entry.id);
+    }
+    if (entry.type !== "activity-group") continue;
+    for (const activity of entry.activities) {
+      const item = activity.projectedItem.item;
+      if (item.type === "run_interrupt_result") interruptedRunIds.add(runId);
+      if (
+        runId === runlessKey &&
+        item.type === "error" &&
+        item.status === "failed" &&
+        item.parentItemId === null
+      ) {
+        failedRunIds.add(runId);
+      }
+    }
   }
 
   const activeRunId = unsettledRunId(latestRun);
-  const failedRunIds = failedFeedRunIds(feed, latestRun);
   const foldsByAnchorId = new Map<string, ThreadFeedRunFold>();
   for (const [runId, group] of groupsByRunId) {
     if (
       runId === activeRunId ||
+      (runlessWorkActive && runId === runlessKey) ||
       interruptedRunIds.has(runId) ||
       failedRunIds.has(runId) ||
       group.entries.some((entry) => entry.type === "message" && entry.message.streaming)
@@ -953,13 +1161,18 @@ function deriveThreadFeedRunFolds(
           (entry) =>
             entry.id !== firstAssistantId &&
             entry.id !== terminalAssistantId &&
+            entry.type !== "html-render" &&
+            entry.type !== "mcp-app" &&
             !(
               entry.type === "activity-group" &&
               entry.activities.some(
                 (activity) =>
                   activity.prominent ||
                   activity.projectedItem.item.type === "notification" ||
-                  activity.projectedItem.item.type === "handoff",
+                  activity.projectedItem.item.type === "handoff" ||
+                  // A child still working outlives its settled launching run;
+                  // its group stays visible while any member is live.
+                  isLiveSubagentTurnItem(activity.projectedItem.item),
               )
             ),
         )
@@ -1010,22 +1223,63 @@ function deriveThreadFeedRunFolds(
   return foldsByAnchorId;
 }
 
+const supersededReasoningGroups = new WeakMap<ThreadFeedActivityGroup, ThreadFeedActivityGroup>();
+const trailingReasoningGroups = new WeakMap<ThreadFeedActivityGroup, ThreadFeedActivityGroup>();
+
+/** A steer or subsequent activity ends thinking even if the provider omits its completion. */
+function settleSupersededReasoning(
+  entry: Exclude<ThreadFeedEntry, { readonly type: "run-fold" | "work-toggle" | "thinking" }>,
+  tail: boolean,
+) {
+  if (entry.type !== "activity-group") return entry;
+  const cache = tail ? trailingReasoningGroups : supersededReasoningGroups;
+  const cached = cache.get(entry);
+  if (cached) return cached;
+  const activities = entry.activities.map((activity, index) =>
+    activity.workEntry.itemType === "reasoning" &&
+    activity.lifecycleStatus === "inProgress" &&
+    (!tail || index < entry.activities.length - 1)
+      ? {
+          ...activity,
+          lifecycleStatus: "completed" as const,
+          status: "success" as const,
+          workEntry: { ...activity.workEntry, toolLifecycleStatus: "completed" as const },
+        }
+      : activity,
+  );
+  const settled = activities.some((activity, index) => activity !== entry.activities[index])
+    ? { ...entry, activities }
+    : entry;
+  cache.set(entry, settled);
+  return settled;
+}
+
 export function deriveThreadFeedPresentation(
   feed: ReadonlyArray<ThreadFeedEntry>,
   latestRun: ThreadFeedLatestRun | null,
   expandedRunIds: ReadonlySet<RunId>,
   expandedWorkGroupIds: ReadonlySet<string> = new Set(),
   activeWorkStartedAt: string | null = null,
+  /** The live work is a provider-native subagent's runless root turn. */
+  runlessWorkActive = false,
 ): ThreadFeedEntry[] {
-  const sourceFeed = feed.filter(
+  const retainedFeed = feed.filter(
     (entry) =>
       entry.type !== "run-fold" && entry.type !== "work-toggle" && entry.type !== "thinking",
   );
+  const sourceFeed = retainedFeed.map((entry, index) =>
+    settleSupersededReasoning(entry, index === retainedFeed.length - 1),
+  );
   const failedRunIds = failedFeedRunIds(sourceFeed, latestRun);
   const activeTailGroup = sourceFeed.at(-1);
-  const foldsByAnchorId = deriveThreadFeedRunFolds(sourceFeed, latestRun);
   const activeRunId = unsettledRunId(latestRun);
   const isWorking = activeWorkStartedAt !== null && latestRun?.status !== "preparing";
+  const foldsByAnchorId = deriveThreadFeedRunFolds(
+    sourceFeed,
+    latestRun,
+    isWorking && runlessWorkActive,
+    failedRunIds,
+  );
   const collapsedEntryIds = new Set<string>();
   for (const fold of foldsByAnchorId.values()) {
     if (!expandedRunIds.has(fold.runId)) {
@@ -1034,9 +1288,11 @@ export function deriveThreadFeedPresentation(
   }
   const result: ThreadFeedEntry[] = [];
   for (const entry of sourceFeed) {
+    // A provider-native subagent works without a run: its null-run tail is
+    // live only while that runless work is active.
     const isActiveTailGroup =
       isWorking &&
-      activeRunId !== null &&
+      (activeRunId !== null || runlessWorkActive) &&
       entry.type === "activity-group" &&
       activeTailGroup?.type === "activity-group" &&
       activeTailGroup.id === entry.id &&
@@ -1280,8 +1536,17 @@ function appendToolGroupRows(
   const shimmer = activeTail && (active || latestActivity.status === "success");
   const singleActivity = activities.length === 1 ? latestActivity : null;
   const groupSummary = summarizeToolGroup(activities.map((activity) => activity.workEntry));
+  const latestThought =
+    live && !expanded
+      ? activities.findLast(
+          (activity) =>
+            activity.workEntry.itemType === "reasoning" &&
+            (activity.workEntry.detail?.trim() ?? "") !== "",
+        )?.workEntry.detail
+      : undefined;
+  const thought = latestThought ? liveThoughtLine(latestThought) : "";
   const summary = live
-    ? expanded && latestActivity.workEntry.itemType === "reasoning"
+    ? (expanded || thought) && latestActivity.workEntry.itemType === "reasoning"
       ? latestActivity.lifecycleStatus === "inProgress"
         ? "Thinking"
         : "Thought"
@@ -1336,6 +1601,7 @@ function appendToolGroupRows(
     ...(groupToolSurface ? { toolSurface: groupToolSurface } : {}),
     ...(groupToolIcon ? { toolIcon: groupToolIcon } : {}),
     ...(summaryToolIcon ? { summaryToolIcon } : {}),
+    ...(thought ? { thought } : {}),
     hasFailure: (() => {
       const lastToolLike = activities.findLast((activity) => activity.toolLike);
       return (
@@ -1404,7 +1670,7 @@ export function setPendingUserInputCustomAnswer(
   }
 
   const selectedOptionValues =
-    customAnswer.trim().length > 0
+    question.initialAnswer !== undefined || customAnswer.trim().length > 0
       ? undefined
       : normalizeSelectedOptionValues(question, draft?.selectedOptionValues);
   return {
@@ -1489,8 +1755,7 @@ export function buildPendingUserInputAnswers(
 export function buildThreadFeed(
   visibleTurnItems: ReadonlyArray<OrchestrationV2ProjectedTurnItem>,
   options?: {
-    readonly localMessages?: ReadonlyArray<OrchestrationMessage>;
-    readonly anchoredMessages?: ReadonlyArray<OrchestrationMessage>;
+    readonly anchoredMessages?: ReadonlyArray<LocalThreadMessage>;
     readonly attempts?: ReadonlyArray<OrchestrationV2RunAttempt>;
     readonly nodes?: ReadonlyArray<OrchestrationV2ExecutionNode>;
   },
@@ -1540,6 +1805,42 @@ export function buildThreadFeed(
       continue;
     }
     const createdAt = DateTime.formatIso(item.startedAt ?? item.updatedAt);
+    // A running or failed render stays an ordinary work row.
+    const render =
+      item.type === "dynamic_tool" && item.status === "completed"
+        ? htmlRenderFromToolItem(item)
+        : undefined;
+    if (render) {
+      const entry: RawThreadFeedEntry = {
+        type: "html-render",
+        id: `html-render:${row.visibility}:${row.sourceThreadId}:${row.sourceItemId}`,
+        createdAt,
+        runId: item.runId,
+        render,
+      };
+      projectedEntriesCache.set(row, { attemptId, entry });
+      entries.push(entry);
+      continue;
+    }
+    const app =
+      item.type === "dynamic_tool" && item.status === "completed"
+        ? mcpAppFromToolItem(item)
+        : undefined;
+    if (app) {
+      const entry: RawThreadFeedEntry = {
+        type: "mcp-app",
+        id: `mcp-app:${row.visibility}:${row.sourceThreadId}:${row.sourceItemId}`,
+        createdAt,
+        runId: item.runId,
+        sourceThreadId: row.sourceThreadId,
+        itemId: row.sourceItemId,
+        revision: turnItemDetailRevision(item),
+        app,
+      };
+      projectedEntriesCache.set(row, { attemptId, entry });
+      entries.push(entry);
+      continue;
+    }
     if (item.type === "user_message" || item.type === "assistant_message") {
       const updatedAt = DateTime.formatIso(item.updatedAt);
       const entry: RawThreadFeedEntry = {
@@ -1589,7 +1890,7 @@ export function buildThreadFeed(
     ...foldedAnswerMessageIds,
     ...entries.flatMap((entry) => (entry.type === "message" ? [entry.id] : [])),
   ]);
-  const appendLocalMessage = (message: OrchestrationMessage): RawThreadFeedEntry => {
+  const appendLocalMessage = (message: LocalThreadMessage): RawThreadFeedEntry => {
     const cached = localMessageEntriesCache.get(message);
     if (cached) return cached;
     const entry: Extract<RawThreadFeedEntry, { readonly type: "message" }> = {
@@ -1622,11 +1923,6 @@ export function buildThreadFeed(
     );
     if (insertionIndex === -1) entries.push(entry);
     else entries.splice(insertionIndex, 0, entry);
-  }
-  for (const message of options?.localMessages ?? []) {
-    if (retainedMessageIds.has(message.id)) continue;
-    retainedMessageIds.add(message.id);
-    entries.push(appendLocalMessage(message));
   }
   return groupAdjacentActivities(entries);
 }

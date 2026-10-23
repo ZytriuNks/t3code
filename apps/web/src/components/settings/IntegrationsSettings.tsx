@@ -12,6 +12,7 @@ import { DeviceHostsSettings } from "./DeviceHostsSettings";
  * @module IntegrationsSettings
  */
 import {
+  AuthSettingsWriteScope,
   BrowserImportFailureReason,
   BROWSER_PROFILE_MAX_COUNT,
   type BrowserLinkTarget,
@@ -49,7 +50,11 @@ import { previewBridge } from "~/components/preview/previewBridge";
 import { cn, randomUUID } from "~/lib/utils";
 import { useEnvironments, usePrimaryEnvironment } from "~/state/environments";
 import { deviceEnvironment, useDeviceState } from "~/state/device";
+import { readEnvironmentScope, useEnvironmentScope } from "~/state/session";
 import { useAtomCommand } from "~/state/use-atom-command";
+import { previewEnvironment } from "~/state/preview";
+import { useServerConfigs } from "~/state/entities";
+import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import {
   AgentDeviceSetupStatus,
   DeviceHubSetupStatus,
@@ -57,6 +62,8 @@ import {
   platformSetupStatus,
 } from "~/components/device/DeviceSetup";
 import { isElectron } from "../../env";
+import { useI18n } from "../../i18n/I18nProvider";
+import type { MessageKey } from "../../i18n/messages";
 
 import { Badge } from "../ui/badge";
 import {
@@ -114,8 +121,6 @@ import { ProjectDefaultsSettings } from "./ProjectDefaultsSettings";
 import { useSettingsScope } from "./SettingsScopeContext";
 import { BrowserImportWizard, type WizardTarget } from "./BrowserImportWizard";
 import type { ImportOutcome } from "./browserImportWizard.logic";
-import { useI18n } from "../../i18n/I18nProvider";
-import type { MessageKey } from "../../i18n/messages";
 
 const FILL_VALUE = "fill";
 const RESPONSIVE_VALUE = "responsive";
@@ -125,28 +130,39 @@ type BrowserProfileDataBridge = Pick<
   "clearCookies" | "clearCache"
 >;
 
+/** Environments that host server-runtime tabs keep their own copy of each profile. */
+export interface ServerProfileData {
+  readonly environmentIds: ReadonlyArray<EnvironmentId>;
+  readonly clear: (environmentId: EnvironmentId, profileId: string) => Promise<void>;
+}
+
 export async function clearBrowserProfileData(
   bridge: BrowserProfileDataBridge | null,
   environmentIds: ReadonlyArray<EnvironmentId>,
   profileId: string,
+  server?: ServerProfileData,
 ): Promise<void> {
-  if (bridge === null || environmentIds.length === 0) {
+  const desktopEnvironmentIds = bridge === null ? [] : environmentIds;
+  const serverEnvironmentIds = server?.environmentIds ?? [];
+  if (desktopEnvironmentIds.length === 0 && serverEnvironmentIds.length === 0) {
     throw new Error("Browser profile data is not available to clear.");
   }
-  await Promise.all(
-    environmentIds.flatMap((environmentId) => [
-      bridge.clearCookies(environmentId, profileId),
-      bridge.clearCache(environmentId, profileId),
+  await Promise.all([
+    ...desktopEnvironmentIds.flatMap((environmentId) => [
+      bridge!.clearCookies(environmentId, profileId),
+      bridge!.clearCache(environmentId, profileId),
     ]),
-  );
+    ...serverEnvironmentIds.map((environmentId) => server!.clear(environmentId, profileId)),
+  ]);
 }
 
 export function browserProfileRemovalAvailable(
   bridgeAvailable: boolean,
   environmentsReady: boolean,
   environmentCount: number,
+  serverBrowserCount = 0,
 ): boolean {
-  return bridgeAvailable && environmentsReady && environmentCount > 0;
+  return (bridgeAvailable || serverBrowserCount > 0) && environmentsReady && environmentCount > 0;
 }
 
 /**
@@ -632,6 +648,35 @@ function BrowserLinkTargetSetting({ disabled }: { readonly disabled: boolean }) 
   );
 }
 
+function PullRequestLinksOpenInAppSetting() {
+  const openInApp = useClientSettings((settings) => settings.pullRequestLinksOpenInApp);
+  const updateSettings = useUpdatePrimarySettings();
+
+  return (
+    <SettingsRow
+      {...searchableSetting("pull-request-links-open-in-app")}
+      description="Clicking a pull request link opens it in T3 Code. Turn off to open pull request links like any other link, on GitHub or your git host."
+      resetAction={
+        openInApp ? null : (
+          <SettingResetButton
+            label="open pull requests in T3 Code"
+            onClick={() => updateSettings({ pullRequestLinksOpenInApp: true })}
+          />
+        )
+      }
+      control={
+        <Switch
+          checked={openInApp}
+          onCheckedChange={(checked) =>
+            updateSettings({ pullRequestLinksOpenInApp: Boolean(checked) })
+          }
+          aria-label="Open pull requests in T3 Code"
+        />
+      }
+    />
+  );
+}
+
 function DeviceIntegrationSettings() {
   const { t } = useI18n();
   const { search, environment: selected } = useSettingsScope();
@@ -661,6 +706,7 @@ function DeviceIntegrationControls({
   agentAccessEnabled: boolean;
 }) {
   const { t } = useI18n();
+  const canConfigure = useEnvironmentScope(environmentId, AuthSettingsWriteScope);
   const { state, loaded } = useDeviceState(environmentId);
   const { scope, environments, connectedEnvironments } = useSettingsScope();
   const updateSettings = useUpdateScopedSettings();
@@ -674,10 +720,18 @@ function DeviceIntegrationControls({
     "hub" | "check" | "agent" | "update-hub" | "update-agent" | null
   >(null);
   const busy = state.hostStatus === "installing" || state.hostStatus === "starting";
+  const localPlatformsUnavailable = state.hosts.some(
+    (host) => host.kind === "local" && !host.platforms.some((platform) => platform.available),
+  );
   const [platformsRevealed, setPlatformsRevealed] = useState(false);
   // Keep diagnostics visible through subsequent agent setup and refresh phases.
   if (platformsRevealed && !enabled) setPlatformsRevealed(false);
-  if (enabled && !platformsRevealed && state.hostStatus === "ready" && pending !== "hub") {
+  if (
+    enabled &&
+    !platformsRevealed &&
+    (state.hostStatus === "ready" || localPlatformsUnavailable) &&
+    pending !== "hub"
+  ) {
     setPlatformsRevealed(true);
   }
 
@@ -685,13 +739,16 @@ function DeviceIntegrationControls({
     kind: NonNullable<typeof pending>,
     input: { enabled?: boolean; agentAccessEnabled?: boolean },
   ) => {
-    if (!environmentId) return;
+    if (!environmentId || !readEnvironmentScope(environmentId, AuthSettingsWriteScope)) return;
     setPending(kind);
     try {
       const results = await Promise.allSettled(
         environments.map(async (environment) => {
           if (environment.connection.phase !== "connected" || !environment.serverConfig) {
             throw new Error("Environment disconnected");
+          }
+          if (!readEnvironmentScope(environment.environmentId, AuthSettingsWriteScope)) {
+            throw new Error("This connection cannot change device settings.");
           }
           return configure({
             environmentId: environment.environmentId,
@@ -794,7 +851,14 @@ function DeviceIntegrationControls({
             <ScopedSwitch
               settingKeys={["enableDeviceSupport"]}
               checked={enabled}
-              disabled={projectScope || !loaded || !environmentId || busy || pending !== null}
+              disabled={
+                !canConfigure ||
+                projectScope ||
+                !loaded ||
+                !environmentId ||
+                busy ||
+                pending !== null
+              }
               aria-label={t("settings.devices.hub.ariaLabel")}
               onCheckedChange={(checked) =>
                 void update("hub", {
@@ -870,6 +934,7 @@ function DeviceIntegrationControls({
               settingKeys={["enableAgentDeviceAccess"]}
               checked={agentAccessEnabled}
               disabled={
+                !canConfigure ||
                 connectedEnvironments.length === 0 ||
                 (!projectScope && (!loaded || !anyHubEnabled || busy)) ||
                 pending !== null
@@ -961,12 +1026,30 @@ function BrowserProfilesSetting({ disabled }: { readonly disabled: boolean }) {
     readonly environmentName: string;
   } | null>(null);
   const [profilePendingRemoval, setProfilePendingRemoval] = useState<BrowserProfile | null>(null);
+  const [profilePendingClear, setProfilePendingClear] = useState<BrowserProfile | null>(null);
   const [profileRemovalError, setProfileRemovalError] = useState<string | null>(null);
   const [profileRemovalInFlight, setProfileRemovalInFlight] = useState(false);
+  const serverConfigs = useServerConfigs();
+  const runClearServerProfile = useAtomCommand(previewEnvironment.clearProfile, {
+    reportFailure: false,
+  });
+  const serverProfileData: ServerProfileData = {
+    environmentIds: environments
+      .map((environment) => environment.environmentId)
+      .filter(
+        (environmentId) =>
+          serverConfigs.get(environmentId)?.environment.capabilities.serverBrowser === true,
+      ),
+    clear: async (environmentId, profileId) => {
+      const result = await runClearServerProfile({ environmentId, input: { profileId } });
+      if (result._tag === "Failure") throw squashAtomCommandFailure(result);
+    },
+  };
   const removalAvailable = browserProfileRemovalAvailable(
     previewBridge !== null,
     environmentsReady,
     environments.length,
+    serverProfileData.environmentIds.length,
   );
   const importInFlightRef = useRef(false);
   const [importInFlight, setImportInFlight] = useState(false);
@@ -1010,11 +1093,11 @@ function BrowserProfilesSetting({ disabled }: { readonly disabled: boolean }) {
 
   const clearProfileData = (id: string, name: string) => {
     if (!settingsHydrated || importInFlightRef.current) return;
-    if (!previewBridge || !environmentsReady || environments.length === 0) {
+    if (!removalAvailable) {
       toastManager.add({
         type: "error",
         title: t("settings.integrations.browserProfiles.clearNamedFailed", { name }),
-        description: t("settings.integrations.browserProfiles.connect"),
+        description: "You're not connected to a server yet.",
       });
       return;
     }
@@ -1022,6 +1105,7 @@ function BrowserProfilesSetting({ disabled }: { readonly disabled: boolean }) {
       previewBridge,
       environments.map((environment) => environment.environmentId),
       id,
+      serverProfileData,
     )
       .then(() => {
         toastManager.add({
@@ -1052,6 +1136,7 @@ function BrowserProfilesSetting({ disabled }: { readonly disabled: boolean }) {
         previewBridge,
         environmentsReady ? environments.map((environment) => environment.environmentId) : [],
         id,
+        serverProfileData,
       );
     } catch {
       setProfileRemovalError(t("settings.integrations.browserProfiles.removeDataFailed"));
@@ -1368,7 +1453,12 @@ function BrowserProfilesSetting({ disabled }: { readonly disabled: boolean }) {
                   </MenuItem>
                   <MenuItem
                     disabled={!settingsHydrated || !removalAvailable}
-                    onClick={() => clearProfileData(profile.id, profile.name)}
+                    onClick={() => {
+                      // Clearing a server copy closes its open tabs, so it asks first.
+                      if (serverProfileData.environmentIds.length > 0) {
+                        setProfilePendingClear(profile);
+                      } else clearProfileData(profile.id, profile.name);
+                    }}
                   >
                     {t("settings.integrations.browserProfiles.clearData")}
                   </MenuItem>
@@ -1416,7 +1506,8 @@ function BrowserProfilesSetting({ disabled }: { readonly disabled: boolean }) {
               })}
             </AlertDialogTitle>
             <AlertDialogDescription>
-              {t("settings.integrations.browserProfiles.removeDescription")}
+              Its cookies and logins are deleted. Desktop tabs already open in this profile stay
+              open until you close them; server browser tabs close now.
             </AlertDialogDescription>
             {profileRemovalError ? (
               <p aria-live="polite" className="text-sm text-destructive">
@@ -1448,6 +1539,36 @@ function BrowserProfilesSetting({ disabled }: { readonly disabled: boolean }) {
               {profileRemovalInFlight
                 ? t("settings.integrations.browserProfiles.removing")
                 : t("settings.integrations.browserProfiles.remove")}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogPopup>
+      </AlertDialog>
+      <AlertDialog
+        open={profilePendingClear !== null}
+        onOpenChange={(open) => {
+          if (!open) setProfilePendingClear(null);
+        }}
+      >
+        <AlertDialogPopup>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Clear “{profilePendingClear?.name}”’s cookies and cache?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              You are signed out of its sites. Server browser tabs open in this profile close now.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogClose render={<Button variant="outline" />}>Cancel</AlertDialogClose>
+            <Button
+              variant="destructive"
+              onClick={() => {
+                if (profilePendingClear)
+                  clearProfileData(profilePendingClear.id, profilePendingClear.name);
+                setProfilePendingClear(null);
+              }}
+            >
+              Clear data
             </Button>
           </AlertDialogFooter>
         </AlertDialogPopup>
@@ -1517,6 +1638,7 @@ export function IntegrationsSettingsPanel() {
         ) : (
           previewDefaults
         )}
+        <PullRequestLinksOpenInAppSetting />
       </SettingsSection>
       <DeviceIntegrationSettings />
     </SettingsPageContainer>

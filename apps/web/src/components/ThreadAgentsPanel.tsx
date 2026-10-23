@@ -233,6 +233,7 @@ export function ThreadAgentsPanel({
         mode="sidebar"
         title={selectedChildShell.title}
         onBack={() => setSelection(null)}
+        onMaximize={() => onOpenThread(selection.threadRef)}
         onOpenThread={onOpenThread}
         onReadyChange={onConversationReadyChange}
       />
@@ -261,6 +262,7 @@ export function ThreadAgentsPanel({
           mode="sidebar"
           title="Parent conversation"
           onBack={() => setSelection(null)}
+          onMaximize={() => onOpenThread(selection.threadRef)}
           onOpenThread={onOpenThread}
           onReadyChange={onConversationReadyChange}
         />

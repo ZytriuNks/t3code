@@ -70,13 +70,10 @@ export function getArm64IntelBuildWarningDescription(state: DesktopUpdateState):
   return "This Mac has Apple Silicon, but T3 Code is still running the Intel build under Rosetta. The next app update will replace it with the native Apple Silicon build.";
 }
 
-/**
- * Words and formatters for the updater's tooltips and install prompt. Pages
- * that translate themselves pass a copy; every other caller keeps the defaults
- * below and renders exactly the same English as before. Versions and the raw
- * updater message always stay verbatim.
- */
+/** Words and formatters for updater copy; raw updater messages and version strings stay verbatim. */
 export interface DesktopUpdateCopy {
+  /** Optional because this retry state was added after the original copy contract. */
+  readonly notAppliedTooltip?: (version: string) => string;
   readonly availableTooltip: (version: string | null) => string;
   readonly downloadingTooltip: (percent: number | null) => string;
   readonly downloadedTooltip: (version: string | null) => string;
@@ -88,6 +85,7 @@ export interface DesktopUpdateCopy {
 }
 
 export const DESKTOP_UPDATE_COPY_DEFAULTS: DesktopUpdateCopy = {
+  notAppliedTooltip: (version) => `Update ${version} did not apply. Click to retry.`,
   availableTooltip: (version) => `Update ${version ?? "available"} ready to download`,
   downloadingTooltip: (percent) =>
     `Downloading update${percent === null ? "" : ` (${Math.floor(percent)}%)`}`,
@@ -105,6 +103,15 @@ export function getDesktopUpdateButtonTooltip(
   state: DesktopUpdateState,
   copy: DesktopUpdateCopy = DESKTOP_UPDATE_COPY_DEFAULTS,
 ): string {
+  if (
+    state.notAppliedVersion !== undefined &&
+    (state.status === "available" || state.status === "downloaded") &&
+    getDesktopUpdateDownloadedVersion(state) === state.notAppliedVersion
+  ) {
+    return (copy.notAppliedTooltip ?? DESKTOP_UPDATE_COPY_DEFAULTS.notAppliedTooltip!)(
+      state.notAppliedVersion,
+    );
+  }
   if (state.status === "available") {
     return copy.availableTooltip(state.availableVersion);
   }

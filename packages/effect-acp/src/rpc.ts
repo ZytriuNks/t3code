@@ -1,6 +1,6 @@
 import * as AcpCompat from "./compat.ts";
-import * as Rpc from "effect/unstable/rpc/Rpc";
-import * as RpcGroup from "effect/unstable/rpc/RpcGroup";
+import * as Rpc from "effect/rpc/Rpc";
+import * as RpcGroup from "effect/rpc/RpcGroup";
 import * as Schema from "effect/Schema";
 
 import * as AcpSchema from "./_generated/schema.gen.ts";
@@ -12,6 +12,7 @@ export const V1_AGENT_METHODS = {
   logout: "logout",
   session_load: "session/load",
   session_set_model: "session/set_model",
+  session_set_mode: "session/set_mode",
 } as const;
 
 export const V1_CLIENT_METHODS = {
@@ -269,9 +270,16 @@ const CompatSetSessionModelRpc = Rpc.make(V1_AGENT_METHODS.session_set_model, {
   error: AcpSchemaV1.Error,
 });
 
+const CompatSetSessionModeRpc = Rpc.make(V1_AGENT_METHODS.session_set_mode, {
+  payload: AcpSchemaV1.SetSessionModeRequest,
+  success: AcpSchemaV1.SetSessionModeResponse,
+  error: AcpSchemaV1.Error,
+});
+
 export const CompatAgentRpcs = RpcGroup.make(
   CompatInitializeRpc,
   CompatSetSessionModelRpc,
+  CompatSetSessionModeRpc,
   LoginRpc,
   CompatAuthenticateV1Rpc,
   LogoutRpc,

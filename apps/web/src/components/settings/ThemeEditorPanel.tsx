@@ -1,12 +1,5 @@
-import { ScrollFrame } from "~/components/ui/scroll-frame";
-import {
-  ChevronDownIcon,
-  ChevronUpIcon,
-  MousePointer2Icon,
-  PaintbrushIcon,
-  PlusIcon,
-  XIcon,
-} from "lucide-react";
+import { MousePointer2Icon, PaintbrushIcon, PlusIcon, XIcon } from "lucide-react";
+import { ChevronDown, ChevronUp } from "lucide";
 import {
   useCallback,
   useEffect,
@@ -38,13 +31,15 @@ import {
 import { cn } from "../../lib/utils";
 import { useI18n } from "../../i18n/I18nProvider";
 import type { MessageKey } from "../../i18n/messages";
+import { themeModeMessageKey } from "./ThemePreviewCircles";
 import { Button } from "../ui/button";
+import { ScrollFrame } from "../ui/scroll-frame";
+import { MorphIcon } from "~/components/MorphIcon";
 import { Input } from "../ui/input";
 import { Switch } from "../ui/switch";
 import { Toggle, ToggleGroup } from "../ui/toggle-group";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
-import { getThemeRoleLabelKey, ThemeColorField } from "./ThemeColorPicker";
-import { themeModeMessageKey } from "./ThemePreviewCircles";
+import { getThemeRoleLabel, ThemeColorField } from "./ThemeColorPicker";
 import {
   clearThemeInspectorHover,
   clearThemeInspectorHighlights,
@@ -58,55 +53,63 @@ import {
 
 const THEME_EDITOR_SIMPLE_ROLES: ReadonlyArray<ThemeColorRole> = ["canvas", "accent"];
 
+type ThemeEditorLabel = MessageKey | "Search" | "Search matches" | "Current match";
+
+function getThemeEditorLabel(label: ThemeEditorLabel, t: (key: MessageKey) => string): string {
+  return label === "Search" || label === "Search matches" || label === "Current match"
+    ? label
+    : t(label);
+}
+
 type ThemeEditorColorFamily = Readonly<{
   id: string;
-  labelKey: MessageKey;
+  label: ThemeEditorLabel;
   role: ThemeColorRole;
   roles: ReadonlyArray<ThemeColorRole>;
 }>;
 
 const THEME_EDITOR_ROLE_GROUPS: ReadonlyArray<{
   id: string;
-  titleKey: MessageKey;
+  title: ThemeEditorLabel;
   families: ReadonlyArray<ThemeEditorColorFamily>;
 }> = [
   {
     id: "foundation",
-    titleKey: "settings.appearance.theme.group.foundation",
+    title: "settings.appearance.theme.group.foundation",
     families: [
       {
         id: "background",
-        labelKey: "settings.appearance.theme.family.background",
+        label: "settings.appearance.theme.family.background",
         role: "canvas",
         roles: ["canvas", "chrome", "toolbar"],
       },
       {
         id: "surface",
-        labelKey: "settings.appearance.theme.family.surface",
+        label: "settings.appearance.theme.family.surface",
         role: "surface",
         roles: ["surface"],
       },
       {
         id: "raised-surface",
-        labelKey: "settings.appearance.theme.family.raisedSurface",
+        label: "settings.appearance.theme.family.raisedSurface",
         role: "surfaceRaised",
         roles: ["surfaceRaised"],
       },
       {
         id: "overlay",
-        labelKey: "settings.appearance.theme.family.overlay",
+        label: "settings.appearance.theme.family.overlay",
         role: "surfaceOverlay",
         roles: ["surfaceOverlay"],
       },
       {
         id: "text",
-        labelKey: "settings.appearance.theme.family.text",
+        label: "settings.appearance.theme.family.text",
         role: "text",
         roles: ["text", "toolbarForeground", "toolbarControlForeground"],
       },
       {
         id: "muted-text",
-        labelKey: "settings.appearance.theme.family.mutedText",
+        label: "settings.appearance.theme.family.mutedText",
         role: "mutedForeground",
         roles: [
           "textMuted",
@@ -119,13 +122,13 @@ const THEME_EDITOR_ROLE_GROUPS: ReadonlyArray<{
       },
       {
         id: "border",
-        labelKey: "settings.appearance.theme.family.border",
+        label: "settings.appearance.theme.family.border",
         role: "border",
         roles: ["border", "toolbarBorder", "sidebarBorder"],
       },
       {
         id: "input",
-        labelKey: "settings.appearance.theme.family.input",
+        label: "settings.appearance.theme.family.input",
         role: "input",
         roles: ["input"],
       },
@@ -133,23 +136,23 @@ const THEME_EDITOR_ROLE_GROUPS: ReadonlyArray<{
   },
   {
     id: "brand-content",
-    titleKey: "settings.appearance.theme.group.brandContent",
+    title: "settings.appearance.theme.group.brandContent",
     families: [
       {
         id: "subtle-surface",
-        labelKey: "settings.appearance.theme.family.subtleSurface",
+        label: "settings.appearance.theme.family.subtleSurface",
         role: "secondary",
         roles: ["secondary", "secondaryForeground", "muted", "toolbarControl"],
       },
       {
         id: "highlight-surface",
-        labelKey: "settings.appearance.theme.family.highlightSurface",
+        label: "settings.appearance.theme.family.highlightSurface",
         role: "accentSurface",
         roles: ["accentSurface", "accentSurfaceForeground", "toolbarControlHover"],
       },
       {
         id: "accent",
-        labelKey: "settings.appearance.theme.family.accent",
+        label: "settings.appearance.theme.family.accent",
         role: "accent",
         roles: [
           "accent",
@@ -163,49 +166,67 @@ const THEME_EDITOR_ROLE_GROUPS: ReadonlyArray<{
       },
       {
         id: "action",
-        labelKey: "settings.appearance.theme.family.action",
+        label: "settings.appearance.theme.family.action",
         role: "messageAction",
         roles: ["messageAction", "messageActionForeground", "messageActionHover"],
       },
       {
         id: "message-surface",
-        labelKey: "settings.appearance.theme.family.messageSurface",
+        label: "settings.appearance.theme.family.messageSurface",
         role: "messageSurface",
         roles: ["messageSurface", "messageForeground"],
       },
       {
         id: "code-surface",
-        labelKey: "settings.appearance.theme.family.codeSurface",
+        label: "settings.appearance.theme.family.codeSurface",
         role: "codeBackground",
         roles: ["codeBackground", "codeForeground"],
       },
     ],
   },
   {
+    id: "search",
+    title: "Search",
+    families: [
+      {
+        id: "search-matches",
+        label: "Search matches",
+        role: "searchMatchBackground",
+        roles: ["searchMatchBackground", "searchMatchForeground"],
+      },
+      {
+        id: "current-match",
+        label: "Current match",
+        role: "searchMatchActiveBackground",
+        roles: ["searchMatchActiveBackground", "searchMatchActiveForeground"],
+      },
+    ],
+  },
+  {
     id: "context",
-    titleKey: "settings.appearance.theme.group.context",
+    title: "settings.appearance.theme.group.context",
     families: [
       {
         id: "sidebar-background",
-        labelKey: "settings.appearance.theme.family.sidebarBackground",
+        label: "settings.appearance.theme.family.sidebarBackground",
         role: "sidebar",
         roles: ["sidebar", "sidebarForeground"],
       },
       {
         id: "sidebar-controls",
-        labelKey: "settings.appearance.theme.family.sidebarControls",
+        label: "settings.appearance.theme.family.sidebarControls",
         role: "sidebarControlSurface",
         roles: ["sidebarControlSurface"],
       },
       {
         id: "sidebar-selection",
-        labelKey: "settings.appearance.theme.family.sidebarSelection",
+        label: "settings.appearance.theme.family.sidebarSelection",
         role: "sidebarRowSelected",
         roles: ["sidebarRowHover", "sidebarRowActive", "sidebarRowSelected"],
       },
       {
         id: "terminal-background",
-        labelKey: "settings.appearance.theme.family.terminalBackground",
+        label: "settings.appearance.theme.family.terminalBackground",
         role: "terminalBackground",
         roles: [
           "terminalBackground",
@@ -219,17 +240,17 @@ const THEME_EDITOR_ROLE_GROUPS: ReadonlyArray<{
   },
   {
     id: "status",
-    titleKey: "settings.appearance.theme.group.status",
+    title: "settings.appearance.theme.group.status",
     families: [
       {
         id: "error",
-        labelKey: "settings.appearance.theme.family.error",
+        label: "settings.appearance.theme.family.error",
         role: "error",
         roles: ["error", "errorForeground", "errorSurface"],
       },
       {
         id: "warning",
-        labelKey: "settings.appearance.theme.family.warning",
+        label: "settings.appearance.theme.family.warning",
         role: "warning",
         roles: ["warning", "warningForeground", "warningSurface"],
       },
@@ -663,10 +684,11 @@ export function ThemeEditorPanel({
     };
     const showInspection = (inspection: ThemeElementInspection) => {
       hoverInspection = inspection;
-      const family = getThemeEditorColorFamily(inspection.role);
       showThemeInspectorHover(
         inspection,
-        family ? t(family.labelKey) : t(getThemeRoleLabelKey(inspection.role)),
+        getThemeEditorColorFamily(inspection.role)
+          ? getThemeEditorLabel(getThemeEditorColorFamily(inspection.role)!.label, t)
+          : getThemeRoleLabel(inspection.role, t),
       );
     };
     const handlePointerOver = (event: PointerEvent) => {
@@ -730,10 +752,11 @@ export function ThemeEditorPanel({
       hoverFrame ??= requestAnimationFrame(() => {
         hoverFrame = null;
         if (hoverInspection) {
-          const family = getThemeEditorColorFamily(hoverInspection.role);
           showThemeInspectorHover(
             hoverInspection,
-            family ? t(family.labelKey) : t(getThemeRoleLabelKey(hoverInspection.role)),
+            getThemeEditorColorFamily(hoverInspection.role)
+              ? getThemeEditorLabel(getThemeEditorColorFamily(hoverInspection.role)!.label, t)
+              : getThemeRoleLabel(hoverInspection.role, t),
           );
         }
       });
@@ -971,11 +994,11 @@ export function ThemeEditorPanel({
           // the stale message goes with the old name.
           setError(null);
         }}
-        placeholder={
+        placeholder={t(
           isEditing
-            ? t("settings.appearance.theme.panel.themeName")
-            : t("settings.appearance.theme.panel.themeNameHint")
-        }
+            ? "settings.appearance.theme.panel.themeName"
+            : "settings.appearance.theme.panel.themeNameHint",
+        )}
         value={name}
       />
     </label>
@@ -1063,7 +1086,7 @@ export function ThemeEditorPanel({
       {families.map((family) => (
         <ThemeColorField
           key={family.id}
-          label={t(family.labelKey)}
+          label={getThemeEditorLabel(family.label, t)}
           onChange={updateColor}
           onSelect={selectThemeRole}
           onToggleSelected={toggleThemeRole}
@@ -1082,7 +1105,10 @@ export function ThemeEditorPanel({
       families: group.families.filter(
         (family) =>
           !query ||
-          [t(family.labelKey), ...family.roles.map((role) => t(getThemeRoleLabelKey(role)))]
+          [
+            getThemeEditorLabel(family.label, t),
+            ...family.roles.map((role) => getThemeRoleLabel(role, t)),
+          ]
             .join(" ")
             .toLowerCase()
             .includes(query),
@@ -1092,7 +1118,9 @@ export function ThemeEditorPanel({
       <div className="space-y-5">
         {groups.map((group) => (
           <section className="space-y-2" key={group.id}>
-            <h4 className="text-sm font-medium text-foreground">{t(group.titleKey)}</h4>
+            <h4 className="text-sm font-medium text-foreground">
+              {getThemeEditorLabel(group.title, t)}
+            </h4>
             {renderRoleFields(group.families, "grid gap-1")}
           </section>
         ))}
@@ -1236,20 +1264,18 @@ export function ThemeEditorPanel({
               {isInspecting
                 ? t("settings.appearance.theme.panel.selectElement")
                 : selectedRole
-                  ? (() => {
-                      const family = getThemeEditorColorFamily(selectedRole);
-                      const label =
-                        isAdvanced && family
-                          ? t(family.labelKey)
-                          : t(getThemeRoleLabelKey(selectedRole));
-                      const count = usageCount ?? 0;
-                      return t(
-                        count === 1
-                          ? "settings.appearance.theme.panel.usageOne"
-                          : "settings.appearance.theme.panel.usageOther",
-                        { count, label },
-                      );
-                    })()
+                  ? t(
+                      usageCount === 1
+                        ? "settings.appearance.theme.panel.usageOne"
+                        : "settings.appearance.theme.panel.usageOther",
+                      {
+                        label:
+                          isAdvanced && getThemeEditorColorFamily(selectedRole)
+                            ? getThemeEditorLabel(getThemeEditorColorFamily(selectedRole)!.label, t)
+                            : getThemeRoleLabel(selectedRole, t),
+                        count: usageCount ?? 0,
+                      },
+                    )
                   : t("settings.appearance.theme.panel.selectColor")}
             </p>
           )}
@@ -1301,7 +1327,7 @@ export function ThemeEditorPanel({
           variant="ghost"
           onClick={() => setIsMinimized(!isMinimized)}
         >
-          {isMinimized ? <ChevronUpIcon /> : <ChevronDownIcon />}
+          <MorphIcon icon={isMinimized ? ChevronUp : ChevronDown} />
         </Button>
         <Button
           aria-label={t("settings.appearance.theme.panel.close")}

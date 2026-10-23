@@ -15,6 +15,7 @@ import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopConfig from "./DesktopConfig.ts";
 import { resolveLinuxDesktopEntryName } from "./DesktopEarlyElectronStartup.ts";
 import { resolveDesktopBaseDir, resolveDesktopStateDir } from "./DesktopStatePaths.ts";
+import { isNightlyDesktopVersion } from "../updates/updateChannels.ts";
 import type { OtlpProtocol } from "@t3tools/shared/observability";
 
 export interface MakeDesktopEnvironmentInput {
@@ -23,11 +24,12 @@ export interface MakeDesktopEnvironmentInput {
   readonly platform: NodeJS.Platform;
   readonly processArch: string;
   readonly appVersion: string;
-  readonly appName?: string;
   readonly appPath: string;
   readonly isPackaged: boolean;
   readonly resourcesPath: string;
   readonly runningUnderArm64Translation: boolean;
+  /** Packaged productName, used as the single stage identity source. */
+  readonly appName?: string;
 }
 
 export class DesktopEnvironment extends Context.Service<
@@ -63,7 +65,7 @@ export class DesktopEnvironment extends Context.Service<
     // extracts on demand (see DesktopWslServerTree).
     readonly serverRoot: string;
     readonly backendEntryPath: string;
-    // Built web client the packaged renderer is served from over t3code-experimental://app.
+    // Built web client the packaged renderer is served from over t3code://app.
     readonly clientAssetsDir: string;
     readonly backendCwd: string;
     readonly preloadPath: string;
@@ -98,25 +100,25 @@ const APP_BASE_NAME = "T3 Code";
 
 function resolveDesktopAppStageLabel(input: {
   readonly isDevelopment: boolean;
+  readonly appVersion: string;
   readonly appName: string;
 }): DesktopAppStageLabel {
   if (input.isDevelopment || input.appName === "T3 Code (Dev)") {
     return "Dev";
   }
-  // Packaged builds use productName independently of development-server mode.
-  // Unrecognized names keep the historical Experimental default.
-  if (input.appName === "T3 Code (Alpha)") {
-    return "Alpha";
+  if (input.appName === "T3 Code (Experimental)" || isNightlyDesktopVersion(input.appVersion)) {
+    return "Experimental";
   }
-  return "Experimental";
+  return "Beta";
 }
 
 export function resolveDesktopAppBranding(input: {
   readonly isDevelopment: boolean;
   readonly appVersion: string;
-  readonly appName: string;
+  readonly appName?: string | undefined;
 }): DesktopAppBranding {
-  const stageLabel = resolveDesktopAppStageLabel(input);
+  const appName = input.appName ?? "T3 Code (Beta)";
+  const stageLabel = resolveDesktopAppStageLabel({ ...input, appName });
   return {
     baseName: APP_BASE_NAME,
     stageLabel,
@@ -162,12 +164,7 @@ const make = Effect.fn("desktop.environment.make")(function* (
   const homeDirectory = input.homeDirectory;
   const devServerUrl = config.devServerUrl;
   const isDevelopment = Option.isSome(devServerUrl);
-  // Tests and dev wiring rarely know the packaged productName; defaulting to
-  // Experimental keeps the historical behavior intact. The packaged launcher
-  // always sets `appName` from Electron.app.getName() (which on packaged
-  // builds is the staged `productName`), so production code never relies on
-  // this fallback.
-  const appName = input.appName ?? "T3 Code (Experimental)";
+  const appName = input.appName ?? "T3 Code (Beta)";
   const appDataDirectory =
     input.platform === "win32"
       ? Option.getOrElse(config.appDataDirectory, () =>
@@ -180,7 +177,7 @@ const make = Effect.fn("desktop.environment.make")(function* (
     homeDirectory,
     joinPath: path.join,
     t3Home: config.t3Home,
-    appName: input.appName,
+    appName,
   });
   const rootDir = path.resolve(input.dirname, "../../..");
   const appRoot = input.isPackaged ? input.appPath : rootDir;
@@ -253,17 +250,17 @@ const make = Effect.fn("desktop.environment.make")(function* (
     appUserModelId: Option.getOrElse(config.appUserModelIdOverride, () =>
       isDevelopment || appName === "T3 Code (Dev)"
         ? "com.t3tools.t3code.dev"
-        : appName === "T3 Code (Alpha)"
-          ? "com.t3tools.t3code"
-          : "com.t3tools.t3code.experimental",
+        : appName === "T3 Code (Experimental)"
+          ? "com.t3tools.t3code.experimental"
+          : "com.t3tools.t3code",
     ),
     linuxDesktopEntryName: resolveLinuxDesktopEntryName(isDevelopment, appName),
     linuxWmClass:
       isDevelopment || appName === "T3 Code (Dev)"
         ? "t3code-dev"
-        : appName === "T3 Code (Alpha)"
-          ? "t3code"
-          : "t3code-experimental",
+        : appName === "T3 Code (Experimental)"
+          ? "t3code-experimental"
+          : "t3code",
     linuxApplicationsDir,
     appImagePath: config.appImagePath,
     defaultDesktopSettings: DesktopAppSettings.resolveDefaultDesktopSettings(input.appVersion),

@@ -54,10 +54,14 @@ vi.mock("../hooks/useSettings", async (importOriginal) => {
     }),
   };
 });
+vi.mock("../state/query", () => ({
+  useEnvironmentQuery: () => ({ data: null, error: null, refresh: () => {} }),
+}));
 vi.mock("../state/use-atom-query-runner", () => ({ useAtomQueryRunner: () => vi.fn() }));
 vi.mock("../state/use-atom-command", () => ({ useAtomCommand: () => vi.fn() }));
 vi.mock("../state/session", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../state/session")>()),
+  useEnvironmentScope: () => false,
   usePreparedConnection: () => ({ _tag: "Loading" }),
 }));
 vi.mock("../state/entities", () => ({
@@ -72,6 +76,7 @@ vi.mock("../state/entities", () => ({
       : { projection: subagentPanelState.projection },
   useThreadVisibleTurnItems: () => subagentPanelState.projection?.visibleTurnItems ?? [],
   useProject: () => null,
+  useThreadTextPlayback: () => null,
 }));
 vi.mock("../state/threads", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../state/threads")>()),
@@ -877,12 +882,16 @@ describe("navigation destination with recovered Markdown layout", () => {
             : rect;
       });
       page.scrollTop = destination === "reading" ? 300 : 1300;
-      rememberTimelinePosition(props.routeThreadKey, {
-        rowId: "resume-dom-row",
-        offsetWithinRow: destination === "reading" ? 300 : 0,
-        scrollOffset: page.scrollTop,
-        atEnd: destination !== "reading",
-      });
+      rememberTimelinePosition(
+        props.routeThreadKey,
+        {
+          rowId: "resume-dom-row",
+          offsetWithinRow: destination === "reading" ? 300 : 0,
+          scrollOffset: page.scrollTop,
+          atEnd: destination !== "reading",
+        },
+        false,
+      );
       const control = createRef<SmoothScrollHandle | null>();
       function TimelineProbe({
         source,
@@ -1318,18 +1327,22 @@ describe("round 3 first source commits", () => {
     const metadata = playback(null);
     if (surface === "reasoning") {
       // 使用真实披露缓存，让新推理 source 首次提交时就挂载到已展开的表面。
-      rememberTimelinePosition(props.routeThreadKey, {
-        rowId: "resume-dom-row",
-        offsetWithinRow: 0,
-        scrollOffset: 0,
-        atEnd: true,
-        disclosures: {
-          runs: new Set(),
-          workGroups: new Set(["work-group:resume-dom-row"]),
-          attempts: new Set(),
-          workGroupState: { scrollPositions: new Map(), expandedEntries: new Set() },
+      rememberTimelinePosition(
+        props.routeThreadKey,
+        {
+          rowId: "resume-dom-row",
+          offsetWithinRow: 0,
+          scrollOffset: 0,
+          atEnd: true,
+          disclosures: {
+            runs: new Set(),
+            workGroups: new Set(["work-group:resume-dom-row"]),
+            attempts: new Set(),
+            workGroupState: { scrollPositions: new Map(), expandedEntries: new Set() },
+          },
         },
-      });
+        false,
+      );
     }
     const show = (text: string | null) => {
       const entries = text === null ? [] : [timelineEntry(text, surface)];
@@ -1370,18 +1383,22 @@ describe("committed history version at first appearance", () => {
     async (format, surface, strict) => {
       const props = timelineProps(`environment-local:r4-correction-${format}-${surface}-${strict}`);
       if (surface === "reasoning")
-        rememberTimelinePosition(props.routeThreadKey, {
-          rowId: "resume-dom-row",
-          offsetWithinRow: 0,
-          scrollOffset: 0,
-          atEnd: true,
-          disclosures: {
-            runs: new Set(),
-            workGroups: new Set(["work-group:resume-dom-row"]),
-            attempts: new Set(),
-            workGroupState: { scrollPositions: new Map(), expandedEntries: new Set() },
+        rememberTimelinePosition(
+          props.routeThreadKey,
+          {
+            rowId: "resume-dom-row",
+            offsetWithinRow: 0,
+            scrollOffset: 0,
+            atEnd: true,
+            disclosures: {
+              runs: new Set(),
+              workGroups: new Set(["work-group:resume-dom-row"]),
+              attempts: new Set(),
+              workGroupState: { scrollPositions: new Map(), expandedEntries: new Set() },
+            },
           },
-        });
+          false,
+        );
       const metadata = playback("A");
       const show = (text: string) => {
         const entries = [timelineEntry(text, surface)];
@@ -1546,18 +1563,22 @@ describe("yield duration through real timeline consumers", () => {
     async (surface, duration) => {
       const props = timelineProps(`environment-local:yield-${surface}-${duration}`);
       if (surface === "reasoning")
-        rememberTimelinePosition(props.routeThreadKey, {
-          rowId: "resume-dom-row",
-          offsetWithinRow: 0,
-          scrollOffset: 0,
-          atEnd: true,
-          disclosures: {
-            runs: new Set(),
-            workGroups: new Set(["work-group:resume-dom-row"]),
-            attempts: new Set(),
-            workGroupState: { scrollPositions: new Map(), expandedEntries: new Set() },
+        rememberTimelinePosition(
+          props.routeThreadKey,
+          {
+            rowId: "resume-dom-row",
+            offsetWithinRow: 0,
+            scrollOffset: 0,
+            atEnd: true,
+            disclosures: {
+              runs: new Set(),
+              workGroups: new Set(["work-group:resume-dom-row"]),
+              attempts: new Set(),
+              workGroupState: { scrollPositions: new Map(), expandedEntries: new Set() },
+            },
           },
-        });
+          false,
+        );
       const metadata = playback(null);
       await act(() =>
         root.render(
@@ -1629,7 +1650,39 @@ describe("subagent panel reasoning", () => {
     const hasRun = history || appStatus !== null;
     return {
       ...base,
-      thread: { ...base.thread, activeProviderThreadId: providerThreadId },
+      thread: {
+        ...base.thread,
+        activeProviderThreadId: providerThreadId,
+        ...(appStatus === null
+          ? {
+              creationSource: "provider" as const,
+              lineage: {
+                ...base.thread.lineage,
+                parentThreadId: ThreadId.make("native-parent"),
+                relationshipToParent: "subagent" as const,
+              },
+            }
+          : {}),
+      },
+      nodes: [
+        {
+          id: nodeId,
+          threadId: base.thread.id,
+          runId: appStatus === null ? null : appRunId,
+          parentNodeId: null,
+          rootNodeId: nodeId,
+          kind: "root_turn",
+          status: turnStatus,
+          countsForRun: false,
+          providerThreadId,
+          providerTurnId,
+          nativeItemRef: null,
+          runtimeRequestId: null,
+          checkpointScopeId: null,
+          startedAt: now,
+          completedAt: turnStatus === "running" ? null : now,
+        },
+      ],
       runs: hasRun
         ? [
             {

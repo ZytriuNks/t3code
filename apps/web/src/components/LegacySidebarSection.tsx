@@ -5,7 +5,7 @@ import { SidebarGroup } from "./ui/sidebar";
 import type { LegacySidebarSection as Section } from "./LegacySidebar.logic";
 
 export const LEGACY_SIDEBAR_SECTION_ACTION_CLASS =
-  "inline-flex h-6 min-w-6 cursor-pointer items-center justify-center rounded-md px-0.75 text-inherit focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring pointer-coarse:after:absolute pointer-coarse:after:size-full pointer-coarse:after:min-h-11 pointer-coarse:after:min-w-11";
+  "inline-flex h-6 min-w-6 cursor-pointer items-center justify-center rounded-md px-0.75 text-inherit focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring pointer-coarse:after:absolute pointer-coarse:after:size-full pointer-coarse:after:min-h-11 pointer-coarse:after:min-w-11";
 
 export function LegacySidebarSection(props: {
   section: Section;
@@ -27,7 +27,7 @@ export function LegacySidebarSection(props: {
           aria-controls={contentId}
           onClick={onToggle}
           data-thread-selection-safe
-          className="flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 self-stretch text-left text-xs font-medium text-inherit outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+          className="flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 self-stretch text-left text-xs font-medium text-inherit outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
         >
           <span>{label}</span>
           <MorphIcon

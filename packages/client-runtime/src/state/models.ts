@@ -1,9 +1,11 @@
+import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { threadPullRequestsOf } from "@t3tools/shared/threadPullRequests";
 import type {
   ThreadLinkedPullRequest,
   EnvironmentId,
   MessageId,
   OrchestrationProjectShell,
+  OrchestrationV2ProviderGoal,
   OrchestrationV2RunStatus,
   OrchestrationV2ProviderFailureClass,
   OrchestrationV2ThreadProjection,
@@ -20,6 +22,8 @@ import { formatSubagentDisplayTitle } from "./subagentDisplay.ts";
 
 export interface EnvironmentProject extends OrchestrationProjectShell {
   readonly environmentId: EnvironmentId;
+  /** Derived from the environment's configured scratch root, never persisted. */
+  readonly isScratch?: true;
 }
 
 /**
@@ -101,14 +105,21 @@ export interface EnvironmentThreadShell {
   readonly latestRun: ThreadRunSummary | null;
   readonly runtime: ThreadRuntimeSummary | null;
   readonly latestUserMessageAt: string | null;
+  /** The last message the user wrote. `undefined` means the server predates it. */
+  readonly latestUserAuthoredMessageAt?: string | null;
   readonly hasPendingApprovals: boolean;
   readonly hasPendingUserInput: boolean;
+  /** What a live subagent below this thread waits on the user for. Subagent
+      rows are hidden, so the threads above them carry it. */
+  readonly pendingSubagentRequest?: PendingSubagentRequest | null;
   readonly hasActionableProposedPlan: boolean;
   readonly pendingBackgroundTasks: ReadonlyArray<
     NonNullable<OrchestrationV2ThreadShell["pendingBackgroundTasks"]>[number]
   >;
   /** Provider instances that have owned the root conversation, oldest first. */
   readonly providerInstanceHistory: ReadonlyArray<ProviderInstanceId>;
+  /** Native `/goal` on the active provider thread. */
+  readonly goal: OrchestrationV2ProviderGoal | null;
   readonly itemCount: number;
   readonly visibleItemCount: number;
   readonly createdAt: string;
@@ -116,12 +127,12 @@ export interface EnvironmentThreadShell {
   readonly archivedAt: string | null;
   readonly settledOverride: "settled" | "active" | null;
   readonly settledAt: string | null;
-  readonly autoSettleDisabledAt: string | null;
   readonly unsettledAt: string | null;
   readonly snoozedUntil: string | null;
   readonly snoozedAt: string | null;
   readonly limitRecovery?: import("@t3tools/contracts").OrchestrationV2LimitRecovery | null;
   readonly pinnedAt: string | null;
+  readonly autoSettleDisabledAt?: string | null;
   /** Slot in the user-arranged pinned order; null for keyless (legacy) pins. */
   readonly pinOrderKey: string | null;
   /** Slot in the user-arranged active order; null for keyless active threads. */
@@ -159,15 +170,23 @@ function terminalRunStatus(status: OrchestrationV2RunStatus): boolean {
   );
 }
 
-// Park runtime at idle when the post-settlement background roster is nonempty
-// so #4415 waiting-presentation Waiting (session.idle) can consume CTM runtime.
+// Park runtime at idle when the post-settlement background roster holds the
+// run's completion, so #4415 waiting-presentation Waiting (session.idle) can
+// consume CTM runtime. Only work that wakes the agent holds it: commands it
+// left running, such as a dev server, present the run's own status (#14872).
 // The server suppresses the roster while an interruptible activity run exists,
 // so a remaining roster is stronger than checkpoint-oriented waiting.
 // latestRun keeps the latest run's status for history presentation.
+// A failed latest run outranks the roster, so the failure stays visible.
 function shellRuntime(thread: OrchestrationV2ThreadShell): ThreadRuntimeSummary | null {
-  if (thread.latestRunId === null && thread.activeProviderThreadId === null) return null;
-  const hasPendingBackgroundTasks = (thread.pendingBackgroundTasks?.length ?? 0) > 0;
-  const status = hasPendingBackgroundTasks ? "idle" : (thread.activityRunStatus ?? thread.status);
+  const parkAtIdle =
+    backgroundWorkHoldsCompletion(thread.pendingBackgroundTasks ?? []) &&
+    thread.status !== "failed";
+  // A pull request watch can hold a thread that never ran.
+  if (thread.latestRunId === null && thread.activeProviderThreadId === null && !parkAtIdle) {
+    return null;
+  }
+  const status = parkAtIdle ? "idle" : (thread.activityRunStatus ?? thread.status);
   return {
     status,
     activeRunId: thread.activeRunId,
@@ -191,9 +210,12 @@ export function scopeProject(
   return { ...project, environmentId };
 }
 
+export type PendingSubagentRequest = "approval" | "user_input";
+
 export function presentThreadShell(
   environmentId: EnvironmentId,
   thread: OrchestrationV2ThreadShell,
+  pendingSubagentRequest: PendingSubagentRequest | null = null,
 ): EnvironmentThreadShell {
   const updatedAt = iso(thread.updatedAt);
   const latestRun =
@@ -235,14 +257,19 @@ export function presentThreadShell(
     latestRun,
     runtime: shellRuntime(thread),
     latestUserMessageAt: nullableIso(thread.latestUserMessageAt),
+    ...(thread.latestUserAuthoredMessageAt === undefined
+      ? {}
+      : { latestUserAuthoredMessageAt: nullableIso(thread.latestUserAuthoredMessageAt) }),
     hasPendingApprovals:
       thread.pendingRuntimeRequest !== null &&
       thread.pendingRuntimeRequest.kind !== "user_input" &&
       thread.pendingRuntimeRequest.kind !== "auth_refresh",
     hasPendingUserInput: thread.pendingRuntimeRequest?.kind === "user_input",
+    pendingSubagentRequest,
     hasActionableProposedPlan: thread.hasActionableProposedPlan,
     pendingBackgroundTasks: thread.pendingBackgroundTasks ?? [],
     providerInstanceHistory: thread.providerInstanceHistory ?? [],
+    goal: thread.goal ?? null,
     itemCount: thread.itemCount,
     visibleItemCount: thread.visibleItemCount,
     createdAt: iso(thread.createdAt),
@@ -250,12 +277,12 @@ export function presentThreadShell(
     archivedAt: nullableIso(thread.archivedAt),
     settledOverride: thread.settledOverride,
     settledAt: nullableIso(thread.settledAt),
-    autoSettleDisabledAt: nullableIso(thread.autoSettleDisabledAt ?? null),
     unsettledAt: nullableIso(thread.unsettledAt ?? null),
     snoozedUntil: nullableIso(thread.snoozedUntil ?? null),
     snoozedAt: nullableIso(thread.snoozedAt ?? null),
     limitRecovery: thread.limitRecovery ?? null,
     pinnedAt: nullableIso(thread.pinnedAt ?? null),
+    autoSettleDisabledAt: nullableIso(thread.autoSettleDisabledAt ?? null),
     pinOrderKey: thread.pinOrderKey ?? null,
     activeOrderKey: thread.activeOrderKey ?? null,
     ...(thread.lastVisitedAt === undefined
@@ -295,7 +322,10 @@ export function resolveThreadProviderStack(
   return [...previous.slice(-(THREAD_PROVIDER_STACK_LIMIT - 1)), current];
 }
 
-/** Both shell and detail timers use the activity-owning run, never last activity. */
+/**
+ * Both shell and detail timers count from the activity-owning run's work
+ * start, never last activity. A wake keeps the start of the work it continues.
+ */
 export function resolveThreadWorkingStartedAt(input: {
   readonly latestRun: Pick<
     ThreadRunSummary,

@@ -1,13 +1,13 @@
-// @effect-diagnostics nodeBuiltinImport:off - pre-ready Electron setup reads settings and prepares the Linux desktop entry synchronously before app services are available.
+// @effect-diagnostics nodeBuiltinImport:off - pre-ready Electron setup reads settings, prepares the Linux desktop entry, and asks Hyprland for its version synchronously before app services are available.
+import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
-import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
 import * as Electron from "electron";
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import * as DesktopEarlyElectronStartup from "./DesktopEarlyElectronStartup.ts";
 import { resolveDesktopAppBranding } from "./DesktopEnvironment.ts";
@@ -31,36 +31,22 @@ function readCommandLineSwitchValue(
   return value.length > 0 ? value : null;
 }
 
-export const resolveEarlyLinuxElectronOptionsFromProcess =
-  (): DesktopEarlyElectronStartup.EarlyLinuxElectronOptions =>
-    DesktopEarlyElectronStartup.resolveEarlyLinuxElectronOptions({
-      env: process.env,
-      homeDirectory: NodeOS.homedir(),
-      joinPath: NodePath.posix.join,
-      readFileString: (path) => NodeFS.readFileSync(path, "utf8"),
-      appName: resolvePackagedProductName(),
-    });
-
-function resolvePackagedProductName(): string {
-  // In packaged Linux builds the productName from `package.json` decides the
-  // XDG WM class and desktop entry name; reading it before Electron fully
-  // boots avoids a race where the .desktop entry resolves before the runtime
-  // identity is set. Dev mode always uses the "T3 Code (Dev)" identity.
-  if (Electron.app.isPackaged) {
-    try {
-      const packageJsonPath = NodePath.join(Electron.app.getAppPath(), "package.json");
-      const parsed = JSON.parse(NodeFS.readFileSync(packageJsonPath, "utf8")) as {
-        productName?: unknown;
-      };
-      if (typeof parsed.productName === "string") {
-        return parsed.productName;
+export const resolveEarlyLinuxElectronOptionsFromProcess = (
+  homeDirectory: string,
+): DesktopEarlyElectronStartup.EarlyLinuxElectronOptions =>
+  DesktopEarlyElectronStartup.resolveEarlyLinuxElectronOptions({
+    env: process.env,
+    homeDirectory,
+    appName: (() => {
+      try {
+        return Electron.app.getName();
+      } catch {
+        return undefined;
       }
-    } catch {
-      // Fall through to the default below.
-    }
-  }
-  return "T3 Code (Experimental)";
-}
+    })(),
+    joinPath: NodePath.posix.join,
+    readFileString: (path) => NodeFS.readFileSync(path, "utf8"),
+  });
 
 export class DesktopPreReadyElectronOptions extends Context.Service<
   DesktopPreReadyElectronOptions,
@@ -72,13 +58,15 @@ export class DesktopPreReadyElectronOptions extends Context.Service<
 
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
-  const platform = yield* HostProcessPlatform;
+  const platform = yield* HostProcess.Platform;
+  const homeDirectory = yield* HostProcess.HomeDirectory;
   return yield* Effect.sync((): DesktopPreReadyElectronOptions["Service"] => {
     const linuxPasswordStoreCommandLine =
       platform === "linux"
         ? readCommandLineSwitchValue(Electron.app.commandLine, "password-store")
         : null;
-    const linux = platform === "linux" ? resolveEarlyLinuxElectronOptionsFromProcess() : null;
+    const linux =
+      platform === "linux" ? resolveEarlyLinuxElectronOptionsFromProcess(homeDirectory) : null;
 
     if (linux !== null) {
       // The portal also requires a valid desktop entry. An AppImage update may
@@ -86,7 +74,7 @@ export const make = Effect.gen(function* () {
       try {
         const applicationsDir = NodePath.posix.join(
           process.env.XDG_DATA_HOME?.trim() ||
-            NodePath.posix.join(NodeOS.homedir(), ".local", "share"),
+            NodePath.posix.join(homeDirectory, ".local", "share"),
           "applications",
         );
         NodeFS.mkdirSync(applicationsDir, { recursive: true });
@@ -117,13 +105,13 @@ export const make = Effect.gen(function* () {
           renderUrlHandlerDesktopEntry({
             displayName: resolveDesktopAppBranding({
               isDevelopment: linux.isDevelopment,
-              appName: resolvePackagedProductName(),
               appVersion: Electron.app.getVersion(),
+              appName: linux.appName,
             }).displayName,
             execTarget: process.env.APPIMAGE?.trim() || process.execPath,
             scheme: ElectronProtocol.getDesktopScheme({
               isDevelopment: linux.isDevelopment,
-              appName: resolvePackagedProductName(),
+              appName: linux.appName,
             }),
             ...(iconPath === undefined ? {} : { iconPath }),
           }),
@@ -138,6 +126,24 @@ export const make = Effect.gen(function* () {
       Electron.app.commandLine.appendSwitch("class", linux.linuxWmClass);
       if (linux.passwordStore !== null && linuxPasswordStoreCommandLine === null) {
         Electron.app.commandLine.appendSwitch("password-store", linux.passwordStore);
+      }
+      // Chromium keeps only the last --disable-features value, so pass the merged list.
+      const disableFeatures = DesktopEarlyElectronStartup.resolveLinuxDisableFeaturesSwitch({
+        env: process.env,
+        ozonePlatform: readCommandLineSwitchValue(Electron.app.commandLine, "ozone-platform"),
+        enableFeatures: readCommandLineSwitchValue(Electron.app.commandLine, "enable-features"),
+        disableFeatures: readCommandLineSwitchValue(Electron.app.commandLine, "disable-features"),
+        // Runs only on Hyprland Wayland sessions without an explicit feature override.
+        readHyprctlVersionJson: () =>
+          NodeChildProcess.execFileSync("hyprctl", ["version", "-j"], {
+            encoding: "utf8",
+            stdio: ["ignore", "pipe", "ignore"],
+            timeout: 1000,
+            maxBuffer: 64 * 1024,
+          }),
+      });
+      if (disableFeatures !== null) {
+        Electron.app.commandLine.appendSwitch("disable-features", disableFeatures);
       }
     }
 

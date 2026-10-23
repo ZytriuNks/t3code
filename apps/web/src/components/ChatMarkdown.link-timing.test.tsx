@@ -28,10 +28,14 @@ vi.mock("./ui/tooltip", async () => {
     TooltipPopup: () => null,
   };
 });
+vi.mock("../state/query", () => ({
+  useEnvironmentQuery: () => ({ data: null, error: null, refresh: () => {} }),
+}));
 vi.mock("../state/use-atom-query-runner", () => ({ useAtomQueryRunner: () => vi.fn() }));
 vi.mock("../state/use-atom-command", () => ({ useAtomCommand: () => vi.fn() }));
 vi.mock("../state/session", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../state/session")>()),
+  useEnvironmentScope: () => false,
   usePreparedConnection: () => ({ _tag: "Loading" }),
 }));
 vi.mock("../state/entities", () => ({

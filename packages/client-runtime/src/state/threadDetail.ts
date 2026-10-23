@@ -1,6 +1,6 @@
 import type { OrchestrationV2ThreadProjection, ScopedThreadRef } from "@t3tools/contracts";
 import * as Option from "effect/Option";
-import { AsyncResult, Atom } from "effect/unstable/reactivity";
+import { AsyncResult, Atom } from "effect/reactivity";
 
 import {
   deriveThreadQueueWorkflowState,
@@ -8,7 +8,7 @@ import {
   type ThreadQueueWorkflowState,
 } from "./threadWorkflows.ts";
 import { deriveThreadTurnSubagents, type ThreadTurnSubagents } from "./threadSubagents.ts";
-import type { EnvironmentThread, EnvironmentThreadShell } from "./models.ts";
+import type { EnvironmentThread } from "./models.ts";
 import { EMPTY_ENVIRONMENT_THREAD_STATE, type EnvironmentThreadState } from "./threadState.ts";
 import {
   createQuestionHistoryProjector,
@@ -20,71 +20,6 @@ import { arrayElementsEqual, parseThreadKey, threadKey } from "./entities.ts";
 const EMPTY_VISIBLE_TURN_ITEMS: OrchestrationV2ThreadProjection["visibleTurnItems"] = Object.freeze(
   [],
 );
-
-/**
- * Combine detail-only collections with the shell's authoritative thread metadata.
- *
- * Shell and detail subscriptions are intentionally independent. A cached detail can
- * therefore briefly outlive a newer shell snapshot after reconnecting. Workspace
- * consumers must use the shell branch/worktree/project fields so they do not target
- * a stale checkout while retaining messages, runs, plans, and checkpoints
- * from the detail subscription.
- */
-export function mergeEnvironmentThread(
-  detail: EnvironmentThread | null,
-  shell: EnvironmentThreadShell | null,
-): EnvironmentThread | null {
-  if (detail === null || shell === null) {
-    return detail;
-  }
-  if (detail.environmentId !== shell.environmentId || detail.projection.thread.id !== shell.id) {
-    return detail;
-  }
-
-  const source = shell.source;
-  return {
-    ...detail,
-    projection: {
-      ...detail.projection,
-      thread: {
-        ...detail.projection.thread,
-        projectId: source.projectId,
-        title: source.title,
-        providerInstanceId: source.providerInstanceId,
-        modelSelection: source.modelSelection,
-        runtimeMode: source.runtimeMode,
-        interactionMode: source.interactionMode,
-        branch: source.branch,
-        worktreePath: source.worktreePath,
-        linkedPullRequest: source.linkedPullRequest,
-        pullRequests: source.pullRequests,
-        branchPullRequest: source.branchPullRequest,
-        activeProviderThreadId: source.activeProviderThreadId,
-        historyOrigin: source.historyOrigin,
-        lineage: source.lineage,
-        forkedFrom: source.forkedFrom,
-        createdAt: source.createdAt,
-        updatedAt: source.updatedAt,
-        archivedAt: source.archivedAt,
-        settledOverride: source.settledOverride,
-        settledAt: source.settledAt,
-        unsettledAt: source.unsettledAt,
-        activeOrderKey: source.activeOrderKey,
-        snoozedUntil: source.snoozedUntil,
-        snoozedAt: source.snoozedAt,
-        limitRecovery: source.limitRecovery,
-        pinnedAt: source.pinnedAt,
-        pinOrderKey: source.pinOrderKey,
-        lastVisitedAt:
-          source.lastVisitedAt === undefined
-            ? detail.projection.thread.lastVisitedAt
-            : source.lastVisitedAt,
-        titleRegeneration: source.titleRegeneration,
-        deletedAt: source.deletedAt,
-      },
-    },
-  };
-}
 
 export function createEnvironmentThreadDetailAtoms<E>(
   threadStateAtom: (
@@ -247,6 +182,7 @@ export function createEnvironmentThreadDetailAtoms<E>(
       Atom.withLabel(`environment-thread-history:${key}`),
     ),
   );
+
   const textPlaybackAtomFamily = Atom.family((key: string) =>
     Atom.make((get) => get(threadStateValueAtomFamily(key)).textPlayback ?? null).pipe(
       Atom.setIdleTTL(0),

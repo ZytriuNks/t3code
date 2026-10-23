@@ -67,10 +67,14 @@ vi.mock("./ui/tooltip", async () => {
     TooltipPopup: () => null,
   };
 });
+vi.mock("../state/query", () => ({
+  useEnvironmentQuery: () => ({ data: null, error: null, refresh: () => {} }),
+}));
 vi.mock("../state/use-atom-query-runner", () => ({ useAtomQueryRunner: () => vi.fn() }));
 vi.mock("../state/use-atom-command", () => ({ useAtomCommand: () => vi.fn() }));
 vi.mock("../state/session", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../state/session")>()),
+  useEnvironmentScope: () => false,
   usePreparedConnection: () => ({ _tag: "Loading" }),
 }));
 vi.mock("../state/entities", () => ({
@@ -1541,7 +1545,7 @@ describe("pre-commit reservation for visible word reflow", () => {
             : kind === "citation"
               ? body
                   .querySelector(
-                    "[data-smooth-atomic] [data-assistant-citation-chip] [data-slot='context-chip-label']",
+                    "[data-smooth-atomic] [data-slot='popover-trigger'] [data-slot='context-chip-label']",
                   )
                   ?.textContent?.endsWith("…") === true
               : body.querySelector("p > span")?.textContent === "Terminal output" &&
@@ -1557,8 +1561,9 @@ describe("pre-commit reservation for visible word reflow", () => {
       expect(liveBody().querySelector("code")?.textContent).toBe("code");
       const template = document.createElement("template");
       template.innerHTML = measuredBodies.at(-1)!;
-      const liveChip = liveBody().querySelector("[data-slot='context-chip']");
-      const measuredChip = template.content.querySelector("[data-slot='context-chip']");
+      const chipSelector = "[data-slot='context-chip'], [data-slot='popover-trigger']";
+      const liveChip = liveBody().querySelector(chipSelector);
+      const measuredChip = template.content.querySelector(chipSelector);
       if (liveChip) {
         expect(measuredChip?.className).toBe(liveChip.className);
         expect(measuredChip?.textContent).toBe(liveChip.textContent);

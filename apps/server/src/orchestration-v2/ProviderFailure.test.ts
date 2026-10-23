@@ -16,10 +16,13 @@ import {
   makeProviderFailureTurnItem,
   MAX_PROVIDER_FAILURE_CODE_LENGTH,
   MAX_PROVIDER_FAILURE_MESSAGE_LENGTH,
-} from "./ProviderFailure.ts";
-import { IdAllocatorV2, layer as idAllocatorLayer } from "./IdAllocator.ts";
-import { ContextHandoffBudgetError } from "./ContextHandoffDelivery.ts";
-import { ProviderAdapterTurnStartError } from "./ProviderAdapter.ts";
+} from "@t3tools/provider-core/server/failure";
+import {
+  IdAllocatorV2,
+  layer as idAllocatorLayer,
+} from "@t3tools/provider-core/server/IdAllocator";
+import { ContextHandoffBudgetError } from "@t3tools/provider-core/server/failure";
+import { ProviderAdapterTurnStartError } from "@t3tools/provider-core/server/ProviderAdapter";
 import { CodexAppServerRequestError } from "effect-codex-app-server/errors";
 
 it("preserves a managed Codex sharing rejection received as an RPC error", () => {

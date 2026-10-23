@@ -3,8 +3,12 @@ import type {
   OrchestrationV2ProviderThread,
   OrchestrationV2Run,
   OrchestrationV2TurnItem,
+  ThreadId,
+  ThreadPullRequestLink,
 } from "@t3tools/contracts";
 import { isOrchestrationV2WorkActive } from "@t3tools/contracts";
+
+import { threadPullRequestKeyOf } from "./threadPullRequests.ts";
 
 const BACKGROUND_TURN_ITEM_TYPES = new Set<OrchestrationV2TurnItem["type"]>([
   "command_execution",
@@ -47,7 +51,48 @@ void TERMINAL_RUN_STATUSES;
 
 export type PendingBackgroundWorkTask = OrchestrationV2PendingBackgroundTask;
 
+/**
+ * Whether a turn-item update can end background work that a settled run is
+ * still waiting on: an item of a background type that is no longer active.
+ * Streaming output on a running item, and every other item type, cannot.
+ */
+export function turnItemUpdateCanEndBackgroundWork(
+  item: Pick<OrchestrationV2TurnItem, "type" | "status">,
+): boolean {
+  return BACKGROUND_TURN_ITEM_TYPES.has(item.type) && !isOrchestrationV2WorkActive(item.status);
+}
+
+/**
+ * Whether background work left behind by a completed root run holds back its
+ * completion alert (desktop/web notification and the mobile push). Commands,
+ * such as dev servers and other long-lived shells, do not: the agent is done
+ * and may leave them running for hours. Subagents and monitors do, because
+ * they wake the agent and it continues (#13625). Work the adapter cannot name,
+ * including kinds this build does not know, holds as the conservative choice.
+ */
+export function backgroundWorkHoldsCompletion(
+  tasks: ReadonlyArray<Pick<PendingBackgroundWorkTask, "kind">>,
+): boolean {
+  return tasks.some((task) => backgroundWorkKindHoldsCompletion(task.kind));
+}
+
+function backgroundWorkKindHoldsCompletion(kind: PendingBackgroundWorkTask["kind"]): boolean {
+  switch (kind) {
+    case "command":
+      return false;
+    case "subagent":
+    case "monitor":
+    case "background_task":
+      return true;
+  }
+}
+
 type PendingBackgroundWorkRun = Pick<OrchestrationV2Run, "id" | "ordinal" | "status">;
+
+type PendingBackgroundWorkPullRequest = Pick<
+  ThreadPullRequestLink,
+  "host" | "repository" | "number" | "url" | "source" | "watch"
+>;
 
 type PendingBackgroundWorkProviderThread = Pick<
   OrchestrationV2ProviderThread,
@@ -66,6 +111,7 @@ type PendingBackgroundWorkTurnItem = {
   } | null;
   readonly input?: unknown;
   readonly prompt?: string | undefined;
+  readonly childThreadId?: ThreadId | null;
 };
 
 function isLatestRunSettledForBackgroundWait(
@@ -105,6 +151,26 @@ function descriptionFromTurnItem(item: PendingBackgroundWorkTurnItem): string | 
   return undefined;
 }
 
+function pendingTaskFromTurnItem(
+  taskId: string,
+  item: PendingBackgroundWorkTurnItem,
+): PendingBackgroundWorkTask {
+  const description = descriptionFromTurnItem(item);
+  const named = { taskId, ...(description === undefined ? {} : { description }) };
+  switch (item.type) {
+    case "subagent":
+      return {
+        ...named,
+        kind: "subagent",
+        ...(item.childThreadId == null ? {} : { childThreadId: item.childThreadId }),
+      };
+    case "command_execution":
+      return { ...named, kind: "command" };
+    default:
+      return { ...named, kind: "background_task" };
+  }
+}
+
 function nativeTaskIdFromTurnItem(item: PendingBackgroundWorkTurnItem): string {
   const nativeId = item.nativeItemRef?.nativeId;
   if (typeof nativeId === "string" && nativeId.length > 0) {
@@ -114,11 +180,38 @@ function nativeTaskIdFromTurnItem(item: PendingBackgroundWorkTurnItem): string {
 }
 
 /**
+ * The turn items the pending-work list names, without its settled-run gate.
+ * Stop ends exactly these, so the list and Stop cannot disagree.
+ */
+export function pendingBackgroundTurnItems<Item extends PendingBackgroundWorkTurnItem>(input: {
+  readonly turnItems: ReadonlyArray<Item>;
+  readonly runs?: ReadonlyArray<PendingBackgroundWorkRun>;
+}): ReadonlyArray<Item> {
+  const rolledBackRunIds = new Set(
+    (input.runs ?? []).filter((run) => run.status === "rolled_back").map((run) => String(run.id)),
+  );
+  return input.turnItems.filter(
+    (item) =>
+      BACKGROUND_TURN_ITEM_TYPES.has(item.type) &&
+      isOrchestrationV2WorkActive(item.status) &&
+      !(item.type === "dynamic_tool" && isPersistentDynamicToolInput(item.input)) &&
+      // Null/absent run id stays eligible; only known rolled_back runs drop.
+      (item.runId === undefined ||
+        item.runId === null ||
+        !rolledBackRunIds.has(String(item.runId))),
+  );
+}
+
+/**
  * Derive one normalized pending-background-work list for post-settlement UI.
  *
  * Sources:
  * - Provider-thread roster (Claude SDK background tasks)
  * - Active command_execution / dynamic_tool / subagent turn items
+ * - Pull request watches, as monitors: a watch wakes the agent, so the thread
+ *   stays working between wakes instead of returning to the inbox. Callers
+ *   that pick a run to interrupt leave `pullRequests` out; Stop ends watches
+ *   on its own.
  *
  * Gated on latest root run settlement. Dedupes by native task ID. Excludes
  * the roster while any interruptible foreground run remains active. Excludes
@@ -139,6 +232,7 @@ export function derivePendingBackgroundWork(input: {
    * pass projection runs so policy cannot drift.
    */
   readonly runs?: ReadonlyArray<PendingBackgroundWorkRun>;
+  readonly pullRequests?: ReadonlyArray<PendingBackgroundWorkPullRequest> | undefined;
 }): ReadonlyArray<PendingBackgroundWorkTask> {
   const hasActiveRun =
     input.hasActiveRun ??
@@ -149,14 +243,15 @@ export function derivePendingBackgroundWork(input: {
   if (hasActiveRun) {
     return [];
   }
+  // A thread that never ran waits on nothing else, but a watch started on it still wakes it.
+  if (input.latestRun == null) {
+    return pullRequestWatchTasks(input.pullRequests);
+  }
   if (!isLatestRunSettledForBackgroundWait(input.latestRun)) {
     return [];
   }
 
   const byTaskId = new Map<string, PendingBackgroundWorkTask>();
-  const rolledBackRunIds = new Set(
-    (input.runs ?? []).filter((run) => run.status === "rolled_back").map((run) => String(run.id)),
-  );
 
   const providerThreads =
     input.activeProviderThreadId === undefined || input.activeProviderThreadId === null
@@ -168,61 +263,41 @@ export function derivePendingBackgroundWork(input: {
       if (task.taskId.length === 0 || byTaskId.has(task.taskId)) {
         continue;
       }
-      const description = task.description?.trim();
+      const { description: rawDescription, ...named } = task;
+      const description = rawDescription?.trim();
       byTaskId.set(task.taskId, {
-        taskId: task.taskId,
+        ...named,
         ...(description === undefined || description.length === 0 ? {} : { description }),
-        ...(task.taskType === undefined ? {} : { taskType: task.taskType }),
       });
     }
   }
 
-  for (const item of input.turnItems) {
-    if (!BACKGROUND_TURN_ITEM_TYPES.has(item.type)) {
-      continue;
-    }
-    if (!isOrchestrationV2WorkActive(item.status)) {
-      continue;
-    }
-    if (item.type === "dynamic_tool" && isPersistentDynamicToolInput(item.input)) {
-      continue;
-    }
-    // Null/absent run id stays eligible; only known rolled_back runs drop.
-    const itemRunId = item.runId;
-    if (itemRunId !== undefined && itemRunId !== null && rolledBackRunIds.has(String(itemRunId))) {
-      continue;
-    }
-
+  for (const item of pendingBackgroundTurnItems(input)) {
     const taskId = nativeTaskIdFromTurnItem(item);
     if (byTaskId.has(taskId)) {
       continue;
     }
 
-    const description = descriptionFromTurnItem(item);
-    byTaskId.set(taskId, {
-      taskId,
-      ...(description === undefined ? {} : { description }),
-      taskType: item.type,
-    });
+    byTaskId.set(taskId, pendingTaskFromTurnItem(taskId, item));
   }
+
+  for (const task of pullRequestWatchTasks(input.pullRequests)) byTaskId.set(task.taskId, task);
 
   return Array.from(byTaskId.values());
 }
 
-export function formatPendingBackgroundWorkLabel(
-  tasks: ReadonlyArray<PendingBackgroundWorkTask>,
-): string | null {
-  if (tasks.length === 0) {
-    return null;
-  }
-  const firstDescription = tasks[0]?.description?.trim();
-  if (tasks.length === 1) {
-    return firstDescription && firstDescription.length > 0
-      ? `Waiting on background task: ${firstDescription}`
-      : "Waiting on a background task";
-  }
-  if (firstDescription && firstDescription.length > 0) {
-    return `Waiting on ${tasks.length} background tasks: ${firstDescription}, …`;
-  }
-  return `Waiting on ${tasks.length} background tasks`;
+function pullRequestWatchTasks(
+  pullRequests: ReadonlyArray<PendingBackgroundWorkPullRequest> | undefined,
+): Array<PendingBackgroundWorkTask> {
+  return (pullRequests ?? []).flatMap((link) =>
+    link.watch === undefined || link.source === "stack-dismissed"
+      ? []
+      : [
+          {
+            taskId: `pull-request-watch:${threadPullRequestKeyOf(link)}`,
+            description: `Watching pull request #${link.number}`,
+            kind: "monitor" as const,
+          },
+        ],
+  );
 }

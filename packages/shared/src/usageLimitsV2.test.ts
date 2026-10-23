@@ -14,7 +14,9 @@ const run = {
   rootNodeId: NodeId.make("root-node"),
   status: "failed" as const,
 };
-const message = "ChatGPT subscription usage limit reached";
+/** The provider's fixed copy for a managed-sharing usage limit. */
+const MANAGED_SHARING_MESSAGE =
+  "Your ChatGPT usage limit was reached. Check ChatGPT Usage settings for your available allowance.";
 const failure = (
   overrides: Partial<Extract<OrchestrationV2TurnItem, { type: "error" }>> = {},
 ): OrchestrationV2TurnItem => ({
@@ -36,7 +38,7 @@ const failure = (
   failure: {
     class: "usage_limit",
     code: "subscription_sharing_usage_limit_exceeded",
-    message,
+    message: MANAGED_SHARING_MESSAGE,
     retryable: false,
   },
   ...overrides,
@@ -44,28 +46,77 @@ const failure = (
 
 describe("ChatGPT usage notice for V2 runs", () => {
   it("recognizes the current run's subscription-sharing failure", () => {
-    expect(isChatGptUsageLimitFailure([failure()], message, run)).toBe(true);
+    expect(isChatGptUsageLimitFailure([failure()], run)).toBe(true);
   });
 
-  it("does not reuse an older run's failure when the message matches", () => {
-    expect(
-      isChatGptUsageLimitFailure([failure()], message, { ...run, id: RunId.make("next-run") }),
-    ).toBe(false);
-    expect(isChatGptUsageLimitFailure([failure()], message, null)).toBe(false);
+  it("recognizes managed sharing the provider reports as a provider_error", () => {
+    // Managed sharing keeps the provider_error class and a null retryable; only
+    // the failure code names the limit, so the class cannot drive the notice.
+    const providerError = failure({
+      failure: {
+        class: "provider_error",
+        code: "subscription_sharing_usage_limit_exceeded",
+        message: MANAGED_SHARING_MESSAGE,
+        retryable: null,
+      },
+    });
+    expect(isChatGptUsageLimitFailure([providerError], run)).toBe(true);
   });
 
-  it("does not turn a different or cleared current error into a ChatGPT notice", () => {
-    expect(isChatGptUsageLimitFailure([failure()], "Connection lost", run)).toBe(false);
-    expect(isChatGptUsageLimitFailure([failure()], null, run)).toBe(false);
+  it("recognizes the code whatever failure class the provider attaches", () => {
+    for (const failureClass of ["provider_error", "usage_limit", "unknown"] as const) {
+      const item = failure({
+        failure: {
+          class: failureClass,
+          code: "subscription_sharing_usage_limit_exceeded",
+          message: MANAGED_SHARING_MESSAGE,
+          retryable: null,
+        },
+      });
+      expect(isChatGptUsageLimitFailure([item], run)).toBe(true);
+    }
+  });
+
+  it("does not show a notice for other managed-sharing codes or a missing code", () => {
+    const unavailable = failure({
+      failure: {
+        class: "provider_error",
+        code: "subscription_sharing_usage_unavailable",
+        message: "ChatGPT usage is temporarily unavailable. Try again shortly.",
+        retryable: null,
+      },
+    });
+    const uncoded = failure({
+      failure: {
+        class: "provider_error",
+        code: null,
+        message: MANAGED_SHARING_MESSAGE,
+        retryable: null,
+      },
+    });
+    expect(isChatGptUsageLimitFailure([unavailable], run)).toBe(false);
+    expect(isChatGptUsageLimitFailure([uncoded], run)).toBe(false);
+  });
+
+  it("does not reuse an older run's failure", () => {
+    expect(isChatGptUsageLimitFailure([failure()], { ...run, id: RunId.make("next-run") })).toBe(
+      false,
+    );
+    expect(isChatGptUsageLimitFailure([failure()], null)).toBe(false);
   });
 
   it("uses the latest failure in the run instead of a historical matching code", () => {
     const newer = failure({
       id: TurnItemId.make("error-two"),
       ordinal: 2,
-      failure: { class: "usage_limit", code: "rate_limit_exceeded", message, retryable: true },
+      failure: {
+        class: "usage_limit",
+        code: "rate_limit_exceeded",
+        message: MANAGED_SHARING_MESSAGE,
+        retryable: true,
+      },
     });
-    expect(isChatGptUsageLimitFailure([failure(), newer], message, run)).toBe(false);
+    expect(isChatGptUsageLimitFailure([failure(), newer], run)).toBe(false);
   });
 
   it("ignores interleaved errors owned by a different run", () => {
@@ -73,23 +124,19 @@ describe("ChatGPT usage notice for V2 runs", () => {
       runId: RunId.make("other-run"),
       failure: { class: "unknown", code: null, message: "Other failure", retryable: null },
     });
-    expect(isChatGptUsageLimitFailure([failure(), other], message, run)).toBe(true);
-    expect(isChatGptUsageLimitFailure([], message, run)).toBe(false);
+    expect(isChatGptUsageLimitFailure([failure(), other], run)).toBe(true);
+    expect(isChatGptUsageLimitFailure([], run)).toBe(false);
   });
 
   it("does not report a subagent's sharing limit as the root run's error", () => {
     const child = failure({ nodeId: NodeId.make("subagent-node") });
-    expect(isChatGptUsageLimitFailure([child], message, run)).toBe(false);
-    expect(isChatGptUsageLimitFailure([failure(), child], message, run)).toBe(true);
+    expect(isChatGptUsageLimitFailure([child], run)).toBe(false);
+    expect(isChatGptUsageLimitFailure([failure(), child], run)).toBe(true);
   });
 
   it("hides old errors while a run is active or has recovered", () => {
-    expect(isChatGptUsageLimitFailure([failure()], message, { ...run, status: "running" })).toBe(
-      false,
-    );
-    expect(isChatGptUsageLimitFailure([failure()], message, { ...run, status: "completed" })).toBe(
-      false,
-    );
-    expect(isChatGptUsageLimitFailure([failure({ status: "running" })], message, run)).toBe(false);
+    expect(isChatGptUsageLimitFailure([failure()], { ...run, status: "running" })).toBe(false);
+    expect(isChatGptUsageLimitFailure([failure()], { ...run, status: "completed" })).toBe(false);
+    expect(isChatGptUsageLimitFailure([failure({ status: "running" })], run)).toBe(false);
   });
 });

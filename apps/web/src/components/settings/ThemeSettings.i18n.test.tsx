@@ -35,6 +35,10 @@ vi.mock("../../hooks/useSettings", () => ({
 // canvas for the terminal preview. None of them carries the copy under test,
 // so each is replaced by the smallest stand-in that keeps them out of this
 // test's module graph.
+vi.mock("~/components/MorphIcon", () => ({ MorphIcon: () => null }));
+vi.mock("~/components/ui/scroll-frame", () => ({
+  ScrollFrame: ({ children }: { children?: ReactNode }) => <div>{children}</div>,
+}));
 vi.mock("~/terminal/ghostty/surface", () => ({
   GhosttyTerminalSurface: { create: ghostty.create },
 }));

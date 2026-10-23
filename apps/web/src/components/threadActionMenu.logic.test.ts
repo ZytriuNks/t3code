@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  buildDraftActionMenuItems,
   buildLegacySidebarThreadActionMenuItems,
   buildThreadActionMenuItems,
   type ThreadActionMenuState,
 } from "./threadActionMenu.logic";
 
 const baseState: ThreadActionMenuState = {
+  canOperate: true,
   branch: null,
   projectFilter: null,
   isPinned: false,
@@ -38,66 +40,58 @@ function allIds(state: ThreadActionMenuState): string[] {
   return flatten(buildThreadActionMenuItems(state));
 }
 
-describe("buildLegacySidebarThreadActionMenuItems", () => {
-  it("matches the shared single-thread structure without settlement, snooze, or project filtering", () => {
-    const items = buildLegacySidebarThreadActionMenuItems({
-      branch: "feat/menu",
-      isPinned: true,
-      supportsPinning: true,
-      supportsTitleRegeneration: true,
-      isRegeneratingTitle: false,
-      isRunning: true,
-    });
+describe("buildThreadActionMenuItems", () => {
+  it.each([false, true])(
+    "disables both lifecycle directions without permission (reversed: %s)",
+    (reversed) => {
+      const items = buildThreadActionMenuItems({
+        ...baseState,
+        canOperate: false,
+        isPinned: reversed,
+        isSettled: reversed,
+        isSnoozed: reversed,
+      });
+      const expected = reversed
+        ? [
+            "unpin",
+            "unsettle",
+            "unsnooze",
+            "rename",
+            "regenerate-title",
+            "auto-settle",
+            "archive",
+            "delete",
+          ]
+        : [
+            "pin",
+            "settle",
+            "snooze",
+            "rename",
+            "regenerate-title",
+            "auto-settle",
+            "archive",
+            "delete",
+          ];
+      expect(items.filter((item) => item.disabled).map((item) => item.id)).toEqual(expected);
+      expect(
+        items.find((item) => item.id === "snooze")?.children?.every((child) => child.disabled) ??
+          true,
+      ).toBe(true);
+    },
+  );
 
-    expect(items.map((item) => item.id)).toEqual([
+  it("preserves local actions and restores mutations after a grant", () => {
+    const denied = buildThreadActionMenuItems({ ...baseState, canOperate: false, branch: "main" });
+    expect(denied.filter((item) => !item.disabled).map((item) => item.id)).toEqual([
       "new-thread-on-branch",
-      "unpin",
-      "rename",
-      "regenerate-title",
       "mark-unread",
       "copy",
       "project-settings",
-      "archive",
-      "delete",
     ]);
-    expect(items[0]).toMatchObject({
-      label: "New thread on feat/menu",
-      icon: "message-square-plus",
-    });
-    expect(items[1]).toMatchObject({ label: "Unpin thread", icon: "pin-off" });
-    expect(items[5]?.children?.map(({ id, label }) => [id, label])).toEqual([
-      ["copy-path", "Path"],
-      ["copy-branch", "Branch"],
-      ["copy-thread-id", "Thread ID"],
-    ]);
-    expect(items.at(-2)).toMatchObject({ id: "archive", disabled: true, separatorBefore: true });
-    expect(allIdsFrom(items)).not.toContain("settle");
-    expect(allIdsFrom(items)).not.toContain("snooze");
-    expect(allIdsFrom(items)).not.toContain("auto-settle");
-    expect(allIdsFrom(items)).not.toContain("filter-by-project");
+    const allowed = buildThreadActionMenuItems({ ...baseState, canOperate: true });
+    expect(allowed.every((item) => !item.disabled)).toBe(true);
   });
 
-  it("respects each thread environment's pinning and title regeneration capabilities", () => {
-    expect(
-      buildLegacySidebarThreadActionMenuItems({
-        branch: null,
-        isPinned: false,
-        supportsPinning: false,
-        supportsTitleRegeneration: false,
-        isRegeneratingTitle: false,
-        isRunning: false,
-      }).map((item) => item.id),
-    ).toEqual(["rename", "mark-unread", "copy", "project-settings", "archive", "delete"]);
-  });
-});
-
-function allIdsFrom(
-  items: ReadonlyArray<{ id: string; children?: ReadonlyArray<{ id: string }> }>,
-) {
-  return items.flatMap((item) => [item.id, ...(item.children?.map((child) => child.id) ?? [])]);
-}
-
-describe("buildThreadActionMenuItems", () => {
   it("hides lifecycle items when the environment lacks the capabilities", () => {
     expect(
       ids({
@@ -228,5 +222,102 @@ describe("buildThreadActionMenuItems", () => {
       (item) => item.id === "archive",
     );
     expect(archiveItem?.disabled).toBe(true);
+  });
+});
+
+describe("buildDraftActionMenuItems", () => {
+  it("offers only the copy values the draft has", () => {
+    const items = buildDraftActionMenuItems({ hasPath: false, hasBranch: true, hasProject: true });
+    expect(items[0]).toMatchObject({ id: "copy", disabled: false });
+    expect(items[0]?.children?.map((item) => item.id)).toEqual(["copy-branch"]);
+
+    const noCopy = buildDraftActionMenuItems({
+      hasPath: false,
+      hasBranch: false,
+      hasProject: true,
+    });
+    expect(noCopy[0]).toMatchObject({ id: "copy", disabled: true, children: [] });
+  });
+
+  it("drops project settings without a project and keeps discard last", () => {
+    const items = buildDraftActionMenuItems({ hasPath: true, hasBranch: false, hasProject: false });
+    expect(items.map((item) => item.id)).toEqual(["copy", "discard"]);
+    expect(items.at(-1)).toMatchObject({ label: "Discard draft", destructive: true });
+  });
+});
+
+describe("legacy sidebar thread actions", () => {
+  const input = {
+    canOperate: true,
+    branch: null,
+    isPinned: false,
+    supportsPinning: true,
+    supportsTitleRegeneration: true,
+    isRegeneratingTitle: false,
+    isRunning: false,
+  };
+
+  it("preserves the Alpha actions and copy submenu without modern lifecycle actions", () => {
+    const items = buildLegacySidebarThreadActionMenuItems(input);
+    expect(items.map((item) => item.id)).toEqual([
+      "pin",
+      "rename",
+      "regenerate-title",
+      "mark-unread",
+      "copy",
+      "project-settings",
+      "archive",
+      "delete",
+    ]);
+    expect(items.find((item) => item.id === "copy")?.children?.map((item) => item.id)).toEqual([
+      "copy-path",
+      "copy-thread-id",
+    ]);
+    expect(items.filter((item) => item.separatorBefore).map((item) => item.id)).toEqual([
+      "rename",
+      "copy",
+      "archive",
+    ]);
+  });
+
+  it("offers the reverse pin action and the existing branch", () => {
+    const items = buildLegacySidebarThreadActionMenuItems({
+      ...input,
+      isPinned: true,
+      branch: "review",
+    });
+    expect(items.map((item) => item.id)).toContain("unpin");
+    expect(items.map((item) => item.id)).not.toContain("pin");
+    expect(items.find((item) => item.id === "copy")?.children?.map((item) => item.id)).toEqual([
+      "copy-path",
+      "copy-branch",
+      "copy-thread-id",
+    ]);
+  });
+
+  it("keeps local copy and read actions usable without operate permission", () => {
+    const items = buildLegacySidebarThreadActionMenuItems({ ...input, canOperate: false });
+    for (const item of items) {
+      expect(item.disabled === true).toBe(
+        ["pin", "rename", "regenerate-title", "archive", "delete"].includes(item.id),
+      );
+    }
+  });
+
+  it("respects older servers and busy threads", () => {
+    const items = buildLegacySidebarThreadActionMenuItems({
+      ...input,
+      supportsPinning: false,
+      supportsTitleRegeneration: false,
+      isRunning: true,
+    });
+    expect(items.map((item) => item.id)).not.toContain("pin");
+    expect(items.map((item) => item.id)).not.toContain("regenerate-title");
+    expect(items.find((item) => item.id === "archive")?.disabled).toBe(true);
+    expect(
+      buildLegacySidebarThreadActionMenuItems({ ...input, isRegeneratingTitle: true }).find(
+        (item) => item.id === "regenerate-title",
+      )?.disabled,
+    ).toBe(true);
   });
 });

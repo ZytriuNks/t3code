@@ -1,14 +1,10 @@
-import {
-  Maximize2Icon,
-  Minimize2Icon,
-  PanelBottomIcon,
-  PanelRightIcon,
-  SquareMenuIcon,
-} from "lucide-react";
-import { memo, type ReactElement, type ReactNode, type RefObject } from "react";
+import { PanelBottomIcon, PanelRightIcon, SquareMenuIcon } from "lucide-react";
+import { Maximize2, Minimize2 } from "lucide";
+import { MorphIcon } from "~/components/MorphIcon";
+import { memo, type ReactElement } from "react";
 
 import type { ThreadPanelPresentation } from "../../rightPanelLayout";
-import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
+import { PopoverCreateHandle, PopoverTrigger } from "../ui/popover";
 import { Toggle } from "../ui/toggle";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 
@@ -21,10 +17,8 @@ export interface PanelLayoutControlsProps {
   terminalShortcutLabel: string | null;
   threadPanelOpen: boolean;
   threadPanelPresentation: ThreadPanelPresentation;
-  threadPanelPopoverAnchor?: RefObject<Element | null>;
-  threadPanelPopoverContent?: ReactNode;
+  threadPanelPopoverHandle?: ReturnType<typeof PopoverCreateHandle>;
   threadPanelShortcutLabel: string | null;
-  threadPanelHasAttention: boolean;
   rightPanelAvailable: boolean;
   rightPanelOpen: boolean;
   rightPanelShortcutLabel: string | null;
@@ -43,10 +37,8 @@ export const PanelLayoutControls = memo(function PanelLayoutControls({
   terminalShortcutLabel,
   threadPanelOpen,
   threadPanelPresentation,
-  threadPanelPopoverAnchor,
-  threadPanelPopoverContent,
+  threadPanelPopoverHandle,
   threadPanelShortcutLabel,
-  threadPanelHasAttention,
   rightPanelAvailable,
   rightPanelOpen,
   rightPanelShortcutLabel,
@@ -64,12 +56,6 @@ export const PanelLayoutControls = memo(function PanelLayoutControls({
       size="sm"
     >
       <SquareMenuIcon className="size-4" />
-      {threadPanelHasAttention ? (
-        <span
-          className="absolute right-1 top-1 size-1.5 rounded-full bg-warning ring-2 ring-background"
-          aria-hidden="true"
-        />
-      ) : null}
     </Toggle>
   );
   const threadPanelTooltip = (trigger: ReactElement) => (
@@ -90,32 +76,13 @@ export const PanelLayoutControls = memo(function PanelLayoutControls({
       className="flex h-full shrink-0 items-center gap-1 [-webkit-app-region:no-drag]"
       data-panel-layout-controls
     >
-      {showThreadPanelControl ? (
-        threadPanelPresentation === "popover" ? (
-          <Popover
-            open={threadPanelOpen}
-            onOpenChange={(open) => {
-              if (open !== threadPanelOpen) onToggleThreadPanel();
-            }}
-          >
-            {threadPanelTooltip(<PopoverTrigger render={threadPanelToggle} />)}
-            <PopoverPopup
-              anchor={threadPanelPopoverAnchor}
-              align="end"
-              alignOffset={0}
-              collisionAvoidance={{ side: "shift", align: "shift", fallbackAxisSide: "none" }}
-              side="bottom"
-              sideOffset={0}
-              variant="panel"
-              padding="none"
-            >
-              {threadPanelPopoverContent}
-            </PopoverPopup>
-          </Popover>
-        ) : (
-          threadPanelTooltip(threadPanelToggle)
-        )
-      ) : null}
+      {showThreadPanelControl
+        ? threadPanelPresentation === "popover"
+          ? threadPanelTooltip(
+              <PopoverTrigger handle={threadPanelPopoverHandle} render={threadPanelToggle} />,
+            )
+          : threadPanelTooltip(threadPanelToggle)
+        : null}
       {showTerminalControl ? (
         <Tooltip>
           <TooltipTrigger render={<span className="flex shrink-0" />}>
@@ -184,11 +151,7 @@ export const RightPanelMaximizeControl = memo(function RightPanelMaximizeControl
             variant="ghost"
             size="sm"
           >
-            {maximized ? (
-              <Minimize2Icon className="size-4" />
-            ) : (
-              <Maximize2Icon className="size-4" />
-            )}
+            <MorphIcon className="size-4" icon={maximized ? Minimize2 : Maximize2} />
           </Toggle>
         }
       />

@@ -16,18 +16,18 @@ import * as TestClock from "effect/testing/TestClock";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
-import { ProjectionProjectRepository } from "../persistence/Services/ProjectionProjects.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as ProjectStore from "./ProjectStore.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as TextGeneration from "../textGeneration/TextGeneration.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
+import * as CommandReceiptStore from "./CommandReceiptStore.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
-import type { ProviderAdapterV2Shape } from "./ProviderAdapter.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 import * as ThreadTitleRegeneration from "./ThreadTitleRegenerationService.ts";
-import { formatThreadTitleContext } from "./ThreadTitleRegenerationService.ts";
-import { makeOrchestratorV2ReplayLayerWithRegistry } from "./testkit/ProviderReplayHarness.ts";
+import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
+import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 
 const projectId = ProjectId.make("project:title-regeneration");
 const modelSelection = {
@@ -41,27 +41,32 @@ const adapter = {
   getCapabilities: () => Effect.succeed(CodexProviderCapabilitiesV2),
   planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" as const }),
   openSession: () => Effect.die("provider execution is disabled in title regeneration tests"),
-} as ProviderAdapterV2Shape;
+} as ProviderAdapter.ProviderAdapterV2["Service"];
 
 function makeHarness(
   options: {
     readonly generateTitle?: TextGeneration.TextGeneration["Service"]["generateThreadTitle"];
   } = {},
 ) {
-  const database = SqlitePersistenceMemory;
-  const registry = ProviderAdapterRegistry.makeLayer([adapter]);
-  const orchestrator = makeOrchestratorV2ReplayLayerWithRegistry(
+  const layerDatabase = SqlitePersistence.layerMemory;
+  const layerRegistry = ProviderAdapterRegistry.layerFromAdapters([adapter]);
+  const layerOrchestrator = ProviderReplayHarness.layerWithRegistry(
     { name: "thread-title-regeneration" },
-    registry,
-    { databaseLayer: database, runEffectWorker: false },
+    layerRegistry,
+    { databaseLayer: layerDatabase, runEffectWorker: false },
   );
-  const threadManagement = ThreadManagement.layer.pipe(Layer.provide(orchestrator));
-  const outbox = EffectOutbox.layer.pipe(Layer.provide(database));
+  const layerServerSettings = ServerSettings.layerTest({});
+  const layerThreadManagement = ThreadManagement.layer.pipe(
+    Layer.provide(layerOrchestrator),
+    Layer.provide(layerServerSettings),
+    Layer.provide(CommandReceiptStore.layer.pipe(Layer.provide(layerDatabase))),
+  );
+  const layerOutbox = EffectOutbox.layer.pipe(Layer.provide(layerDatabase));
   const generateThreadTitle = vi.fn(
     options.generateTitle ?? (() => Effect.succeed({ title: "Generated title" })),
   );
-  const projectedProjects = Layer.mock(ProjectionProjectRepository)({
-    getById: ({ projectId: requestedProjectId }) =>
+  const layerProjectedProjects = Layer.mock(ProjectStore.ProjectStoreV2)({
+    get: (requestedProjectId) =>
       Effect.succeed(
         requestedProjectId === projectId
           ? Option.some({
@@ -71,6 +76,8 @@ function makeHarness(
               defaultModelSelection: modelSelection,
               defaultThreadEnvMode: null,
               autoPull: false,
+              faviconPath: null,
+              projectIcon: null,
               scripts: [],
               createdAt: "2026-06-20T00:00:00.000Z",
               updatedAt: "2026-06-20T00:00:00.000Z",
@@ -79,18 +86,23 @@ function makeHarness(
           : Option.none(),
       ),
   });
-  const titleRegeneration = ThreadTitleRegeneration.layer.pipe(
+  const layerTitleRegeneration = ThreadTitleRegeneration.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
-        threadManagement,
-        projectedProjects,
+        layerThreadManagement,
+        layerProjectedProjects,
         Layer.mock(TextGeneration.TextGeneration)({ generateThreadTitle }),
-        ServerSettings.layerTest({}),
+        layerServerSettings,
       ),
     ),
   );
   return {
-    layer: Layer.mergeAll(threadManagement, titleRegeneration, outbox, database),
+    layer: Layer.mergeAll(
+      layerThreadManagement,
+      layerTitleRegeneration,
+      layerOutbox,
+      layerDatabase,
+    ),
     generateThreadTitle,
   };
 }
@@ -163,7 +175,7 @@ describe("formatThreadTitleContext", () => {
   });
 
   it("builds a newest-first digest, skipping system messages and empty sections", () => {
-    const context = formatThreadTitleContext([
+    const context = ThreadTitleRegeneration.formatThreadTitleContext([
       { role: "user", text: "First question" },
       { role: "system", text: "Hidden instructions" },
       { role: "assistant", text: "" },
@@ -180,7 +192,7 @@ describe("formatThreadTitleContext", () => {
   });
 
   it("pins the first user message ahead of the retained tail once content stops fitting", () => {
-    const context = formatThreadTitleContext([
+    const context = ThreadTitleRegeneration.formatThreadTitleContext([
       { role: "user", text: `Ancient context that anchors the topic ${"x".repeat(600)}` },
       { role: "assistant", text: "y".repeat(6_000) },
       { role: "user", text: "z".repeat(1_500) },
@@ -191,7 +203,7 @@ describe("formatThreadTitleContext", () => {
   });
 
   it("truncates an oversized pinned first user message", () => {
-    const context = formatThreadTitleContext([
+    const context = ThreadTitleRegeneration.formatThreadTitleContext([
       { role: "user", text: `Topic anchor ${"a".repeat(4_000)}` },
       { role: "assistant", text: "y".repeat(9_000) },
       { role: "user", text: "z".repeat(1_500) },
@@ -202,7 +214,7 @@ describe("formatThreadTitleContext", () => {
   });
 
   it("retains at most four attachments from the newest messages", () => {
-    const context = formatThreadTitleContext([
+    const context = ThreadTitleRegeneration.formatThreadTitleContext([
       { role: "user", text: "older", attachments: [attachment("a"), attachment("b")] },
       {
         role: "user",
@@ -437,8 +449,9 @@ describe("ThreadTitleRegenerationService", () => {
   );
 });
 
-for (const outcome of ["success", "exhausted", "stale", "interrupted"] as const) {
-  it.effect(`initial title retry: ${outcome}`, () =>
+it.effect.each(["success", "exhausted", "stale", "interrupted"] as const)(
+  "initial title retry: %s",
+  (outcome) =>
     Effect.gen(function* () {
       const attempted = yield* Deferred.make<void>();
       let attempts = 0;
@@ -501,5 +514,4 @@ for (const outcome of ["success", "exhausted", "stale", "interrupted"] as const)
         else assert.isNotOk(projection.thread.titleRegeneration);
       }).pipe(Effect.provide(harness.layer));
     }),
-  );
-}
+);

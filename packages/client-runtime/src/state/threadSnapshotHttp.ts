@@ -3,10 +3,9 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 
-import { RemoteEnvironmentAuthorization } from "../authorization/service.ts";
+import * as RemoteEnvironmentAuthorization from "../authorization/service.ts";
 import type { PreparedConnection } from "../connection/model.ts";
-import { environmentEndpointUrl } from "../environment/endpoint.ts";
-import { ManagedRelayDpopSigner } from "../relay/managedRelay.ts";
+import * as ManagedRelay from "../relay/managedRelay.ts";
 import type { RemoteEnvironmentRequestError } from "../rpc/http.ts";
 import {
   executeAuthenticatedEnvironmentHttpRequest,
@@ -21,6 +20,30 @@ import {
 // cold-open load. Older turn pages wait for this deadline.
 const DEFAULT_THREAD_SNAPSHOT_TIMEOUT_MS = 20_000;
 
+/** Progressive history metadata returned by a bounded snapshot loader. */
+export type ThreadSnapshotHistoryMeta = {
+  readonly historyCursor: string | null;
+  readonly hasMoreHistory: boolean;
+  /** Max local turn ordinal from the full projection; optional on older servers. */
+  readonly latestLocalTurnOrdinal?: number | null;
+};
+
+/**
+ * Outcome of an HTTP thread-detail snapshot load.
+ *
+ * - `present`: snapshot body is available (seed projection, resume via socket).
+ * - `missing`: server definitively reported the thread does not exist (404).
+ * - `unavailable`: transport/timeout/5xx/etc.; fall back to the socket path.
+ */
+export type ThreadSnapshotLoadResult =
+  | {
+      readonly _tag: "present";
+      readonly snapshot: OrchestrationV2ThreadDetailSnapshot;
+      readonly history?: ThreadSnapshotHistoryMeta;
+    }
+  | { readonly _tag: "missing" }
+  | { readonly _tag: "unavailable" };
+
 /**
  * Load a thread's detail snapshot over HTTP instead of embedding it in the
  * WebSocket subscription's first frame. The response is gzip-compressible by
@@ -31,16 +54,17 @@ export const fetchEnvironmentThreadSnapshot = Effect.fn(
 )(function* (input: {
   readonly prepared: PreparedConnection;
   readonly threadId: ThreadId;
-  readonly signer: Option.Option<ManagedRelayDpopSigner["Service"]>;
-  readonly remoteAuthorization?: Option.Option<RemoteEnvironmentAuthorization["Service"]>;
+  readonly signer: Option.Option<ManagedRelay.ManagedRelayDpopSigner["Service"]>;
+  readonly remoteAuthorization?: Option.Option<
+    RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization["Service"]
+  >;
   readonly timeoutMs?: number;
 }) {
   return yield* executeAuthenticatedEnvironmentHttpRequest({
     ...input,
     group: "orchestration",
     method: "GET",
-    url: (httpBaseUrl) =>
-      environmentEndpointUrl(httpBaseUrl, `/api/orchestration/threads/${input.threadId}`),
+    url: (urls) => urls.threadSnapshot({ params: { threadId: input.threadId } }),
     timeoutMs: input.timeoutMs ?? DEFAULT_THREAD_SNAPSHOT_TIMEOUT_MS,
     request: ({ client, headers }) =>
       client.threadSnapshot({
@@ -51,21 +75,6 @@ export const fetchEnvironmentThreadSnapshot = Effect.fn(
 });
 
 export type FetchEnvironmentThreadSnapshotError = RemoteEnvironmentRequestError;
-
-export type ThreadSnapshotHistoryMeta = {
-  readonly historyCursor: string | null;
-  readonly hasMoreHistory: boolean;
-  readonly latestLocalTurnOrdinal?: number | null;
-};
-
-export type ThreadSnapshotLoadResult =
-  | {
-      readonly _tag: "present";
-      readonly snapshot: OrchestrationV2ThreadDetailSnapshot;
-      readonly history?: ThreadSnapshotHistoryMeta;
-    }
-  | { readonly _tag: "missing" }
-  | { readonly _tag: "unavailable" };
 
 /**
  * Loads a thread's detail snapshot over HTTP.

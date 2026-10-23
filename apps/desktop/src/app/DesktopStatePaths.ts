@@ -10,16 +10,17 @@ function normalizeConfiguredBaseDir(t3Home: Option.Option<string>): Option.Optio
   return trimmed.length > 0 ? Option.some(trimmed) : Option.none();
 }
 
-// The base directory is derived from the packaged `productName` so the
-// Alpha and Experimental installers do not share the same T3 home (and
-// therefore the same `statev2.sqlite`). An explicit T3CODE_HOME always
+// The base directory is derived from the packaged `productName`. Beta keeps
+// the Alpha home so an upgrade can reuse conversations, settings and OAuth
+// credentials. An explicit T3CODE_HOME always
 // wins because it is the documented override for power users.
 const BASE_DIR_BY_APP_NAME: Record<string, string> = {
+  "T3 Code (Beta)": ".t3-alpha",
   "T3 Code (Alpha)": ".t3-alpha",
   "T3 Code (Experimental)": ".t3-experimental",
   "T3 Code (Dev)": ".t3-dev",
 };
-const BASE_DIR_FALLBACK = ".t3-experimental";
+const BASE_DIR_FALLBACK = ".t3-alpha";
 
 export function resolveDesktopBaseDir(input: {
   readonly homeDirectory: string;
@@ -30,7 +31,7 @@ export function resolveDesktopBaseDir(input: {
   return Option.getOrElse(normalizeConfiguredBaseDir(input.t3Home), () =>
     input.joinPath(
       input.homeDirectory,
-      BASE_DIR_BY_APP_NAME[input.appName ?? "T3 Code (Experimental)"] ?? BASE_DIR_FALLBACK,
+      BASE_DIR_BY_APP_NAME[input.appName ?? "T3 Code (Beta)"] ?? BASE_DIR_FALLBACK,
     ),
   );
 }

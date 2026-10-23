@@ -1,4 +1,3 @@
-import { ScrollFrame } from "~/components/ui/scroll-frame";
 import type {
   AnnotationSide,
   CodeViewDiffItem,
@@ -12,7 +11,7 @@ import type { ScopedThreadRef } from "@t3tools/contracts";
 import { useCallback, useMemo, useState, type ReactNode, type Ref } from "react";
 
 import { type DraftId, useComposerDraftStore } from "~/composerDraftStore";
-import { fnv1a32 } from "~/lib/diffRendering";
+import { fnv1a32, resolveFileDiffPath } from "~/lib/diffRendering";
 import {
   buildDiffReviewComment,
   restoreDiffReviewCommentRange,
@@ -36,7 +35,7 @@ interface DiffCommentAnnotationGroup {
 }
 
 type DiffCommentLineAnnotation = DiffLineAnnotation<DiffCommentAnnotationGroup>;
-export type AnnotatableCodeViewHandle = CodeViewHandle<DiffCommentAnnotationGroup>;
+export type AnnotatableCodeViewHandle = CodeViewHandle<DiffCommentAnnotationGroup, undefined>;
 const EMPTY_REVIEW_COMMENTS: ReadonlyArray<ReviewCommentContext> = [];
 
 function annotationSide(range: SelectedLineRange): AnnotationSide {
@@ -96,6 +95,8 @@ interface AnnotatableCodeViewProps {
     fileKey: string,
     collapsed: boolean,
   ) => ReactNode;
+  /** Unfold a collapsed file that holds the find match being navigated to. */
+  onRevealSearchMatch: (fileKey: string) => void;
 }
 
 interface DiffSelectionContext {
@@ -116,6 +117,7 @@ export function AnnotatableCodeView({
   renderHeaderMetadata,
   renderHeaderFilenameSuffix,
   renderHeaderPrefix,
+  onRevealSearchMatch,
 }: AnnotatableCodeViewProps) {
   const addReviewComment = useComposerDraftStore((store) => store.addReviewComment);
   const removeReviewComment = useComposerDraftStore((store) => store.removeReviewComment);
@@ -218,15 +220,15 @@ export function AnnotatableCodeView({
       if (!range) return;
       const item = context.item;
       if (item.type !== "diff") return;
-      const file = filesByKey.get(item.id);
-      if (!file) return;
+      // Read from the item, not the file list, so this callback keeps its identity as
+      // patches arrive; the viewer re-applies its options whenever it changes.
       const id = nextFileCommentId();
       const comment = buildDiffReviewComment({
         id,
         sectionId,
         sectionTitle,
-        filePath: file.filePath,
-        fileDiff: file.fileDiff,
+        filePath: resolveFileDiffPath(item.fileDiff),
+        fileDiff: item.fileDiff,
         range,
         text: "",
       });
@@ -243,63 +245,62 @@ export function AnnotatableCodeView({
         },
       });
     },
-    [filesByKey, sectionId, sectionTitle],
+    [sectionId, sectionTitle],
   );
 
   const hasOpenComment = draft !== null;
   return (
-    <ScrollFrame variant="page" className="h-full flex-1">
-      <StyledDiffCodeView<DiffCommentAnnotationGroup>
-        key={codeViewKey}
-        {...(viewerRef ? { viewerRef } : {})}
-        {...(className ? { className } : {})}
-        {...(unsafeCSSExtra ? { unsafeCSSExtra } : {})}
-        {...(renderHeaderMetadata
-          ? {
-              renderHeaderMetadata: (item: CodeViewItem<DiffCommentAnnotationGroup>) =>
-                item.type === "diff" ? renderHeaderMetadata(item.fileDiff) : null,
-            }
-          : {})}
-        {...(renderCodeViewFooter ? { renderCodeViewFooter } : {})}
-        items={items}
-        selectedLines={selectedLines}
-        onSelectedLinesChange={setSelectedLines}
-        options={{
-          ...options,
-          enableGutterUtility: !hasOpenComment,
-          enableLineSelection: !hasOpenComment,
-          onGutterUtilityClick: beginComment,
-        }}
-        renderHeaderFilenameSuffix={(item) =>
-          item.type === "diff" ? renderHeaderFilenameSuffix(item.fileDiff) : null
-        }
-        renderHeaderPrefix={(item) =>
-          item.type === "diff"
-            ? renderHeaderPrefix(item.fileDiff, item.id, item.collapsed === true)
-            : null
-        }
-        renderAnnotation={(annotation) => {
-          const hasDraft = annotation.metadata.entries.some((entry) => entry.kind === "draft");
-          return (
-            <div
-              className={hasDraft ? "py-1" : "divide-y divide-border/30 border-y border-border/30"}
-            >
-              {annotation.metadata.entries.map((entry) => (
-                <DiffCommentAnnotation
-                  key={entry.id}
-                  kind={entry.kind}
-                  rangeLabel={entry.rangeLabel}
-                  text={entry.kind === "draft" ? draftText : entry.text}
-                  onTextChange={setDraftText}
-                  onCancel={() => removeEntry(entry.id)}
-                  onComment={(text) => submitEntry(entry.id, text)}
-                  onDelete={() => removeEntry(entry.id)}
-                />
-              ))}
-            </div>
-          );
-        }}
-      />
-    </ScrollFrame>
+    <StyledDiffCodeView<DiffCommentAnnotationGroup>
+      key={codeViewKey}
+      {...(viewerRef ? { viewerRef } : {})}
+      {...(className ? { className } : {})}
+      {...(unsafeCSSExtra ? { unsafeCSSExtra } : {})}
+      {...(renderHeaderMetadata
+        ? {
+            renderHeaderMetadata: (item: CodeViewItem<DiffCommentAnnotationGroup>) =>
+              item.type === "diff" ? renderHeaderMetadata(item.fileDiff) : null,
+          }
+        : {})}
+      {...(renderCodeViewFooter ? { renderCodeViewFooter } : {})}
+      items={items}
+      selectedLines={selectedLines}
+      onSelectedLinesChange={setSelectedLines}
+      onRevealSearchMatch={(item) => onRevealSearchMatch(item.id)}
+      options={{
+        ...options,
+        enableGutterUtility: !hasOpenComment,
+        enableLineSelection: !hasOpenComment,
+        onGutterUtilityClick: beginComment,
+      }}
+      renderHeaderFilenameSuffix={(item) =>
+        item.type === "diff" ? renderHeaderFilenameSuffix(item.fileDiff) : null
+      }
+      renderHeaderPrefix={(item) =>
+        item.type === "diff"
+          ? renderHeaderPrefix(item.fileDiff, item.id, item.collapsed === true)
+          : null
+      }
+      renderAnnotation={(annotation) => {
+        const hasDraft = annotation.metadata.entries.some((entry) => entry.kind === "draft");
+        return (
+          <div
+            className={hasDraft ? "py-1" : "divide-y divide-border/30 border-y border-border/30"}
+          >
+            {annotation.metadata.entries.map((entry) => (
+              <DiffCommentAnnotation
+                key={entry.id}
+                kind={entry.kind}
+                rangeLabel={entry.rangeLabel}
+                text={entry.kind === "draft" ? draftText : entry.text}
+                onTextChange={setDraftText}
+                onCancel={() => removeEntry(entry.id)}
+                onComment={(text) => submitEntry(entry.id, text)}
+                onDelete={() => removeEntry(entry.id)}
+              />
+            ))}
+          </div>
+        );
+      }}
+    />
   );
 }

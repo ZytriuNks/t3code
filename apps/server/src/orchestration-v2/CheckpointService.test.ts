@@ -1,3 +1,4 @@
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { assert, it, vi } from "@effect/vitest";
 import {
   CheckpointScopeId,
@@ -14,12 +15,8 @@ import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
-import {
-  CheckpointServiceV2,
-  checkpointRefForScopeOrdinal,
-  layer as checkpointServiceLayer,
-} from "./CheckpointService.ts";
-import { layer as idAllocatorLayer } from "./IdAllocator.ts";
+import * as CheckpointService from "./CheckpointService.ts";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 
 it.effect.each([false, true, "interrupt"] as const)(
   "materializes baseline, lookup fails=%s",
@@ -51,10 +48,10 @@ it.effect.each([false, true, "interrupt"] as const)(
             )
           : Effect.succeed(true),
     );
-    const testLayer = checkpointServiceLayer.pipe(
+    const layerTest = CheckpointService.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
-          idAllocatorLayer,
+          IdAllocator.layer,
           Layer.mock(CheckpointStore.CheckpointStore)({
             isGitRepository: () => Effect.succeed(true),
             hasCheckpointRef,
@@ -62,10 +59,11 @@ it.effect.each([false, true, "interrupt"] as const)(
           }),
         ),
       ),
+      Layer.provideMerge(NodeCrypto.layer),
     );
 
     return Effect.gen(function* () {
-      const checkpoints = yield* CheckpointServiceV2;
+      const checkpoints = yield* CheckpointService.CheckpointServiceV2;
       if (lookupFails === "interrupt") {
         const exit = yield* Effect.exit(
           checkpoints.materializeBaselineCheckpoint({ scope, ordinalWithinScope: 2 }),
@@ -92,7 +90,7 @@ it.effect.each([false, true, "interrupt"] as const)(
       assert.equal(baseline.ordinalWithinScope, 2);
       assert.equal(
         baseline.ref,
-        checkpointRefForScopeOrdinal({
+        yield* CheckpointService.checkpointRefForScopeOrdinal({
           scopeId: scope.id,
           ordinalWithinScope: 2,
         }),
@@ -102,6 +100,6 @@ it.effect.each([false, true, "interrupt"] as const)(
         cwd: scope.cwd,
         checkpointRef: baseline.ref,
       });
-    }).pipe(Effect.provide(testLayer));
+    }).pipe(Effect.provide(layerTest));
   },
 );

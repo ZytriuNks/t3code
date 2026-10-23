@@ -1,57 +1,78 @@
+import * as NodePath from "@effect/platform-node/NodePath";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as PlatformError from "effect/PlatformError";
 
 import { resolveUserDataPath } from "./DesktopUserData.ts";
 
-it.effect("keeps the installed Experimental browser profile without importing Alpha secrets", () =>
-  Effect.gen(function* () {
-    const fs = yield* FileSystem.FileSystem;
-    const path = yield* Path.Path;
-    const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-exp-profile-" });
-    for (const name of ["t3code", "t3code-v2", "T3 Code (Alpha)"]) {
-      yield* fs.makeDirectory(path.join(root, name), { recursive: true });
-      yield* fs.writeFileString(path.join(root, name, "Local State"), name);
-    }
-    const experimental = path.join(root, "t3code-experimental");
-    yield* fs.makeDirectory(experimental, { recursive: true });
-    yield* fs.writeFileString(path.join(experimental, "Local State"), "exp-profile");
-    assert.equal(
-      yield* resolveUserDataPath({
-        appDataDirectory: root,
-        isDevelopment: false,
-        platform: "win32",
-        appName: "T3 Code (Experimental)",
+it.effect("identifies a failed source read and preserves its cause", () => {
+  const sourceState = "/profiles/t3code-v2/Local State";
+  const cause = PlatformError.systemError({
+    _tag: "PermissionDenied",
+    module: "FileSystem",
+    method: "readFileString",
+    pathOrDescriptor: sourceState,
+  });
+  return Effect.gen(function* () {
+    const error = yield* resolveUserDataPath({
+      appDataDirectory: "/profiles",
+      isDevelopment: false,
+      platform: "win32",
+      appName: "T3 Code (Beta)",
+    }).pipe(Effect.flip);
+    assert.equal(error.operation, "read");
+    assert.equal(error.resourcePath, sourceState);
+    assert.equal(error.category, "PermissionDenied");
+    assert.strictEqual(error.cause, cause);
+  }).pipe(
+    Effect.provideService(
+      FileSystem.FileSystem,
+      FileSystem.makeNoop({
+        exists: (path) => Effect.succeed(path === sourceState),
+        readFileString: () => Effect.fail(cause),
       }),
-      experimental,
-    );
-    assert.equal(yield* fs.readFileString(path.join(experimental, "Local State")), "exp-profile");
-  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
-);
+    ),
+    Effect.provide(Layer.mergeAll(NodeServices.layer, NodePath.layerPosix)),
+  );
+});
 
-it.effect("does not create an Experimental profile from the Alpha profile on first launch", () =>
-  Effect.gen(function* () {
-    const fs = yield* FileSystem.FileSystem;
-    const path = yield* Path.Path;
-    const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-exp-profile-" });
-    yield* fs.makeDirectory(path.join(root, "t3code-v2"), { recursive: true });
-    yield* fs.writeFileString(path.join(root, "t3code-v2", "Local State"), "alpha-profile");
-    const experimental = path.join(root, "t3code-experimental");
-    assert.equal(
+it.effect.each(["t3code-v2", "T3 Code (Alpha)"])(
+  "preserves Windows credential keys from %s without copying browser databases",
+  (sourceName) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-v2-profile-" });
+      const source = path.join(directory, sourceName);
+      const destination = path.join(directory, "t3code");
+      const state = '{"os_crypt":{"encrypted_key":"test-encrypted-key"}}';
+      yield* fs.makeDirectory(path.join(directory, "T3 Code (Alpha)"), { recursive: true });
+      yield* fs.makeDirectory(path.join(source, "IndexedDB"), { recursive: true });
+      yield* fs.writeFileString(path.join(source, "Local State"), state);
+      yield* fs.writeFileString(path.join(source, "IndexedDB", "LOCK"), "V1 owns this database");
       yield* resolveUserDataPath({
-        appDataDirectory: root,
+        appDataDirectory: directory,
         isDevelopment: false,
         platform: "win32",
-        appName: "T3 Code (Experimental)",
-      }),
-      experimental,
-    );
-    assert.isFalse(yield* fs.exists(path.join(experimental, "Local State")));
-    assert.equal(
-      yield* fs.readFileString(path.join(root, "t3code-v2", "Local State")),
-      "alpha-profile",
-    );
-  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+        appName: "T3 Code (Beta)",
+      });
+      assert.equal(yield* fs.readFileString(path.join(destination, "Local State")), state);
+      assert.equal(yield* fs.readFileString(path.join(source, "Local State")), state);
+      assert.isFalse(yield* fs.exists(path.join(destination, "IndexedDB")));
+      yield* fs.writeFileString(path.join(destination, "Local State"), "existing V2 state");
+      yield* resolveUserDataPath({
+        appDataDirectory: directory,
+        isDevelopment: false,
+        platform: "win32",
+        appName: "T3 Code (Beta)",
+      });
+      assert.equal(
+        yield* fs.readFileString(path.join(destination, "Local State")),
+        "existing V2 state",
+      );
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );

@@ -3,12 +3,9 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
 
-import { IdAllocatorV2 } from "./IdAllocator.ts";
-import {
-  type ProviderContinuationRequest,
-  ProviderContinuationRequests,
-} from "./ProviderContinuationRequests.ts";
-import { ThreadManagementService } from "./ThreadManagementService.ts";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
+import * as ThreadManagementService from "./ThreadManagementService.ts";
 import { isUndeliveredMailboxSteer } from "./NotificationMailbox.ts";
 
 const CONTINUATION_MESSAGE_TEXT = "Background task completed.";
@@ -22,7 +19,9 @@ function delegatedCompletionText(taskIds: ReadonlyArray<string>): string {
 
 function currentDelegatedCompletionDelivery(
   projection: Pick<OrchestrationV2ThreadProjection, "messages" | "runs" | "providerTurns">,
-  completion: NonNullable<ProviderContinuationRequest["delegatedCompletion"]>,
+  completion: NonNullable<
+    ProviderContinuationRequests.ProviderContinuationRequest["delegatedCompletion"]
+  >,
 ) {
   const sourceRun = projection.runs.find((candidate) => candidate.id === completion.parentRunId);
   const delivery = sourceRun?.delegatedCompletion?.delivery;
@@ -43,8 +42,10 @@ function currentDelegatedCompletionDelivery(
 }
 
 function delegatedCompletionRetryKey(
-  request: ProviderContinuationRequest,
-  completion: NonNullable<ProviderContinuationRequest["delegatedCompletion"]>,
+  request: ProviderContinuationRequests.ProviderContinuationRequest,
+  completion: NonNullable<
+    ProviderContinuationRequests.ProviderContinuationRequest["delegatedCompletion"]
+  >,
 ): string {
   return `${request.threadId}:${completion.parentRunId}:${completion.generation}:${completion.messageId}`;
 }
@@ -56,11 +57,11 @@ function delegatedCompletionRetryKey(
  * the orchestrator selects native steering or queued delivery under its thread
  * lock. Adapter-buffered continuations still queue behind active work.
  */
-export const workerLive = Layer.effectDiscard(
+export const layer = Layer.effectDiscard(
   Effect.gen(function* () {
-    const ids = yield* IdAllocatorV2;
-    const requests = yield* ProviderContinuationRequests;
-    const threads = yield* ThreadManagementService;
+    const ids = yield* IdAllocator.IdAllocatorV2;
+    const requests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
+    const threads = yield* ThreadManagementService.ThreadManagementService;
     const retryAttempts = yield* Ref.make(new Map<string, number>());
 
     const clearRetryAttempt = (key: string) =>
@@ -80,7 +81,7 @@ export const workerLive = Layer.effectDiscard(
       });
 
     const dispatchContinuation = Effect.fn("ProviderContinuationService.dispatchContinuation")(
-      function* (request: ProviderContinuationRequest) {
+      function* (request: ProviderContinuationRequests.ProviderContinuationRequest) {
         const projection = yield* threads.getThreadRecords(
           request.threadId,
           ["messages", "runs", "providerTurns"],
@@ -125,31 +126,88 @@ export const workerLive = Layer.effectDiscard(
             fixtureName: "delegated-completion",
             commandName: "dispatch",
           });
-          yield* threads.dispatch({
-            type: "message.dispatch",
-            commandId,
-            threadId: request.threadId,
-            messageId: delivery.messageId,
-            text: delegatedCompletionText(delivery.taskIds),
-            attachments: [],
-            dispatchMode: { type: "queue_after_active" },
-            createdBy: "agent",
-            creationSource: "server",
-            delegatedCompletion: {
-              parentRunId: request.delegatedCompletion.parentRunId,
-              generation: delivery.generation,
-              taskIds: delivery.taskIds,
-            },
-          });
+          yield* threads
+            .dispatch({
+              type: "message.dispatch",
+              commandId,
+              threadId: request.threadId,
+              messageId: delivery.messageId,
+              text: delegatedCompletionText(delivery.taskIds),
+              attachments: [],
+              dispatchMode: { type: "queue_after_active" },
+              createdBy: "agent",
+              creationSource: "server",
+              delegatedCompletion: {
+                parentRunId: request.delegatedCompletion.parentRunId,
+                generation: delivery.generation,
+                taskIds: delivery.taskIds,
+              },
+            })
+            .pipe(
+              // The project turned the target instance off between the cohort
+              // read above and this dispatch. The finalize that claimed this
+              // delivery already wrote the children's results to the parent's
+              // history unconditionally, so nothing is lost: acknowledge each
+              // task administratively (observedByRunId: null, the same shape
+              // task_status uses when no run observed it) to consume this
+              // delivery instead of leaving it open to retry. The parent's
+              // next turn against an enabled instance reads those results from
+              // history the same way any turn does; nothing here re-offers
+              // this generation.
+              Effect.catchTags({
+                ThreadManagementProviderInstanceDisabledError: (error) =>
+                  Effect.logInfo(
+                    "orchestration-v2.provider-continuation.delegated-completion-disabled",
+                    {
+                      threadId: request.threadId,
+                      projectId: error.projectId,
+                      instanceId: error.instanceId,
+                    },
+                  ).pipe(
+                    Effect.andThen(
+                      Effect.forEach(
+                        delivery.taskIds,
+                        (taskId) =>
+                          ids.allocate
+                            .command({
+                              fixtureName: "delegated-completion",
+                              commandName: "acknowledge-disabled",
+                            })
+                            .pipe(
+                              Effect.flatMap((ackCommandId) =>
+                                threads.dispatch({
+                                  type: "delegated_task.completion-delivery.acknowledge",
+                                  commandId: ackCommandId,
+                                  parentThreadId: request.threadId,
+                                  taskId,
+                                  observedByRunId: null,
+                                }),
+                              ),
+                            ),
+                        { discard: true },
+                      ),
+                    ),
+                    Effect.andThen(
+                      request.clearIfCurrent !== undefined
+                        ? request.clearIfCurrent()
+                        : request.dispatchIfCurrent !== undefined
+                          ? request.dispatchIfCurrent(Effect.void)
+                          : Effect.void,
+                    ),
+                  ),
+              }),
+            );
           yield* clearRetryAttempt(retryKey);
           return;
         }
         // The ordinal is display metadata only: allocate.message appends a
         // random UUID, so a stale projection read here cannot collide ids.
-        const messageId = yield* ids.allocate.message({
-          threadId: request.threadId,
-          ordinal: projection.messages.length + 1,
-        });
+        const messageId =
+          request.messageId ??
+          (yield* ids.allocate.message({
+            threadId: request.threadId,
+            ordinal: projection.messages.length + 1,
+          }));
         const commandId = CommandId.make(`provider-continuation:${messageId}`);
         const dispatch = threads.dispatch({
           type: "message.dispatch",
@@ -171,11 +229,40 @@ export const workerLive = Layer.effectDiscard(
           // marker or the turn settles immediately having prompted nothing.
           creationSource: request.delivery === "message_text" ? "server" : "provider",
         });
+        // The adapter's buffered wake has nowhere else to go once the
+        // instance is off: drop it rather than warn, since nothing here
+        // retries it either way. This catch sits outside dispatchIfCurrent so
+        // an adapter that clears its own sticky offer flag on dispatch
+        // failure (inside dispatchIfCurrent) observes the raw failure first.
+        // Not every adapter self-clears that way, so the explicit callback is
+        // called here too; clearIfCurrent implementations are idempotent, so
+        // a source that already cleared is unaffected.
+        const logInstanceDisabled = (
+          error: ThreadManagementService.ThreadManagementProviderInstanceDisabledError,
+        ) =>
+          Effect.logInfo("orchestration-v2.provider-continuation.instance-disabled", {
+            threadId: request.threadId,
+            providerThreadId: request.providerThreadId,
+            projectId: error.projectId,
+            instanceId: error.instanceId,
+          }).pipe(
+            Effect.andThen(
+              request.clearIfCurrent !== undefined ? request.clearIfCurrent() : Effect.void,
+            ),
+          );
         if (request.dispatchIfCurrent === undefined) {
-          yield* dispatch;
+          yield* dispatch.pipe(
+            Effect.catchTags({
+              ThreadManagementProviderInstanceDisabledError: logInstanceDisabled,
+            }),
+          );
           return;
         }
-        yield* request.dispatchIfCurrent(dispatch);
+        yield* request.dispatchIfCurrent(dispatch).pipe(
+          Effect.catchTags({
+            ThreadManagementProviderInstanceDisabledError: logInstanceDisabled,
+          }),
+        );
       },
     );
 

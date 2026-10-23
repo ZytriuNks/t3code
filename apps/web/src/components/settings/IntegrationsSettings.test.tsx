@@ -18,6 +18,16 @@ const { languageState, listBrowserImportSources } = vi.hoisted(() => ({
   listBrowserImportSources: vi.fn().mockResolvedValue([]),
 }));
 
+vi.mock("../ui/tooltip", () => ({
+  Tooltip: ({ children }: { children: ReactNode }) => children,
+  TooltipTrigger: ({ render, children }: { render: ReactNode; children: ReactNode }) => (
+    <>
+      {render}
+      {children}
+    </>
+  ),
+  TooltipPopup: () => null,
+}));
 vi.mock("../preview/previewBridge", () => ({
   previewBridge: { listBrowserImportSources },
 }));
@@ -25,6 +35,8 @@ vi.mock("../../env", () => ({ isElectron: true }));
 vi.mock("../../state/environments", () => ({
   useEnvironments: () => ({ environments: [], isReady: true }),
   usePrimaryEnvironment: () => null,
+  // Settings rows resolve the primary grant before rendering server controls.
+  usePrimaryEnvironmentId: () => null,
 }));
 vi.mock("../../hooks/useSettings", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../hooks/useSettings")>()),
@@ -66,6 +78,8 @@ import { translate } from "../../i18n/messages";
 let renderer: ReactTestRenderer | undefined;
 const english = (key: Parameters<typeof translate>[1], values?: Parameters<typeof translate>[2]) =>
   translate("en", key, values);
+const chinese = (key: Parameters<typeof translate>[1], values?: Parameters<typeof translate>[2]) =>
+  translate("zh-CN", key, values);
 
 beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
@@ -195,6 +209,12 @@ const deviceState = (overrides: Partial<DeviceServiceState> = {}): DeviceService
 });
 
 describe("device setup guidance", () => {
+  it("localizes the platform guidance using the supplied copy", () => {
+    expect(platformSetupStatus(deviceState(), "ios", chinese).message).toBe(
+      "已安装 Xcode，但没有可用的 iOS 模拟器。请在 Xcode 设置 → 组件中安装运行时。",
+    );
+  });
+
   it("directs users to install an iOS runtime and create an Android virtual device", () => {
     expect(platformSetupStatus(deviceState(), "ios", english).message).toContain("Xcode Settings");
     expect(platformSetupStatus(deviceState(), "android", english).message).toContain(

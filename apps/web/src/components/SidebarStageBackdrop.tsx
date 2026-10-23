@@ -7,7 +7,12 @@ import { resolveServerBackedAppStageLabel } from "../branding.logic";
 import { primaryServerConfigAtom } from "../state/server";
 
 export type SidebarStageBackdropVariant = "nightly" | "dev";
-export type EnvironmentIdentificationPillLabel = "Alpha" | "Experimental" | "Dev" | "Nightly";
+export type EnvironmentIdentificationPillLabel =
+  | "Beta"
+  | "Alpha"
+  | "Experimental"
+  | "Dev"
+  | "Nightly";
 
 // A wide viewBox keeps the 96-unit art height at a fixed scale while sidebar resizing reveals
 // more horizontal canvas instead of zooming the scene.
@@ -32,6 +37,7 @@ export function resolveEnvironmentIdentificationPillLabel(
   // Stages without artwork still need an identity when artwork is the saved default.
   if (mode === "artwork" && resolveSidebarStageBackdropVariant(stageLabel) !== null) return null;
   const normalized = stageLabel.trim().toLowerCase();
+  if (normalized === "beta") return "Beta";
   if (normalized === "alpha") return "Alpha";
   if (normalized === "experimental") return "Experimental";
   if (normalized === "dev") return "Dev";

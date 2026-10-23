@@ -2,8 +2,10 @@ import {
   EnvironmentId,
   MessageId,
   NodeId,
+  ProviderDriverKind,
   ProviderInstanceId,
   ProviderSessionId,
+  ProviderThreadId,
   RunId,
   RuntimeRequestId,
   TurnItemId,
@@ -74,15 +76,6 @@ describe("V2 client presentation", () => {
     expect(shell.source).toBe(v2ThreadShell);
   });
 
-  it("exposes the auto-settle opt-out timestamp and defaults older shells to enabled", () => {
-    const disabledAt = DateTime.makeUnsafe("2026-06-20T02:00:00.000Z");
-    expect(
-      presentThreadShell(environmentId, { ...v2ThreadShell, autoSettleDisabledAt: disabledAt })
-        .autoSettleDisabledAt,
-    ).toBe("2026-06-20T02:00:00.000Z");
-    expect(presentThreadShell(environmentId, v2ThreadShell).autoSettleDisabledAt).toBeNull();
-  });
-
   it("preserves active ordering and both pull-request sources", () => {
     const linkedPullRequest = {
       projectId: v2ThreadShell.projectId,
@@ -149,7 +142,7 @@ describe("V2 client presentation", () => {
       latestRunId: runId,
       activeRunId: null,
       status: "completed",
-      pendingBackgroundTasks: [{ taskId: "bg-1", description: "sleep 20" }],
+      pendingBackgroundTasks: [{ taskId: "bg-1", description: "Watch build", kind: "monitor" }],
     });
 
     expect(shell.latestRun).toMatchObject({ runId, status: "completed" });
@@ -157,7 +150,86 @@ describe("V2 client presentation", () => {
       status: "idle",
       activeRunId: null,
     });
-    expect(shell.pendingBackgroundTasks).toEqual([{ taskId: "bg-1", description: "sleep 20" }]);
+    expect(shell.pendingBackgroundTasks).toEqual([
+      { taskId: "bg-1", description: "Watch build", kind: "monitor" },
+    ]);
+  });
+
+  it("parks a thread that never ran at idle while a pull request watch holds it", () => {
+    const watch = { taskId: "pull-request-watch:github.com/acme/app#1", kind: "monitor" as const };
+    const watched = presentThreadShell(environmentId, {
+      ...v2ThreadShell,
+      latestRunId: null,
+      activeProviderThreadId: null,
+      activeRunId: null,
+      status: "idle",
+      pendingBackgroundTasks: [watch],
+    });
+    expect(watched.runtime).toMatchObject({ status: "idle", activeRunId: null });
+    expect(
+      presentThreadShell(environmentId, {
+        ...v2ThreadShell,
+        latestRunId: null,
+        activeProviderThreadId: null,
+        status: "idle",
+        pendingBackgroundTasks: [],
+      }).runtime,
+    ).toBeNull();
+  });
+
+  it.each([
+    { kinds: ["command"], expected: "completed" },
+    { kinds: ["command", "subagent"], expected: "idle" },
+    { kinds: ["background_task"], expected: "idle" },
+  ] as const)("presents a completed shell with $kinds as $expected", ({ kinds, expected }) => {
+    const pendingBackgroundTasks = kinds.map((kind, index) => ({
+      taskId: `bg-${index}`,
+      kind,
+    }));
+    const shell = presentThreadShell(environmentId, {
+      ...v2ThreadShell,
+      latestRunId: RunId.make("run-completed"),
+      activeRunId: null,
+      status: "completed",
+      pendingBackgroundTasks,
+    });
+
+    expect(shell.latestRun?.status).toBe("completed");
+    expect(shell.runtime).toMatchObject({ status: expected, activeRunId: null });
+    expect(shell.pendingBackgroundTasks).toEqual(pendingBackgroundTasks);
+  });
+
+  it.each(["running", "waiting"] as const)(
+    "preserves shell %s while only commands remain in the roster",
+    (status) => {
+      const runId = RunId.make("run-command");
+      const shell = presentThreadShell(environmentId, {
+        ...v2ThreadShell,
+        latestRunId: runId,
+        activeRunId: runId,
+        status,
+        pendingBackgroundTasks: [{ taskId: "dev-server", kind: "command" }],
+      });
+
+      expect(shell.latestRun?.status).toBe(status);
+      expect(shell.runtime).toMatchObject({ status, activeRunId: runId });
+      expect(shell.pendingBackgroundTasks).toEqual([{ taskId: "dev-server", kind: "command" }]);
+    },
+  );
+
+  it("keeps a failed latest run failed while background tasks are still pending", () => {
+    const shell = presentThreadShell(environmentId, {
+      ...v2ThreadShell,
+      latestRunId: RunId.make("run-failed"),
+      activeRunId: null,
+      status: "failed",
+      lastError: "Provider turn failed",
+      pendingBackgroundTasks: [{ taskId: "bg-1", description: "Watch build", kind: "monitor" }],
+    });
+
+    // Sidebar and mobile list read runtime "idle" as Waiting before failure.
+    expect(shell.runtime).toMatchObject({ status: "failed", lastError: "Provider turn failed" });
+    expect(shell.pendingBackgroundTasks).toHaveLength(1);
   });
 
   it("stacks earlier provider owners behind the current one, newest history first to go", () => {
@@ -261,7 +333,9 @@ describe("V2 client presentation", () => {
       activeRunId,
       activityRunStatus: "running",
       status: "cancelled",
-      pendingBackgroundTasks: [{ taskId: "bg-activity", description: "background work" }],
+      pendingBackgroundTasks: [
+        { taskId: "bg-activity", description: "background work", kind: "background_task" },
+      ],
     });
 
     expect(shell.runtime).toMatchObject({ status: "idle", activeRunId });
@@ -276,7 +350,7 @@ describe("V2 client presentation", () => {
       // Stale: server already projected a post-settlement roster, but shell
       // status still says running (packaged orchestrator-v2 bug).
       status: "running",
-      pendingBackgroundTasks: [{ taskId: "bg-1", description: "sleep 20" }],
+      pendingBackgroundTasks: [{ taskId: "bg-1", description: "Watch build", kind: "monitor" }],
     });
 
     expect(shell.latestRun).toMatchObject({ runId, status: "running" });
@@ -284,7 +358,9 @@ describe("V2 client presentation", () => {
       status: "idle",
       activeRunId: runId,
     });
-    expect(shell.pendingBackgroundTasks).toEqual([{ taskId: "bg-1", description: "sleep 20" }]);
+    expect(shell.pendingBackgroundTasks).toEqual([
+      { taskId: "bg-1", description: "Watch build", kind: "monitor" },
+    ]);
   });
 
   it("parks runtime idle over stale checkpoint waiting when the roster is nonempty", () => {
@@ -295,7 +371,7 @@ describe("V2 client presentation", () => {
       activeRunId: runId,
       // Stale: checkpoint-oriented waiting masks post-settlement background work.
       status: "waiting",
-      pendingBackgroundTasks: [{ taskId: "bg-2", description: "background bash" }],
+      pendingBackgroundTasks: [{ taskId: "bg-2", description: "Watch build", kind: "monitor" }],
     });
 
     expect(shell.latestRun).toMatchObject({ runId, status: "waiting" });
@@ -304,7 +380,7 @@ describe("V2 client presentation", () => {
       activeRunId: runId,
     });
     expect(shell.pendingBackgroundTasks).toEqual([
-      { taskId: "bg-2", description: "background bash" },
+      { taskId: "bg-2", description: "Watch build", kind: "monitor" },
     ]);
   });
 
@@ -431,7 +507,7 @@ describe("V2 client presentation", () => {
       contextHandoffId: null,
     };
     const backgroundItem = {
-      id: TurnItemId.make("item-background-command"),
+      id: TurnItemId.make("item-background-subagent"),
       threadId: v2Projection.thread.id,
       runId,
       nodeId: null,
@@ -441,12 +517,18 @@ describe("V2 client presentation", () => {
       parentItemId: null,
       ordinal: 0,
       status: "running" as const,
-      title: "Background command",
+      title: "Background review",
       startedAt: now,
       completedAt: null,
       updatedAt: now,
-      type: "command_execution" as const,
-      input: "sleep 20",
+      type: "subagent" as const,
+      subagentId: NodeId.make("subagent-review"),
+      origin: "provider_native" as const,
+      driver: ProviderDriverKind.make("codex"),
+      providerInstanceId: v2Projection.thread.providerInstanceId,
+      childThreadId: null,
+      prompt: "Review the changes",
+      result: null,
     };
 
     expect(
@@ -469,6 +551,66 @@ describe("V2 client presentation", () => {
       status: "running",
       activeRunId: runId,
     });
+    expect(
+      deriveThreadRuntime({
+        ...v2Projection,
+        runs: [{ ...run, status: "failed" as const, completedAt: now }],
+        turnItems: [backgroundItem],
+      }),
+    ).toMatchObject({ status: "failed", activeRunId: null });
+    const commandItem = {
+      ...backgroundItem,
+      id: TurnItemId.make("item-background-command"),
+      type: "command_execution" as const,
+      input: "npm run dev",
+    };
+    expect(
+      deriveThreadRuntime({ ...v2Projection, runs: [run], turnItems: [commandItem] }),
+    ).toMatchObject({ status: "waiting", activeRunId: null });
+
+    for (const [turnItems, status] of [
+      [[commandItem], "completed"],
+      [[backgroundItem], "idle"],
+      [[commandItem, backgroundItem], "idle"],
+    ] as const) {
+      expect(
+        deriveThreadRuntime({
+          ...v2Projection,
+          runs: [{ ...run, status: "completed", completedAt: now }],
+          turnItems,
+        }),
+      ).toMatchObject({ status, activeRunId: null });
+    }
+
+    for (const kind of ["monitor", "background_task"] as const) {
+      const providerThread = {
+        id: ProviderThreadId.make("provider-thread-background"),
+        driver: ProviderDriverKind.make("claudeCode"),
+        providerInstanceId: v2Projection.thread.providerInstanceId,
+        providerSessionId: null,
+        appThreadId: v2Projection.thread.id,
+        ownerNodeId: null,
+        nativeThreadRef: null,
+        nativeConversationHeadRef: null,
+        status: "idle" as const,
+        firstRunOrdinal: 1,
+        lastRunOrdinal: 1,
+        handoffIds: [],
+        forkedFrom: null,
+        pendingBackgroundTasks: [{ taskId: "background-task", kind }],
+        createdAt: now,
+        updatedAt: now,
+      };
+      for (const status of ["completed", "failed"] as const) {
+        expect(
+          deriveThreadRuntime({
+            ...v2Projection,
+            runs: [{ ...run, status, completedAt: now }],
+            providerThreads: [providerThread],
+          }),
+        ).toMatchObject({ status: status === "failed" ? "failed" : "idle", activeRunId: null });
+      }
+    }
   });
 
   it("joins pending request entities to their native turn-item display data", () => {

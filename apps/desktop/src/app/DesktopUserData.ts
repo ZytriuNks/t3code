@@ -37,28 +37,17 @@ export const resolveUserDataPath = Effect.fn("desktop.userData.resolveUserDataPa
     readonly appDataDirectory: string;
     readonly isDevelopment: boolean;
     readonly platform: NodeJS.Platform;
-    readonly appName: string;
+    readonly appName?: string;
   }) {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-    const stageNames = {
-      // Alpha is the user's primary profile, so it owns the original
-      // filesystem-friendly userData directory (`t3code`) — this is what
-      // every prior Alpha build on this machine used, so the long-running
-      // conversation history and settings live here. Experimental and Dev
-      // sit alongside it for A/B verification against the alpha baseline.
-      "T3 Code (Alpha)": { current: "t3code", legacy: "t3code-v2" },
-      "T3 Code (Experimental)": { current: "t3code-experimental", legacy: "t3code-experimental" },
-      "T3 Code (Dev)": { current: "t3code-dev", legacy: "T3 Code (Dev)" },
-    } as const;
-    // Packaged Dev installers (rare on Windows where dev runs via Vite + the
-    // electron launcher) sit alongside Alpha and Experimental with their own
-    // userData directory so the three builds stay fully isolated.
-    const stageNamesFallback = stageNames;
-    const names = input.isDevelopment
-      ? stageNames["T3 Code (Dev)"]
-      : ((stageNames as Record<string, { current: string; legacy: string }>)[input.appName] ??
-        stageNames["T3 Code (Experimental)"]);
+    const appName = input.appName ?? "T3 Code (Beta)";
+    const names =
+      input.isDevelopment || appName === "T3 Code (Dev)"
+        ? { current: "t3code-dev", legacy: "T3 Code (Dev)" }
+        : appName === "T3 Code (Experimental)"
+          ? { current: "t3code-experimental", legacy: "T3 Code (Experimental)" }
+          : { current: "t3code", legacy: "t3code-v2" };
     const destinationPath = path.join(input.appDataDirectory, names.current);
     const legacyPath = path.join(input.appDataDirectory, names.legacy);
     const inspect = (resourcePath: string) =>
@@ -69,9 +58,49 @@ export const resolveUserDataPath = Effect.fn("desktop.userData.resolveUserDataPa
             DesktopUserDataInitializationError.fromFileSystem(cause, "inspect", resourcePath),
           ),
         );
-    if (input.isDevelopment) {
+    if (input.isDevelopment || appName === "T3 Code (Dev)") {
       return (yield* inspect(legacyPath)) ? legacyPath : destinationPath;
     }
+    // Beta deliberately reuses the legacy Alpha profile. This keeps the
+    // Chromium cookie store and Clerk OAuth state available after upgrade.
+    if (appName !== "T3 Code (Beta)" || input.platform !== "win32") {
+      return destinationPath;
+    }
+    const destinationState = path.join(destinationPath, "Local State");
+    if (yield* inspect(destinationState)) return destinationPath;
+    const legacyState = path.join(legacyPath, "Local State");
+    const sourceState = (yield* inspect(legacyState))
+      ? legacyState
+      : path.join(input.appDataDirectory, "T3 Code (Alpha)", "Local State");
+    if (!(yield* inspect(sourceState))) return destinationPath;
+    // Windows safeStorage keys live here. Copy only these preferences, never locked databases.
+    const state = yield* fs
+      .readFileString(sourceState)
+      .pipe(
+        Effect.mapError((cause) =>
+          DesktopUserDataInitializationError.fromFileSystem(cause, "read", sourceState),
+        ),
+      );
+    yield* fs
+      .makeDirectory(destinationPath, { recursive: true })
+      .pipe(
+        Effect.mapError((cause) =>
+          DesktopUserDataInitializationError.fromFileSystem(
+            cause,
+            "create-directory",
+            destinationPath,
+          ),
+        ),
+      );
+    yield* fs.writeFileString(destinationState, state, { flag: "wx" }).pipe(
+      Effect.catchIf(
+        (error) => error.reason._tag === "AlreadyExists",
+        () => Effect.void,
+      ),
+      Effect.mapError((cause) =>
+        DesktopUserDataInitializationError.fromFileSystem(cause, "write", destinationState),
+      ),
+    );
     return destinationPath;
   },
 );

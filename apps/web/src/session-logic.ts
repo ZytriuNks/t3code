@@ -12,8 +12,20 @@ import {
   type ToolActivitySurface,
   type ToolActivityIcon,
   type ToolActivitySource,
+  type ThreadId,
+  type TurnItemId,
 } from "@t3tools/contracts";
 import { extractToolActivityPresentation } from "@t3tools/client-runtime/work-log/tool-presentation";
+import {
+  classifyToolActivity,
+  collectToolFilePaths,
+  formatReadToolLabel,
+  formatSearchToolLabel,
+} from "@t3tools/shared/toolActivity";
+import type { HtmlRenderReference } from "@t3tools/shared/htmlRender";
+import { turnItemDetailRevision } from "@t3tools/client-runtime/work-log/item-detail";
+import type { McpAppReference } from "@t3tools/shared/mcpApp";
+import { htmlRenderFromToolItem, mcpAppFromToolItem } from "@t3tools/shared/toolOutput";
 import {
   contextCompactionLabel,
   workEntryIndicatesToolFailure,
@@ -24,6 +36,7 @@ import type {
   ThreadPendingUserInput,
 } from "@t3tools/client-runtime/state/thread-requests";
 import type { ThreadRunSummary, ThreadRuntimeSummary } from "@t3tools/client-runtime/state/shell";
+import { threadRuntimeHasInterruptibleRun } from "@t3tools/client-runtime/state/thread-execution";
 import { turnItemIsWorkspacePreparation } from "@t3tools/client-runtime/state/turn-item-presentation";
 
 import {
@@ -106,7 +119,7 @@ export interface LatestProposedPlanState {
 
 export type TimelineAttempt = Pick<
   OrchestrationV2RunAttempt,
-  "id" | "runId" | "attemptOrdinal" | "rootNodeId" | "status"
+  "id" | "runId" | "attemptOrdinal" | "rootNodeId" | "status" | "completedAt"
 >;
 
 export type TimelineEntry = (
@@ -122,6 +135,26 @@ export type TimelineEntry = (
       readonly kind: "proposed-plan";
       readonly createdAt: string;
       readonly proposedPlan: ProposedPlan;
+    }
+  | {
+      /** A page a completed `html_render` call published, shown where the call happened. */
+      readonly id: string;
+      readonly kind: "html-render";
+      readonly createdAt: string;
+      readonly runId: RunId | null;
+      readonly htmlRender: HtmlRenderReference;
+    }
+  | {
+      /** An MCP App a completed tool call captured, hosted where the call happened. */
+      readonly id: string;
+      readonly kind: "mcp-app";
+      readonly createdAt: string;
+      readonly runId: RunId | null;
+      /** The thread and item that own the app; a fork's inherited app is its source's. */
+      readonly sourceThreadId: ThreadId;
+      readonly itemId: TurnItemId;
+      readonly revision: string;
+      readonly mcpApp: McpAppReference;
     }
   | {
       readonly id: string;
@@ -298,12 +331,15 @@ const STANDALONE_V2_ITEM_TYPES = new Set<OrchestrationV2ProjectedTurnItem["item"
   "handoff",
   "run_interrupt_request",
   "run_interrupt_result",
+  "secret_request",
   "subagent",
 ]);
 
 const PERSISTENT_RESOURCE_V2_ITEM_TYPES = new Set<OrchestrationV2TurnItem["type"]>([
   "fork",
   "thread_created",
+  // Still answerable after a steer supersedes the attempt that asked.
+  "secret_request",
 ]);
 
 export function timelineEntryIsPersistentResourceCard(entry: TimelineEntry): boolean {
@@ -450,7 +486,7 @@ function projectedWorkEntry(row: OrchestrationV2ProjectedTurnItem): WorkLogEntry
     case "file_search":
       return {
         ...common,
-        label: title ?? "Searched files",
+        label: title ?? formatSearchToolLabel(item) ?? "Searched files",
         ...(item.pattern ? { detail: item.pattern } : {}),
         toolTitle: title ?? "File search",
         toolData: item,
@@ -489,13 +525,25 @@ function projectedWorkEntry(row: OrchestrationV2ProjectedTurnItem): WorkLogEntry
         toolData: item,
       };
     }
-    case "dynamic_tool":
+    case "dynamic_tool": {
+      const classified = classifyToolActivity({
+        itemType: "dynamic_tool_call",
+        data: { toolName: item.toolName ?? undefined, input: item.input },
+      });
+      const [readPath] = collectToolFilePaths({ input: item.input });
       return {
         ...common,
-        label: title ?? item.toolName ?? "Tool call",
+        label:
+          title ??
+          (classified === "read"
+            ? formatReadToolLabel(readPath ?? "")
+            : classified === "search"
+              ? (formatSearchToolLabel({ input: item.input }) ?? item.toolName ?? "Tool call")
+              : (item.toolName ?? "Tool call")),
         toolTitle: title ?? item.toolName ?? "Tool",
         toolData: { input: item.input, output: item.output },
       };
+    }
     case "approval_request":
       return {
         ...common,
@@ -661,6 +709,41 @@ export function deriveTimelineEntriesFromVisibleTurnItems(
         kind: "proposed-plan",
         createdAt,
         proposedPlan,
+        ...attemptMetadata,
+      });
+      continue;
+    }
+
+    const htmlRender =
+      item.type === "dynamic_tool" && item.status === "completed"
+        ? htmlRenderFromToolItem(item)
+        : undefined;
+    if (htmlRender !== undefined) {
+      entries.push({
+        id: item.id,
+        kind: "html-render",
+        createdAt,
+        runId: item.runId,
+        htmlRender,
+        ...attemptMetadata,
+      });
+      continue;
+    }
+
+    const mcpApp =
+      item.type === "dynamic_tool" && item.status === "completed"
+        ? mcpAppFromToolItem(item)
+        : undefined;
+    if (mcpApp !== undefined) {
+      entries.push({
+        id: item.id,
+        kind: "mcp-app",
+        createdAt,
+        runId: item.runId,
+        sourceThreadId: row.sourceThreadId,
+        itemId: row.sourceItemId,
+        revision: turnItemDetailRevision(item),
+        mcpApp,
         ...attemptMetadata,
       });
       continue;
@@ -993,6 +1076,22 @@ export function derivePhase(runtime: ThreadRuntimeSummary | null): SessionPhase 
     return "connecting";
   if (runtime.status === "running" || runtime.status === "waiting") return "running";
   return "ready";
+}
+
+/**
+ * Whether web and desktop offer Stop for the active thread. The server settles
+ * a preparing or starting run on `run.interrupt` (Orchestrator.dispatchRunInterrupt),
+ * so Stop must not wait for the phase to reach "running". A queued thread offers
+ * Stop only while an earlier run is still interruptible; Stop targets that run.
+ */
+export function deriveCanInterruptRunningThread(
+  hasActiveThread: boolean,
+  runtime: ThreadRuntimeSummary | null,
+): boolean {
+  return (
+    hasActiveThread &&
+    (derivePhase(runtime) === "running" || threadRuntimeHasInterruptibleRun(runtime))
+  );
 }
 
 export type { TurnDiffSummary };

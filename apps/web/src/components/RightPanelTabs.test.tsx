@@ -1,7 +1,7 @@
 import { EnvironmentId, type ThreadPullRequestLink } from "@t3tools/contracts";
 import type { DesktopPreviewFavicon, PreviewSessionSnapshot } from "@t3tools/contracts";
-import type { RightPanelSurface } from "~/rightPanelStore";
 import { renderToStaticMarkup } from "react-dom/server";
+import { DEFAULT_RESOLVED_KEYBINDINGS } from "@t3tools/shared/keybindings";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -95,19 +95,22 @@ function renderTabs(
   second?: DesktopPreviewFavicon,
   audio?: { audible?: boolean; audioMuted?: boolean },
   previewRuntimeTabId: ((tabId: string) => string) | null = (tabId) => `runtime:${tabId}`,
-  options: { empty?: boolean; agentsAvailable?: boolean } = {},
 ) {
-  const surfaces: readonly RightPanelSurface[] = options.empty
-    ? []
-    : second
-      ? [previewSurface, secondSurface]
-      : [previewSurface];
   return renderToStaticMarkup(
     <RightPanelTabs
       mode="inline"
-      surfaces={surfaces}
+      keybindings={DEFAULT_RESOLVED_KEYBINDINGS}
+      getShortcutContext={() => ({
+        terminalFocus: false,
+        terminalOpen: false,
+        previewFocus: false,
+        previewOpen: false,
+        isWeb: true,
+        isDesktop: false,
+      })}
+      surfaces={second ? [previewSurface, secondSurface] : [previewSurface]}
       environmentId={null}
-      activeSurfaceId={options.empty ? null : previewSurface.id}
+      activeSurfaceId={previewSurface.id}
       pendingSurfaceIds={new Set()}
       previewSessions={sessions}
       desktopByTabId={{
@@ -130,7 +133,6 @@ function renderTabs(
       onAddDiff={() => undefined}
       onAddFiles={() => undefined}
       onAddDevice={() => undefined}
-      onAddAgents={() => undefined}
       browserAvailable
       terminalAvailable={false}
       diffAvailable={false}
@@ -138,22 +140,11 @@ function renderTabs(
       pullRequestAvailable={false}
       pullRequestsAvailable={false}
       deviceAvailable={false}
-      agentsAvailable={options.agentsAvailable ?? false}
     >
       <div>content</div>
     </RightPanelTabs>,
   );
 }
-
-describe("Agents surface entry", () => {
-  it("appears in the empty launcher when a server thread is active", () => {
-    const html = renderTabs(null, undefined, undefined, undefined, {
-      empty: true,
-      agentsAvailable: true,
-    });
-    expect(html).toContain("Agents");
-  });
-});
 
 describe("RightPanelTabs preview favicon", () => {
   it("prefers a live capture and never asks Google about a private hostname", () => {

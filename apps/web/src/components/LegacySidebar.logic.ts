@@ -10,7 +10,7 @@ import {
 import type { SidebarProjectSnapshot } from "../sidebarProjectGrouping";
 import type { SidebarThreadSummary } from "../types";
 import type { SidebarThreadSortOrder } from "@t3tools/contracts/settings";
-import { filterSidebarVisibleThreads, sortPinnedThreadsForSidebar } from "./Sidebar.logic";
+import { filterSidebarV2VisibleThreads, sortPinnedThreadsForSidebar } from "./Sidebar.logic";
 import { sortThreads } from "../lib/threadSort";
 
 export type LegacySidebarSection = "pinned" | "projects" | "unassigned";
@@ -20,7 +20,7 @@ export function legacySidebarThreads(
   section: LegacySidebarSection,
   order: SidebarThreadSortOrder,
 ) {
-  const visible = filterSidebarVisibleThreads(threads).filter((thread) =>
+  const visible = filterSidebarV2VisibleThreads(threads, null).filter((thread) =>
     section === "pinned" ? thread.pinnedAt != null : thread.pinnedAt == null,
   );
   return section === "pinned" ? sortPinnedThreadsForSidebar(visible) : sortThreads(visible, order);

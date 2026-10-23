@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { makeProviderReplayGate } from "./ProviderReplayGate.testkit.ts";
+import { makeProviderReplayGate } from "@t3tools/provider-testing/replayGate";
 
 describe("ProviderReplayGate", () => {
   it("signals arrival before the held frame is released", async () => {

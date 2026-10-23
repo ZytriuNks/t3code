@@ -42,7 +42,7 @@ export function assertCursorSubagentOutput(
   );
   assert.deepEqual(
     lifecycleItems.map((item) => item.type),
-    ["reasoning", "assistant_message", "subagent", "subagent", "assistant_message"],
+    ["reasoning", "assistant_message", "subagent", "subagent", "reasoning", "assistant_message"],
     "Cursor progress, subagents, and the final response must retain provider order",
   );
   const assistantMessages = lifecycleItems.filter((item) => item.type === "assistant_message");
@@ -82,7 +82,7 @@ export function assertCursorSubagentOutput(
     assert.lengthOf(childProjection.providerThreads, 0);
     assert.lengthOf(childProjection.providerTurns, 0);
     assertExecutionNodeKinds(childProjection, ["root_turn", "tool_call"]);
-    assertTurnItemTypes(childProjection, ["user_message", "file_search", "assistant_message"]);
+    assertTurnItemTypes(childProjection, ["user_message", "dynamic_tool", "assistant_message"]);
     assertUserMessagesInclude(childProjection, [subagent.prompt]);
     assert.isTrue(
       childProjection.turnItems.some(

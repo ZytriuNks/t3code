@@ -13,7 +13,7 @@ export type ThreadHistoryLoadEarlierResult =
   | { readonly _tag: "error"; readonly message: string };
 
 export type ThreadHistoryHandler = {
-  readonly loadEarlier: () => Effect.Effect<ThreadHistoryLoadEarlierResult>;
+  readonly loadEarlier: (throughEntryId?: string) => Effect.Effect<ThreadHistoryLoadEarlierResult>;
 };
 
 /**
@@ -42,11 +42,12 @@ export class ThreadHistoryController extends Context.Service<
     readonly loadEarlier: (
       environmentId: EnvironmentId,
       threadId: ThreadId,
+      throughEntryId?: string,
     ) => Effect.Effect<ThreadHistoryLoadEarlierResult>;
   }
 >()("@t3tools/client-runtime/state/threadHistoryController") {}
 
-export const threadHistoryControllerLayer: Layer.Layer<ThreadHistoryController> = Layer.effect(
+export const layer: Layer.Layer<ThreadHistoryController> = Layer.effect(
   ThreadHistoryController,
   Effect.gen(function* () {
     const handlers = yield* Ref.make(new Map<string, ThreadHistoryHandler>());
@@ -78,14 +79,14 @@ export const threadHistoryControllerLayer: Layer.Layer<ThreadHistoryController> 
           next.delete(key);
           return next;
         }),
-      loadEarlier: (environmentId, threadId) =>
+      loadEarlier: (environmentId, threadId, throughEntryId) =>
         Ref.get(handlers).pipe(
           Effect.flatMap((current) => {
             const handler = current.get(threadKey({ environmentId, threadId }));
             if (handler === undefined) {
               return Effect.succeed({ _tag: "noop" } satisfies ThreadHistoryLoadEarlierResult);
             }
-            return handler.loadEarlier();
+            return handler.loadEarlier(throughEntryId);
           }),
         ),
     });

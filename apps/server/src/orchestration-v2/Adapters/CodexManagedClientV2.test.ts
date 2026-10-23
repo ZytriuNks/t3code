@@ -6,6 +6,7 @@ import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
+import * as Stream from "effect/Stream";
 import { makeCodexManagedClientV2 } from "./CodexManagedClientV2.ts";
 
 it.effect(
@@ -32,6 +33,10 @@ it.effect(
       };
       const registrations: string[] = [];
       const scope = yield* Scope.make();
+      const settings = yield* Schema.decodeEffect(CodexSettings)({});
+      const managedSettings = yield* Schema.decodeEffect(CodexSettings)({
+        binaryPath: "managed-codex",
+      });
       const managed = yield* makeCodexManagedClientV2({
         input: {
           instanceId: ProviderInstanceId.make("managed"),
@@ -42,15 +47,19 @@ it.effect(
             runtimeMode: "full-access",
             interactionMode: "default",
           },
-          settings: Schema.decodeSync(CodexSettings)({}),
+          settings,
           environment: {},
         },
         resolveRuntime: Effect.sync(() => ({
-          config: Schema.decodeSync(CodexSettings)({ binaryPath: "managed-codex" }),
+          config: managedSettings,
           environment: { ACCESS_TOKEN: revision },
           revision,
         })),
         withAccess: (effect) => effect,
+        initializeParams: {
+          clientInfo: { name: "managed-fixture", version: "0.1.0" },
+          capabilities: { experimentalApi: true },
+        },
         factory: {
           open: (input) =>
             Effect.gen(function* () {
@@ -66,10 +75,15 @@ it.effect(
                   request: (method) =>
                     Effect.sync(() => {
                       requests.push(`${token}:${method}`);
-                      return {};
+                      return {} as never;
                     }),
                   notify: () => Effect.void,
                   raw: {
+                    notifications: Stream.empty,
+                    requests: Stream.empty,
+                    notify: () => Effect.void,
+                    respond: () => Effect.void,
+                    respondError: () => Effect.void,
                     request: (method, payload) =>
                       Effect.sync(() => {
                         requests.push(`${token}:${method}`);

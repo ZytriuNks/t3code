@@ -7,10 +7,14 @@ import {
   ChatAttachmentId,
   CommandId,
   EventId,
+  MessageId,
+  ProjectId,
+  ProviderInstanceId,
   RuntimeRequestId,
   ThreadId,
   TurnItemId,
   type OrchestrationV2Command,
+  type OrchestrationV2ServerCommand,
   type OrchestrationV2StoredEvent,
   type UserInputAttachments,
 } from "@t3tools/contracts";
@@ -19,19 +23,20 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { createPendingAttachmentId, resolveAttachmentPath } from "../attachmentStore.ts";
 import * as ServerConfig from "../config.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import {
   OrchestratorCommandPreviouslyRejectedError,
   OrchestratorDispatchError,
 } from "./Orchestrator.ts";
-import { ThreadManagementService } from "./ThreadManagementService.ts";
-import { dispatchCommand } from "./ThreadMessageIntake.ts";
+import * as ThreadManagementService from "./ThreadManagementService.ts";
+import { dispatchCommand, sendToThread } from "./ThreadMessageIntake.ts";
 
-const intakeTestLayer = ServerConfig.layerTest(process.cwd(), {
+const layerIntakeTest = ServerConfig.layerTest(process.cwd(), {
   prefix: "t3-question-intake-",
-}).pipe(Layer.provideMerge(NodeServices.layer));
+}).pipe(Layer.provideMerge(NodeServices.layer), Layer.provideMerge(ServerSettings.layerTest()));
 
-const failingDispatch = (captured: OrchestrationV2Command[]) =>
-  Layer.mock(ThreadManagementService)({
+const layerFailingDispatch = (captured: OrchestrationV2ServerCommand[]) =>
+  Layer.mock(ThreadManagementService.ThreadManagementService)({
     dispatch: (command) => {
       captured.push(command);
       return Effect.fail(
@@ -132,7 +137,7 @@ it.effect("claims question uploads and passes readable paths through the V2 requ
       NodePath.join(config.attachmentsDir, `${id}.png`),
       new Uint8Array([1, 2, 3]),
     );
-    const captured: OrchestrationV2Command[] = [];
+    const captured: OrchestrationV2ServerCommand[] = [];
     yield* dispatchCommand({
       type: "runtime-request.respond",
       commandId: CommandId.make("answer-1"),
@@ -142,7 +147,7 @@ it.effect("claims question uploads and passes readable paths through the V2 requ
       attachmentsByQuestionId: {
         q: [{ type: "image", id, name: "screen.png", mimeType: "image/png", sizeBytes: 3 }],
       },
-    }).pipe(Effect.provide(failingDispatch(captured)), Effect.result);
+    }).pipe(Effect.provide(layerFailingDispatch(captured)), Effect.result);
     expect(captured).toHaveLength(1);
     const command = captured[0]!;
     expect(command.type).toBe("runtime-request.respond");
@@ -159,7 +164,7 @@ it.effect("claims question uploads and passes readable paths through the V2 requ
       "Selected option",
       `Attached image "screen.png": "${path}"`,
     ]);
-  }).pipe(Effect.provide(intakeTestLayer)),
+  }).pipe(Effect.provide(layerIntakeTest)),
 );
 
 it.effect("rolls back earlier question claims when a later pending upload is missing", () =>
@@ -176,7 +181,7 @@ it.effect("rolls back earlier question claims when a later pending upload is mis
       NodePath.join(config.attachmentsDir, `${existingId}.png`),
       new Uint8Array([9, 9, 9, 9]),
     );
-    const captured: OrchestrationV2Command[] = [];
+    const captured: OrchestrationV2ServerCommand[] = [];
     const result = yield* dispatchCommand({
       type: "runtime-request.respond",
       commandId: CommandId.make("answer-missing-pending"),
@@ -210,7 +215,7 @@ it.effect("rolls back earlier question claims when a later pending upload is mis
           },
         ],
       },
-    }).pipe(Effect.provide(failingDispatch(captured)), Effect.result);
+    }).pipe(Effect.provide(layerFailingDispatch(captured)), Effect.result);
     expect(result._tag).toBe("Failure");
     if (result._tag === "Failure") {
       expect(result.failure._tag).toBe("AttachmentClaimError");
@@ -226,7 +231,7 @@ it.effect("rolls back earlier question claims when a later pending upload is mis
         entry.startsWith("thread-q-fail-"),
       ),
     ).toEqual([`${existingId}.png`]);
-  }).pipe(Effect.provide(intakeTestLayer)),
+  }).pipe(Effect.provide(layerIntakeTest)),
 );
 
 it.effect("rolls back earlier question claims when attachment path preparation fails", () =>
@@ -237,7 +242,7 @@ it.effect("rolls back earlier question claims when attachment path preparation f
       NodePath.join(config.attachmentsDir, `${pendingId}.png`),
       new Uint8Array([1, 2, 3]),
     );
-    const captured: OrchestrationV2Command[] = [];
+    const captured: OrchestrationV2ServerCommand[] = [];
     const result = yield* dispatchCommand({
       type: "runtime-request.respond",
       commandId: CommandId.make("answer-missing-claimed"),
@@ -264,7 +269,7 @@ it.effect("rolls back earlier question claims when attachment path preparation f
           },
         ],
       },
-    }).pipe(Effect.provide(failingDispatch(captured)), Effect.result);
+    }).pipe(Effect.provide(layerFailingDispatch(captured)), Effect.result);
     expect(result._tag).toBe("Failure");
     if (result._tag === "Failure") {
       expect(result.failure._tag).toBe("AttachmentClaimError");
@@ -278,7 +283,7 @@ it.effect("rolls back earlier question claims when attachment path preparation f
         entry.startsWith("thread-path-fail-"),
       ),
     ).toEqual([]);
-  }).pipe(Effect.provide(intakeTestLayer)),
+  }).pipe(Effect.provide(layerIntakeTest)),
 );
 
 it.effect("retains claimed copies when dispatch failure may have been accepted", () =>
@@ -289,7 +294,7 @@ it.effect("retains claimed copies when dispatch failure may have been accepted",
       NodePath.join(config.attachmentsDir, `${pendingId}.png`),
       new Uint8Array([1, 2, 3]),
     );
-    const captured: OrchestrationV2Command[] = [];
+    const captured: OrchestrationV2ServerCommand[] = [];
     const result = yield* dispatchCommand({
       type: "runtime-request.respond",
       commandId: CommandId.make("answer-ambiguous"),
@@ -307,7 +312,7 @@ it.effect("retains claimed copies when dispatch failure may have been accepted",
           },
         ],
       },
-    }).pipe(Effect.provide(failingDispatch(captured)), Effect.result);
+    }).pipe(Effect.provide(layerFailingDispatch(captured)), Effect.result);
     expect(result._tag).toBe("Failure");
     expect(captured).toHaveLength(1);
     // The response may have been accepted before the error, so the copy that
@@ -317,7 +322,7 @@ it.effect("retains claimed copies when dispatch failure may have been accepted",
     );
     expect(threadFiles).toHaveLength(1);
     expect(NodeFS.existsSync(NodePath.join(config.attachmentsDir, `${pendingId}.png`))).toBe(true);
-  }).pipe(Effect.provide(intakeTestLayer)),
+  }).pipe(Effect.provide(layerIntakeTest)),
 );
 
 it.effect("releases claimed copies when the command was already rejected", () =>
@@ -349,7 +354,7 @@ it.effect("releases claimed copies when the command was already rejected", () =>
       },
     }).pipe(
       Effect.provide(
-        Layer.mock(ThreadManagementService)({
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
           dispatch: (command) =>
             Effect.fail(
               new OrchestratorCommandPreviouslyRejectedError({
@@ -369,7 +374,7 @@ it.effect("releases claimed copies when the command was already rejected", () =>
       ),
     ).toEqual([]);
     expect(NodeFS.existsSync(NodePath.join(config.attachmentsDir, `${pendingId}.png`))).toBe(true);
-  }).pipe(Effect.provide(intakeTestLayer)),
+  }).pipe(Effect.provide(layerIntakeTest)),
 );
 
 it.effect("releases claimed copies when dispatch replays an earlier accepted response", () =>
@@ -419,7 +424,7 @@ it.effect("releases claimed copies when dispatch replays an earlier accepted res
       },
     }).pipe(
       Effect.provide(
-        Layer.mock(ThreadManagementService)({
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
           dispatch: () => Effect.succeed({ sequence: 1, storedEvents }),
         }),
       ),
@@ -437,7 +442,7 @@ it.effect("releases claimed copies when dispatch replays an earlier accepted res
       NodeFS.readFileSync(NodePath.join(config.attachmentsDir, `${earlierAttachment.id}.png`)),
     ).toEqual(Buffer.from([4, 4, 4]));
     expect(NodeFS.existsSync(NodePath.join(config.attachmentsDir, `${pendingId}.png`))).toBe(true);
-  }).pipe(Effect.provide(intakeTestLayer)),
+  }).pipe(Effect.provide(layerIntakeTest)),
 );
 
 it.effect("releases claimed copies when the recorded answer has no attachments", () =>
@@ -475,7 +480,7 @@ it.effect("releases claimed copies when the recorded answer has no attachments",
       },
     }).pipe(
       Effect.provide(
-        Layer.mock(ThreadManagementService)({
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
           dispatch: () => Effect.succeed({ sequence: 1, storedEvents }),
         }),
       ),
@@ -488,7 +493,7 @@ it.effect("releases claimed copies when the recorded answer has no attachments",
       ),
     ).toEqual([]);
     expect(NodeFS.existsSync(NodePath.join(config.attachmentsDir, `${pendingId}.png`))).toBe(true);
-  }).pipe(Effect.provide(intakeTestLayer)),
+  }).pipe(Effect.provide(layerIntakeTest)),
 );
 
 it.effect("releases claimed copies when the recorded answer was text-only", () =>
@@ -526,7 +531,7 @@ it.effect("releases claimed copies when the recorded answer was text-only", () =
       },
     }).pipe(
       Effect.provide(
-        Layer.mock(ThreadManagementService)({
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
           dispatch: () => Effect.succeed({ sequence: 1, storedEvents }),
         }),
       ),
@@ -539,7 +544,7 @@ it.effect("releases claimed copies when the recorded answer was text-only", () =
       ),
     ).toEqual([]);
     expect(NodeFS.existsSync(NodePath.join(config.attachmentsDir, `${pendingId}.png`))).toBe(true);
-  }).pipe(Effect.provide(intakeTestLayer)),
+  }).pipe(Effect.provide(layerIntakeTest)),
 );
 
 it.effect("retains claimed copies referenced by a fresh recorded answer", () =>
@@ -584,7 +589,7 @@ it.effect("retains claimed copies referenced by a fresh recorded answer", () =>
       },
     }).pipe(
       Effect.provide(
-        Layer.mock(ThreadManagementService)({
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
           // A fresh commit records exactly the attachments this attempt claimed.
           dispatch: (command) =>
             Effect.succeed({
@@ -608,7 +613,7 @@ it.effect("retains claimed copies referenced by a fresh recorded answer", () =>
         entry.startsWith("thread-fresh-answer-"),
       ),
     ).toHaveLength(2);
-  }).pipe(Effect.provide(intakeTestLayer)),
+  }).pipe(Effect.provide(layerIntakeTest)),
 );
 
 it.effect("releases claimed copies when preparation dies with a defect", () =>
@@ -624,7 +629,7 @@ it.effect("releases claimed copies when preparation dies with a defect", () =>
         throw new Error("poisoned");
       },
     };
-    const captured: OrchestrationV2Command[] = [];
+    const captured: OrchestrationV2ServerCommand[] = [];
     const result = yield* dispatchCommand({
       type: "runtime-request.respond",
       commandId: CommandId.make("answer-defect"),
@@ -643,7 +648,7 @@ it.effect("releases claimed copies when preparation dies with a defect", () =>
         ],
         q2: [poisoned] as never,
       },
-    }).pipe(Effect.provide(failingDispatch(captured)), Effect.exit);
+    }).pipe(Effect.provide(layerFailingDispatch(captured)), Effect.exit);
     expect(result._tag).toBe("Failure");
     expect(captured).toHaveLength(0);
     expect(
@@ -652,7 +657,7 @@ it.effect("releases claimed copies when preparation dies with a defect", () =>
       ),
     ).toEqual([]);
     expect(NodeFS.existsSync(NodePath.join(config.attachmentsDir, `${pendingId}.png`))).toBe(true);
-  }).pipe(Effect.provide(intakeTestLayer)),
+  }).pipe(Effect.provide(layerIntakeTest)),
 );
 
 it.effect("a retried response re-claims the preserved pending uploads", () =>
@@ -692,9 +697,9 @@ it.effect("a retried response re-claims the preserved pending uploads", () =>
         ],
       },
     };
-    const captured: OrchestrationV2Command[] = [];
+    const captured: OrchestrationV2ServerCommand[] = [];
     const first = yield* dispatchCommand(command).pipe(
-      Effect.provide(failingDispatch(captured)),
+      Effect.provide(layerFailingDispatch(captured)),
       Effect.result,
     );
     expect(first._tag).toBe("Failure");
@@ -706,7 +711,7 @@ it.effect("a retried response re-claims the preserved pending uploads", () =>
     );
     const retry = yield* dispatchCommand(command).pipe(
       Effect.provide(
-        Layer.mock(ThreadManagementService)({
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
           dispatch: (dispatched) => {
             captured.push(dispatched);
             return Effect.succeed({ sequence: 1, storedEvents: [] });
@@ -735,7 +740,7 @@ it.effect("a retried response re-claims the preserved pending uploads", () =>
         entry.startsWith("thread-retry-"),
       ),
     ).toHaveLength(2);
-  }).pipe(Effect.provide(intakeTestLayer)),
+  }).pipe(Effect.provide(layerIntakeTest)),
 );
 
 it.effect("applies the image budget across all questions before dispatch", () =>
@@ -747,7 +752,7 @@ it.effect("applies the image budget across all questions before dispatch", () =>
       mimeType: "image/png",
       sizeBytes: 10 * 1024 * 1024,
     }));
-    const captured: OrchestrationV2Command[] = [];
+    const captured: OrchestrationV2ServerCommand[] = [];
     const result = yield* Effect.exit(
       dispatchCommand({
         type: "runtime-request.respond",
@@ -756,10 +761,60 @@ it.effect("applies the image budget across all questions before dispatch", () =>
         requestId: RuntimeRequestId.make("question-image-budget"),
         answers: {},
         attachmentsByQuestionId: { q1: attachments, q2: attachments },
-      }).pipe(Effect.provide(failingDispatch(captured))),
+      }).pipe(Effect.provide(layerFailingDispatch(captured))),
     );
     expect(result._tag).toBe("Failure");
     if (result._tag === "Failure") expect(String(result.cause)).toContain("80 MiB");
     expect(captured).toEqual([]);
-  }).pipe(Effect.provide(intakeTestLayer)),
+  }).pipe(Effect.provide(layerIntakeTest)),
+);
+
+it.effect("releases claimed copies when a project disables the message's provider instance", () =>
+  Effect.gen(function* () {
+    const config = yield* ServerConfig.ServerConfig;
+    const pendingId = ChatAttachmentId.make(createPendingAttachmentId()!);
+    NodeFS.writeFileSync(
+      NodePath.join(config.attachmentsDir, `${pendingId}.png`),
+      new Uint8Array([1, 2, 3]),
+    );
+    const result = yield* sendToThread({
+      projectId: ProjectId.make("project-disabled-send"),
+      commandId: CommandId.make("command-disabled-send"),
+      threadId: ThreadId.make("thread-disabled-send"),
+      messageId: MessageId.make("message-disabled-send"),
+      text: "Hello",
+      attachments: [
+        {
+          type: "image",
+          id: pendingId,
+          name: "screen.png",
+          mimeType: "image/png",
+          sizeBytes: 3,
+        },
+      ],
+      mode: "auto",
+      createdBy: "user",
+      creationSource: "web",
+    }).pipe(
+      Effect.provide(
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
+          sendToThread: (input) =>
+            Effect.fail(
+              new ThreadManagementService.ThreadManagementProviderInstanceDisabledError({
+                projectId: input.projectId,
+                instanceId: ProviderInstanceId.make("codex"),
+              }),
+            ),
+        }),
+      ),
+      Effect.result,
+    );
+    expect(result._tag).toBe("Failure");
+    expect(
+      NodeFS.readdirSync(config.attachmentsDir).filter((entry) =>
+        entry.startsWith("thread-disabled-send-"),
+      ),
+    ).toEqual([]);
+    expect(NodeFS.existsSync(NodePath.join(config.attachmentsDir, `${pendingId}.png`))).toBe(true);
+  }).pipe(Effect.provide(layerIntakeTest)),
 );

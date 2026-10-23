@@ -15,6 +15,7 @@ import {
 } from "./lib/windowControlsOverlay";
 import { AppRoot } from "./AppRoot";
 import { clearChunkReloadGuard, reloadOnceForChunkLoadError } from "./lib/chunkReloadGuard";
+import { installDesktopSystemContextMenu } from "./lib/desktopSystemContextMenu";
 
 prepareProviderAuthDelivery();
 
@@ -26,6 +27,7 @@ const router = getRouter(history);
 if (isElectron) {
   syncDocumentElectronPlatformClasses(navigator.platform);
   syncDocumentWindowControlsOverlayClass();
+  installDesktopSystemContextMenu(window.desktopBridge);
 }
 
 const clerkPublishableKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY as string | undefined;

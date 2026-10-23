@@ -19,10 +19,10 @@ import {
 } from "./electron-launcher.mjs";
 
 describe("electron development launcher", () => {
-  it("uses the Experimental identity for packaged launches", () => {
-    assert.equal(APP_DISPLAY_NAME, "T3 Code (Experimental)");
-    assert.equal(APP_BUNDLE_ID, "com.t3tools.t3code.experimental");
-    assert.deepEqual(APP_PROTOCOL_SCHEMES, ["t3code-experimental"]);
+  it("uses the Beta identity for packaged launches", () => {
+    assert.equal(APP_DISPLAY_NAME, "T3 Code (Beta)");
+    assert.equal(APP_BUNDLE_ID, "com.t3tools.t3code");
+    assert.deepEqual(APP_PROTOCOL_SCHEMES, ["t3code"]);
   });
 
   it("uses captured values only as fallbacks for a live runner environment", () => {

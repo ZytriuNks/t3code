@@ -71,6 +71,19 @@ vi.mock("../../state/query", () => ({
   }),
 }));
 
+// The sections run outside a React renderer here, so context reads use the English copy directly.
+vi.mock("../../i18n/I18nProvider", async () => {
+  const { translate } = await import("../../i18n/messages");
+  return {
+    useI18n: () => ({
+      t: (
+        key: import("../../i18n/messages").MessageKey,
+        values?: import("../../i18n/messages").MessageValues,
+      ) => translate("en", key, values),
+    }),
+  };
+});
+
 vi.mock("../../localApi", () => ({
   ensureLocalApi: () => ({ dialogs: { confirm: setup.confirm } }),
 }));

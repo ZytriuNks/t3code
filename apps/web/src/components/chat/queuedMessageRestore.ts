@@ -1,10 +1,10 @@
 import { useComposerDraftStore, type ComposerThreadTarget } from "../../composerDraftStore";
-import type { QueuedComposerMessage } from "../../queuedMessageStore";
+import type { ThreadContextRecord } from "@t3tools/contracts";
 
 /** Restore thread references from messages returned to the composer by Stop or Cancel. */
 export function restoreQueuedThreadContexts(
   target: ComposerThreadTarget,
-  messages: ReadonlyArray<Pick<QueuedComposerMessage, "threadContexts">>,
+  messages: ReadonlyArray<{ readonly threadContexts: ReadonlyArray<ThreadContextRecord> }>,
 ): string {
   const store = useComposerDraftStore.getState();
   const draft = store.getComposerDraft(target);

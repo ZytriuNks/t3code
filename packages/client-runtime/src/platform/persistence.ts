@@ -1,7 +1,6 @@
 import {
   type EnvironmentId,
   type OrchestrationV2ShellSnapshot,
-  OrchestrationV2ShellSnapshotJson,
   type OrchestrationV2ThreadDetailSnapshot,
   type ServerConfig,
   type ThreadId,
@@ -13,7 +12,8 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import type { ConnectionRegistration } from "../connection/catalog.ts";
-import type { ConnectionTarget } from "../connection/model.ts";
+import type { DeferredShellSnapshot } from "../state/shellPullRequests.ts";
+import type { ConnectionTarget, PersistedConnectionTarget } from "../connection/model.ts";
 
 export class ConnectionPersistenceError extends Schema.TaggedError<ConnectionPersistenceError>()(
   "ConnectionPersistenceError",
@@ -22,6 +22,7 @@ export class ConnectionPersistenceError extends Schema.TaggedError<ConnectionPer
       "list-targets",
       "list-disabled-targets",
       "register-connection",
+      "set-connection-routes",
       "remove-connection",
       "set-connection-enabled",
       "load-shell",
@@ -53,10 +54,23 @@ export class ConnectionTargetStore extends Context.Service<
 export class ConnectionRegistrationStore extends Context.Service<
   ConnectionRegistrationStore,
   {
+    /**
+     * Saves one route's records and sets the environment's full route list,
+     * preferred first. Records of routes missing from `routes` are dropped.
+     */
     readonly register: (
       registration: ConnectionRegistration,
+      routes: ReadonlyArray<PersistedConnectionTarget>,
     ) => Effect.Effect<void, ConnectionPersistenceError>;
-    readonly remove: (target: ConnectionTarget) => Effect.Effect<void, ConnectionPersistenceError>;
+    /** Reorders or drops routes without adding one. `routes` must not be empty. */
+    readonly setRoutes: (
+      environmentId: EnvironmentId,
+      routes: ReadonlyArray<PersistedConnectionTarget>,
+    ) => Effect.Effect<void, ConnectionPersistenceError>;
+    /** Forgets the environment and every route it had. */
+    readonly remove: (
+      environmentId: EnvironmentId,
+    ) => Effect.Effect<void, ConnectionPersistenceError>;
     readonly setEnabled: (
       environmentId: EnvironmentId,
       enabled: boolean,
@@ -69,7 +83,7 @@ export class EnvironmentCacheStore extends Context.Service<
   {
     readonly loadShell: (
       environmentId: EnvironmentId,
-    ) => Effect.Effect<Option.Option<OrchestrationV2ShellSnapshot>, ConnectionPersistenceError>;
+    ) => Effect.Effect<Option.Option<DeferredShellSnapshot>, ConnectionPersistenceError>;
     readonly saveShell: (
       environmentId: EnvironmentId,
       snapshot: OrchestrationV2ShellSnapshot,
@@ -130,9 +144,6 @@ export class EnvironmentCacheStore extends Context.Service<
     ) => Effect.Effect<void, ConnectionPersistenceError>;
   }
 >()("@t3tools/client-runtime/platform/persistence/EnvironmentCacheStore") {}
-
-/** Encodes project icons and V2 thread dates for `EnvironmentCacheStore.saveShell`. */
-export const encodeShellSnapshotForCache = Schema.encodeEffect(OrchestrationV2ShellSnapshotJson);
 
 export class EnvironmentOwnedDataCleanup extends Context.Reference<{
   readonly clear: (environmentId: EnvironmentId) => Effect.Effect<void>;

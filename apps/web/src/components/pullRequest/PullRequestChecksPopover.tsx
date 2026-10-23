@@ -6,7 +6,6 @@ import type {
   PullRequestRef,
   ScopedThreadRef,
 } from "@t3tools/contracts";
-import { ChevronDownIcon } from "lucide-react";
 import { useState } from "react";
 
 import { useOpenLink } from "~/browser/useOpenLink";
@@ -74,7 +73,7 @@ function ChecksBody({
   }
   return (
     <>
-      <ScrollArea scrollbarVariant="compact" className="max-h-64">
+      <ScrollArea className="max-h-64">
         <ul className="flex flex-col gap-1">
           {/* Keyed by position as well as by name: the host is the one that decides how many runs
           share a name, and a repeated key is a rendering fault rather than a wrong list. */}
@@ -156,6 +155,9 @@ export function PullRequestChecksPopover({
   const presentation = pullRequestChecksStatePresentation(checksState);
   // Counts beat the rollup's own wording where they are known, the way GitHub's own header reads.
   const runningCount = checks?.filter((check) => check.status === "pending").length ?? 0;
+  const failedCount =
+    checks?.filter((check) => check.status === "failure" || check.status === "cancelled").length ??
+    0;
   const summary = checks === undefined || stale ? null : summarizePullRequestChecks(checks);
   return (
     <Popover>
@@ -189,8 +191,9 @@ export function PullRequestChecksPopover({
               <span className="tabular-nums">
                 {runningCount}/{checks.length}
               </span>
+            ) : failedCount > 0 ? (
+              <span className="tabular-nums">{failedCount} failed</span>
             ) : null}
-            <ChevronDownIcon aria-hidden className="size-3" />
           </>
         ) : null}
       </PopoverTrigger>

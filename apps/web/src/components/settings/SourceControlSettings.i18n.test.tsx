@@ -3,9 +3,11 @@ import { act, type ReactNode } from "react";
 import { create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
+const localeState = vi.hoisted(() => ({ language: "zh-CN" as "zh-CN" | "en" }));
+
 vi.mock("../../hooks/useSettings", () => ({
   useClientSettings: (selector?: (settings: typeof DEFAULT_CLIENT_SETTINGS) => unknown) => {
-    const settings = { ...DEFAULT_CLIENT_SETTINGS, language: "zh-CN" as const };
+    const settings = { ...DEFAULT_CLIENT_SETTINGS, language: localeState.language };
     return selector ? selector(settings) : settings;
   },
 }));
@@ -86,5 +88,30 @@ describe("SourceControlSettings Chinese rendering", () => {
     const text = textContents(renderer!);
     expect(text).toContain("服务器环境");
     expect(text).toContain("连接一个环境以检查其版本控制工具和托管集成。");
+  });
+
+  it("follows a language change without remounting the settings page", () => {
+    act(() => {
+      localeState.language = "en";
+      renderer!.update(
+        <I18nProvider>
+          <SourceControlSettingsPanel />
+        </I18nProvider>,
+      );
+    });
+    expect(textContents(renderer!)).toContain("Server environment");
+    expect(textContents(renderer!)).toContain(
+      "Connect an environment to inspect its version control tools and hosting integrations.",
+    );
+
+    act(() => {
+      localeState.language = "zh-CN";
+      renderer!.update(
+        <I18nProvider>
+          <SourceControlSettingsPanel />
+        </I18nProvider>,
+      );
+    });
+    expect(textContents(renderer!)).toContain("服务器环境");
   });
 });

@@ -3,6 +3,45 @@ import { BotIcon, type LucideIcon } from "lucide-react";
 import { cn } from "../../lib/utils";
 import { ProviderInstanceIcon } from "./ProviderInstanceIcon";
 
+export function threadRelationshipStatusLabel(status: string | null): string {
+  switch (status) {
+    case "preparing":
+    case "starting":
+      return "Starting";
+    case "running":
+    case "in_progress":
+      return "Running";
+    case "pending":
+    case "queued":
+      return "Queued";
+    case "waiting":
+    case "blocked":
+      return "Waiting";
+    case "completed":
+      return "Done";
+    case "failed":
+    case "error":
+      return "Failed";
+    case "cancelled":
+    case "interrupted":
+      return "Stopped";
+    case "rolled_back":
+      return "Reverted";
+    case "resolved_native":
+      return "Resolved (native)";
+    case "resolved_portable":
+      return "Resolved (portable)";
+    case "consumed":
+      return "Consumed";
+    case "superseded":
+      return "Superseded";
+    case "idle":
+      return "Idle";
+    default:
+      return "Unknown";
+  }
+}
+
 /** Shared by lineage and timeline links, including the provider glyph and status badge. */
 export function ThreadRelationshipIcon({
   driver,
@@ -17,7 +56,7 @@ export function ThreadRelationshipIcon({
 }) {
   const iconClassName = "size-4 shrink-0 text-muted-foreground";
   return (
-    <span className="relative inline-flex shrink-0 items-center justify-center">
+    <span className="relative inline-flex size-4 shrink-0 items-center justify-center">
       {driver ? (
         <ProviderInstanceIcon
           driverKind={driver}

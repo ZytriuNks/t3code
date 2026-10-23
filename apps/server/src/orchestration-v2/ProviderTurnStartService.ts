@@ -2,6 +2,7 @@ import { modelSelectionsEqual } from "@t3tools/shared/model";
 import { projectComposerContextForProvider } from "@t3tools/shared/composerContextReferences";
 import {
   CommandId,
+  latestProviderTurnForAttempt,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2ExecutionNode,
   type OrchestrationV2ProviderThread,
@@ -18,37 +19,38 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
+import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 
-import { GitWorkflowService } from "../git/GitWorkflowService.ts";
-import { ProjectService } from "../project/ProjectService.ts";
-import { ProviderAuthService } from "../provider/Services/ProviderAuthService.ts";
-import { EventSinkV2 } from "./EventSink.ts";
+import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
+import * as GitWorkflowService from "../git/GitWorkflowService.ts";
+import * as ProjectService from "../project/ProjectService.ts";
+import * as ProviderAuthService from "../provider/ProviderAuthService.ts";
+import * as EventSink from "./EventSink.ts";
 import * as ContextHandoffService from "./ContextHandoffService.ts";
 import {
   DEFAULT_HANDOFF_TOKEN_CAP,
   handoffTokenCapConfig,
   handoffBudget,
   attachmentTokenAllowance,
+  contextUsageForHandoff,
   historicalMessage,
   latestNativeContextUsage,
-} from "./ContextHandoffBudget.ts";
+} from "@t3tools/provider-core/server/handoffBudget";
 import { deliverContextHandoffs } from "./ContextHandoffDelivery.ts";
+import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import * as ProjectionStore from "./ProjectionStore.ts";
+import * as ProviderSessionManager from "./ProviderSessionManager.ts";
+import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
+import * as RunExecutionService from "./RunExecutionService.ts";
+import * as RuntimePolicy from "./RuntimePolicy.ts";
 import {
-  ProviderAdapterTurnStartError,
-  type ProviderAdapterV2HistoricalContext,
-  type ProviderAdapterV2SessionRuntime,
-} from "./ProviderAdapter.ts";
-import { IdAllocatorV2 } from "./IdAllocator.ts";
-import { ProjectionStoreV2, type ProjectionRuntimeRecoveryState } from "./ProjectionStore.ts";
-import { ProviderSessionManagerV2 } from "./ProviderSessionManager.ts";
-import { makeProviderFailure } from "./ProviderFailure.ts";
-import {
-  canRouteRelatedSubagent,
-  RunExecutionServiceV2,
-  selectInheritedBackgroundTurnItems,
-} from "./RunExecutionService.ts";
-import { RuntimePolicyV2 } from "./RuntimePolicy.ts";
+  isRestartNoteContinuation,
+  pendingRestartCancelledBackgroundWork,
+  restartCancelledBackgroundWorkNote,
+} from "./RestartBackgroundNote.ts";
 
 export class ProviderTurnStartError extends Schema.TaggedError<ProviderTurnStartError>()(
   "ProviderTurnStartError",
@@ -59,6 +61,11 @@ export class ProviderTurnStartError extends Schema.TaggedError<ProviderTurnStart
 ) {}
 
 const isProviderTurnStartError = Schema.is(ProviderTurnStartError);
+
+/** Claude refuses to replace a process running background work before it reads the prompt. */
+const refusedBeforePrompt = (error: unknown): boolean =>
+  Predicate.isTagged(error, "ClaudeBackgroundWorkBlocksQueryReplacementError") ||
+  (Predicate.hasProperty(error, "cause") && refusedBeforePrompt(error.cause));
 
 export interface ProviderTurnStartServiceV2Shape {
   /**
@@ -81,31 +88,33 @@ export class ProviderTurnStartServiceV2 extends Context.Service<
 export const layer: Layer.Layer<
   ProviderTurnStartServiceV2,
   never,
-  | EventSinkV2
+  | EventSink.EventSinkV2
   | ContextHandoffService.ContextHandoffServiceV2
-  | IdAllocatorV2
+  | IdAllocator.IdAllocatorV2
   | FileSystem.FileSystem
-  | GitWorkflowService
-  | ProjectService
-  | ProviderAuthService
-  | ProjectionStoreV2
-  | ProviderSessionManagerV2
-  | RunExecutionServiceV2
-  | RuntimePolicyV2
+  | Path.Path
+  | GitWorkflowService.GitWorkflowService
+  | ProjectService.ProjectService
+  | ProviderAuthService.ProviderAuthService
+  | ProjectionStore.ProjectionStoreV2
+  | ProviderSessionManager.ProviderSessionManagerV2
+  | RunExecutionService.RunExecutionServiceV2
+  | RuntimePolicy.RuntimePolicyV2
 > = Layer.effect(
   ProviderTurnStartServiceV2,
   Effect.gen(function* () {
-    const eventSink = yield* EventSinkV2;
+    const eventSink = yield* EventSink.EventSinkV2;
     const contextHandoffService = yield* ContextHandoffService.ContextHandoffServiceV2;
-    const idAllocator = yield* IdAllocatorV2;
+    const idAllocator = yield* IdAllocator.IdAllocatorV2;
     const fileSystem = yield* FileSystem.FileSystem;
-    const gitWorkflow = yield* GitWorkflowService;
-    const projects = yield* ProjectService;
-    const providerAuth = yield* ProviderAuthService;
-    const projectionStore = yield* ProjectionStoreV2;
-    const providerSessions = yield* ProviderSessionManagerV2;
-    const runExecution = yield* RunExecutionServiceV2;
-    const runtimePolicy = yield* RuntimePolicyV2;
+    const path = yield* Path.Path;
+    const gitWorkflow = yield* GitWorkflowService.GitWorkflowService;
+    const projects = yield* ProjectService.ProjectService;
+    const providerAuth = yield* ProviderAuthService.ProviderAuthService;
+    const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+    const providerSessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
+    const runExecution = yield* RunExecutionService.RunExecutionServiceV2;
+    const runtimePolicy = yield* RuntimePolicy.RuntimePolicyV2;
 
     // These callbacks outlive startup while a run drains background work. Build
     // them outside start's scope so they cannot retain its full thread history.
@@ -115,24 +124,27 @@ export const layer: Layer.Layer<
       readonly attemptId: OrchestrationV2RunAttempt["id"];
       readonly providerThreadId: OrchestrationV2ProviderThread["id"];
       readonly runOrdinal: number;
-      readonly inheritedBackgroundTurnItems: ReturnType<typeof selectInheritedBackgroundTurnItems>;
+      readonly inheritedBackgroundTurnItems: ReturnType<
+        typeof RunExecutionService.selectInheritedBackgroundTurnItems
+      >;
     }) => {
       // Guards and background routing need live execution state, not a fresh
       // allocation of every completed message and tool output in the thread.
+      // `false` means the run moved on or is gone. A failed read is an error,
+      // so the caller fails the start or the run instead of skipping it.
       const isCurrentAttemptInStatus = (expectedStatus: OrchestrationV2Run["status"]) =>
         projectionStore.getRuntimeRecoveryProjection(input.threadId).pipe(
           Effect.map((current) => {
             const run = current.runs.find((candidate) => candidate.id === input.runId);
             return run?.activeAttemptId === input.attemptId && run.status === expectedStatus;
           }),
-          Effect.catchCause(() => Effect.succeed(false)),
         );
       return {
         isCurrentAttemptInStatus,
         loadInheritedBackgroundTurnItems: () =>
           projectionStore.getRuntimeRecoveryProjection(input.threadId).pipe(
             Effect.map((current) =>
-              selectInheritedBackgroundTurnItems({
+              RunExecutionService.selectInheritedBackgroundTurnItems({
                 threadId: input.threadId,
                 currentProviderThreadId: input.providerThreadId,
                 currentRunOrdinal: input.runOrdinal,
@@ -152,7 +164,6 @@ export const layer: Layer.Layer<
                 (run.status === "starting" || run.status === "running")
               );
             }),
-            Effect.catchCause(() => Effect.succeed(false)),
           ),
         hasUnpairedRunInterruptRequest: () =>
           projectionStore
@@ -172,15 +183,15 @@ export const layer: Layer.Layer<
     };
 
     const makeDeliverySession = (
-      session: ProviderAdapterV2SessionRuntime,
+      session: ProviderAdapter.ProviderAdapterV2SessionRuntime,
       startWithHandoffs: (
-        input: Parameters<ProviderAdapterV2SessionRuntime["startTurn"]>[0],
+        input: Parameters<ProviderAdapter.ProviderAdapterV2SessionRuntime["startTurn"]>[0],
         compact?: boolean,
-      ) => ReturnType<ProviderAdapterV2SessionRuntime["startTurn"]>,
+      ) => ReturnType<ProviderAdapter.ProviderAdapterV2SessionRuntime["startTurn"]>,
     ) => {
       let deliver: typeof startWithHandoffs | undefined = startWithHandoffs;
       const start = (
-        input: Parameters<ProviderAdapterV2SessionRuntime["startTurn"]>[0],
+        input: Parameters<ProviderAdapter.ProviderAdapterV2SessionRuntime["startTurn"]>[0],
         compact = false,
       ) =>
         Effect.suspend(() => {
@@ -487,9 +498,9 @@ export const layer: Layer.Layer<
         }
       }
       const selectInheritedBackgroundItems = (
-        current: ProjectionRuntimeRecoveryState,
-      ): ReturnType<typeof selectInheritedBackgroundTurnItems> =>
-        selectInheritedBackgroundTurnItems({
+        current: ProjectionStore.ProjectionRuntimeRecoveryState,
+      ): ReturnType<typeof RunExecutionService.selectInheritedBackgroundTurnItems> =>
+        RunExecutionService.selectInheritedBackgroundTurnItems({
           threadId: current.thread.id,
           currentProviderThreadId: providerThread.id,
           currentRunOrdinal: run.ordinal,
@@ -537,32 +548,65 @@ export const layer: Layer.Layer<
               }),
         }),
       );
+      // The last start attempt fails the run with the provider's own reason
+      // instead of leaving it `starting` after the effect gives up. A run that
+      // already left `starting` is not overwritten, and a failed write returns
+      // its error to the effect worker.
+      const settleStartFailure = (failed: {
+        readonly signal: string;
+        readonly title: string;
+        readonly error: Error;
+      }) =>
+        Effect.gen(function* () {
+          const nestedCause = "cause" in failed.error ? failed.error.cause : undefined;
+          yield* settleRunBeforeStart({
+            signal: failed.signal,
+            status: "failed",
+            now: yield* DateTime.now,
+            providerInstanceId: run.providerInstanceId,
+            itemProviderThreadId: providerThread.id,
+            item: {
+              type: "error",
+              title: failed.title,
+              failure: makeProviderFailure({
+                cause: failed.error,
+                message:
+                  nestedCause instanceof Error
+                    ? nestedCause.message
+                    : typeof nestedCause === "string"
+                      ? nestedCause
+                      : failed.error.message,
+                class: "provider_error",
+              }),
+            },
+          });
+        });
       if (sessionResult._tag === "Failure") {
         if (input.willRetry === true) return yield* sessionResult.failure;
-        const failedAt = yield* DateTime.now;
-        const openError = sessionResult.failure;
-        const nestedCause = "cause" in openError ? openError.cause : undefined;
-        const failure = makeProviderFailure({
-          cause: openError,
-          message:
-            nestedCause instanceof Error
-              ? nestedCause.message
-              : typeof nestedCause === "string"
-                ? nestedCause
-                : openError.message,
-          class: "provider_error",
-        });
-        yield* settleRunBeforeStart({
+        yield* settleStartFailure({
           signal: "provider-session-open-failure",
-          status: "failed",
-          now: failedAt,
-          providerInstanceId: run.providerInstanceId,
-          itemProviderThreadId: providerThread.id,
-          item: { type: "error", title: "Provider session failed to open", failure },
+          title: "Provider session failed to open",
+          error: sessionResult.failure,
         });
         return;
       }
       const session = sessionResult.success;
+      // Only the provider's own thread load fails the run on the last attempt;
+      // store, id and handoff failures around it keep their typed errors.
+      const loadFromProvider = (
+        load: Effect.Effect<OrchestrationV2ProviderThread, ProviderAdapter.ProviderAdapterV2Error>,
+      ) =>
+        Effect.gen(function* () {
+          const loaded = yield* Effect.result(load);
+          if (loaded._tag === "Success") return loaded.success;
+          if (input.willRetry === true) return yield* loaded.failure;
+          yield* settleStartFailure({
+            signal: "provider-thread-load-failure",
+            title: "Provider turn failed to start",
+            error: loaded.failure,
+          });
+          return undefined;
+        });
       let effectiveHandoffs = handoffs;
       const loadedProviderThread = yield* Effect.gen(function* () {
         if (nativeForkTransfer !== undefined) {
@@ -579,38 +623,45 @@ export const layer: Layer.Layer<
           const sourceAttempt = sourceProjection.attempts.find(
             (candidate) => candidate.id === sourceRun?.activeAttemptId,
           );
-          const sourceProviderTurn = sourceProjection.providerTurns.find(
-            (candidate) =>
-              candidate.id === sourceAttempt?.providerTurnId ||
-              candidate.runAttemptId === sourceAttempt?.id,
-          );
+          const sourceProviderTurn =
+            latestProviderTurnForAttempt(sourceProjection.providerTurns, sourceAttempt?.id) ??
+            sourceProjection.providerTurns.find(
+              (candidate) => candidate.id === sourceAttempt?.providerTurnId,
+            );
           if (sourceRun === undefined || sourceProviderThread === undefined) {
             return yield* new ProviderTurnStartError({
               runId,
               cause: `Native fork transfer ${nativeForkTransfer.id} has no source provider execution.`,
             });
           }
-          return yield* session.forkThread({
-            sourceProviderThread,
-            sourceProviderTurns: sourceProjection.providerTurns,
-            targetThreadId: projection.thread.id,
-            modelSelection: run.modelSelection,
-            runtimePolicy: resolvedRuntimePolicy,
-            ...(sourceProviderTurn === undefined ? {} : { providerTurnId: sourceProviderTurn.id }),
-          });
+          return yield* loadFromProvider(
+            session.forkThread({
+              sourceProviderThread,
+              sourceProviderTurns: sourceProjection.providerTurns,
+              targetThreadId: projection.thread.id,
+              modelSelection: run.modelSelection,
+              runtimePolicy: resolvedRuntimePolicy,
+              ...(sourceProviderTurn === undefined
+                ? {}
+                : { providerTurnId: sourceProviderTurn.id }),
+            }),
+          );
         }
         if (providerThread.nativeThreadRef === null) {
           // Hand the run's provider thread to the adapter so it adopts this
           // row's identity when attaching native state. An adapter that mints
           // its own row instead leaves two live rows per app thread, and
           // `activeProviderThreadId` then flaps between them on every update.
-          return yield* session.ensureThread({
-            threadId: projection.thread.id,
-            modelSelection: run.modelSelection,
-            runtimePolicy: resolvedRuntimePolicy,
-            providerSessionId,
-            existingProviderThread: providerThread,
-          });
+          return yield* loadFromProvider(
+            session.ensureThread({
+              threadId: projection.thread.id,
+              title: projection.thread.title,
+              modelSelection: run.modelSelection,
+              runtimePolicy: resolvedRuntimePolicy,
+              providerSessionId,
+              existingProviderThread: providerThread,
+            }),
+          );
         }
         const uncertainDelivery = projection.contextHandoffs.some(
           (handoff) =>
@@ -621,7 +672,7 @@ export const layer: Layer.Layer<
         const resumed = yield* Effect.result(
           uncertainDelivery
             ? Effect.fail(
-                new ProviderAdapterTurnStartError({
+                new ProviderAdapter.ProviderAdapterTurnStartError({
                   driver: session.driver,
                   threadId: projection.thread.id,
                   providerThreadId: providerThread.id,
@@ -647,16 +698,20 @@ export const layer: Layer.Layer<
           reason: uncertainDelivery ? "uncertain_history_delivery" : "resume_failed",
           errorTag: resumed.failure._tag,
         });
-        const replacement = yield* session.ensureThread({
-          threadId: projection.thread.id,
-          modelSelection: run.modelSelection,
-          runtimePolicy: resolvedRuntimePolicy,
-          providerSessionId,
-          // The native ref is dropped so the adapter binds a fresh native
-          // session instead of retrying the resume that just failed, while
-          // still adopting this row's identity.
-          existingProviderThread: { ...providerThread, nativeThreadRef: null },
-        });
+        const replacement = yield* loadFromProvider(
+          session.ensureThread({
+            threadId: projection.thread.id,
+            title: projection.thread.title,
+            modelSelection: run.modelSelection,
+            runtimePolicy: resolvedRuntimePolicy,
+            providerSessionId,
+            // The native ref is dropped so the adapter binds a fresh native
+            // session instead of retrying the resume that just failed, while
+            // still adopting this row's identity.
+            existingProviderThread: { ...providerThread, nativeThreadRef: null },
+          }),
+        );
+        if (replacement === undefined) return undefined;
         const transferId = yield* idAllocator.allocate.contextTransfer({
           sourceThreadId: projection.thread.id,
           targetThreadId: projection.thread.id,
@@ -725,6 +780,8 @@ export const layer: Layer.Layer<
         });
         return replacement;
       });
+      // The last attempt already failed the run.
+      if (loadedProviderThread === undefined) return;
       if (!(yield* isCurrentAttemptInStatus("starting"))) {
         return;
       }
@@ -749,26 +806,27 @@ export const layer: Layer.Layer<
       const previousUsage = measuredContext
         ? { ...threadUsage, ...measuredContext.usage }
         : threadUsage;
-      const compatibleUsage =
-        previousSelection !== undefined &&
-        session.canReuseContextUsage?.(previousSelection, run.modelSelection) &&
-        previousUsage != null
-          ? {
-              usedTokens: previousUsage.usedTokens,
-              ...(previousUsage.maxTokens === undefined
-                ? {}
-                : { maxTokens: previousUsage.maxTokens }),
-            }
-          : null;
+      const reuseTelemetry =
+        sameSelection ||
+        (previousSelection !== undefined &&
+          session.canReuseContextUsage?.(previousSelection, run.modelSelection) === true);
+      const knownModelWindow = session.getModelContextWindow?.(
+        run.modelSelection,
+        resolvedRuntimePolicy.cwd,
+      );
+      // Persist before delivery. Keep this native transcript's measured
+      // occupancy. A different model drops compaction telemetry and uses the
+      // new window when that window is known.
+      const handoffUsage = contextUsageForHandoff({
+        sameNativeThread,
+        sameSelection,
+        reuseTelemetry,
+        previousUsage,
+        knownModelWindow,
+      });
       const runningProviderThread: OrchestrationV2ProviderThread = {
         ...loadedProviderThread,
-        // Persist invalidation before delivery: a failed start must not let the next
-        // attempt mistake old-model telemetry for usage of the new selection.
-        contextUsage: sameNativeThread
-          ? sameSelection
-            ? (previousUsage ?? null)
-            : compatibleUsage
-          : null,
+        contextUsage: handoffUsage,
         id: providerThread.id,
         driver: session.driver,
         providerInstanceId: run.providerInstanceId,
@@ -891,12 +949,39 @@ export const layer: Layer.Layer<
         return;
       }
       const routableSubagents = projection.subagents.filter((subagent) =>
-        canRouteRelatedSubagent(subagent.status),
+        RunExecutionService.canRouteRelatedSubagent(subagent.status),
       );
       const userText = projectComposerContextForProvider({
         text: message.text,
         records: message.context?.records ?? [],
       });
+      // Delivered once: this run's provider turn marks the work as told. A
+      // restart continuation is prompted by its own text or resumes natively.
+      const noteContinuation = isRestartNoteContinuation(
+        run,
+        projection.runs,
+        projection.providerTurns,
+        projection.attempts,
+      );
+      const restartCancelledWork = pendingRestartCancelledBackgroundWork({
+        runs: projection.runs,
+        providerTurns: projection.providerTurns,
+        compactionMessageIds: new Set(
+          projection.messages
+            .filter(
+              (candidate) =>
+                candidate.attachments.length === 0 &&
+                candidate.text.trim().toLowerCase() === "/compact",
+            )
+            .map((candidate) => candidate.id),
+        ),
+        run,
+        attempts: projection.attempts,
+      });
+      const restartNote =
+        restartCancelledWork.length === 0
+          ? ""
+          : restartCancelledBackgroundWorkNote(restartCancelledWork);
       const tokenCap = yield* handoffTokenCapConfig.pipe(
         Effect.orElseSucceed(() => DEFAULT_HANDOFF_TOKEN_CAP),
       );
@@ -982,14 +1067,13 @@ export const layer: Layer.Layer<
             }, 0)
           : 0;
       });
-      const reportedUsage = sameSelection ? previousUsage : compatibleUsage;
       const modelContextWindow =
-        session.getModelContextWindow?.(run.modelSelection) ?? reportedUsage?.maxTokens;
+        knownModelWindow ??
+        (handoffUsage !== null || reuseTelemetry ? previousUsage?.maxTokens : undefined);
       // Replacing a native thread clears its usage, not the selected model's capacity.
-      // Model/options changes invalidate old window and compaction telemetry.
       const budgetProviderThread = {
         ...runningProviderThread,
-        contextUsage: sameNativeThread ? (reportedUsage ?? null) : null,
+        contextUsage: handoffUsage,
       };
       const missedRuns = projection.runs.filter(
         (source) =>
@@ -1042,22 +1126,25 @@ export const layer: Layer.Layer<
             handoffs: [...effectiveHandoffs, ...retryHandoff],
             deferInline: compact,
             providerThread: runningProviderThread,
-            budget: handoffBudget({
-              tokenCap,
-              modelContextWindow,
-              userText,
-              attachments: message.attachments,
-              providerThread: budgetProviderThread,
-              nativeContextEstimate:
-                budgetProviderThread.contextUsage?.usedTokens === undefined
-                  ? yield* nativeContextEstimate
-                  : 0,
+            budget: Effect.gen(function* () {
+              return handoffBudget({
+                tokenCap,
+                modelContextWindow,
+                // The note is sent with the user text, so it spends the same allowance.
+                userText: restartNote === "" ? userText : `${restartNote}\n\n${userText}`,
+                attachments: message.attachments,
+                providerThread: budgetProviderThread,
+                nativeContextEstimate:
+                  budgetProviderThread.contextUsage?.usedTokens === undefined
+                    ? yield* nativeContextEstimate
+                    : 0,
+              });
             }),
             alreadyDeliveredItemIds: deliveredItemIds,
             ...(session.injectHistory === undefined
               ? {}
               : {
-                  inject: (history: ProviderAdapterV2HistoricalContext) =>
+                  inject: (history: ProviderAdapter.ProviderAdapterV2HistoricalContext) =>
                     session.injectHistory!({
                       providerThread: runningProviderThread,
                       ...history,
@@ -1085,16 +1172,32 @@ export const layer: Layer.Layer<
           });
           if (!(yield* isCurrentAttemptInStatus("running"))) return;
           const start = compact ? session.compactThread! : session.startTurn;
+          const context = [delivery.context, restartNote]
+            .filter((part) => part !== "")
+            .join("\n\n");
+          // A note continuation has no turn to resume; its text is the prompt.
+          const { restartContinuationOfRunId: _resumedRunId, ...promptedInput } = turnInput;
           yield* start({
-            ...turnInput,
+            ...(noteContinuation ? promptedInput : turnInput),
             message: {
               ...turnInput.message,
-              text:
-                delivery.context === ""
-                  ? userText
-                  : `${delivery.context}\n\nUser message:\n${userText}`,
+              text: context === "" ? userText : `${context}\n\nUser message:\n${userText}`,
             },
-          });
+          }).pipe(
+            // A pending marker would make the next turn abandon this native
+            // session, though the refused prompt never reached it.
+            Effect.tapError((error) =>
+              refusedBeforePrompt(error)
+                ? delivery.unsent.pipe(
+                    Effect.catchCause(() =>
+                      Effect.logWarning("Failed to restore unsent context handoffs", {
+                        runId: run.id,
+                      }),
+                    ),
+                  )
+                : Effect.void,
+            ),
+          );
           // The provider already accepted the turn. A stale pending marker
           // can force a fresh thread later, but must not stop live ingestion.
           yield* delivery.delivered.pipe(
@@ -1109,7 +1212,7 @@ export const layer: Layer.Layer<
           Effect.mapError((cause) =>
             cause._tag === "ProviderAdapterTurnStartError"
               ? cause
-              : new ProviderAdapterTurnStartError({
+              : new ProviderAdapter.ProviderAdapterTurnStartError({
                   driver: session.driver,
                   threadId: projection.thread.id,
                   providerThreadId: providerThread.id,
@@ -1119,10 +1222,13 @@ export const layer: Layer.Layer<
           ),
         );
       const deliverySession =
-        effectiveHandoffs.length === 0 && missedItems.length === 0
+        effectiveHandoffs.length === 0 &&
+        missedItems.length === 0 &&
+        restartNote === "" &&
+        !noteContinuation
           ? session
           : makeDeliverySession(session, startWithHandoffs);
-      yield* runExecution.startRootRun({
+      return runExecution.startRootRun({
         commandId: CommandId.make(`command:effect:provider-turn.start:${run.id}`),
         appThread: projection.thread,
         providerSessionId,
@@ -1147,6 +1253,13 @@ export const layer: Layer.Layer<
               .filter((turn) => turn.providerThreadId === providerThread.id)
               .map((turn) => turn.ordinal),
           ) + 1,
+        // Legacy accepted attempts have no native id. They count only before
+        // a replacement, while no accepted attempt records a native identity.
+        nativeThreadHasTurns:
+          nativeInputRunIds.size > 0 ||
+          (legacyInputRunIds.size > 0 &&
+            sameNativeThread &&
+            !acceptedAttempts.some((source) => source.nativeThreadId !== undefined)),
         shouldStartProviderTurn: runControls.shouldStartProviderTurn,
         shouldFinalizeRun: runControls.shouldFinalizeRun,
         hasUnpairedRunInterruptRequest: runControls.hasUnpairedRunInterruptRequest,
@@ -1170,7 +1283,15 @@ export const layer: Layer.Layer<
 
     return ProviderTurnStartServiceV2.of({
       start: (input) =>
-        start(input).pipe(
+        Effect.gen(function* () {
+          // Storage cleanup removes worktrees under the same lease. Only startup
+          // holds it; the provider turn runs after it is released.
+          const { thread } = yield* projectionStore.getThreadRecords(input.threadId, []);
+          const providerTurn = yield* thread.worktreePath === null
+            ? start(input)
+            : withWorkspaceLease(path.resolve(thread.worktreePath), start(input));
+          if (providerTurn !== undefined) yield* providerTurn;
+        }).pipe(
           Effect.mapError((cause) =>
             isProviderTurnStartError(cause)
               ? cause

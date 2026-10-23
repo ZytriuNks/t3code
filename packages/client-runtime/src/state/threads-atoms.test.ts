@@ -2,51 +2,43 @@ import {
   EnvironmentId,
   EventId,
   MessageId,
-  RunId,
   ORCHESTRATION_V2_WS_METHODS,
   TurnItemId,
   type OrchestrationV2ThreadHistoryPage,
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2ThreadDetailSnapshot,
   type OrchestrationV2ThreadStreamItem,
-  type OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
 import { afterEach, describe, expect, it, vi } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
-import { HttpClient, HttpClientResponse } from "effect/unstable/http";
+import { HttpClient, HttpClientResponse } from "effect/http";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
-import { Atom, AtomRegistry } from "effect/unstable/reactivity";
+import { Atom, AtomRegistry } from "effect/reactivity";
 
 import type { ConnectionCatalogEntry } from "../connection/catalog.ts";
-import { EnvironmentRegistry } from "../connection/registry.ts";
+import * as EnvironmentRegistry from "../connection/registry.ts";
 import {
   AVAILABLE_CONNECTION_STATE,
   PrimaryConnectionTarget,
   type NetworkStatus,
   type PreparedConnection,
 } from "../connection/model.ts";
-import { EnvironmentSupervisor } from "../connection/supervisor.ts";
-import { EnvironmentCacheStore } from "../platform/persistence.ts";
+import * as EnvironmentSupervisor from "../connection/supervisor.ts";
+import * as Persistence from "../platform/persistence.ts";
 import type { WsRpcProtocolClient } from "../rpc/protocol.ts";
 import type { RpcSession } from "../rpc/session.ts";
 import { createEnvironmentThreadDetailAtoms } from "./threadDetail.ts";
 import { THREAD_SNAPSHOT_IDLE_TTL_MS } from "./threadRetention.ts";
 import { v2Projection, v2ThreadId } from "./orchestrationV2TestFixtures.ts";
-import {
-  ThreadHistoryController,
-  threadHistoryControllerLayer,
-} from "./threadHistoryController.ts";
-import {
-  createEnvironmentThreadStateAtoms,
-  ThreadSnapshotLoader,
-  type EnvironmentThreadState,
-} from "./threads.ts";
+import * as ThreadHistoryController from "./threadHistoryController.ts";
+import { createEnvironmentThreadStateAtoms, type EnvironmentThreadState } from "./threads.ts";
+import * as ThreadSnapshotLoader from "./threadSnapshotHttp.ts";
 
 const TARGET = new PrimaryConnectionTarget({
   environmentId: EnvironmentId.make("environment-1"),
@@ -64,7 +56,6 @@ const SNAPSHOT: OrchestrationV2ThreadDetailSnapshot = { snapshotSequence: 7, pro
 const makeHarness = Effect.fn("TestThreadAtoms.makeHarness")(function* (options?: {
   readonly snapshot?: OrchestrationV2ThreadDetailSnapshot;
   readonly snapshotUnavailable?: boolean;
-  readonly completionMarker?: boolean;
 }) {
   const subscriptions = yield* Queue.unbounded<{
     readonly afterSequence: number | undefined;
@@ -105,7 +96,7 @@ const makeHarness = Effect.fn("TestThreadAtoms.makeHarness")(function* (options?
   const session: RpcSession = {
     client,
     initialConfig: Effect.succeed({
-      threadResumeCompletionMarker: options?.completionMarker ?? true,
+      threadResumeCompletionMarker: true,
       threadSnapshotPagination: true,
     } as never),
     subscribeServerConfig: (input) => client.subscribeServerConfig(input),
@@ -113,7 +104,7 @@ const makeHarness = Effect.fn("TestThreadAtoms.makeHarness")(function* (options?
     probe: Effect.void,
     closed: Effect.never,
   };
-  const supervisor = EnvironmentSupervisor.of({
+  const supervisor = EnvironmentSupervisor.EnvironmentSupervisor.of({
     target: TARGET,
     state: yield* SubscriptionRef.make(AVAILABLE_CONNECTION_STATE),
     session: yield* SubscriptionRef.make(Option.some(session)),
@@ -131,7 +122,7 @@ const makeHarness = Effect.fn("TestThreadAtoms.makeHarness")(function* (options?
     disconnect: Effect.void,
     retryNow: Effect.void,
   });
-  const environmentRegistry = EnvironmentRegistry.of({
+  const environmentRegistry = EnvironmentRegistry.EnvironmentRegistry.of({
     entries: yield* SubscriptionRef.make<ReadonlyMap<EnvironmentId, ConnectionCatalogEntry>>(
       new Map(),
     ),
@@ -141,6 +132,8 @@ const makeHarness = Effect.fn("TestThreadAtoms.makeHarness")(function* (options?
     registerPlatform: () => Effect.die("Unexpected environment registration"),
     reconcilePlatform: () => Effect.die("Unexpected environment reconciliation"),
     remove: () => Effect.die("Unexpected environment removal"),
+    removeRoute: () => Effect.die("Unexpected route removal"),
+    reorderRoutes: () => Effect.die("Unexpected route reorder"),
     removeRelayEnvironments: () => Effect.die("Unexpected environment removal"),
     retryNow: () => Effect.void,
     setEnabled: () => Effect.die("Unexpected environment toggle"),
@@ -148,15 +141,15 @@ const makeHarness = Effect.fn("TestThreadAtoms.makeHarness")(function* (options?
     state: () => SubscriptionRef.get(supervisor.state),
     stateChanges: () => SubscriptionRef.changes(supervisor.state),
     run: (_environmentId, effect) =>
-      Effect.provideService(effect, EnvironmentSupervisor, supervisor),
+      Effect.provideService(effect, EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
     runStream: (_environmentId, stream) =>
-      Stream.provideService(stream, EnvironmentSupervisor, supervisor),
+      Stream.provideService(stream, EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
     followStream: (_environmentId, stream) =>
-      Stream.provideService(stream, EnvironmentSupervisor, supervisor),
+      Stream.provideService(stream, EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
   });
-  const historyController = yield* Effect.service(ThreadHistoryController).pipe(
-    Effect.provide(threadHistoryControllerLayer),
-  );
+  const historyController = yield* Effect.service(
+    ThreadHistoryController.ThreadHistoryController,
+  ).pipe(Effect.provide(ThreadHistoryController.layer));
   const historyHttpClient = HttpClient.make((request, url) =>
     Effect.gen(function* () {
       const response = yield* Deferred.make<OrchestrationV2ThreadHistoryPage>();
@@ -169,12 +162,12 @@ const makeHarness = Effect.fn("TestThreadAtoms.makeHarness")(function* (options?
   );
   const runtime = Atom.runtime(
     Layer.mergeAll(
-      Layer.succeed(ThreadHistoryController, historyController),
+      Layer.succeed(ThreadHistoryController.ThreadHistoryController, historyController),
       Layer.succeed(HttpClient.HttpClient, historyHttpClient),
-      Layer.succeed(EnvironmentRegistry, environmentRegistry),
+      Layer.succeed(EnvironmentRegistry.EnvironmentRegistry, environmentRegistry),
       Layer.succeed(
-        EnvironmentCacheStore,
-        EnvironmentCacheStore.of({
+        Persistence.EnvironmentCacheStore,
+        Persistence.EnvironmentCacheStore.of({
           loadShell: () => Effect.succeedNone,
           saveShell: () => Effect.void,
           loadThread: () =>
@@ -194,8 +187,8 @@ const makeHarness = Effect.fn("TestThreadAtoms.makeHarness")(function* (options?
         }),
       ),
       Layer.succeed(
-        ThreadSnapshotLoader,
-        ThreadSnapshotLoader.of({
+        ThreadSnapshotLoader.ThreadSnapshotLoader,
+        ThreadSnapshotLoader.ThreadSnapshotLoader.of({
           load: () =>
             Effect.sync(() => {
               httpLoads += 1;
@@ -237,10 +230,6 @@ const makeHarness = Effect.fn("TestThreadAtoms.makeHarness")(function* (options?
     stateAtom,
     details,
     ref,
-    supervisorState: supervisor.state,
-    replaceSession: SubscriptionRef.update(supervisor.session, (value) =>
-      Option.map(value, (session) => ({ ...session })),
-    ),
     subscriptions,
     olderLoads,
     loadEarlier: () => historyController.loadEarlier(TARGET.environmentId, THREAD_ID),
@@ -607,291 +596,5 @@ it.effect("keeps snapshot boundaries and completion markers ordered inside a rep
     expect(next.afterSequence).toBe(21);
     remount();
     yield* Deferred.await(next.closed);
-  }),
-);
-
-function playbackItem(
-  id: string,
-  text: string,
-  type: "assistant_message" | "reasoning" = "assistant_message",
-): Extract<OrchestrationV2TurnItem, { type: "assistant_message" | "reasoning" }> {
-  return {
-    id: TurnItemId.make(id),
-    type,
-    messageId: MessageId.make(`message-${id}`),
-    threadId: THREAD_ID,
-    runId: RunId.make("playback-run"),
-    nodeId: null,
-    providerThreadId: null,
-    providerTurnId: null,
-    nativeItemRef: null,
-    parentItemId: null,
-    ordinal: type === "reasoning" ? 1 : 2,
-    status: "running",
-    title: null,
-    text,
-    streaming: true,
-    startedAt: THREAD.updatedAt,
-    completedAt: null,
-    updatedAt: THREAD.updatedAt,
-  };
-}
-
-function playbackUpdate(
-  sequence: number,
-  item: OrchestrationV2TurnItem,
-): OrchestrationV2ThreadStreamItem {
-  return {
-    kind: "event",
-    sequence,
-    event: {
-      id: EventId.make(`playback-${sequence}`),
-      type: "turn-item.updated",
-      threadId: THREAD_ID,
-      occurredAt: THREAD.updatedAt,
-      payload: item,
-    },
-  };
-}
-
-it.effect("retains each text boundary at the marker when replay and live arrive in one batch", () =>
-  Effect.gen(function* () {
-    const h = yield* makeHarness();
-    yield* SubscriptionRef.set(h.supervisorState, {
-      desired: true,
-      network: "online",
-      phase: "connected",
-      stage: null,
-      attempt: 1,
-      generation: 1,
-      lastFailure: null,
-      retryAt: null,
-    });
-    const unmount = h.registry.mount(h.stateAtom);
-    const first = yield* Queue.take(h.subscriptions);
-    yield* Queue.offerAll(first.events, [
-      playbackUpdate(8, playbackItem("body", "replayed body")),
-      playbackUpdate(9, playbackItem("thought", "replayed reasoning", "reasoning")),
-      { kind: "synchronized" },
-      playbackUpdate(10, playbackItem("body", "replayed body live")),
-      playbackUpdate(11, playbackItem("thought", "replayed reasoning live", "reasoning")),
-    ]);
-    const state = yield* observeState(
-      h.registry,
-      h.stateAtom,
-      (value) =>
-        Option.getOrNull(value.data)?.turnItems.some(
-          (item) => item.type === "reasoning" && item.text.endsWith(" live"),
-        ) === true,
-    );
-    expect(state.status).toBe("live");
-    expect(state.textPlayback?.phase).toBe("synchronized");
-    expect(state.textPlayback?.generation).toBe(1);
-    expect(state.textPlayback!.baselineByItemId).toEqual(
-      new Map([
-        ["body", { runId: "playback-run", text: "replayed body" }],
-        ["thought", { runId: "playback-run", text: "replayed reasoning" }],
-      ]),
-    );
-    expect(h.registry.get(h.details.textPlaybackAtom(h.ref))).toBe(state.textPlayback);
-    const boundary = state.textPlayback;
-    yield* Queue.offer(first.events, playbackUpdate(12, playbackItem("body", "more live")));
-    const live = yield* observeState(
-      h.registry,
-      h.stateAtom,
-      (value) =>
-        Option.getOrNull(value.data)?.turnItems.some(
-          (item) => item.type === "assistant_message" && item.text === "more live",
-        ) === true,
-    );
-    expect(live.textPlayback).toBe(boundary);
-    unmount();
-    yield* Deferred.await(first.closed);
-    const remount = h.registry.mount(h.stateAtom);
-    const next = yield* Queue.take(h.subscriptions);
-    expect(h.registry.get(h.stateAtom).status).toBe("live");
-    expect(next.afterSequence).toBe(12);
-    expect(h.registry.get(h.stateAtom).textPlayback?.generation).toBe(2);
-    expect(h.registry.get(h.stateAtom).textPlayback?.phase).toBe("pending");
-    yield* Queue.offerAll(next.events, [
-      playbackUpdate(13, playbackItem("body", "warm replay")),
-      { kind: "synchronized" },
-      playbackUpdate(14, playbackItem("body", "warm replay live")),
-    ]);
-    const resumed = yield* observeState(
-      h.registry,
-      h.stateAtom,
-      (value) =>
-        Option.getOrNull(value.data)?.turnItems.some(
-          (item) => item.type === "assistant_message" && item.text === "warm replay live",
-        ) === true,
-    );
-    expect(resumed.textPlayback?.baselineByItemId.get("body")?.text).toBe("warm replay");
-    expect(resumed.textPlayback?.generation).toBe(2);
-    yield* h.replaceSession;
-    yield* Deferred.await(next.closed);
-    const reconnected = yield* Queue.take(h.subscriptions);
-    expect(reconnected.afterSequence).toBe(14);
-    expect(h.registry.get(h.stateAtom).textPlayback?.generation).toBe(3);
-    expect(h.registry.get(h.stateAtom).textPlayback?.phase).toBe("pending");
-    expect(h.registry.get(h.stateAtom).status).toBe("synchronizing");
-    yield* Queue.offerAll(reconnected.events, [
-      playbackUpdate(15, playbackItem("body", "reconnected replay")),
-      { kind: "synchronized" },
-      playbackUpdate(16, playbackItem("body", "reconnected replay live")),
-    ]);
-    const recovered = yield* observeState(
-      h.registry,
-      h.stateAtom,
-      (value) =>
-        Option.getOrNull(value.data)?.turnItems.some(
-          (item) => item.type === "assistant_message" && item.text === "reconnected replay live",
-        ) === true,
-    );
-    expect(recovered.textPlayback?.baselineByItemId.get("body")?.text).toBe("reconnected replay");
-    expect(recovered.textPlayback?.generation).toBe(3);
-    remount();
-    yield* Deferred.await(reconnected.closed);
-  }),
-);
-
-it.effect(
-  "replaces text baselines at a socket fallback and leaves them intact during history paging",
-  () =>
-    Effect.gen(function* () {
-      const h = yield* makeHarness();
-      const unmount = h.registry.mount(h.stateAtom);
-      const first = yield* Queue.take(h.subscriptions);
-      yield* Queue.offerAll(first.events, [
-        playbackUpdate(8, playbackItem("stale-body", "stale")),
-        {
-          kind: "snapshot",
-          snapshotSequence: 20,
-          projection: {
-            ...THREAD,
-            turnItems: [
-              playbackItem("body", "fallback"),
-              {
-                ...playbackItem("tool", "excluded"),
-                type: "command_execution",
-                input: "pwd",
-                output: "excluded tool output",
-                exitCode: 0,
-              },
-            ],
-          },
-          historyCursor: "older-text",
-          hasMoreHistory: true,
-          latestLocalTurnOrdinal: 2,
-        },
-        { kind: "synchronized" },
-        playbackUpdate(21, playbackItem("body", "fallback live")),
-      ]);
-      const state = yield* observeState(
-        h.registry,
-        h.stateAtom,
-        (value) =>
-          Option.getOrNull(value.data)?.turnItems.some(
-            (item) => item.type === "assistant_message" && item.text === "fallback live",
-          ) === true,
-      );
-      expect([...state.textPlayback!.baselineByItemId.keys()]).toEqual(["body"]);
-      expect(state.textPlayback?.baselineByItemId.get("body")?.text).toBe("fallback");
-      const loading = yield* h.loadEarlier().pipe(Effect.forkScoped);
-      const request = yield* Queue.take(h.olderLoads);
-      const older = playbackItem("older", "old reasoning", "reasoning");
-      yield* Deferred.succeed(request.response, {
-        snapshotSequence: 21,
-        items: [
-          {
-            position: 0,
-            visibility: "local",
-            sourceThreadId: THREAD_ID,
-            sourceItemId: older.id,
-            item: older,
-          },
-        ],
-        nextCursor: null,
-        hasMoreHistory: false,
-      });
-      expect(yield* Fiber.join(loading)).toEqual({ _tag: "loaded" });
-      // The older page is finished history: it joins the baseline at its
-      // loaded text, while every existing (possibly live) baseline is kept.
-      const paged = h.registry.get(h.stateAtom).textPlayback!;
-      expect(paged.generation).toBe(state.textPlayback!.generation);
-      expect(paged.phase).toBe(state.textPlayback!.phase);
-      expect(paged.baselineByItemId.get(older.id)).toEqual({
-        runId: older.runId,
-        text: "old reasoning",
-      });
-      for (const [id, baseline] of state.textPlayback!.baselineByItemId)
-        expect(paged.baselineByItemId.get(id)).toBe(baseline);
-      // A live item's baseline is not advanced to its streamed text.
-      expect(paged.baselineByItemId.get("body")?.text).toBe("fallback");
-      expect(
-        Option.getOrThrow(h.registry.get(h.stateAtom).data).turnItems.some(
-          (item) => item.id === older.id,
-        ),
-      ).toBe(true);
-      yield* Queue.offerAll(first.events, [
-        {
-          kind: "event",
-          sequence: 22,
-          event: {
-            id: EventId.make("playback-delete"),
-            type: "thread.deleted",
-            threadId: THREAD_ID,
-            occurredAt: THREAD.updatedAt,
-            payload: { ...THREAD.thread, deletedAt: THREAD.updatedAt },
-          },
-        },
-        { kind: "synchronized" },
-      ]);
-      const removed = yield* observeState(
-        h.registry,
-        h.stateAtom,
-        (value) => value.status === "deleted",
-      );
-      expect(removed.textPlayback).toBeUndefined();
-      expect(h.registry.get(h.details.textPlaybackAtom(h.ref))).toBeNull();
-      unmount();
-      yield* Deferred.await(first.closed);
-    }),
-);
-
-it.effect("legacy resumes suppress only restored runs and never wait for a completion marker", () =>
-  Effect.gen(function* () {
-    const h = yield* makeHarness({
-      completionMarker: false,
-      snapshot: {
-        snapshotSequence: 7,
-        projection: { ...THREAD, turnItems: [playbackItem("body", "cached")] },
-      },
-    });
-    const unmount = h.registry.mount(h.stateAtom);
-    const subscription = yield* Queue.take(h.subscriptions);
-    const restored = h.registry.get(h.stateAtom);
-    expect(restored.status).toBe("live");
-    expect(restored.textPlayback?.phase).toBe("legacy");
-    expect(restored.textPlayback?.baselineByItemId.get("body")?.text).toBe("cached");
-    expect(restored.textPlayback?.legacyRunIds).toEqual(new Set(["playback-run"]));
-    yield* Queue.offerAll(subscription.events, [
-      playbackUpdate(8, playbackItem("body", "cached continued")),
-      playbackUpdate(9, {
-        ...playbackItem("new-body", "new run live"),
-        runId: RunId.make("new-run"),
-      }),
-    ]);
-    const live = yield* observeState(
-      h.registry,
-      h.stateAtom,
-      (value) =>
-        Option.getOrNull(value.data)?.turnItems.some((item) => item.id === "new-body") === true,
-    );
-    expect(live.status).toBe("live");
-    expect(live.textPlayback).toBe(restored.textPlayback);
-    expect(live.textPlayback?.legacyRunIds.has("new-run")).toBe(false);
-    unmount();
-    yield* Deferred.await(subscription.closed);
   }),
 );

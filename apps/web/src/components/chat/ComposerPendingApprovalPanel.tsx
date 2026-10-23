@@ -1,5 +1,5 @@
-import { ScrollFrame } from "~/components/ui/scroll-frame";
 import { memo } from "react";
+import { ScrollFrame } from "../ui/scroll-frame";
 import { type PendingApproval } from "../../session-logic";
 import { cn } from "~/lib/utils";
 
@@ -49,11 +49,11 @@ export const ComposerPendingApprovalPanel = memo(function ComposerPendingApprova
           <span className="ml-auto shrink-0 tabular-nums">1/{pendingCount}</span>
         ) : null}
       </span>
-      <ScrollFrame variant="compact">
+      <ScrollFrame variant="compact" className="w-full">
         <Detail
           aria-label={detailAriaLabel}
           className={cn(
-            "block max-h-20 w-full min-w-0 overflow-auto text-xs text-foreground [scrollbar-width:thin] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70 [&::-webkit-scrollbar]:h-1.5",
+            "block max-h-20 w-full min-w-0 overflow-auto text-xs text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70 [&::-webkit-scrollbar]:h-1.5",
             approval.requestKind === "mcp-elicitation"
               ? "whitespace-pre-wrap font-sans wrap-break-word"
               : "whitespace-pre font-mono",

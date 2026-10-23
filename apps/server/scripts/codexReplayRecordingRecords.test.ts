@@ -21,7 +21,7 @@ it("preserves monotonic request ids across native Codex forks", () => {
     },
   ];
 
-  const output = codexReplayRecordingOutputRecords(records);
+  const output = codexReplayRecordingOutputRecords(records, { workspace: "/fixture" });
 
   assert.deepEqual(output, records);
   assert.deepEqual(

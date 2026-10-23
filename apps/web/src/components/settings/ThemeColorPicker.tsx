@@ -8,73 +8,16 @@ import { ColorHueSlider, ColorSaturationValuePlane } from "../ui/color-picker";
 import { Input } from "../ui/input";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
-
-/**
- * Every palette role's display name. The exhaustive record keeps the labels in
- * step with `THEME_COLOR_ROLES`: a new role is a type error until it is named.
- */
-const THEME_ROLE_MESSAGE_KEYS: Record<ThemeColorRole, MessageKey> = {
-  canvas: "settings.appearance.theme.role.canvas",
-  chrome: "settings.appearance.theme.role.chrome",
-  toolbar: "settings.appearance.theme.role.toolbar",
-  toolbarForeground: "settings.appearance.theme.role.toolbarForeground",
-  toolbarBorder: "settings.appearance.theme.role.toolbarBorder",
-  toolbarControl: "settings.appearance.theme.role.toolbarControl",
-  toolbarControlForeground: "settings.appearance.theme.role.toolbarControlForeground",
-  toolbarControlHover: "settings.appearance.theme.role.toolbarControlHover",
-  surface: "settings.appearance.theme.role.surface",
-  surfaceRaised: "settings.appearance.theme.role.surfaceRaised",
-  surfaceOverlay: "settings.appearance.theme.role.surfaceOverlay",
-  text: "settings.appearance.theme.role.text",
-  textMuted: "settings.appearance.theme.role.textMuted",
-  border: "settings.appearance.theme.role.border",
-  input: "settings.appearance.theme.role.input",
-  focus: "settings.appearance.theme.role.focus",
-  accent: "settings.appearance.theme.role.accent",
-  accentForeground: "settings.appearance.theme.role.accentForeground",
-  secondary: "settings.appearance.theme.role.secondary",
-  secondaryForeground: "settings.appearance.theme.role.secondaryForeground",
-  muted: "settings.appearance.theme.role.muted",
-  mutedForeground: "settings.appearance.theme.role.mutedForeground",
-  placeholder: "settings.appearance.theme.role.placeholder",
-  secondaryLabel: "settings.appearance.theme.role.secondaryLabel",
-  iconMuted: "settings.appearance.theme.role.iconMuted",
-  error: "settings.appearance.theme.role.error",
-  errorForeground: "settings.appearance.theme.role.errorForeground",
-  errorSurface: "settings.appearance.theme.role.errorSurface",
-  warning: "settings.appearance.theme.role.warning",
-  warningForeground: "settings.appearance.theme.role.warningForeground",
-  warningSurface: "settings.appearance.theme.role.warningSurface",
-  update: "settings.appearance.theme.role.update",
-  updateForeground: "settings.appearance.theme.role.updateForeground",
-  updateSurface: "settings.appearance.theme.role.updateSurface",
-  accentSurface: "settings.appearance.theme.role.accentSurface",
-  accentSurfaceForeground: "settings.appearance.theme.role.accentSurfaceForeground",
-  messageSurface: "settings.appearance.theme.role.messageSurface",
-  messageForeground: "settings.appearance.theme.role.messageForeground",
-  messageAction: "settings.appearance.theme.role.messageAction",
-  messageActionForeground: "settings.appearance.theme.role.messageActionForeground",
-  messageActionHover: "settings.appearance.theme.role.messageActionHover",
-  codeBackground: "settings.appearance.theme.role.codeBackground",
-  codeForeground: "settings.appearance.theme.role.codeForeground",
-  sidebar: "settings.appearance.theme.role.sidebar",
-  sidebarForeground: "settings.appearance.theme.role.sidebarForeground",
-  sidebarMutedForeground: "settings.appearance.theme.role.sidebarMutedForeground",
-  sidebarControlSurface: "settings.appearance.theme.role.sidebarControlSurface",
-  sidebarRowHover: "settings.appearance.theme.role.sidebarRowHover",
-  sidebarRowActive: "settings.appearance.theme.role.sidebarRowActive",
-  sidebarRowSelected: "settings.appearance.theme.role.sidebarRowSelected",
-  sidebarBorder: "settings.appearance.theme.role.sidebarBorder",
-  terminalBackground: "settings.appearance.theme.role.terminalBackground",
-  terminalForeground: "settings.appearance.theme.role.terminalForeground",
-  terminalCursor: "settings.appearance.theme.role.terminalCursor",
-  terminalSelection: "settings.appearance.theme.role.terminalSelection",
-  terminalScrollbar: "settings.appearance.theme.role.terminalScrollbar",
-  terminalScrollbarHover: "settings.appearance.theme.role.terminalScrollbarHover",
-};
-
-export function getThemeRoleLabelKey(role: ThemeColorRole): MessageKey {
-  return THEME_ROLE_MESSAGE_KEYS[role];
+export function getThemeRoleLabel(role: ThemeColorRole, t: (key: MessageKey) => string): string {
+  if (
+    role === "searchMatchBackground" ||
+    role === "searchMatchForeground" ||
+    role === "searchMatchActiveBackground" ||
+    role === "searchMatchActiveForeground"
+  ) {
+    return role.replace(/([A-Z])/g, " $1").replace(/^./, (character) => character.toUpperCase());
+  }
+  return t(`settings.appearance.theme.role.${role}`);
 }
 
 /**
@@ -221,7 +164,9 @@ function ThemeColorPickerPanel({
       <div className="flex items-center justify-between border-b border-border/70 px-4 py-3">
         <div className="min-w-0">
           <p className="truncate text-xs font-semibold text-foreground">{label}</p>
-          <p className="text-2xs text-muted-foreground">Choose a color</p>
+          <p className="text-2xs text-muted-foreground">
+            {t("settings.appearance.theme.picker.chooseColor")}
+          </p>
         </div>
         <span
           className="size-7 shrink-0 rounded-full shadow-sm"
@@ -319,7 +264,7 @@ function ThemeColorPicker({
               render={
                 <button
                   aria-label={chooseColorLabel}
-                  className="relative flex size-6 shrink-0 cursor-pointer items-center justify-center rounded-full border border-foreground/30 transition-transform hover:scale-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+                  className="relative flex size-6 shrink-0 cursor-pointer items-center justify-center rounded-full border border-foreground/30 transition-transform hover:scale-105 focus-visible:outline-2 focus-visible:outline-solid focus-visible:-outline-offset-2 focus-visible:outline-ring"
                   onFocus={onInteract}
                   onPointerDown={onInteract}
                   type="button"
@@ -366,7 +311,7 @@ export const ThemeColorField = memo(function ThemeColorField({
   label?: string;
 }) {
   const { t } = useI18n();
-  const label = customLabel ?? t(getThemeRoleLabelKey(role));
+  const label = customLabel ?? getThemeRoleLabel(role, t);
   const isColorValue = isThemeColor(value);
   const swatchValue = isColorValue ? value : "#000000";
   const editorValue = value.trim().toLowerCase().startsWith("oklch(")
@@ -385,13 +330,14 @@ export const ThemeColorField = memo(function ThemeColorField({
         <TooltipTrigger
           render={
             <button
-              aria-label={
+              aria-label={t(
                 selected
-                  ? t("settings.appearance.theme.picker.hideUsage", { label })
-                  : t("settings.appearance.theme.picker.showUsage", { label })
-              }
+                  ? "settings.appearance.theme.picker.hideUsage"
+                  : "settings.appearance.theme.picker.showUsage",
+                { label },
+              )}
               aria-pressed={selected}
-              className="flex min-w-0 flex-1 cursor-pointer items-center rounded-md text-left text-sm text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+              className="flex min-w-0 flex-1 cursor-pointer items-center rounded-md text-left text-sm text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
               onClick={() => onToggleSelected?.(role)}
               type="button"
             >
@@ -400,9 +346,12 @@ export const ThemeColorField = memo(function ThemeColorField({
           }
         />
         <TooltipPopup side="top">
-          {selected
-            ? t("settings.appearance.theme.picker.hideUsageTooltip", { label })
-            : t("settings.appearance.theme.picker.showUsageTooltip", { label })}
+          {t(
+            selected
+              ? "settings.appearance.theme.picker.hideUsageTooltip"
+              : "settings.appearance.theme.picker.showUsageTooltip",
+            { label },
+          )}
         </TooltipPopup>
       </Tooltip>
       <div className="ml-auto flex shrink-0 items-center gap-2">

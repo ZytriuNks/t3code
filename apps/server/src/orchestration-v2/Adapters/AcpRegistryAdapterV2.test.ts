@@ -4,42 +4,51 @@ import { ProviderInstanceId, ProviderSessionId, ThreadId } from "@t3tools/contra
 import { resolveSelfInvocation } from "@t3tools/shared/nodeRuntime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
-import * as Crypto from "effect/Crypto";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
-import { HttpClient, HttpClientResponse } from "effect/unstable/http";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import * as HttpClient from "effect/http/HttpClient";
+import * as HttpClientResponse from "effect/http/HttpClientResponse";
+import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as EffectAcpErrors from "effect-acp/errors";
 
-import { ServerConfig } from "../../config.ts";
+import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
+import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
+import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
+import * as ServerSettings from "../../serverSettings.ts";
 import type {
   AcpRegistryAvailableCommands,
   AcpRegistryLiveConfiguration,
-} from "../../provider/acp/AcpRegistryProbe.ts";
-import { makeAcpRegistryCatalog } from "../../provider/acp/AcpRegistrySupport.ts";
-import { layer as idAllocatorLayer, IdAllocatorV2 } from "../IdAllocator.ts";
-import { ProviderAdapterV2RuntimePolicy } from "../ProviderAdapter.ts";
+} from "@t3tools/provider-acp-registry/testing";
+import * as AcpRegistrySupport from "@t3tools/provider-acp-registry/server/AcpRegistrySupport";
+import * as AcpRegistryRuntimeCoordinator from "@t3tools/provider-acp-registry/server/AcpRegistryRuntimeCoordinator";
+import { ACP_SESSION_MODE_OPTION_ID } from "@t3tools/provider-acp/server/sessionConfig";
+import * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSessionRuntime";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import {
+  decodeAcpReplayTranscript,
+  makeAcpReplayCompletenessAssertion,
+  makeAcpReplayRuntime,
+} from "./AcpAdapterV2.testkit.ts";
+import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import { BUILT_IN_PROVIDER_ADAPTER_DRIVER_KINDS_V2 } from "../builtInProviderAdapterDrivers.ts";
+import { AcpRegistryAdapterV2Driver } from "@t3tools/provider-acp-registry/server";
 import {
   ACP_REGISTRY_PROVIDER,
-  AcpRegistryAdapterV2Driver,
   makeAcpRegistryAdapterV2,
   acpRegistryPromptFailure,
-} from "./AcpRegistryAdapterV2.ts";
+} from "@t3tools/provider-acp-registry/testing";
 
 const registryUrl = "https://registry.test/registry.json";
 const decodeAcpRegistryAdapterSettings = Schema.decodeUnknownEffect(
   AcpRegistryAdapterV2Driver.configSchema,
 );
 
-const serverConfigLayer = ServerConfig.layerTest(process.cwd(), {
-  prefix: "t3-acp-registry-v2-adapter-",
-}).pipe(Layer.provide(NodeServices.layer));
+const layerHost = TestProviderHost.layer().pipe(Layer.provide(NodeServices.layer));
 
-const registryLayer = Layer.succeed(
+const layerRegistry = Layer.succeed(
   HttpClient.HttpClient,
   HttpClient.make((request) =>
     Effect.succeed(
@@ -65,6 +74,11 @@ const registryLayer = Layer.succeed(
                     cmd: "fixture-agent",
                     args: [],
                   },
+                  "windows-x86_64": {
+                    archive: "https://registry.test/unused",
+                    cmd: "fixture-agent.exe",
+                    args: [],
+                  },
                 },
               },
             },
@@ -75,11 +89,18 @@ const registryLayer = Layer.succeed(
   ),
 );
 
-const testLayer = Layer.mergeAll(
+// Adapters given an explicit runtime never resolve through the catalog.
+const layerInjectedRuntimeCatalog = Layer.mock(AcpRegistrySupport.AcpRegistryCatalog)({
+  resolve: () => Effect.die("the runtime is injected"),
+});
+
+const layerTest = Layer.mergeAll(
   NodeServices.layer,
-  idAllocatorLayer,
-  serverConfigLayer,
-  registryLayer,
+  IdAllocator.layer,
+  McpProviderSessions.layer,
+  layerHost,
+  layerRegistry,
+  ServerSettings.layerTest(),
 );
 
 describe("AcpRegistryAdapterV2", () => {
@@ -114,6 +135,8 @@ describe("AcpRegistryAdapterV2", () => {
     assert.isTrue(BUILT_IN_PROVIDER_ADAPTER_DRIVER_KINDS_V2.has(ACP_REGISTRY_PROVIDER));
     assert.equal(AcpRegistryAdapterV2Driver.driverKind, ACP_REGISTRY_PROVIDER);
     assert.deepEqual(AcpRegistryAdapterV2Driver.defaultConfig(), {
+      source: "registry",
+      commandArgs: [],
       enabled: true,
       agentId: "",
       commandPath: "",
@@ -123,19 +146,260 @@ describe("AcpRegistryAdapterV2", () => {
     });
   });
 
-  it.effect("opens a real ACP child process resolved from registry configuration", () =>
-    Effect.gen(function* () {
+  describe("the agent's own mode picker", () => {
+    type Frame = Record<string, unknown>;
+    const outbound = (method: string, params: unknown = "<any>"): Frame => ({
+      type: "expect_outbound",
+      frame: { kind: "request", method, params },
+    });
+    const answer = (method: string, result: unknown): Frame => ({
+      type: "emit_inbound",
+      frame: { kind: "response", method, result },
+    });
+    const permissionModeOption = (currentValue: string) => ({
+      id: "permission-mode",
+      name: "Permission mode",
+      category: "mode",
+      type: "select",
+      currentValue,
+      options: ["ask", "auto"].map((value) => ({ value, name: value })),
+    });
+
+    // A scripted ACP v1 agent: initialize, session/new answered with `setup`,
+    // then the frames T3 must send (and the agent's answers) to apply the
+    // user's stored pick from the agent's mode picker.
+    const openWithStoredModePick = Effect.fn("openWithStoredModePick")(function* (input: {
+      readonly setup: unknown;
+      readonly modeFrames: ReadonlyArray<Frame>;
+      readonly storedModePick: string;
+    }) {
       const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const fileSystem = yield* FileSystem.FileSystem;
-      const idAllocator = yield* IdAllocatorV2;
       const path = yield* Path.Path;
-      const serverConfig = yield* ServerConfig;
+      const replayDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-acp-registry-mode-pick-",
+      });
+      const statusPath = path.join(replayDir, "status.json");
+      const transcript = yield* decodeAcpReplayTranscript(
+        {
+          provider: ACP_REGISTRY_PROVIDER,
+          protocol: "acp.ndjson-jsonrpc",
+          version: "1",
+          scenario: "stored-mode-pick",
+          entries: [
+            outbound("initialize"),
+            answer("initialize", {
+              protocolVersion: 1,
+              agentCapabilities: { loadSession: false },
+              authMethods: [{ id: "test", name: "Test" }],
+            }),
+            outbound("session/new"),
+            answer("session/new", { sessionId: "agent-session", ...(input.setup as object) }),
+            ...input.modeFrames,
+          ] as never,
+        },
+        ACP_REGISTRY_PROVIDER,
+      );
+      const instanceId = ProviderInstanceId.make("acp-registry-mode-pick");
+      const adapter = yield* makeAcpRegistryAdapterV2({
+        selfInvocation: yield* resolveSelfInvocation(),
+        instanceId,
+        settings: yield* decodeAcpRegistryAdapterSettings({
+          agentId: "fixture-agent",
+          authMethodId: "test",
+        }),
+        environment: {},
+        makeRuntime: makeAcpReplayRuntime({
+          transcript,
+          statusPath,
+          scriptPath: yield* path.fromFileUrl(
+            new URL("../../../scripts/acp-replay-agent.ts", import.meta.url),
+          ),
+          childProcessSpawner,
+          fileSystem,
+        }),
+      }).pipe(Effect.provide(layerInjectedRuntimeCatalog));
+      yield* adapter
+        .openSession({
+          threadId: ThreadId.make("thread-acp-registry-mode-pick"),
+          providerSessionId: ProviderSessionId.make("provider-session-mode-pick"),
+          modelSelection: {
+            instanceId,
+            model: "default",
+            options: [{ id: ACP_SESSION_MODE_OPTION_ID, value: input.storedModePick }],
+          },
+          runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+            runtimeMode: "approval-required",
+            interactionMode: "default",
+            cwd: replayDir,
+          }),
+        })
+        .pipe(Effect.scoped);
+      // Closing the session stops the agent, which writes its replay status in
+      // the same tick as its last answer. The script must be consumed exactly.
+      yield* makeAcpReplayCompletenessAssertion(fileSystem, statusPath, transcript);
+    });
+
+    it.effect("switches an agent that only advertises modes with session/set_mode", () =>
+      openWithStoredModePick({
+        setup: {
+          modes: {
+            currentModeId: "default",
+            availableModes: ["default", "autoEdit"].map((id) => ({ id, name: id })),
+          },
+        },
+        modeFrames: [
+          outbound("session/set_mode", { sessionId: "agent-session", modeId: "autoEdit" }),
+          answer("session/set_mode", {}),
+        ],
+        storedModePick: "autoEdit",
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
+    );
+
+    it.effect("switches a mode config option under its own id", () =>
+      openWithStoredModePick({
+        setup: { configOptions: [permissionModeOption("ask")] },
+        modeFrames: [
+          outbound("session/set_config_option", {
+            sessionId: "agent-session",
+            configId: "permission-mode",
+            value: "auto",
+          }),
+          answer("session/set_config_option", { configOptions: [permissionModeOption("auto")] }),
+        ],
+        storedModePick: "auto",
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
+    );
+  });
+
+  it.effect(
+    "offers policy-guarded client fs to every registry agent and terminals to Devin only",
+    () =>
+      Effect.gen(function* () {
+        const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const path = yield* Path.Path;
+        const mockAgentPath = yield* path.fromFileUrl(
+          new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
+        );
+        const fileSystem = yield* FileSystem.FileSystem;
+        const advertisedCapabilities = Effect.fn("advertisedCapabilities")(function* (
+          agentId: string,
+          runtimeMode: "full-access" | "approval-required" = "full-access",
+        ) {
+          let clientCapabilities: unknown;
+          type Runtime = AcpSessionRuntime.AcpSessionRuntime["Service"];
+          let read: Parameters<Runtime["handleReadTextFile"]>[0] | undefined;
+          let write: Parameters<Runtime["handleWriteTextFile"]>[0] | undefined;
+          const workspace = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "registry-client-fs-",
+          });
+          const file = path.join(workspace, "served.txt");
+          yield* fileSystem.writeFileString(file, "original");
+          const instanceId = ProviderInstanceId.make(`acp-registry-capabilities-${agentId}`);
+          const adapter = yield* makeAcpRegistryAdapterV2({
+            selfInvocation: yield* resolveSelfInvocation(),
+            instanceId,
+            settings: yield* decodeAcpRegistryAdapterSettings({ agentId, authMethodId: "test" }),
+            environment: {},
+            makeRuntime: (input) =>
+              Effect.gen(function* () {
+                clientCapabilities = input.clientCapabilities;
+                const { processEnvironment: _processEnvironment, ...runtimeInput } = input;
+                const context = yield* Layer.build(
+                  AcpSessionRuntime.layer({
+                    ...runtimeInput,
+                    spawn: {
+                      command: process.execPath,
+                      args: [mockAgentPath],
+                      cwd: input.cwd,
+                      env: { T3_ACP_SESSION_LIFECYCLE: "1" },
+                    },
+                    authMethodId: "test",
+                  }).pipe(
+                    Layer.provide(
+                      Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, childProcessSpawner),
+                    ),
+                  ),
+                );
+                const runtime = yield* Effect.service(AcpSessionRuntime.AcpSessionRuntime).pipe(
+                  Effect.provide(context),
+                );
+                return {
+                  ...runtime,
+                  handleReadTextFile: (handler) =>
+                    Effect.sync(() => {
+                      read = handler;
+                    }).pipe(Effect.andThen(runtime.handleReadTextFile(handler))),
+                  handleWriteTextFile: (handler) =>
+                    Effect.sync(() => {
+                      write = handler;
+                    }).pipe(Effect.andThen(runtime.handleWriteTextFile(handler))),
+                };
+              }),
+          }).pipe(Effect.provide(layerInjectedRuntimeCatalog));
+          const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+            runtimeMode,
+            interactionMode: "default",
+            cwd: workspace,
+          });
+          yield* adapter.openSession({
+            threadId: ThreadId.make(`thread-acp-registry-capabilities-${agentId}`),
+            providerSessionId: ProviderSessionId.make(`provider-session-capabilities-${agentId}`),
+            modelSelection: { instanceId, model: "default" },
+            runtimePolicy,
+          });
+          if (read === undefined || write === undefined)
+            return yield* Effect.die("registry fs capability requires real handlers");
+          const request = { sessionId: "mock-session-1", path: file, content: "served" };
+          if (runtimeMode === "full-access") {
+            yield* write(request, { requestId: "write", method: "fs/write_text_file" });
+            assert.equal(
+              (yield* read(request, { requestId: "read", method: "fs/read_text_file" })).content,
+              "served",
+            );
+          } else {
+            assert.include(
+              (yield* write(request, { requestId: "write", method: "fs/write_text_file" }).pipe(
+                Effect.flip,
+              )).message,
+              "requires approval",
+            );
+            assert.include(
+              (yield* read(request, { requestId: "read", method: "fs/read_text_file" }).pipe(
+                Effect.flip,
+              )).message,
+              "requires approval",
+            );
+            assert.equal(yield* fileSystem.readFileString(file), "original");
+          }
+          return clientCapabilities;
+        });
+
+        assert.deepInclude(yield* advertisedCapabilities("devin"), {
+          fs: { readTextFile: true, writeTextFile: true },
+          terminal: true,
+        });
+        assert.deepInclude(yield* advertisedCapabilities("gemini"), {
+          fs: { readTextFile: true, writeTextFile: true },
+          terminal: false,
+        });
+        assert.deepInclude(yield* advertisedCapabilities("gemini-approval", "approval-required"), {
+          fs: { readTextFile: true, writeTextFile: true },
+          terminal: false,
+        });
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
+  );
+
+  it.effect("opens a real ACP child process resolved from registry configuration", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const host = yield* ProviderHost.ProviderHost;
       const mockAgentPath = yield* path.fromFileUrl(
         new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
       );
-      const resolver = yield* makeAcpRegistryCatalog({
-        cacheDir: serverConfig.providerStatusCacheDir,
-        toolsDir: serverConfig.baseDir + "/tools",
+      const resolver = yield* AcpRegistrySupport.makeAcpRegistryCatalog({
+        cacheDir: host.paths.providerStatusCacheDir,
+        toolsDir: host.paths.baseDir + "/tools",
         registryUrl,
       });
       const settings = yield* decodeAcpRegistryAdapterSettings({
@@ -151,8 +415,7 @@ describe("AcpRegistryAdapterV2", () => {
         readonly commands: AcpRegistryAvailableCommands;
       }>();
       const configurationPublished = yield* Deferred.make<AcpRegistryLiveConfiguration>();
-      const adapter = makeAcpRegistryAdapterV2({
-        crypto: yield* Crypto.Crypto,
+      const adapter = yield* makeAcpRegistryAdapterV2({
         selfInvocation: yield* resolveSelfInvocation(),
         instanceId,
         settings,
@@ -160,60 +423,61 @@ describe("AcpRegistryAdapterV2", () => {
           T3_ACP_SESSION_LIFECYCLE: "1",
           T3_ACP_COMMAND_ADVERTISEMENT_DELAY_MS: "750",
         },
-        childProcessSpawner,
-        fileSystem,
-        idAllocator,
-        runtimeCoordinator: {
-          withForegroundStartup: (agentId, effect) =>
-            Effect.acquireUseRelease(
-              Effect.sync(() => {
-                assert.equal(agentId, "fixture-agent");
-                startupActive = true;
-                startupCount += 1;
-              }),
-              () => effect,
-              () =>
-                Effect.sync(() => {
-                  startupActive = false;
-                }),
-            ),
-          runBackgroundProbe: (_agentId, effect) => effect.pipe(Effect.map(Option.some)),
-          withSessionMutation: (effect) => effect,
-          clearAvailableCommands: () => Effect.void,
-          publishAvailableCommands: (publishedInstanceId, commands) =>
-            Deferred.succeed(commandsPublished, {
-              instanceId: publishedInstanceId,
-              commands,
-            }).pipe(Effect.asVoid),
-          getAvailableCommands: () => Effect.succeed(Option.none()),
-          watchAvailableCommands: () => Effect.never,
-          clearLiveConfiguration: () => Effect.void,
-          publishLiveConfiguration: (_publishedInstanceId, configuration) =>
-            Deferred.succeed(configurationPublished, configuration).pipe(Effect.asVoid),
-          getLiveConfiguration: () => Effect.succeed(Option.none()),
-          watchLiveConfiguration: () => Effect.never,
-          requestUrlAuthentication: () => Effect.succeed(false),
-          acceptUrlAuthentication: () => Effect.succeed(false),
-          getUrlAuthAction: () => Effect.succeed(Option.none()),
-          watchUrlAuthAction: () => Effect.never,
-        },
-        resolver: {
-          resolve: (configuredSettings, cwd, environment) =>
-            Effect.sync(() => assert.isTrue(startupActive)).pipe(
-              Effect.andThen(resolver.resolve(configuredSettings, cwd, environment)),
-              Effect.map((resolved) => ({
-                ...resolved,
-                spawn: {
-                  ...resolved.spawn,
-                  args: [mockAgentPath],
-                },
-              })),
-            ),
-        },
-        serverConfig,
-      });
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            Layer.mock(AcpRegistryRuntimeCoordinator.AcpRegistryRuntimeCoordinator)({
+              withForegroundStartup: (agentId, effect) =>
+                Effect.acquireUseRelease(
+                  Effect.sync(() => {
+                    assert.equal(agentId, "fixture-agent");
+                    startupActive = true;
+                    startupCount += 1;
+                  }),
+                  () => effect,
+                  () =>
+                    Effect.sync(() => {
+                      startupActive = false;
+                    }),
+                ),
+              runBackgroundProbe: (_agentId, effect) => effect.pipe(Effect.map(Option.some)),
+              withSessionMutation: (effect) => effect,
+              clearAvailableCommands: () => Effect.void,
+              publishAvailableCommands: (publishedInstanceId, commands) =>
+                Deferred.succeed(commandsPublished, {
+                  instanceId: publishedInstanceId,
+                  commands,
+                }).pipe(Effect.asVoid),
+              getAvailableCommands: () => Effect.succeed(Option.none()),
+              watchAvailableCommands: () => Effect.never,
+              clearLiveConfiguration: () => Effect.void,
+              publishLiveConfiguration: (_publishedInstanceId, configuration) =>
+                Deferred.succeed(configurationPublished, configuration).pipe(Effect.asVoid),
+              getLiveConfiguration: () => Effect.succeed(Option.none()),
+              watchLiveConfiguration: () => Effect.never,
+              requestUrlAuthentication: () => Effect.succeed(false),
+              acceptUrlAuthentication: () => Effect.succeed(false),
+              getUrlAuthAction: () => Effect.succeed(Option.none()),
+              watchUrlAuthAction: () => Effect.never,
+            }),
+            Layer.mock(AcpRegistrySupport.AcpRegistryCatalog)({
+              resolve: (configuredSettings, cwd, environment) =>
+                Effect.sync(() => assert.isTrue(startupActive)).pipe(
+                  Effect.andThen(resolver.resolve(configuredSettings, cwd, environment)),
+                  Effect.map((resolved) => ({
+                    ...resolved,
+                    spawn: {
+                      ...resolved.spawn,
+                      args: [mockAgentPath],
+                    },
+                  })),
+                ),
+            }),
+          ),
+        ),
+      );
       const threadId = ThreadId.make("thread-acp-registry-fixture");
-      const runtimePolicy = ProviderAdapterV2RuntimePolicy.make({
+      const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
         runtimeMode: "full-access",
         interactionMode: "default",
         cwd: process.cwd(),
@@ -266,6 +530,6 @@ describe("AcpRegistryAdapterV2", () => {
         name: "Auto",
         description: null,
       });
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 });

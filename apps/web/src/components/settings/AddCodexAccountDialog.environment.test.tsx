@@ -9,6 +9,8 @@ const state = vi.hoisted(() => ({
   mutate: vi.fn(),
   update: vi.fn(),
   mutationEnvironmentIds: [] as EnvironmentId[],
+  canManageProviders: true,
+  hasCurrentGrant: true,
 }));
 vi.mock("react", async (importOriginal) => {
   const actual = await importOriginal<typeof import("react")>();
@@ -28,6 +30,11 @@ vi.mock("../ui/toast", () => ({ toastManager: { add: state.toast } }));
 vi.mock("@effect/atom-react", () => ({ useAtomValue: () => [] }));
 vi.mock("../../state/server", () => ({
   serverEnvironment: { providersValueAtom: () => null, updateSettings: "update" },
+}));
+vi.mock("../../state/session", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../state/session")>()),
+  useEnvironmentScope: () => state.canManageProviders,
+  readEnvironmentScope: () => state.hasCurrentGrant,
 }));
 vi.mock("../../state/use-atom-command", () => ({ useAtomCommand: () => state.update }));
 vi.mock("../../hooks/useSettings", () => ({
@@ -59,6 +66,8 @@ function render() {
 }
 beforeEach(() => {
   hooks.reset();
+  state.canManageProviders = true;
+  state.hasCurrentGrant = true;
   state.toast.mockReset();
   state.mutationEnvironmentIds = [];
   state.mutate.mockReset().mockResolvedValue({ _tag: "Success", value: {} });
@@ -96,4 +105,22 @@ it("creates managed accounts atomically on the selected environment without repl
   expect(state.update).not.toHaveBeenCalled();
   expect(onAccountCreated).toHaveBeenCalledWith("codex_new-account", "ChatGPT - Personal");
   expect(onClose).toHaveBeenCalledOnce();
+});
+
+it("does not create an account after the provider management grant is revoked", async () => {
+  const tree = render();
+  state.hasCurrentGrant = false;
+  const form = visitElements(tree, (element) => element.props.id === "add-codex-account")!;
+  (form.props.onSubmit as (event: { preventDefault: () => void }) => void)({ preventDefault() {} });
+  await Promise.resolve();
+  expect(state.mutate).not.toHaveBeenCalled();
+  expect(state.update).not.toHaveBeenCalled();
+  expect(onAccountCreated).not.toHaveBeenCalled();
+  expect(onClose).not.toHaveBeenCalled();
+});
+
+it("disables creation without the provider management grant", () => {
+  state.canManageProviders = false;
+  const submit = visitElements(render(), (element) => element.props.form === "add-codex-account")!;
+  expect(submit.props.disabled).toBe(true);
 });

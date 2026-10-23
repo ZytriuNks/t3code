@@ -1,4 +1,6 @@
-import { ProviderDriverKind, type UsageProviderKind } from "@t3tools/contracts";
+import type { UsageProviderKind } from "@t3tools/contracts";
+
+import { ProviderDriverKind } from "@t3tools/contracts";
 
 type UsageProviderPresentation = {
   readonly label: string;
@@ -38,6 +40,11 @@ export const PROVIDER_PRESENTATION = {
     label: "Antigravity",
     color: "#8c7bd1",
     driverKind: ProviderDriverKind.make("antigravity"),
+  },
+  pi: {
+    label: "Pi",
+    color: "#4d9f8a",
+    driverKind: ProviderDriverKind.make("pi"),
   },
 } satisfies Record<UsageProviderKind, UsageProviderPresentation>;
 

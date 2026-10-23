@@ -1,7 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import { CodexSettings } from "@t3tools/contracts";
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import { Platform as HostProcessPlatform } from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -19,7 +19,7 @@ const setup = Effect.gen(function* () {
   const shared = yield* fs.makeTempDirectoryScoped({ prefix: "codex-cross-volume-shared-" });
   const shadow = yield* fs.makeTempDirectoryScoped({ prefix: "codex-cross-volume-shadow-" });
   const layout = yield* resolveCodexHomeLayout(
-    Schema.decodeSync(CodexSettings)({ homePath: shared, shadowHomePath: shadow }),
+    yield* Schema.decodeEffect(CodexSettings)({ homePath: shared, shadowHomePath: shadow }),
   );
   const source = path.join(shared, "config.toml");
   const linked = path.join(shadow, "config.toml");

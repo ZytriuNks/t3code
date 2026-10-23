@@ -1,110 +1,137 @@
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
-import { SourceControlProviderRegistry } from "../sourceControl/SourceControlProviderRegistry.ts";
+import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
+  EnvironmentId,
   CommandId,
   MessageId,
   ProjectId,
+  ProviderDriverKind,
+  ProviderInstanceId,
   ThreadId,
   type OrchestrationV2ThreadProjection,
 } from "@t3tools/contracts";
 import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as CodexResetCredit from "../provider/Layers/codexResetCredit.ts";
-import { FetchHttpClient } from "effect/unstable/http";
+import * as ResetCreditCoordinator from "../provider/resetCreditCoordinator.ts";
+import { FetchHttpClient } from "effect/http";
 import { describe } from "vite-plus/test";
 
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
 import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
 import * as HostPowerMonitor from "../background/HostPowerMonitor.ts";
-import { ServerConfig } from "../config.ts";
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
-import { AntigravityInstallation } from "../provider/AntigravityInstallation.ts";
+import * as ServerConfig from "../config.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as AntigravityInstallation from "../provider/AntigravityInstallation.ts";
+import * as CodexInstallation from "../provider/CodexInstallation.ts";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ModelManifest from "../provider/ModelManifest.ts";
-import { ProviderInstanceRegistryHydrationLive } from "../provider/Layers/ProviderInstanceRegistryHydration.ts";
-import {
-  NoOpProviderEventLoggers,
-  ProviderEventLoggers,
-} from "../provider/Layers/ProviderEventLoggers.ts";
-import { OpenCodeRuntimeLive } from "../provider/opencodeRuntime.ts";
-import { ServerSettingsService } from "../serverSettings.ts";
+import * as ProviderInstanceRegistryHydration from "../provider/ProviderInstanceRegistryHydration.ts";
+import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
+import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
+import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
+import * as OpenCodeRuntime from "@t3tools/provider-opencode/server/OpenCodeRuntime";
+import * as OpenCodeServerLedger from "@t3tools/provider-opencode/server/OpenCodeServerLedger";
+import * as ServerSettings from "../serverSettings.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
-import { OrchestratorV2 } from "./Orchestrator.ts";
-import { worktreeRepairDependenciesTestLayer } from "./ProviderTurnStartService.testkit.ts";
-import { runDaemonWithOptions as runEffectWorkerDaemonWithOptions } from "./EffectWorker.ts";
-import { OrchestrationV2LayerLive } from "./runtimeLayer.ts";
-import { layer as mcpSessionRegistryTestLayer } from "../mcp/McpSessionRegistry.testkit.ts";
+import * as Orchestrator from "./Orchestrator.ts";
+import * as ProviderTurnStartServiceTestkit from "./ProviderTurnStartService.testkit.ts";
+import * as EffectWorker from "./EffectWorker.ts";
+import * as RuntimeLayer from "./runtimeLayer.ts";
+import * as McpSessionRegistryTestkit from "../mcp/McpSessionRegistry.testkit.ts";
 import { CURSOR_MODEL_SELECTION, SUBAGENT_PROMPT } from "./testkit/fixtures/shared.ts";
 
-const PlatformTestLayer = Layer.merge(
+const layerPlatformTest = Layer.merge(
   NodeServices.layer,
-  Layer.mock(SourceControlProviderRegistry)({ resolveLink: () => Effect.die("unused title link") }),
+  Layer.mock(SourceControlProviderRegistry.SourceControlProviderRegistry)({
+    resolveLink: () => Effect.die("unused title link"),
+  }),
 );
 
-const serverConfigLayer = ServerConfig.layerTest(process.cwd(), {
+const layerServerConfig = ServerConfig.layerTest(process.cwd(), {
   prefix: "t3-cursor-v2-live-",
 });
 
-const vcsDriverRegistryLayer = VcsDriverRegistry.layer.pipe(
+const layerVcsDriverRegistry = VcsDriverRegistry.layer.pipe(
   Layer.provide(VcsProcess.layer),
-  Layer.provide(serverConfigLayer),
-  Layer.provide(PlatformTestLayer),
+  Layer.provide(layerServerConfig),
+  Layer.provide(layerPlatformTest),
 );
 
-const checkpointStoreLayer = CheckpointStore.layer.pipe(Layer.provide(vcsDriverRegistryLayer));
+const layerCheckpointStore = CheckpointStore.layer.pipe(Layer.provide(layerVcsDriverRegistry));
 
-const serverSettingsLayer = ServerSettingsService.layerTest({
-  providers: {
-    cursor: { enabled: true },
+const layerServerSettings = ServerSettings.layerTest({
+  providerInstances: {
+    [ProviderInstanceId.make("cursor")]: {
+      driver: ProviderDriverKind.make("cursor"),
+      enabled: true,
+    },
   },
 });
-const backgroundPolicyLayer = BackgroundPolicy.layer.pipe(
+const layerBackgroundPolicy = BackgroundPolicy.layer.pipe(
   Layer.provide(Layer.effect(HostPowerMonitor.HostPowerMonitor, HostPowerMonitor.make())),
-  Layer.provide(serverSettingsLayer),
+  Layer.provide(layerServerSettings),
 );
-const providerInstanceRegistryLayer = ProviderInstanceRegistryHydrationLive.pipe(
+const layerProviderInstanceRegistry = ProviderInstanceRegistryHydration.layer.pipe(
   Layer.provide(
     Layer.mergeAll(
-      serverConfigLayer.pipe(Layer.provide(PlatformTestLayer)),
-      serverSettingsLayer,
+      layerServerConfig.pipe(Layer.provide(layerPlatformTest)),
+      layerServerSettings,
       ServerSecretStore.layer.pipe(
-        Layer.provide(serverConfigLayer),
-        Layer.provide(PlatformTestLayer),
+        Layer.provide(layerServerConfig),
+        Layer.provide(layerPlatformTest),
       ),
       NodeServices.layer,
       FetchHttpClient.layer,
-      OpenCodeRuntimeLive.pipe(Layer.provide(PlatformTestLayer)),
-      Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers),
-      ModelManifest.layerTest,
-      AntigravityInstallation.layer.pipe(
-        Layer.provide(serverConfigLayer.pipe(Layer.provide(PlatformTestLayer))),
-        Layer.provide(FetchHttpClient.layer),
-        Layer.provide(PlatformTestLayer),
+      OpenCodeRuntime.layer.pipe(
+        Layer.provide(OpenCodeServerLedger.layerTest),
+        Layer.provide(layerPlatformTest),
       ),
+      Layer.succeed(
+        ProviderEventLoggers.ProviderEventLoggers,
+        ProviderEventLoggers.NoOpProviderEventLoggers,
+      ),
+      ProviderLatestVersions.layer,
+      ModelManifest.layerTest,
+      AntigravityInstallation.AntigravityInstallation.layer.pipe(
+        Layer.provide(layerServerConfig.pipe(Layer.provide(layerPlatformTest))),
+        Layer.provide(FetchHttpClient.layer),
+        Layer.provide(layerPlatformTest),
+      ),
+      // The Codex driver now resolves managed ChatGPT installs; these runs never launch Codex.
+      Layer.mock(CodexInstallation.CodexInstallation)({
+        managedDirectory: "unused-managed-installation",
+      }),
+      Layer.succeed(ServerEnvironment.ServerEnvironmentIdentity, {
+        getEnvironmentId: Effect.succeed(
+          EnvironmentId.make("00000000-0000-4000-8000-000000000001"),
+        ),
+      }),
     ),
   ),
 );
 
-const liveLayer = OrchestrationV2LayerLive.pipe(
-  Layer.provide(worktreeRepairDependenciesTestLayer),
-  Layer.provide(mcpSessionRegistryTestLayer),
-  Layer.provide(SqlitePersistenceMemory),
-  Layer.provide(checkpointStoreLayer),
-  Layer.provide(serverConfigLayer),
-  Layer.provide(serverSettingsLayer),
-  Layer.provide(providerInstanceRegistryLayer),
-  Layer.provide(CodexResetCredit.layer),
-  Layer.provide(backgroundPolicyLayer),
-  Layer.provide(PlatformTestLayer),
+const layerLive = RuntimeLayer.layer.pipe(
+  Layer.provide(ProviderTurnStartServiceTestkit.layer),
+  Layer.provide(McpSessionRegistryTestkit.layer),
+  Layer.provide(SqlitePersistence.layerMemory),
+  Layer.provide(layerCheckpointStore),
+  Layer.provide(layerServerConfig),
+  Layer.provide(layerServerSettings),
+  Layer.provide(layerProviderInstanceRegistry),
+  Layer.provide(ResetCreditCoordinator.layer),
+  Layer.provide(layerBackgroundPolicy),
+  Layer.provide(layerPlatformTest),
+  Layer.provide(McpProviderSessions.layer),
 );
 
 const waitForIdle = Effect.fn("CursorOrchestratorV2Live.waitForIdle")(function* (
   threadId: ThreadId,
 ) {
-  const orchestrator = yield* OrchestratorV2;
+  const orchestrator = yield* Orchestrator.OrchestratorV2;
   for (let attempt = 0; attempt < 600; attempt += 1) {
     const projection = yield* orchestrator.getThreadProjection(threadId);
     if (
@@ -127,8 +154,8 @@ describe.runIf(process.env.T3_CURSOR_LIVE_ORCHESTRATOR === "1")(
       "forks through portable context using real Cursor agents",
       () =>
         Effect.gen(function* () {
-          yield* runEffectWorkerDaemonWithOptions({ concurrency: 2 }).pipe(Effect.forkScoped);
-          const orchestrator = yield* OrchestratorV2;
+          yield* EffectWorker.runDaemonWithOptions({ concurrency: 2 }).pipe(Effect.forkScoped);
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
           const projectId = ProjectId.make("project:cursor-live-portable-fork");
           const sourceThreadId = ThreadId.make("thread:cursor-live-portable-fork:source");
           const targetThreadId = ThreadId.make("thread:cursor-live-portable-fork:target");
@@ -216,7 +243,69 @@ describe.runIf(process.env.T3_CURSOR_LIVE_ORCHESTRATOR === "1")(
           );
           assert.include(targetProjection.contextHandoffs[0]?.summaryText ?? "", marker);
           assert.include(assistantText(targetProjection), marker);
-        }).pipe(Effect.provide(liveLayer), Effect.scoped),
+        }).pipe(Effect.provide(layerLive), Effect.scoped),
+      360_000,
+    );
+
+    it.live(
+      "runs a sandboxed thread after a full access thread in the same server",
+      () =>
+        Effect.gen(function* () {
+          yield* EffectWorker.runDaemonWithOptions({ concurrency: 2 }).pipe(Effect.forkScoped);
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const projectId = ProjectId.make("project:cursor-live-sandbox-after-full-access");
+
+          const runThread = Effect.fn("CursorOrchestratorV2Live.runThread")(function* (input: {
+            readonly name: string;
+            readonly runtimeMode: "full-access" | "approval-required";
+          }) {
+            const threadId = ThreadId.make(`thread:cursor-live-sandbox:${input.name}`);
+            yield* orchestrator.dispatch({
+              type: "thread.create",
+              createdBy: "user",
+              creationSource: "web",
+              commandId: CommandId.make(`command:cursor-live-sandbox:${input.name}:create`),
+              threadId,
+              projectId,
+              title: `Cursor live sandbox ${input.name}`,
+              modelSelection: CURSOR_MODEL_SELECTION,
+              runtimeMode: input.runtimeMode,
+              interactionMode: "default",
+              branch: null,
+              worktreePath: process.cwd(),
+            });
+            yield* orchestrator.dispatch({
+              type: "message.dispatch",
+              createdBy: "user",
+              creationSource: "web",
+              commandId: CommandId.make(`command:cursor-live-sandbox:${input.name}:message`),
+              threadId,
+              messageId: MessageId.make(`message:cursor-live-sandbox:${input.name}`),
+              text: "Respond with exactly: OK. Do not use any tools.",
+              attachments: [],
+              modelSelection: CURSOR_MODEL_SELECTION,
+              dispatchMode: { type: "start_immediately" },
+            });
+            return yield* waitForIdle(threadId);
+          });
+
+          // The SDK decides once per process whether local sandboxing works.
+          // The unsandboxed thread must run first to catch a wrong verdict.
+          const fullAccess = yield* runThread({ name: "full-access", runtimeMode: "full-access" });
+          const supervised = yield* runThread({
+            name: "supervised",
+            runtimeMode: "approval-required",
+          });
+
+          assert.deepEqual(
+            fullAccess.runs.map((run) => run.status),
+            ["completed"],
+          );
+          assert.deepEqual(
+            supervised.runs.map((run) => run.status),
+            ["completed"],
+          );
+        }).pipe(Effect.provide(layerLive), Effect.scoped),
       360_000,
     );
 
@@ -224,8 +313,8 @@ describe.runIf(process.env.T3_CURSOR_LIVE_ORCHESTRATOR === "1")(
       "spawns native subagents with child thread lineage",
       () =>
         Effect.gen(function* () {
-          yield* runEffectWorkerDaemonWithOptions({ concurrency: 2 }).pipe(Effect.forkScoped);
-          const orchestrator = yield* OrchestratorV2;
+          yield* EffectWorker.runDaemonWithOptions({ concurrency: 2 }).pipe(Effect.forkScoped);
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
           const projectId = ProjectId.make("project:cursor-live-subagent-lineage");
           const sourceThreadId = ThreadId.make("thread:cursor-live-subagent-lineage");
 
@@ -291,7 +380,7 @@ describe.runIf(process.env.T3_CURSOR_LIVE_ORCHESTRATOR === "1")(
               `child thread ${subagent.childThreadId} should contain the subagent response`,
             );
           }
-        }).pipe(Effect.provide(liveLayer), Effect.scoped),
+        }).pipe(Effect.provide(layerLive), Effect.scoped),
       360_000,
     );
   },

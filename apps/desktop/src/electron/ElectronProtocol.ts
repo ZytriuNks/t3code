@@ -3,75 +3,47 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
-import * as NodeTimersPromises from "node:timers/promises";
-// @effect-diagnostics-next-line nodeBuiltinImport:off -- Privileged schemes must read packaged identity synchronously before app.ready and Effect service startup.
-import * as NodeFS from "node:fs";
-// @effect-diagnostics-next-line nodeBuiltinImport:off -- The same synchronous Electron startup boundary resolves the packaged manifest path.
-import * as NodePath from "node:path";
 import * as Path from "effect/Path";
-import * as Mime from "effect/unstable/http/Mime";
+import * as Mime from "effect/http/Mime";
 import * as Ref from "effect/Ref";
+import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 
 import * as Electron from "electron";
 
 export const DESKTOP_HOST = "app";
-// Scheme is derived from `appName` so the Alpha and Experimental installers
-// register distinct privileged protocols. Without this Chromium would launch
-// the renderer with `--standard-schemes=t3code-experimental` for every
-// packaged build and the two installers would share registered schemes.
-const PRODUCTION_SCHEMES_BY_APP_NAME: Record<string, string> = {
-  "T3 Code (Alpha)": "t3code",
-  "T3 Code (Experimental)": "t3code-experimental",
-  "T3 Code (Dev)": "t3code-dev",
-};
-const PRODUCTION_SCHEME_FALLBACK = "t3code-experimental";
+const DESKTOP_PRODUCTION_SCHEME = "t3code";
+const DESKTOP_EXPERIMENTAL_SCHEME = "t3code-experimental";
 const DESKTOP_DEVELOPMENT_SCHEME = "t3code-dev";
 
-/**
- * Resolve the production scheme synchronously from the packaged
- * `app.asar/package.json` so the privileged protocol registration (which
- * must run before `app.ready`) matches the staged productName. In dev mode
- * the development scheme is always returned.
- */
-export function resolveProductionScheme(): string {
-  const productName = readPackagedProductName();
-  if (productName === undefined) return PRODUCTION_SCHEME_FALLBACK;
-  return PRODUCTION_SCHEMES_BY_APP_NAME[productName] ?? PRODUCTION_SCHEME_FALLBACK;
+export type DesktopSchemeInput =
+  | boolean
+  | { readonly isDevelopment: boolean; readonly appName?: string | undefined };
+
+function normalizeSchemeInput(input: DesktopSchemeInput): {
+  readonly isDevelopment: boolean;
+  readonly appName: string;
+} {
+  return typeof input === "boolean"
+    ? { isDevelopment: input, appName: "T3 Code (Beta)" }
+    : { isDevelopment: input.isDevelopment, appName: input.appName ?? "T3 Code (Beta)" };
 }
 
-function readPackagedProductName(): string | undefined {
-  // Packaged: Electron.app.getAppPath() points at the unpacked asar location;
-  // the real `package.json` lives inside `resources/app.asar` at that path.
-  try {
-    const appPath = Electron.app.getAppPath();
-    const packageJsonPath = NodePath.join(appPath, "package.json");
-    const parsed = JSON.parse(NodeFS.readFileSync(packageJsonPath, "utf8")) as {
-      productName?: unknown;
-    };
-    if (typeof parsed.productName === "string") {
-      return parsed.productName;
-    }
-  } catch {
-    // Fall through to the fallback below.
-  }
-  return undefined;
+export function getDesktopScheme(input: DesktopSchemeInput): string {
+  const { isDevelopment, appName } = normalizeSchemeInput(input);
+  if (isDevelopment || appName === "T3 Code (Dev)") return DESKTOP_DEVELOPMENT_SCHEME;
+  return appName === "T3 Code (Experimental)"
+    ? DESKTOP_EXPERIMENTAL_SCHEME
+    : DESKTOP_PRODUCTION_SCHEME;
 }
 
-export function getDesktopScheme(input: { isDevelopment: boolean; appName: string }): string {
-  if (input.isDevelopment) {
-    return DESKTOP_DEVELOPMENT_SCHEME;
-  }
-  return PRODUCTION_SCHEMES_BY_APP_NAME[input.appName] ?? PRODUCTION_SCHEME_FALLBACK;
+function getDesktopOrigin(input: DesktopSchemeInput): string {
+  return `${getDesktopScheme(input)}://${DESKTOP_HOST}`;
 }
 
-function getDesktopOrigin(isDevelopment: boolean, appName: string): string {
-  return `${getDesktopScheme({ isDevelopment, appName })}://${DESKTOP_HOST}`;
-}
-
-export function getDesktopUrl(isDevelopment: boolean, appName: string): string {
-  return `${getDesktopOrigin(isDevelopment, appName)}/`;
+export function getDesktopUrl(input: DesktopSchemeInput): string {
+  return `${getDesktopOrigin(input)}/`;
 }
 
 export class ElectronProtocolRegistrationError extends Schema.TaggedError<ElectronProtocolRegistrationError>()(
@@ -165,7 +137,7 @@ function withContentSecurityPolicy(response: Response, policy: string): Response
 function registerDesktopSchemePrivilegesSync(): void {
   Electron.protocol.registerSchemesAsPrivileged([
     {
-      scheme: resolveProductionScheme(),
+      scheme: DESKTOP_PRODUCTION_SCHEME,
       privileges: {
         standard: true,
         secure: true,
@@ -174,6 +146,17 @@ function registerDesktopSchemePrivilegesSync(): void {
         stream: true,
         // Custom schemes skip Chromium's V8 code cache unless they opt in.
         // Dev stays off: Vite serves changing code at stable URLs.
+        codeCache: true,
+      },
+    },
+    {
+      scheme: DESKTOP_EXPERIMENTAL_SCHEME,
+      privileges: {
+        standard: true,
+        secure: true,
+        supportFetchAPI: true,
+        corsEnabled: true,
+        stream: true,
         codeCache: true,
       },
     },
@@ -196,11 +179,29 @@ const registerDesktopSchemePrivileges = Effect.sync(registerDesktopSchemePrivile
 
 export const layerSchemePrivileges = Layer.effectDiscard(registerDesktopSchemePrivileges);
 
-async function proxyRequest(
+class ElectronProtocolFetchError extends Schema.TaggedError<ElectronProtocolFetchError>()(
+  "ElectronProtocolFetchError",
+  { cause: Schema.Defect() },
+) {}
+
+const netFetch = (url: string, init: RequestInit) =>
+  Effect.tryPromise({
+    try: () => Electron.net.fetch(url, init),
+    catch: (cause) => new ElectronProtocolFetchError({ cause }),
+  });
+
+// The dev renderer target can briefly refuse connections while Vite restarts:
+// retry idempotent requests after 50ms, then 150ms, and keep the last failure.
+const fetchWithTransientRetry = (url: string, init: RequestInit) =>
+  netFetch(url, init).pipe(
+    Effect.retry({ schedule: Schedule.exponential("50 millis", 3), times: 2 }),
+  );
+
+const proxyRequest = Effect.fn("desktop.protocol.proxyRequest")(function* (
   request: Request,
   targetOrigin: URL,
   contentSecurityPolicy: string,
-): Promise<Response> {
+) {
   const requestUrl = new URL(request.url);
   if (requestUrl.host !== DESKTOP_HOST) {
     return new Response(null, { status: 404 });
@@ -236,12 +237,10 @@ async function proxyRequest(
   }
   const response =
     request.method === "GET" || request.method === "HEAD"
-      ? await fetchWithTransientRetry(targetUrl.toString(), init)
-      : await Electron.net.fetch(targetUrl.toString(), init);
+      ? yield* fetchWithTransientRetry(targetUrl.toString(), init)
+      : yield* netFetch(targetUrl.toString(), init);
   return withContentSecurityPolicy(response, contentSecurityPolicy);
-}
-
-const TRANSIENT_FETCH_RETRY_DELAYS_MS = [0, 50, 150] as const;
+});
 
 // Serves the packaged web client without a backend: files resolve within the
 // asset directory, and any other path falls back to index.html so the SPA
@@ -284,24 +283,6 @@ const serveDesktopAsset = Effect.fn("desktop.protocol.serveAsset")(function* (
   });
 });
 
-async function fetchWithTransientRetry(url: string, init: RequestInit): Promise<Response> {
-  let lastError: unknown;
-
-  for (const delayMs of TRANSIENT_FETCH_RETRY_DELAYS_MS) {
-    if (delayMs > 0) {
-      await NodeTimersPromises.setTimeout(delayMs);
-    }
-
-    try {
-      return await Electron.net.fetch(url, init);
-    } catch (error) {
-      lastError = error;
-    }
-  }
-
-  throw lastError;
-}
-
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
   const registered = yield* Ref.make(false);
@@ -324,7 +305,14 @@ export const make = Effect.gen(function* () {
                   contentSecurityPolicy,
                 );
               }
-              return proxyRequest(request, input.targetOrigin, contentSecurityPolicy);
+              // Reject with net.fetch's own error, as an unproxied fetch would.
+              return runPromise(
+                proxyRequest(request, input.targetOrigin, contentSecurityPolicy).pipe(
+                  Effect.catchTags({
+                    ElectronProtocolFetchError: (error) => Effect.die(error.cause),
+                  }),
+                ),
+              );
             });
           },
           catch: (cause) => new ElectronProtocolRegistrationError({ scheme: input.scheme, cause }),

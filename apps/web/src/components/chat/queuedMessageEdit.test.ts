@@ -38,29 +38,30 @@ const uploadedFile = {
   sizeBytes: file.sizeBytes,
 };
 
-describe("queued message edits", () => {
+describe("queued message file edits", () => {
   beforeEach(() => {
     useComposerDraftStore.setState({ draftsByThreadKey: {}, draftThreadsByThreadKey: {} });
   });
 
-  for (const images of [[], [image]]) {
-    it(`preserves a generic file in a ${images.length === 0 ? "file-only" : "mixed"} save`, async () => {
-      const attachments = await prepareQueuedEditAttachments({
-        existingAttachments: [],
-        images,
-        files: [file],
-        uploadFiles: async () => [uploadedFile],
-        readImage: async () => "data:image/png;base64,aW1hZ2U=",
-      });
-      expect(attachments.at(-1)).toEqual(uploadedFile);
-      expect(attachments.length).toBe(images.length + 1);
-      if (images.length > 0)
-        expect(attachments[0]).toMatchObject({
-          type: "image",
-          dataUrl: "data:image/png;base64,aW1hZ2U=",
-        });
+  it.each([
+    { images: [], label: "file-only" },
+    { images: [image], label: "mixed" },
+  ])("preserves a generic file in a $label save", async ({ images }) => {
+    const attachments = await prepareQueuedEditAttachments({
+      existingAttachments: [],
+      images,
+      files: [file],
+      uploadFiles: async () => [uploadedFile],
+      readImage: async () => "data:image/png;base64,aW1hZ2U=",
     });
-  }
+    expect(attachments.at(-1)).toEqual(uploadedFile);
+    expect(attachments.length).toBe(images.length + 1);
+    if (images.length > 0)
+      expect(attachments[0]).toMatchObject({
+        type: "image",
+        dataUrl: "data:image/png;base64,aW1hZ2U=",
+      });
+  });
 
   it("retains saved attachments alongside newly uploaded files", async () => {
     const saved = { ...uploadedFile, id: "saved:earlier" };
@@ -111,6 +112,46 @@ describe("queued message edits", () => {
     expect(store.getComposerDraft(threadTarget)?.files).toEqual([uploaded]);
   });
 
+  it.each([false, true])(
+    "keeps thread references and clears the edit source (context-only: %s)",
+    (contextOnly) => {
+      const store = useComposerDraftStore.getState();
+      const reference = threadContextRecord(
+        scopeThreadRef(environmentId, ThreadId.make("thread:reference")),
+        "Earlier thread",
+      );
+      if (!contextOnly) store.setPrompt(editTarget, "Original message");
+      store.setThreadContexts(editTarget, [reference]);
+      const originalText = store.getComposerDraft(editTarget)?.prompt ?? "";
+
+      expect(recoverQueuedMessageEdit({ editTarget, threadTarget, originalText })).toBe("kept");
+      expect(store.getComposerDraft(threadTarget)?.threadContexts).toEqual([reference]);
+      expect(store.getComposerDraft(threadTarget)?.prompt).toContain(reference.contextId);
+      expect(store.getComposerDraft(editTarget)).toBeNull();
+    },
+  );
+
+  it("does not overwrite a separate thread reference draft when recovering an edit", () => {
+    const store = useComposerDraftStore.getState();
+    const existing = threadContextRecord(
+      scopeThreadRef(environmentId, ThreadId.make("thread:existing")),
+      "Existing reference",
+    );
+    const edited = threadContextRecord(
+      scopeThreadRef(environmentId, ThreadId.make("thread:edited")),
+      "Edited reference",
+    );
+    store.setThreadContexts(threadTarget, [existing]);
+    store.setThreadContexts(editTarget, [edited]);
+
+    expect(recoverQueuedMessageEdit({ editTarget, threadTarget, originalText: "" })).toBe(
+      "discarded",
+    );
+    expect(store.getComposerDraft(threadTarget)?.threadContexts).toEqual([existing]);
+    expect(store.getComposerDraft(threadTarget)?.prompt).not.toContain(edited.contextId);
+    expect(store.getComposerDraft(editTarget)).toBeNull();
+  });
+
   it("does not overwrite a separate draft when the queued run leaves", () => {
     const store = useComposerDraftStore.getState();
     store.setPrompt(threadTarget, "Separate draft");
@@ -119,23 +160,6 @@ describe("queued message edits", () => {
       "discarded",
     );
     expect(store.getComposerDraft(threadTarget)?.prompt).toBe("Separate draft");
-    expect(store.getComposerDraft(editTarget)).toBeNull();
-  });
-
-  it("keeps a thread reference when a queued edit is recovered", () => {
-    const store = useComposerDraftStore.getState();
-    const reference = threadContextRecord(
-      scopeThreadRef(environmentId, ThreadId.make("thread:reference")),
-      "Earlier thread",
-    );
-    store.setPrompt(editTarget, "Original message");
-    store.setThreadContexts(editTarget, [reference]);
-
-    expect(
-      recoverQueuedMessageEdit({ editTarget, threadTarget, originalText: "Original message" }),
-    ).toBe("kept");
-    expect(store.getComposerDraft(threadTarget)?.threadContexts).toEqual([reference]);
-    expect(store.getComposerDraft(threadTarget)?.prompt).toContain(reference.contextId);
     expect(store.getComposerDraft(editTarget)).toBeNull();
   });
 });

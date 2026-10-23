@@ -1,10 +1,11 @@
 #!/usr/bin/env pwsh
 # Quiet, retry-free fork install/upgrade helper.
 #
-# Builds of this fork ship three productNames — `T3 Code (Alpha)`,
+# Builds of this fork ship three productNames — `T3 Code (Beta)`,
 # `T3 Code (Experimental)`, and `T3 Code (Dev)` — that install to
-# `D:\t3code\<stage>\T3 Code (<stage>)\` and keep their Chromium
-# profiles and T3 homes fully isolated. A vanilla silent install
+# Beta replaces the current Alpha payload in place and reuses its persistent
+# identity; Experimental and Dev keep separate Chromium profiles and T3 homes.
+# A vanilla silent install
 # (`/S`) against an existing fork install triggers the
 # `uninstallOldVersion` UninstallLoop in app-builder-lib's
 # `installUtil.nsh`, which retries the previous build's uninstaller
@@ -23,7 +24,7 @@
 #
 # Usage (from a normal PowerShell, chcp 936 is fine):
 #
-#   pwsh .\scripts\fork-build\install-fork.ps1 -Stage Alpha
+#   pwsh .\scripts\fork-build\install-fork.ps1 -Stage Beta
 #   pwsh .\scripts\fork-build\install-fork.ps1 -Stage Experimental
 #   pwsh .\scripts\fork-build\install-fork.ps1 -Stage Dev
 #   pwsh .\scripts\fork-build\install-fork.ps1 -Stage All
@@ -35,7 +36,7 @@
 
 param(
   [Parameter(Mandatory = $true)]
-  [ValidateSet("Alpha", "Experimental", "Dev", "All")]
+  [ValidateSet("Beta", "Experimental", "Dev", "All")]
   [string]$Stage,
 
   [string]$InstallerPath,
@@ -46,16 +47,39 @@ param(
 $ErrorActionPreference = "Stop"
 
 $ProductNames = @{
-  Alpha         = "T3 Code (Alpha)"
+  Beta          = "T3 Code (Beta)"
   Experimental  = "T3 Code (Experimental)"
   Dev           = "T3 Code (Dev)"
 }
 
 $DefaultInstallers = @{
-  Alpha         = "release\T3-Code-T3CodeAlpha-*x64.exe"
+  Beta          = "release\T3-Code-T3CodeBeta-*x64.exe"
   Experimental  = "release\T3-Code-T3CodeExperimental-*x64.exe"
   Dev           = "release\T3-Code-T3CodeDev-*x64.exe"
 }
+
+function Resolve-BetaInstallDirectory {
+  if ($env:T3CODE_ALPHA_INSTALL_DIR) {
+    return $env:T3CODE_ALPHA_INSTALL_DIR
+  }
+
+  # Keep the common fork and stock electron-builder locations compatible. The
+  # first existing directory wins, so the upgrade follows the user's current
+  # Alpha install without requiring a registry or payload migration.
+  $candidates = @(
+    (Join-Path ${env:LOCALAPPDATA} "Programs\T3 Code (Alpha)"),
+    "D:\t3code\alpha\T3 Code (Alpha)",
+    (Join-Path ${env:LOCALAPPDATA} "Programs\T3 Code")
+  )
+  foreach ($candidate in $candidates) {
+    if (Test-Path -LiteralPath $candidate) {
+      return $candidate
+    }
+  }
+  return $candidates[0]
+}
+
+$BetaInstallDirectory = Resolve-BetaInstallDirectory
 
 function Remove-ForkUninstallKey {
   param([string]$DisplayNamePattern)
@@ -109,11 +133,20 @@ function Invoke-SilentInstall {
   Write-Host ""
   Write-Host "[$StageName] Removing prior uninstall registry entry for $productName"
   Remove-ForkUninstallKey -DisplayNamePattern "$productName*"
+  if ($StageName -eq "Beta") {
+    # The Beta package replaces the legacy Alpha payload in place. Remove both
+    # display-name entries so NSIS does not run the old uninstaller first.
+    Remove-ForkUninstallKey -DisplayNamePattern "T3 Code (Alpha)*"
+  }
 
   Stop-RunningT3
 
   Write-Host "[$StageName] Installing $Installer (silent)"
-  $proc = Start-Process -FilePath $Installer -ArgumentList "/S" -Wait -PassThru
+  $arguments = @("/S")
+  if ($StageName -eq "Beta") {
+    $arguments += "/D=$BetaInstallDirectory"
+  }
+  $proc = Start-Process -FilePath $Installer -ArgumentList $arguments -Wait -PassThru
   Write-Host "[$StageName] Installer exit code: $($proc.ExitCode)"
   if ($proc.ExitCode -ne 0) {
     throw "Installer for $StageName exited with code $($proc.ExitCode)"
@@ -121,7 +154,7 @@ function Invoke-SilentInstall {
 }
 
 $stages = if ($Stage -eq "All") {
-  "Alpha", "Experimental", "Dev"
+  "Beta", "Experimental", "Dev"
 } else {
   $Stage
 }

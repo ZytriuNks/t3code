@@ -5,13 +5,10 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
-import { EventStoreV2 } from "./EventStore.ts";
-import {
-  ORCHESTRATION_V2_PROJECTION_SCHEMA_VERSION,
-  ProjectionStoreV2,
-} from "./ProjectionStore.ts";
+import * as EventStore from "./EventStore.ts";
+import * as ProjectionStore from "./ProjectionStore.ts";
 
 export interface ProjectionVerificationV2 {
   readonly valid: boolean;
@@ -61,13 +58,13 @@ const encodeEntityKey = Schema.encodeSync(
 export const layer: Layer.Layer<
   ProjectionMaintenanceV2,
   never,
-  EventStoreV2 | ProjectionStoreV2 | SqlClient.SqlClient
+  EventStore.EventStoreV2 | ProjectionStore.ProjectionStoreV2 | SqlClient.SqlClient
 > = Layer.effect(
   ProjectionMaintenanceV2,
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
-    const eventStore = yield* EventStoreV2;
-    const projectionStore = yield* ProjectionStoreV2;
+    const eventStore = yield* EventStore.EventStoreV2;
+    const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
 
     /**
      * EventSink commits the event, its projection updates, and projection metadata in one SQL
@@ -108,7 +105,7 @@ export const layer: Layer.Layer<
       const projectionSequence = metadata[0]?.last_sequence ?? 0;
       return {
         valid:
-          schemaVersion === ORCHESTRATION_V2_PROJECTION_SCHEMA_VERSION &&
+          schemaVersion === ProjectionStore.ORCHESTRATION_V2_PROJECTION_SCHEMA_VERSION &&
           projectionSequence === expectedSequence &&
           missingThreadIds.length === 0 &&
           unexpectedThreadIds.length === 0 &&
@@ -184,7 +181,7 @@ export const layer: Layer.Layer<
             )
             VALUES (
               'thread-projections',
-              ${ORCHESTRATION_V2_PROJECTION_SCHEMA_VERSION},
+              ${ProjectionStore.ORCHESTRATION_V2_PROJECTION_SCHEMA_VERSION},
               ${lastSequence},
               ${now}
             )
@@ -218,6 +215,7 @@ export const layer: Layer.Layer<
       "thread.snoozed",
       "thread.unsnoozed",
       "thread.pinned",
+      "thread.auto-settle-set",
       "thread.unpinned",
       "thread.pin-reordered",
       "thread.active-reordered",
@@ -232,6 +230,7 @@ export const layer: Layer.Layer<
     ];
 
     const supersedableThreadEventTypes = new Set(SUPERSEDABLE_THREAD_EVENT_TYPES);
+    // Keep subagent.updated and turn-item.updated rows: slimmed payloads reference their prompts.
     const COMPACTION_PAGE_SIZE = 500;
 
     /**
