@@ -4,7 +4,6 @@ import { shouldHideUnavailableContextMenuItems } from "./contextMenuPreferences"
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
-// Inline Lucide-style icon paths (stroke-based, viewBox 0 0 24 24, strokeWidth 2).
 const ICON_PATHS: Record<string, ReadonlyArray<{ tag: string; attrs: Record<string, string> }>> = {
   archive: [
     { tag: "rect", attrs: { width: "20", height: "5", x: "2", y: "3", rx: "1" } },
@@ -226,20 +225,11 @@ export function isContextMenuOpen(): boolean {
   return activeContextMenuDismiss !== null;
 }
 
-/**
- * Closes the currently open fallback context menu, resolving its show() with
- * null (the same result as dismissing by outside click or Escape). No-op when
- * no renderer menu is open.
- */
 export function dismissContextMenu(): void {
   activeContextMenuDismiss?.();
   activeContextMenuDismiss = null;
 }
 
-/**
- * Imperative DOM-based context menu shared by web and desktop renderers.
- * Supports nested submenus and resolves with the clicked leaf item id.
- */
 export function showContextMenuFallback<T extends string>(
   items: readonly ContextMenuItem<T>[],
   position?: { x: number; y: number },
@@ -480,8 +470,6 @@ export function showContextMenuFallback<T extends string>(
         }
 
         if (typeof item.checked === "boolean") {
-          // Option rows use the icon slot for the check so labels line up
-          // with icon rows. The unselected option keeps the slot empty.
           button.setAttribute("role", "menuitemradio");
           button.setAttribute("aria-checked", item.checked ? "true" : "false");
           const check = item.checked ? createIconElement("check", "neutral") : null;

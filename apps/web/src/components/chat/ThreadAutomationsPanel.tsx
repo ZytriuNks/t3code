@@ -16,7 +16,7 @@ import {
 
 import { ThreadDetailsSection } from "./ThreadDetailsSection";
 import { cn } from "../../lib/utils";
-import { relativeLabel, scheduleLabel } from "../settings/ScheduledTasksSettings";
+import { ScheduledRelativeLabel, scheduleLabel } from "../settings/ScheduledTasksSettings";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useEnvironmentQuery } from "../../state/query";
 import { serverEnvironment } from "../../state/server";
@@ -38,17 +38,29 @@ const STATUS_DOT_CLASS: Record<ScheduledTask["lastRunStatus"], string> = {
   failed: "bg-destructive",
 };
 
-/**
- * Thread details panel section listing the automations (scheduled tasks) bound
- * to this thread. Fed by the live scheduled-task subscription, so run status
- * and next-run times update as the scheduler works — no manual refresh.
- * Renders nothing when the thread has no bound automations.
- */
+function TaskScheduleLine({ task }: { task: ScheduledTask }) {
+  const { t } = useI18n();
+  return (
+    <>
+      {scheduleLabel(task.schedule, t)}
+      {task.enabled && task.nextRunAt !== null ? (
+        <ScheduledRelativeLabel
+          value={task.nextRunAt}
+          format={(label) => t("settings.scheduledTasks.relative.withNext", { label })}
+        />
+      ) : task.enabled ? (
+        ""
+      ) : (
+        t("settings.scheduledTasks.relative.withPaused")
+      )}
+    </>
+  );
+}
+
 export function ThreadAutomationsPanel(props: {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
 }) {
-  const { t } = useI18n();
   const canOperate = useAtomValue(
     serverEnvironment.runScheduledTaskNow.permissionAtom(props.environmentId),
   );
@@ -67,9 +79,7 @@ export function ThreadAutomationsPanel(props: {
   const boundTasks = (tasksQuery.data?.tasks ?? []).filter(
     (task) => task.threadId === props.threadId,
   );
-  // A load error must not look like "no automations" — this thread may have
-  // tasks whose controls would silently vanish. Only hide the section when we
-  // positively know there is nothing bound to it.
+
   if (tasksQuery.error === null && boundTasks.length === 0) return null;
 
   const reportFailure = (title: string, error: unknown) => {
@@ -172,21 +182,22 @@ export function ThreadAutomationsPanel(props: {
                 aria-hidden
               />
             </span>
-            <div className="min-w-0 flex-1">
-              <span className="block truncate text-sm font-medium text-foreground/80">
-                {task.title}
-              </span>
-              <p className="truncate text-2xs text-muted-foreground">
-                {scheduleLabel(task.schedule, t)}
-                {task.enabled && task.nextRunAt !== null
-                  ? t("settings.scheduledTasks.relative.withNext", {
-                      label: relativeLabel(task.nextRunAt, t),
-                    })
-                  : task.enabled
-                    ? ""
-                    : ` · ${t("settings.scheduledTasks.status.paused").toLowerCase()}`}
-              </p>
-            </div>
+            <Tooltip>
+              <TooltipTrigger render={<div className="min-w-0 flex-1" />}>
+                <span className="block truncate text-sm font-medium text-foreground/80">
+                  {task.title}
+                </span>
+                <p className="truncate text-2xs text-muted-foreground">
+                  <TaskScheduleLine task={task} />
+                </p>
+              </TooltipTrigger>
+              <TooltipPopup side="left">
+                <p className="font-medium">{task.title}</p>
+                <p className="text-muted-foreground">
+                  <TaskScheduleLine task={task} />
+                </p>
+              </TooltipPopup>
+            </Tooltip>
             <Tooltip>
               <TooltipTrigger
                 render={

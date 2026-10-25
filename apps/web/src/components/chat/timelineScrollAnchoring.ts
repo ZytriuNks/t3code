@@ -6,7 +6,6 @@ export interface TimelineRunObservation {
   readonly runId: RunId | null;
 }
 
-/** Opening a thread establishes a baseline; only later runs get new-turn framing. */
 export function observeTimelineRun(
   previous: TimelineRunObservation | null,
   input: TimelineRunObservation & {
@@ -59,7 +58,7 @@ export interface AnchoredTurnMetrics {
   readonly scrollDeltaToRevealEnd: number;
 }
 
-export function getRowBottom(state: TimelineListMeasurementState, index: number): number | null {
+function getRowBottom(state: TimelineListMeasurementState, index: number): number | null {
   const top = state.positionAtIndex(index);
   const height = state.sizeAtIndex(index);
   if (
@@ -95,7 +94,12 @@ export function timelineContentOverflowsViewport(
   if (typeof scrollLength !== "number" || !Number.isFinite(scrollLength) || scrollLength <= 0) {
     return false;
   }
-  const lastBottom = getRowBottom(state, state.data.length - 1);
+  const lastIndex = state.data.length - 1;
+  // Overflow can use an unmeasured tail's lower bound; anchored-turn metrics need its height.
+  const lastTop = state.positionAtIndex(lastIndex);
+  const lastBottom =
+    getRowBottom(state, lastIndex) ??
+    (typeof lastTop === "number" && Number.isFinite(lastTop) ? lastTop + 1 : null);
   if (lastBottom === null) {
     return false;
   }
@@ -165,7 +169,6 @@ export interface RememberedTimelinePosition {
   };
 }
 
-// Scoped thread keys keep separate environments independent. Bound the session cache.
 const rememberedTimelinePositions = new Map<string, RememberedTimelinePosition>();
 
 export function readTimelinePosition(threadKey: string) {

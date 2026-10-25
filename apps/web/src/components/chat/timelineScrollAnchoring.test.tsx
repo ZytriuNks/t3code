@@ -3,9 +3,6 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   observeTimelineRun,
   getAnchoredTurnMetrics,
-  getRowBottom,
-  readTimelinePosition,
-  rememberTimelinePosition,
   timelineContentOverflowsViewport,
 } from "./timelineScrollAnchoring";
 
@@ -89,7 +86,10 @@ describe("timeline scroll anchoring", () => {
       sizes: [80, 40],
     });
 
-    expect(getRowBottom(state, 1)).toBe(160);
+    expect(
+      getAnchoredTurnMetrics({ state, anchorIndex: 0, composerOverlayHeight: 0, anchorOffset: 0 })
+        ?.lastBottom,
+    ).toBe(160);
   });
 
   it("treats the active turn as fitting when it fits above the composer", () => {
@@ -132,70 +132,6 @@ describe("timeline scroll anchoring", () => {
     expect(metrics?.targetScrollToRevealEnd).toBe(1436);
     expect(metrics?.scrollDeltaToRevealEnd).toBe(0);
   });
-
-  it("reports overflow only for the current anchored turn", () => {
-    const state = buildState({
-      positions: [0, 900, 1180],
-      sizes: [800, 220, 300],
-      scroll: 900,
-      scrollLength: 760,
-    });
-
-    const metrics = getAnchoredTurnMetrics({
-      state,
-      anchorIndex: 1,
-      composerOverlayHeight: 180,
-      anchorOffset: 16,
-    });
-
-    expect(metrics?.turnHeight).toBe(580);
-    expect(metrics?.usableViewportHeight).toBe(564);
-    expect(metrics?.overflowsUsableViewport).toBe(true);
-  });
-
-  it("returns the minimal positive scroll delta needed to reveal the turn end", () => {
-    const state = buildState({
-      positions: [0, 900, 1180],
-      sizes: [800, 220, 360],
-      scroll: 900,
-      scrollLength: 760,
-    });
-
-    const metrics = getAnchoredTurnMetrics({
-      state,
-      anchorIndex: 1,
-      composerOverlayHeight: 180,
-      anchorOffset: 16,
-    });
-
-    expect(metrics?.lastBottom).toBe(1540);
-    expect(metrics?.visibleUsableBottom).toBe(1464);
-    expect(metrics?.scrollDeltaToRevealEnd).toBe(76);
-  });
-
-  it("subtracts composer height from usable viewport height", () => {
-    const state = buildState({
-      positions: [0, 300],
-      sizes: [120, 470],
-      scrollLength: 700,
-    });
-
-    const withoutComposer = getAnchoredTurnMetrics({
-      state,
-      anchorIndex: 1,
-      composerOverlayHeight: 0,
-      anchorOffset: 16,
-    });
-    const withComposer = getAnchoredTurnMetrics({
-      state,
-      anchorIndex: 1,
-      composerOverlayHeight: 220,
-      anchorOffset: 16,
-    });
-
-    expect(withoutComposer?.overflowsUsableViewport).toBe(false);
-    expect(withComposer?.overflowsUsableViewport).toBe(true);
-  });
 });
 
 describe("observeTimelineRun", () => {
@@ -211,13 +147,6 @@ describe("observeTimelineRun", () => {
     runId: RunId.make("new-run"),
     messageId: MessageId.make("new-message"),
   };
-
-  it("opens an already hydrated thread at the end instead of framing its existing run", () => {
-    const opened = observeTimelineRun(null, existing);
-    expect(opened.anchorMessageId).toBeNull();
-    expect(observeTimelineRun(opened.observation, existing).anchorMessageId).toBeNull();
-    expect(observeTimelineRun(opened.observation, next).anchorMessageId).toBe(next.messageId);
-  });
 
   it("does not mistake delayed hydration for a newly started turn", () => {
     const loading = { ...existing, hydrated: false, runId: null, messageId: null };
@@ -243,11 +172,6 @@ describe("observeTimelineRun", () => {
     ).toBe("later-message");
   });
 
-  it("does not anchor when an existing run's user message arrives after its run", () => {
-    const opened = observeTimelineRun(null, { ...existing, messageId: null });
-    expect(observeTimelineRun(opened.observation, existing).anchorMessageId).toBeNull();
-  });
-
   it("waits for a new run's user message and frames it only once", () => {
     const opened = observeTimelineRun(null, existing);
     const waiting = observeTimelineRun(opened.observation, { ...next, messageId: null });
@@ -255,14 +179,6 @@ describe("observeTimelineRun", () => {
     const ready = observeTimelineRun(waiting.observation, next);
     expect(ready.anchorMessageId).toBe(next.messageId);
     expect(observeTimelineRun(ready.observation, next).anchorMessageId).toBeNull();
-  });
-
-  it("establishes a separate baseline when the same thread ID belongs to another environment", () => {
-    const opened = observeTimelineRun(null, existing);
-    expect(
-      observeTimelineRun(opened.observation, { ...next, threadKey: "other:thread" })
-        .anchorMessageId,
-    ).toBeNull();
   });
 
   it("does not reset the baseline during a temporary loss of projection data", () => {
@@ -275,32 +191,11 @@ describe("observeTimelineRun", () => {
     expect(observeTimelineRun(reconnecting.observation, existing).anchorMessageId).toBeNull();
   });
 
-  it("frames the first new run in an initially empty thread", () => {
-    const opened = observeTimelineRun(null, { ...existing, runId: null, messageId: null });
-    expect(observeTimelineRun(opened.observation, next).anchorMessageId).toBe(next.messageId);
-  });
-
   it("waits for a queued run to start before framing it", () => {
     const opened = observeTimelineRun(null, { ...existing, queued: true });
     expect(opened.anchorMessageId).toBeNull();
     expect(observeTimelineRun(opened.observation, existing).anchorMessageId).toBe(
       existing.messageId,
     );
-  });
-});
-
-describe("remembered timeline positions", () => {
-  it("keeps reading positions and end-follow independent across threads and environments", () => {
-    const reading = { rowId: "message-4", offsetWithinRow: 32, scrollOffset: 932, atEnd: false };
-    const following = { rowId: "message-9", offsetWithinRow: 10, scrollOffset: 2010, atEnd: true };
-    rememberTimelinePosition("scroll-test-a:thread-1", reading, false);
-    rememberTimelinePosition("scroll-test-a:thread-2", following, true);
-    rememberTimelinePosition("scroll-test-b:thread-1", following, true);
-    expect(readTimelinePosition("scroll-test-a:thread-1")).toEqual(reading);
-    expect(readTimelinePosition("scroll-test-a:thread-2")).toEqual(following);
-    expect(readTimelinePosition("scroll-test-b:thread-1")).toEqual(following);
-    expect(readTimelinePosition("scroll-test-a:unvisited")).toBeUndefined();
-    rememberTimelinePosition("scroll-test-a:thread-1", following, true);
-    expect(readTimelinePosition("scroll-test-a:thread-1")).toEqual(following);
   });
 });

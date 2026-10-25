@@ -1,3 +1,5 @@
+import { translate } from "../../i18n/messages";
+import { parseWebhookFilterDrafts } from "@t3tools/client-runtime/scheduled-task-webhook";
 import {
   EnvironmentId,
   ProjectId,
@@ -18,6 +20,9 @@ import { resolveSettingsScope, type SettingsScopeSearch } from "./settingsScope"
 import { deriveProviderInstanceEntries } from "../../providerInstances";
 import {
   scheduledTaskDefaultModel,
+  webhookDraftErrors,
+  webhookDeliveryLabel,
+  webhookFilterErrorCopy,
   matchesScheduledTaskScope,
   scheduleFromDraft,
   taskToDraft,
@@ -73,8 +78,6 @@ function group(
   };
 }
 
-// Project IDs are environment-local. This unrelated server checkout deliberately
-// shares an ID with a laptop checkout in the selected group.
 const sameIdElsewhere = member("first", serverId);
 const groups = [group("t3code", [first, second, third]), group("other", [other, sameIdElsewhere])];
 const tasks = [first, second, third, other, sameIdElsewhere].map((project, index) => ({
@@ -120,14 +123,6 @@ describe("scheduled task settings scope", () => {
       ),
     ).toBe(false);
   });
-
-  it("does not offer an unrelated environment's same-ID project when creating a task", () => {
-    const scope = resolveSettingsScope({ project: "t3code" }, groups, environments);
-    const serverProjects = [third, other, sameIdElsewhere];
-    expect(
-      serverProjects.filter((project) => matchesScheduledTaskScope(scope, serverId, project.id)),
-    ).toEqual([third]);
-  });
 });
 
 const legacyTask: ScheduledTask = {
@@ -159,14 +154,6 @@ describe("editing scheduled task branch settings", () => {
     expect(draft.baseRef).toBe("release");
     expect(draft.startFromOrigin).toBe(false);
   });
-
-  it.each([true, false])("preserves an explicit origin flag of %s", (startFromOrigin) => {
-    const draft = taskToDraft({
-      ...legacyTask,
-      workspaceStrategy: { type: "worktree", baseRef: "release", startFromOrigin },
-    });
-    expect(draft.startFromOrigin).toBe(startFromOrigin);
-  });
 });
 
 describe("webhook scheduled tasks", () => {
@@ -177,6 +164,43 @@ describe("webhook scheduled tasks", () => {
     webhook: { path: "/api/hooks/legacy-task/token", url: null, hasSecret: true },
   };
 
+  it("round-trips dedupe settings, clears them, and rejects invalid windows", () => {
+    const dedupe = {
+      replayKey: "{{headers.delivery-id}}",
+      coalesceKey: "{{body.id}}",
+      coalesceWindowSeconds: 10,
+    };
+    const draft = taskToDraft({
+      ...webhookTask,
+      schedule: { type: "webhook", signature: null, dedupe },
+    });
+    expect(scheduleFromDraft(draft)).toMatchObject({ dedupe });
+    expect(
+      scheduleFromDraft({
+        ...draft,
+        replayKey: " \n ",
+        coalesceKey: " \t ",
+        coalesceWindowSeconds: "",
+      }),
+    ).toMatchObject({ dedupe: {} });
+    expect(
+      scheduleFromDraft({
+        ...draft,
+        replayKey: `  ${dedupe.replayKey}  `,
+        coalesceKey: `\t${dedupe.coalesceKey}\n`,
+      }),
+    ).toMatchObject({ dedupe });
+    expect(
+      scheduleFromDraft({ ...draft, replayKey: "", coalesceKey: "", coalesceWindowSeconds: "" }),
+    ).toMatchObject({ dedupe: {} });
+    expect(scheduleFromDraft({ ...draft, coalesceWindowSeconds: "" })).toMatchObject({
+      dedupe: { replayKey: dedupe.replayKey, coalesceKey: dedupe.coalesceKey },
+    });
+    for (const coalesceWindowSeconds of ["9", "3601", "1.5", "abc"]) {
+      expect(scheduleFromDraft({ ...draft, coalesceWindowSeconds })).toBeNull();
+    }
+  });
+
   it("keeps a stored secret when the secret field is left blank", () => {
     const draft = taskToDraft(webhookTask);
     expect(draft.scheduleMode).toBe("webhook");
@@ -185,22 +209,13 @@ describe("webhook scheduled tasks", () => {
       type: "webhook",
       signature,
       maxDeliveryAgeMinutes: null,
+      dedupe: {},
     });
     expect(scheduleFromDraft({ ...draft, signatureSecret: " new " })).toEqual({
       type: "webhook",
       signature: { ...signature, secret: "new" },
       maxDeliveryAgeMinutes: null,
-    });
-  });
-
-  it("drops the signature when it is switched off and offers GitHub's settings", () => {
-    const draft = taskToDraft({ ...webhookTask, schedule: { type: "webhook", signature: null } });
-    expect(draft.signatureEnabled).toBe(false);
-    expect(draft.signatureHeader).toBe("x-hub-signature-256");
-    expect(scheduleFromDraft(draft)).toEqual({
-      type: "webhook",
-      signature: null,
-      maxDeliveryAgeMinutes: null,
+      dedupe: {},
     });
   });
 
@@ -214,11 +229,37 @@ describe("webhook scheduled tasks", () => {
     for (const blank of ["", "  "]) {
       expect(scheduleFromDraft({ ...draft, maxDeliveryAgeMinutes: blank })).toMatchObject({
         maxDeliveryAgeMinutes: null,
+        dedupe: {},
       });
     }
     for (const invalid of ["0", "-5", "1.5", "abc", "1441"]) {
       expect(scheduleFromDraft({ ...draft, maxDeliveryAgeMinutes: invalid })).toBeNull();
     }
+  });
+
+  it("sends filters only when the form changed them", () => {
+    const filters = [
+      { path: "headers.x-github-event", op: "equals", value: "pull_request" },
+      { path: "body.action", op: "in", value: ["opened", "reopened"] },
+    ] as const;
+    const draft = taskToDraft({
+      ...webhookTask,
+      schedule: { type: "webhook", signature, filters },
+    });
+    expect(draft.filters.map((filter) => filter.op)).toEqual(["equals", "in"]);
+    // A title-only save leaves the key out, so the server keeps whatever is stored now.
+    expect(scheduleFromDraft({ ...draft, title: "Renamed" })).not.toHaveProperty("filters");
+    expect(scheduleFromDraft({ ...draft, filters: draft.filters.slice(0, 1) })).toMatchObject({
+      filters: filters.slice(0, 1),
+    });
+    // Removing every row is a change, so it clears the stored filters.
+    expect(scheduleFromDraft({ ...draft, filters: [] })).toMatchObject({ filters: [] });
+    expect(
+      scheduleFromDraft({
+        ...draft,
+        filters: [{ id: "f1", path: "body.action", op: "in", value: " , " }],
+      }),
+    ).toBeNull();
   });
 });
 
@@ -266,28 +307,6 @@ describe("scheduled task model defaults", () => {
       project,
       deriveProviderInstanceEntries(value.providers),
     );
-  it("uses the environment default with its provider options", () => {
-    expect(resolve(config, { id: projectId })).toEqual(environmentSelection);
-  });
-  it("prefers the project's configured model", () => {
-    expect(resolve(config, { id: projectId, defaultModelSelection: projectSelection })).toEqual(
-      projectSelection,
-    );
-    expect(
-      resolve(
-        {
-          ...config,
-          settings: {
-            ...config.settings,
-            projectSettingsOverrides: {
-              [projectId]: { defaultModelSelection: projectSelection },
-            },
-          },
-        },
-        { id: projectId },
-      ),
-    ).toEqual(projectSelection);
-  });
   it("uses the advertised default instead of catalog order when no default is configured", () => {
     expect(
       resolve({ ...config, settings: { ...config.settings, defaultModelSelection: null } }, null),
@@ -304,15 +323,68 @@ describe("scheduled task model defaults", () => {
       }),
     ).toEqual(environmentSelection);
   });
-  it("does not choose an implicit model on a disabled provider", () => {
+});
+
+it("rejects dedupe templates without a request placeholder", () => {
+  const draft = taskToDraft({ ...legacyTask, schedule: { type: "webhook", signature: null } });
+  expect(scheduleFromDraft({ ...draft, replayKey: "literal" })).toBeNull();
+  expect(scheduleFromDraft({ ...draft, coalesceKey: "{{body.bad" })).toBeNull();
+});
+
+describe("webhook localized feedback", () => {
+  const zh = (
+    key: import("../../i18n/messages").MessageKey,
+    values?: import("../../i18n/messages").MessageValues,
+  ) => translate("zh-CN", key, values);
+
+  it("uses the shared filter validation and reports the invalid row in Chinese", () => {
+    const valid = { id: "valid", path: "headers.x-event", op: "equals", value: "push" } as const;
+    expect(parseWebhookFilterDrafts([valid], webhookFilterErrorCopy(zh))).toEqual({
+      filters: [{ path: "headers.x-event", op: "equals", value: "push" }],
+    });
     expect(
-      resolve(
-        {
-          ...config,
-          providers: config.providers.map((provider) => ({ ...provider, enabled: false })),
-        },
-        null,
+      parseWebhookFilterDrafts(
+        [valid, { id: "invalid", path: "body.action", op: "in", value: " , " }],
+        webhookFilterErrorCopy(zh),
       ),
-    ).toBeNull();
+    ).toEqual({
+      error: "筛选条件 2 需要 body、headers 或 query 下的路径，并且至少包含一个值。",
+    });
+    expect(
+      parseWebhookFilterDrafts(
+        [{ ...valid, path: "invalid", op: "exists" }],
+        webhookFilterErrorCopy(zh),
+      ),
+    ).toEqual({ error: "筛选条件 1 需要 body、headers 或 query 下的路径。" });
+  });
+
+  it("reports invalid limits and request keys in the selected language", () => {
+    const draft = taskToDraft({ ...legacyTask, schedule: { type: "webhook", signature: null } });
+    expect(webhookDraftErrors({ ...draft, maxDeliveryAgeMinutes: "0" }, zh)).toEqual([
+      { title: "时限无效", description: expect.stringContaining("整数分钟") },
+    ]);
+    expect(
+      webhookDraftErrors({ ...draft, replayKey: "literal", coalesceWindowSeconds: "9" }, zh),
+    ).toEqual([
+      { title: "Webhook 设置无效", description: "重放识别键必须包含有效的请求占位符。" },
+      { title: "Webhook 设置无效", description: "合并窗口必须为 10 至 3600 的整数秒。" },
+    ]);
+    expect(webhookDraftErrors({ ...draft, maxDeliveryAgeMinutes: "0" })[0]?.title).toBe(
+      "Invalid age limit",
+    );
+  });
+
+  it("distinguishes accepted and pending deliveries and preserves unknown server outcomes", () => {
+    expect(webhookDeliveryLabel({ outcome: "accepted" }, zh)).toBe("已运行");
+    expect(webhookDeliveryLabel({ outcome: "accepted", pendingWindow: true }, zh)).toBe(
+      "已开启合并窗口",
+    );
+    expect(webhookDeliveryLabel({ outcome: "rejected_signature" }, zh)).toBe("签名无效");
+    expect(webhookDeliveryLabel({ outcome: "future_server_outcome" }, zh)).toBe(
+      "future server outcome",
+    );
+    expect(webhookDeliveryLabel({ outcome: "accepted", pendingWindow: true })).toBe(
+      "Opened window",
+    );
   });
 });

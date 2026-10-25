@@ -1,3 +1,4 @@
+import { settlePromise } from "@t3tools/client-runtime/state/runtime";
 import { useState } from "react";
 import type { ClientSettings } from "@t3tools/contracts/settings";
 
@@ -56,17 +57,15 @@ export function NotificationSettings() {
                 return;
               }
               setRequesting(true);
-              try {
-                const permission = await Notification.requestPermission();
-                if (permission !== "granted") {
-                  setPermissionMessage(t("settings.general.notifications.blocked"));
-                  return;
-                }
-              } catch {
+              const permission = await settlePromise(() => Notification.requestPermission());
+              setRequesting(false);
+              if (permission._tag === "Failure") {
                 setPermissionMessage(t("settings.general.notifications.unavailable"));
                 return;
-              } finally {
-                setRequesting(false);
+              }
+              if (permission.value !== "granted") {
+                setPermissionMessage(t("settings.general.notifications.blocked"));
+                return;
               }
             }
             updateSettings({ notificationMode: value });

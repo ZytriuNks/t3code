@@ -1,11 +1,6 @@
-import {
-  Component,
-  useCallback,
-  useLayoutEffect,
-  useRef,
-  type ReactNode,
-  type RefObject,
-} from "react";
+import { observeResize } from "~/lib/observeResize";
+import { useStableCallback } from "~/hooks/useStableCallback";
+import { Component, useLayoutEffect, useRef, type ReactNode, type RefObject } from "react";
 
 import { SMOOTH_TEXT_LAYOUT_EVENT, type SmoothTextLayoutDetail } from "../lib/smoothTextLayout";
 
@@ -80,7 +75,7 @@ export function useSmoothScroll({
 }) {
   const controllerRef = useRef<SmoothScrollHandle | null>(null);
   const handledEndRequestRef = useRef({ identity, value: endRequest });
-  const request = useCallback(() => controllerRef.current?.request() ?? false, []);
+  const request = useStableCallback(() => controllerRef.current?.request() ?? false);
 
   useLayoutEffect(() => {
     if (!enabled || !element) return;
@@ -444,34 +439,35 @@ export function useSmoothScroll({
     controllerRef.current = handle;
     controlRef.current = handle;
     element.addEventListener(SMOOTH_TEXT_LAYOUT_EVENT, followLayout);
-    const resize = new ResizeObserver(() => {
-      const width = element.clientWidth;
-      const height = element.clientHeight;
-      if (width !== trackedWidth || height !== trackedHeight) {
-        trackedWidth = width;
-        trackedHeight = height;
-        viewportResized = true;
-      }
-      (onLayoutRequest ?? pin)();
-    });
-    resize.observe(element);
-    if (element.firstElementChild) resize.observe(element.firstElementChild);
+    const stopResize = observeResize(
+      [element, ...(element.firstElementChild ? [element.firstElementChild] : [])],
+      () => {
+        const width = element.clientWidth;
+        const height = element.clientHeight;
+        if (width !== trackedWidth || height !== trackedHeight) {
+          trackedWidth = width;
+          trackedHeight = height;
+          viewportResized = true;
+        }
+        (onLayoutRequest ?? pin)();
+      },
+    );
     pin();
 
     return () => {
       handle.cancel();
       if (chaseFrame !== null) cancelAnimationFrame(chaseFrame);
-      resize.disconnect();
+      stopResize();
       element.removeEventListener(SMOOTH_TEXT_LAYOUT_EVENT, followLayout);
       if (controllerRef.current === handle) controllerRef.current = null;
       if (controlRef.current === handle) controlRef.current = null;
     };
-    // A thread switch must discard the previous thread's controller even if the DOM is reused.
   }, [
     controlRef,
     element,
     enabled,
     footerRef,
+    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- A thread switch must discard the controller even when the DOM is reused.
     identity,
     onDetach,
     onFollowingChange,

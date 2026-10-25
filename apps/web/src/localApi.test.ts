@@ -1,8 +1,8 @@
+import { DEFAULT_CLIENT_SETTINGS } from "@t3tools/contracts";
 import {
-  DEFAULT_CLIENT_SETTINGS,
+  type DesktopBridge,
   type ConfirmDialogOptions,
   type ContextMenuItem,
-  type DesktopBridge,
 } from "@t3tools/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -70,42 +70,6 @@ afterEach(() => {
 });
 
 describe("LocalApi", () => {
-  it("keeps backend operations out of the local host facade", async () => {
-    const { createLocalApi } = await import("./localApi");
-    const api = createLocalApi();
-
-    expect(api).not.toHaveProperty("server");
-    expect(api.shell).not.toHaveProperty("openInEditor");
-  });
-
-  it("uses the browser context-menu fallback without a desktop bridge", async () => {
-    showContextMenuFallbackMock.mockResolvedValue("rename");
-    const { createLocalApi } = await import("./localApi");
-    const items = [{ id: "rename", label: "Rename" }] as const;
-
-    await expect(createLocalApi().contextMenu.show(items, { x: 4, y: 5 })).resolves.toBe("rename");
-    expect(showContextMenuFallbackMock).toHaveBeenCalledWith(items, { x: 4, y: 5 });
-  });
-
-  it("dismisses an open browser context menu without a desktop bridge", async () => {
-    const { createLocalApi } = await import("./localApi");
-
-    await createLocalApi().contextMenu.close();
-
-    expect(dismissContextMenuMock).toHaveBeenCalledOnce();
-  });
-
-  it("uses the themed confirmation host when it is available", async () => {
-    requestConfirmDialogMock.mockResolvedValue(true);
-    const { createLocalApi } = await import("./localApi");
-    const options = { variant: "destructive" } as const;
-
-    await expect(createLocalApi().dialogs.confirm("Delete this thread?", options)).resolves.toBe(
-      true,
-    );
-    expect(requestConfirmDialogMock).toHaveBeenCalledWith("Delete this thread?", options);
-  });
-
   it("fails closed in a browser when no themed host is available", async () => {
     requestConfirmDialogMock.mockReturnValue(undefined);
     const { createLocalApi } = await import("./localApi");

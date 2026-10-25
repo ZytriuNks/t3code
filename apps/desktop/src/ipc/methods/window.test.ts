@@ -1,3 +1,4 @@
+import * as ElectronWindow from "../../electron/ElectronWindow.ts";
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -28,15 +29,13 @@ vi.mock("electron", () => ({
 import * as DesktopBackendConfiguration from "../../backend/DesktopBackendConfiguration.ts";
 import * as DesktopBackendManager from "../../backend/DesktopBackendManager.ts";
 import * as DesktopBackendPool from "../../backend/DesktopBackendPool.ts";
-import * as ElectronDialog from "../../electron/ElectronDialog.ts";
-import * as ElectronWindow from "../../electron/ElectronWindow.ts";
-import * as DesktopAppSettings from "../../settings/DesktopAppSettings.ts";
 import {
   getLocalEnvironmentBootstraps,
   getWindowFullscreenState,
   openLocalPath,
   pasteAsText,
   pickProjectFavicon,
+  getRelayTelemetryEnabled,
   probeRemoteEditors,
 } from "./window.ts";
 
@@ -93,23 +92,6 @@ const bootstrapsLayer = (instances: ReadonlyArray<DesktopBackendManager.DesktopB
   Layer.merge(DesktopBackendPool.layerTest([...instances]), backendConfigurationLayer);
 
 describe("getLocalEnvironmentBootstraps", () => {
-  it.effect("publishes the concrete running distro without replacing the stable instance id", () =>
-    Effect.gen(function* () {
-      const result = yield* getLocalEnvironmentBootstraps.handler();
-
-      assert.deepEqual(result, [
-        {
-          id: "wsl:default",
-          label: "WSL (Ubuntu)",
-          runningDistro: "Ubuntu",
-          httpBaseUrl: "http://127.0.0.1:3774/",
-          wsBaseUrl: "ws://127.0.0.1:3774/",
-          bootstrapToken: "bootstrap-token",
-        },
-      ]);
-    }).pipe(Effect.provide(bootstrapsLayer([defaultWslInstance]))),
-  );
-
   it.effect("hands out the current window's token to a backend launched with the secret", () =>
     Effect.gen(function* () {
       const result = yield* getLocalEnvironmentBootstraps.handler();
@@ -382,60 +364,21 @@ describe("pasteAsText", () => {
     },
   );
 });
-
-describe("pickProjectFavicon", () => {
-  const pickerLayer = (
-    pickFiles: () => Effect.Effect<Array<string>>,
-    settings?: DesktopAppSettings.DesktopSettings,
-  ) =>
-    Layer.mergeAll(
-      Layer.mock(ElectronDialog.ElectronDialog)({ pickFiles }),
-      Layer.mock(ElectronWindow.ElectronWindow)({
-        focusedMainOrFirst: Effect.succeedNone,
-      }),
-      DesktopAppSettings.layerTest(settings),
-    );
-
-  it.effect("opens a single-image picker from the project directory", () =>
+describe("getRelayTelemetryEnabled", () => {
+  it.effect("reads the desktop host opt-out before returning the renderer policy", () =>
     Effect.gen(function* () {
-      const pickFiles = vi.fn(() => Effect.succeed(["/pictures/icon.png"]));
-      const result = yield* pickProjectFavicon
-        .handler("/project")
-        .pipe(Effect.provide(pickerLayer(pickFiles)));
-
-      assert.strictEqual(result, "/pictures/icon.png");
-      assert.deepEqual(pickFiles.mock.calls, [
-        [
-          {
-            owner: Option.none(),
-            defaultPath: Option.some("/project"),
-            multiple: false,
-            filters: [
-              {
-                name: "Images",
-                extensions: ["avif", "gif", "ico", "jpeg", "jpg", "png", "svg", "webp", "icns"],
-              },
-            ],
-          },
-        ],
-      ]);
-    }),
-  );
-
-  it.effect("does not open a picker while the local environment is off", () =>
-    Effect.gen(function* () {
-      const pickFiles = vi.fn(() => Effect.succeed(["/pictures/icon.png"]));
-      const result = yield* pickProjectFavicon.handler("/project").pipe(
-        Effect.provide(
-          pickerLayer(pickFiles, {
-            ...DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS,
-            localEnvironmentEnabled: false,
+      assert.isFalse(
+        yield* getRelayTelemetryEnabled.handler().pipe(
+          Effect.provideService(HostProcess.Environment, {
+            T3CODE_TELEMETRY_ENABLED: "false",
           }),
         ),
       );
-
-      assert.strictEqual(result, null);
-      assert.strictEqual(pickFiles.mock.calls.length, 0);
+      assert.isTrue(
+        yield* getRelayTelemetryEnabled
+          .handler()
+          .pipe(Effect.provideService(HostProcess.Environment, {})),
+      );
     }),
   );
 });

@@ -12,16 +12,18 @@ import { useNavigate } from "@tanstack/react-router";
 import { mergeEnvironmentSettings } from "../../hooks/useSettings";
 import { useI18n } from "../../i18n/I18nProvider";
 import type { MessageKey } from "../../i18n/messages";
-import { getCustomModelOptionsByInstance } from "../../modelSelection";
+import {
+  getCustomModelOptionsByInstance,
+  resolveEffectiveDefaultModelSelection,
+} from "../../modelSelection";
 import {
   applyProviderInstanceSettings,
   deriveProviderInstanceEntries,
   resolveDefaultProviderModelSelection,
   sortProviderInstanceEntries,
 } from "../../providerInstances";
-import { useEnvironments } from "../../state/environments";
+import { useEnvironmentProviders, useEnvironments } from "../../state/environments";
 import { EMPTY_SERVER_PROVIDERS } from "../../state/server";
-import { resolveEnvModeLabel, WORKTREE_SUBMODULES_LABELS } from "../BranchToolbar.logic";
 import { ProviderModelPicker } from "../chat/ProviderModelPicker";
 import { runtimeModeConfig, runtimeModeOptions } from "../chat/runtimeModeConfig";
 import { PULL_REQUEST_MERGE_METHOD_LABELS } from "../pullRequest/pullRequestDetail.logic";
@@ -69,6 +71,11 @@ const PERMISSIONS_MODE_DESCRIPTION_KEYS: Record<RuntimeMode, MessageKey> = {
  * project or checkout scope; the scoped hooks route the write.
  */
 const WORKTREE_SUBMODULES_OPTIONS = ["recursive", "top-level", "none"] as const;
+const WORKTREE_SUBMODULES_LABEL_KEYS: Record<WorktreeSubmodules, MessageKey> = {
+  recursive: "settings.general.submodules.recursive",
+  "top-level": "settings.general.submodules.topLevel",
+  none: "settings.general.submodules.none",
+};
 function isWorktreeSubmodules(value: string | null): value is WorktreeSubmodules {
   return value !== null && (WORKTREE_SUBMODULES_OPTIONS as readonly string[]).includes(value);
 }
@@ -80,11 +87,21 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
   const updateSettings = useUpdateScopedSettings();
   const navigate = useNavigate();
   const { environments } = useEnvironments();
+  const providersByEnvironment = useEnvironmentProviders();
   const representative = target
     ? environments.find((environment) => environment.environmentId === target.environmentId)
     : undefined;
-  const providers = representative?.serverConfig?.providers ?? EMPTY_SERVER_PROVIDERS;
-  const selection = resolveDefaultProviderModelSelection(providers, settings.defaultModelSelection);
+  const providers =
+    (representative?.serverConfig
+      ? providersByEnvironment.get(representative.environmentId)
+      : undefined) ?? EMPTY_SERVER_PROVIDERS;
+  const storedSelection = resolveDefaultProviderModelSelection(
+    providers,
+    settings.defaultModelSelection,
+  );
+  const selection = storedSelection
+    ? resolveEffectiveDefaultModelSelection(settings, providers, storedSelection)
+    : null;
   const entries = sortProviderInstanceEntries(
     applyProviderInstanceSettings(
       deriveProviderInstanceEntries(providers),
@@ -104,18 +121,12 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
   const PermissionIcon = runtimeModeConfig[settings.defaultRuntimeMode].icon;
   const mixedWorkspace = useScopedSettingsMixed(["defaultThreadEnvMode"]);
   const mixedSubmodules = useScopedSettingsMixed(["worktreeSubmodules"]);
-  const mixedBrowser = useScopedSettingsMixed(["enableAgentBrowserAccess"]);
   const mixedAutoPull = useScopedSettingsMixed(["defaultAutoPull"]);
   const mixedAgentCredits = useScopedSettingsMixed(["removeAgentCreditsOnMerge"]);
   const mixedMergeMethod = useScopedSettingsMixed(["pullRequestMergeMethod"]);
   const modelSource = useScopedSettingSource(["defaultModelSelection"]);
   const isProjectScope = scope.kind === "project" || scope.kind === "checkout";
   const unavailable = connectedEnvironments.length === 0;
-  // File-backed keys show their effective value; the target already carries
-  // the checkout's t3.json, and a null file here only fills the built-in.
-  // The reset arrow beside the title clears the tier (SettingsRow handles a
-  // project override, the environment value is cleared here), so the picker
-  // has no "inherit" item.
   const effective = target
     ? resolveProjectSettings(target.settings, null, null, null).settings
     : null;
@@ -126,16 +137,16 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
       const environment = environments.find(
         (entry) => entry.environmentId === candidate.environmentId,
       );
-      const config = environment?.serverConfig;
-      if (!config) continue;
+      const providers = providersByEnvironment.get(candidate.environmentId);
+      if (!environment?.serverConfig || !providers) continue;
       const entry = applyProviderInstanceSettings(
-        deriveProviderInstanceEntries(config.providers),
+        deriveProviderInstanceEntries(providers),
         candidate.settings,
         candidate.projectId,
       ).find((option) => option.instanceId === instanceId);
       const options = getCustomModelOptionsByInstance(
         mergeEnvironmentSettings(candidate.settings, settings),
-        config.providers,
+        providers,
       ).get(instanceId);
       if (
         !entry?.enabled ||
@@ -220,8 +231,6 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
                 provider={activeEntry.driverKind}
                 models={activeEntry.models}
                 model={selection.model}
-                prompt=""
-                onPromptChange={() => {}}
                 modelOptions={selection.options ?? []}
                 allowPromptInjectedEffort={false}
                 planModeEnabled={settings.planModeEnabled}
@@ -272,7 +281,7 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
             <SelectValue>
               {(value: string | null) =>
                 value === "local" || value === "worktree"
-                  ? resolveEnvModeLabel(value)
+                  ? t(`settings.general.workspace.mode.${value}`)
                   : unavailable
                     ? t("settings.general.workspace.unavailable")
                     : t("settings.general.mixed")
@@ -280,8 +289,10 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
             </SelectValue>
           </SelectTrigger>
           <SelectPopup align="end" alignItemWithTrigger={false}>
-            <SelectItem value="local">{resolveEnvModeLabel("local")}</SelectItem>
-            <SelectItem value="worktree">{resolveEnvModeLabel("worktree")}</SelectItem>
+            <SelectItem value="local">{t("settings.general.workspace.mode.local")}</SelectItem>
+            <SelectItem value="worktree">
+              {t("settings.general.workspace.mode.worktree")}
+            </SelectItem>
           </SelectPopup>
         </Select>
       }
@@ -290,19 +301,11 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
 
   return (
     <SettingsSection
-      id={
-        category === "general" || category === "project"
-          ? "project-defaults"
-          : category === "integrations"
-            ? "browser-access"
-            : "source-control-defaults"
-      }
+      id={category === "source-control" ? "source-control-defaults" : "project-defaults"}
       title={
-        category === "general" || category === "project"
-          ? t("settings.general.newThreads.title")
-          : category === "integrations"
-            ? t("settings.defaults.browser")
-            : t("settings.defaults.repositories")
+        category === "source-control"
+          ? t("settings.defaults.repositories")
+          : t("settings.general.newThreads.title")
       }
     >
       {category === "project" ? (
@@ -317,7 +320,7 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
             serverScoped
             settingKeys={["defaultRuntimeMode"]}
             mixed={mixedPermissions}
-            {...searchableSetting("default-permissions")}
+            {...searchableSetting("default-permissions", t)}
             description={
               isProjectScope
                 ? t("settings.general.permissions.projectDescription")
@@ -378,7 +381,7 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
             serverScoped
             settingKeys={["worktreeSubmodules"]}
             mixed={mixedSubmodules}
-            {...searchableSetting("worktree-submodules")}
+            {...searchableSetting("worktree-submodules", t)}
             description={
               isProjectScope
                 ? t("settings.general.submodules.projectDescription")
@@ -403,7 +406,7 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
                   <SelectValue>
                     {(value: string | null) =>
                       isWorktreeSubmodules(value)
-                        ? WORKTREE_SUBMODULES_LABELS[value]
+                        ? t(WORKTREE_SUBMODULES_LABEL_KEYS[value])
                         : unavailable
                           ? t("settings.general.workspace.unavailable")
                           : t("settings.general.mixed")
@@ -413,7 +416,7 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
                 <SelectPopup align="end" alignItemWithTrigger={false}>
                   {WORKTREE_SUBMODULES_OPTIONS.map((option) => (
                     <SelectItem key={option} value={option}>
-                      {WORKTREE_SUBMODULES_LABELS[option]}
+                      {t(WORKTREE_SUBMODULES_LABEL_KEYS[option])}
                     </SelectItem>
                   ))}
                 </SelectPopup>
@@ -421,7 +424,7 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
             }
           />
         </>
-      ) : category === "source-control" ? (
+      ) : (
         <>
           <SettingsRow
             serverScoped
@@ -456,7 +459,7 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
             serverScoped
             settingKeys={["removeAgentCreditsOnMerge"]}
             mixed={mixedAgentCredits}
-            {...searchableSetting("remove-agent-credits-on-merge")}
+            {...searchableSetting("remove-agent-credits-on-merge", t)}
             description="Remove recognized agent credit lines from GitHub merge and squash messages, keeping human co-authors. Includes auto-merge. Excludes merge queues, stack merges, and existing commits."
             resetAction={
               settings.removeAgentCreditsOnMerge ? (
@@ -482,7 +485,7 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
             serverScoped
             settingKeys={["pullRequestMergeMethod"]}
             mixed={mixedMergeMethod}
-            {...searchableSetting("pull-request-merge-method")}
+            {...searchableSetting("pull-request-merge-method", t)}
             description={
               isProjectScope
                 ? t("settings.defaults.mergeProjectDescription")
@@ -524,42 +527,6 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
                   <SelectItem value="rebase">{PULL_REQUEST_MERGE_METHOD_LABELS.rebase}</SelectItem>
                 </SelectPopup>
               </Select>
-            }
-          />
-        </>
-      ) : (
-        <>
-          <SettingsRow
-            serverScoped
-            settingKeys={["enableAgentBrowserAccess"]}
-            mixed={mixedBrowser}
-            id={searchableSetting("agent-browser-access").id}
-            title={t("settings.defaults.agentBrowserAccess")}
-            description={
-              isProjectScope
-                ? t("settings.defaults.agentBrowserProjectDescription")
-                : t("settings.defaults.agentBrowserDescription")
-            }
-            resetAction={
-              settings.enableAgentBrowserAccess !==
-              DEFAULT_SERVER_SETTINGS.enableAgentBrowserAccess ? (
-                <SettingResetButton
-                  label={t("settings.defaults.agentBrowserResetLabel")}
-                  onClick={() =>
-                    updateSettings({
-                      enableAgentBrowserAccess: DEFAULT_SERVER_SETTINGS.enableAgentBrowserAccess,
-                    })
-                  }
-                />
-              ) : null
-            }
-            control={
-              <Switch
-                aria-label={t("settings.defaults.agentBrowserAriaLabel")}
-                mixed={mixedBrowser}
-                checked={mixedBrowser ? false : settings.enableAgentBrowserAccess}
-                onCheckedChange={(enabled) => updateSettings({ enableAgentBrowserAccess: enabled })}
-              />
             }
           />
         </>

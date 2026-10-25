@@ -1,4 +1,5 @@
 import { useRef } from "react";
+import { useI18n } from "../../i18n/I18nProvider";
 import { BranchNamingMode, DEFAULT_SERVER_SETTINGS } from "@t3tools/contracts";
 
 import { Input } from "../ui/input";
@@ -20,6 +21,7 @@ const MODES = {
 } satisfies Record<BranchNamingMode, string>;
 
 export function BranchNamingSettings() {
+  const { t } = useI18n();
   const settings = useScopedSettings();
   const { targets } = useSettingsScope();
   const scopeKey = targets.map((target) => `${target.environmentId}:${target.projectId}`).join(",");
@@ -35,7 +37,7 @@ export function BranchNamingSettings() {
       <SettingsRow
         serverScoped
         settingKeys={["branchNamingMode"]}
-        {...searchableSetting("worktree-branch-naming")}
+        {...searchableSetting("worktree-branch-naming", t)}
         description="Choose how new worktree branches are named from your first message."
         status={
           !modeMixed && settings.branchNamingMode === "semantic"

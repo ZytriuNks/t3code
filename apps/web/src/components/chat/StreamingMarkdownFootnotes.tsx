@@ -1,10 +1,9 @@
+import { useStableCallback } from "~/hooks/useStableCallback";
 import {
   createContext,
   use,
-  useCallback,
   useId,
   useLayoutEffect,
-  useMemo,
   useRef,
   useState,
   type ReactNode,
@@ -177,7 +176,7 @@ export function StreamingMarkdownFootnoteItem({ children, ...props }: React.Comp
     new Map<HTMLAnchorElement, { ready: boolean; timer: ReturnType<typeof setTimeout> | null }>(),
   );
   const current = useRef({ state, item, visible, animate: false, enabled: false });
-  const finish = useCallback(() => {
+  const finish = useStableCallback(() => {
     const { state, item, visible } = current.current;
     if (
       !visible ||
@@ -189,20 +188,17 @@ export function StreamingMarkdownFootnoteItem({ children, ...props }: React.Comp
       return;
     playback.current.notified = true;
     state.finish(item.id, playback.current.settledAt ?? performance.now());
-  }, []);
-  const settle = useCallback(
-    (link: HTMLAnchorElement) => {
-      const entry = backrefs.current.get(link);
-      if (!entry) return;
-      if (entry.timer !== null) clearTimeout(entry.timer);
-      backrefs.current.set(link, { ready: true, timer: null });
-      link.style.removeProperty("visibility");
-      delete link.dataset.smoothFootnoteBackref;
-      link.style.removeProperty("--t3-footnote-backref-duration");
-      finish();
-    },
-    [finish],
-  );
+  });
+  const settle = useStableCallback((link: HTMLAnchorElement) => {
+    const entry = backrefs.current.get(link);
+    if (!entry) return;
+    if (entry.timer !== null) clearTimeout(entry.timer);
+    backrefs.current.set(link, { ready: true, timer: null });
+    link.style.removeProperty("visibility");
+    delete link.dataset.smoothFootnoteBackref;
+    link.style.removeProperty("--t3-footnote-backref-duration");
+    finish();
+  });
   const wait = (link: HTMLAnchorElement) => {
     const entry = backrefs.current.get(link)!;
     if (entry.timer !== null) clearTimeout(entry.timer);
@@ -375,18 +371,20 @@ export function StreamingFootnoteProvider({ children }: { children: ReactNode })
     active: boolean;
   }>({ host: null, active: false });
   const hosts = useRef(new Map<string, { host: HTMLDivElement; priority: number }>());
-  const register = useCallback((id: string, host: HTMLDivElement | null, priority: number) => {
-    if (host) hosts.current.set(id, { host, priority });
-    else hosts.current.delete(id);
-    const selected = [...hosts.current.values()].toSorted((a, b) => b.priority - a.priority)[0];
-    const selectedHost = selected?.host ?? null;
-    const active = (selected?.priority ?? 0) > 0;
-    setSelection((previous) =>
-      previous.host === selectedHost && previous.active === active
-        ? previous
-        : { host: selectedHost, active },
-    );
-  }, []);
+  const register = useStableCallback(
+    (id: string, host: HTMLDivElement | null, priority: number) => {
+      if (host) hosts.current.set(id, { host, priority });
+      else hosts.current.delete(id);
+      const selected = [...hosts.current.values()].toSorted((a, b) => b.priority - a.priority)[0];
+      const selectedHost = selected?.host ?? null;
+      const active = (selected?.priority ?? 0) > 0;
+      setSelection((previous) =>
+        previous.host === selectedHost && previous.active === active
+          ? previous
+          : { host: selectedHost, active },
+      );
+    },
+  );
   return (
     <StreamingFootnoteHostContext value={selection.host}>
       <StreamingFootnoteActivityContext value={selection.active}>
@@ -401,10 +399,7 @@ export function StreamingFootnoteProvider({ children }: { children: ReactNode })
 export function StreamingFootnoteHost({ fallback = false }: { fallback?: boolean }) {
   const register = use(SetStreamingFootnoteHostContext);
   const id = useId();
-  const setHost = useCallback(
-    (host: HTMLDivElement | null) => register(id, host, fallback ? 0 : 1),
-    [register, id, fallback],
-  );
+  const setHost = (host: HTMLDivElement | null) => register(id, host, fallback ? 0 : 1);
   return <div ref={setHost} data-stream-footnote-host="" />;
 }
 
@@ -458,9 +453,9 @@ export function StreamingMarkdownFootnotes({
   const [introduced, setIntroduced] = useState(!streaming || historicalHeading);
   if (historicalHeading && !headingReady) setHeadingReady(true);
   if (historicalHeading && !introduced) setIntroduced(true);
-  const finishHeading = useCallback(() => setHeadingReady(true), []);
-  const runs = useMemo(() => footnoteRuns(items), [items]);
-  const observations = useMemo(() => {
+  const finishHeading = useStableCallback(() => setHeadingReady(true));
+  const runs = (() => footnoteRuns(items))();
+  const observations = (() => {
     const waitingRuns = new Set<string>();
     return new Map(
       items.map((item) => {
@@ -477,7 +472,7 @@ export function StreamingMarkdownFootnotes({
         return [item.id, { text: item.text, ready }];
       }),
     );
-  }, [items, runs, handoff]);
+  })();
   const [playback, setPlayback] = useState(() => ({
     autoCollapse,
     seen: observations,
@@ -645,7 +640,7 @@ export function StreamingMarkdownFootnotes({
   const panelRef = useRef<HTMLDivElement>(null);
   const widgetRef = useRef<HTMLDivElement>(null);
   const closeGeneration = useRef(0);
-  const finishCollapse = useCallback((ids: readonly string[]) => {
+  const finishCollapse = useStableCallback((ids: readonly string[]) => {
     setPlayback((previous) =>
       previous.closing && previous.closingIds === ids
         ? {
@@ -658,7 +653,7 @@ export function StreamingMarkdownFootnotes({
           }
         : previous,
     );
-  }, []);
+  });
   const groupPlayed =
     handoff !== null &&
     handoff.ids.length > 0 &&
@@ -723,22 +718,18 @@ export function StreamingMarkdownFootnotes({
       handoff.complete();
     }
   }, [handoff, groupPlayed, open, nextFollowsActive, runWaiting]);
-  const finishItem = useCallback(
-    (id: string, settledAt: number) => {
-      const item = items.find((item) => item.id === id);
-      if (!item?.complete) return;
-      setCompletedItems((previous) =>
-        previous.get(id)?.text === item.text &&
-        previous.get(id)?.navigationKey === item.navigationKey
-          ? previous
-          : new Map([
-              ...previous,
-              [id, { text: item.text, navigationKey: item.navigationKey, at: settledAt }],
-            ]),
-      );
-    },
-    [items],
-  );
+  const finishItem = (id: string, settledAt: number) => {
+    const item = items.find((item) => item.id === id);
+    if (!item?.complete) return;
+    setCompletedItems((previous) =>
+      previous.get(id)?.text === item.text && previous.get(id)?.navigationKey === item.navigationKey
+        ? previous
+        : new Map([
+            ...previous,
+            [id, { text: item.text, navigationKey: item.navigationKey, at: settledAt }],
+          ]),
+    );
+  };
   useLayoutEffect(() => {
     // Enqueuing a note changes the head, not the identity of an ongoing close.
     const generation = ++closeGeneration.current;
@@ -853,42 +844,23 @@ export function StreamingMarkdownFootnotes({
   }, [container, useLiveHost, host, inlineHost]);
   useLayoutEffect(() => () => container?.remove(), [container]);
 
-  const visibility = useMemo(
-    () => ({
-      headingReady,
-      activeId,
-      open,
-      closingIds: playback.closingIds,
-      batchIds: playback.batchIds,
-      items,
-      streaming,
-      smooth,
-      mode,
-      lineMode,
-      fadeDurationMs,
-      yieldDurationMs,
-      resumeKey: playbackResume?.key ?? null,
-      resumeSynchronized: resumed,
-      finish: finishItem,
-    }),
-    [
-      headingReady,
-      activeId,
-      open,
-      playback.closingIds,
-      playback.batchIds,
-      items,
-      streaming,
-      smooth,
-      mode,
-      lineMode,
-      fadeDurationMs,
-      yieldDurationMs,
-      playbackResume,
-      resumed,
-      finishItem,
-    ],
-  );
+  const visibility = (() => ({
+    headingReady,
+    activeId,
+    open,
+    closingIds: playback.closingIds,
+    batchIds: playback.batchIds,
+    items,
+    streaming,
+    smooth,
+    mode,
+    lineMode,
+    fadeDurationMs,
+    yieldDurationMs,
+    resumeKey: playbackResume?.key ?? null,
+    resumeSynchronized: resumed,
+    finish: finishItem,
+  }))();
   const panel = (
     <div className="streaming-markdown-footnotes" hidden={!showPanel}>
       <Collapsible

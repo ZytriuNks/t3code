@@ -1,5 +1,3 @@
-"use client";
-
 import { ScrollArea as ScrollAreaPrimitive } from "@base-ui/react/scroll-area";
 import { useState } from "react";
 
@@ -38,15 +36,11 @@ function ScrollArea({
   ...props
 }: ScrollAreaPrimitive.Root.Props & {
   scrollFade?: boolean;
-  /** Keep focused and highlighted items clear of the fade. Off for lists
-   * whose rows take focus on click, where the scroll would nudge the list. */
   scrollFadePadding?: boolean;
   scrollbarGutter?: boolean;
   hideScrollbars?: boolean;
   chainVerticalScroll?: boolean;
-  /** The viewport clips to the parent's radius; "none" for a region flush to an edge. */
   radius?: "inherit" | "none";
-  /** Override Base UI's focusable viewport when focusable descendants provide scroll access. */
   viewportTabIndex?: number;
   scrollbarVariant?: "page" | "compact";
   windowEdge?: boolean;

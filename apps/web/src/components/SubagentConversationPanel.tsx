@@ -1,3 +1,4 @@
+import { useStableCallback } from "~/hooks/useStableCallback";
 import { observeResize } from "~/lib/observeResize";
 import {
   scopeProjectRef,
@@ -16,12 +17,12 @@ import {
   type ThreadId,
 } from "@t3tools/contracts";
 import { ArrowLeft, Maximize2, X } from "lucide-react";
-import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import * as Option from "effect/Option";
 import { useTheme } from "~/hooks/useTheme";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { useEnvironmentSettings } from "~/hooks/useSettings";
-import { useEnvironments } from "~/state/environments";
+import { useEnvironmentProviders } from "~/state/environments";
 import { useEnvironmentThread } from "~/state/threads";
 import {
   useProject,
@@ -134,57 +135,44 @@ export function SubagentConversationPanel({
   const threadState = useEnvironmentThread(threadRef.environmentId, threadRef.threadId);
   const visibleTurnItems = useThreadVisibleTurnItems(threadRef);
   const textPlayback = useThreadTextPlayback(threadRef);
-  const parentThreadRef = useMemo(() => {
+  const parentThreadRef = (() => {
     const parentThreadId =
       shell?.lineage.relationshipToParent === "subagent" ? shell.lineage.parentThreadId : null;
     return parentThreadId === null ? null : scopeThreadRef(threadRef.environmentId, parentThreadId);
-  }, [shell?.lineage.parentThreadId, shell?.lineage.relationshipToParent, threadRef.environmentId]);
+  })();
   const parentShell = useThreadShell(parentThreadRef);
   const parentProjection = useThreadProjection(parentThreadRef)?.projection ?? null;
   const project = useProject(
     shell === null ? null : scopeProjectRef(threadRef.environmentId, shell.projectId),
   );
-  const { environments } = useEnvironments();
+  const providersByEnvironment = useEnvironmentProviders();
   const { resolvedTheme } = useTheme();
   const environmentSettings = useEnvironmentSettings(threadRef.environmentId);
   // The conversation structure is a project-scoped key, so the environment
   // values alone would leave a project that opted in showing the default
   // layout inside the very same session as its parent thread.
-  const projectSettings = useMemo(
-    () => resolveProjectSettings(environmentSettings, project?.id ?? null, project).settings,
-    [environmentSettings, project],
-  );
-  const settings = useMemo(
-    () => ({ ...environmentSettings, ...projectSettings }),
-    [environmentSettings, projectSettings],
-  );
+  const projectSettings = (() =>
+    resolveProjectSettings(environmentSettings, project?.id ?? null, project).settings)();
+  const settings = (() => ({ ...environmentSettings, ...projectSettings }))();
   const listRef = useRef<LegendListRef | null>(null);
   const timelineViewportRef = useRef<HTMLDivElement | null>(null);
-  const timelineProjection = useMemo<TimelineEntriesProjection>(
-    () =>
-      deriveTimelineEntriesFromVisibleTurnItemsWithState({
-        visibleTurnItems,
-        optimisticMessages: [],
-        anchoredMessages: [],
-        attachmentUrlById: EMPTY_ATTACHMENT_URLS,
-        ...(projection === null
-          ? {}
-          : {
-              attempts: projection.attempts,
-              nodes: projection.nodes,
-              plans: projection.plans,
-            }),
-      }),
-    [projection, visibleTurnItems],
-  );
-  const activityRun = useMemo(
-    () => (projection === null ? null : deriveThreadActivityRun(projection)),
-    [projection],
-  );
-  const providerSubagentStatus = useMemo(
-    () => (projection === null ? null : deriveProviderSubagentStatus(projection)),
-    [projection],
-  );
+  const timelineProjection = ((): TimelineEntriesProjection =>
+    deriveTimelineEntriesFromVisibleTurnItemsWithState({
+      visibleTurnItems,
+      optimisticMessages: [],
+      anchoredMessages: [],
+      attachmentUrlById: EMPTY_ATTACHMENT_URLS,
+      ...(projection === null
+        ? {}
+        : {
+            attempts: projection.attempts,
+            nodes: projection.nodes,
+            plans: projection.plans,
+          }),
+    }))();
+  const activityRun = (() => (projection === null ? null : deriveThreadActivityRun(projection)))();
+  const providerSubagentStatus = (() =>
+    projection === null ? null : deriveProviderSubagentStatus(projection))();
   const runlessWorkActive =
     providerSubagentStatus !== null && isOrchestrationV2WorkActive(providerSubagentStatus.status);
   const isWorking = isActiveRun(activityRun?.status) || runlessWorkActive;
@@ -192,8 +180,7 @@ export function SubagentConversationPanel({
     ? providerSubagentStatus.startedAt
     : (activityRun?.startedAt ?? null);
   const providerStatuses =
-    environments.find((environment) => environment.environmentId === threadRef.environmentId)
-      ?.serverConfig?.providers ?? EMPTY_PROVIDER_STATUSES;
+    providersByEnvironment.get(threadRef.environmentId) ?? EMPTY_PROVIDER_STATUSES;
   const subagent = parentProjection?.subagents.find(
     (candidate) => candidate.childThreadId === threadRef.threadId,
   );
@@ -207,22 +194,22 @@ export function SubagentConversationPanel({
   const routeKey = scopedThreadKey(threadRef);
   const [readyThreadKey, setReadyThreadKey] = useState<string | null>(null);
   const [layoutThreadKey, setLayoutThreadKey] = useState<string | null>(null);
-  const onTimelineInitialLayout = useCallback(() => setLayoutThreadKey(routeKey), [routeKey]);
+  const onTimelineInitialLayout = () => setLayoutThreadKey(routeKey);
   // Reader navigation leaves live follow; reaching the end again after a
   // downward move re-arms it, like the main chat (keyed so a new thread follows).
   const [detachedFollowKey, setDetachedFollowKey] = useState<string | null>(null);
   const movedTowardEndRef = useRef(false);
-  const onTimelineManualNavigation = useCallback(() => {
+  const onTimelineManualNavigation = () => {
     movedTowardEndRef.current = false;
     setDetachedFollowKey(routeKey);
-  }, [routeKey]);
-  const onTimelineIsAtEndChange = useCallback((isAtEnd: boolean) => {
+  };
+  const onTimelineIsAtEndChange = useStableCallback((isAtEnd: boolean) => {
     // The virtualizer can report an estimated end while the reader is above
     // it; only a real downward move to the edge re-arms follow.
     if (!isAtEnd || !movedTowardEndRef.current) return;
     movedTowardEndRef.current = false;
     setDetachedFollowKey(null);
-  }, []);
+  });
   const detached = detachedFollowKey === routeKey;
   useLayoutEffect(() => {
     const scroller = listRef.current?.getScrollableNode();
@@ -416,7 +403,6 @@ export function SubagentConversationPanel({
               timestampFormat={settings.timestampFormat}
               workspaceRoot={workspaceRoot}
               skills={EMPTY_SKILLS}
-              providerStatuses={providerStatuses}
               runs={projection?.runs ?? []}
               anchorMessageId={null}
               onAnchorReady={NOOP}
@@ -426,6 +412,7 @@ export function SubagentConversationPanel({
               liveFollowEnabled={!detached}
               onManualNavigation={onTimelineManualNavigation}
               hideEmptyPlaceholder={false}
+              emptyPlaceholderInset={0}
               topFadeEnabled={false}
             />
           ) : null}

@@ -1,5 +1,3 @@
-"use client";
-
 import { ScrollFrame } from "~/components/ui/scroll-frame";
 
 import { mergeProps } from "@base-ui/react/merge-props";
@@ -62,10 +60,6 @@ function SelectTrigger({
   );
 }
 
-/**
- * The select-field look for a picker that is not a Select, such as a Menu or
- * Combobox trigger. Render it as that trigger: `<MenuTrigger render={<SelectButton />}>`.
- */
 function SelectButton({
   className,
   size = "default",

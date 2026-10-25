@@ -1,6 +1,5 @@
-// @vitest-environment jsdom
 import { EnvironmentId, ProjectId, ThreadId } from "@t3tools/contracts";
-import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 import { DraftId, useComposerDraftStore } from "../composerDraftStore";
 import { prepareThreadContinuationDraft } from "./prepareThreadContinuationDraft";
@@ -11,7 +10,7 @@ const sourceThread = { environmentId, threadId: ThreadId.make("native-child") };
 const draftId = DraftId.make("independent-draft");
 const threadId = ThreadId.make("independent-thread");
 
-beforeEach(() => {
+function setup() {
   useComposerDraftStore.setState({
     draftsByThreadKey: {},
     draftThreadsByThreadKey: {},
@@ -21,7 +20,7 @@ beforeEach(() => {
     stickyOptionsByModelByProvider: {},
     stickyActiveProvider: null,
   });
-});
+}
 
 function openDraft() {
   useComposerDraftStore.getState().setProjectDraftThreadId(project, draftId, { threadId });
@@ -38,6 +37,7 @@ const input = () => ({
 
 describe("prepare independent thread continuation", () => {
   it("prepares a runless child reference without changing the source or invested draft", async () => {
+    setup();
     const store = useComposerDraftStore.getState();
     const existingId = DraftId.make("invested-draft");
     store.setProjectDraftThreadId(project, existingId, {
@@ -63,6 +63,7 @@ describe("prepare independent thread continuation", () => {
   });
 
   it("does not open a draft without current operate permission", async () => {
+    setup();
     const open = vi.fn(openDraft);
     expect(
       await prepareThreadContinuationDraft({
@@ -75,6 +76,7 @@ describe("prepare independent thread continuation", () => {
   });
 
   it("does not move a child reference into another environment", async () => {
+    setup();
     const open = vi.fn(openDraft);
     expect(
       await prepareThreadContinuationDraft({
@@ -87,6 +89,7 @@ describe("prepare independent thread continuation", () => {
   });
 
   it("leaves state alone when opening the draft is abandoned", async () => {
+    setup();
     const before = useComposerDraftStore.getState().draftsByThreadKey;
     expect(
       await prepareThreadContinuationDraft({ ...input(), openDraft: async () => null }),
@@ -95,6 +98,7 @@ describe("prepare independent thread continuation", () => {
   });
 
   it("does not attach context if permission was revoked during draft preparation", async () => {
+    setup();
     let allowed = true;
     let finish: ((value: { draftId: DraftId; threadId: ThreadId }) => void) | undefined;
     const result = prepareThreadContinuationDraft({
@@ -117,6 +121,7 @@ describe("prepare independent thread continuation", () => {
   });
 
   it("reports draft preparation errors instead of writing source state", async () => {
+    setup();
     const before = useComposerDraftStore.getState().draftsByThreadKey;
     await expect(
       prepareThreadContinuationDraft({

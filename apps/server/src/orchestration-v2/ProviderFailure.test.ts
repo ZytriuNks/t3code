@@ -14,7 +14,6 @@ import * as Effect from "effect/Effect";
 import {
   makeProviderFailure,
   makeProviderFailureTurnItem,
-  MAX_PROVIDER_FAILURE_CODE_LENGTH,
   MAX_PROVIDER_FAILURE_MESSAGE_LENGTH,
 } from "@t3tools/provider-core/server/failure";
 import {
@@ -72,11 +71,11 @@ it("replaces unsafe control characters without stripping whitespace", () => {
 it("bounds provider-controlled failure strings", () => {
   const failure = makeProviderFailure({
     message: "m".repeat(MAX_PROVIDER_FAILURE_MESSAGE_LENGTH + 500),
-    code: "c".repeat(MAX_PROVIDER_FAILURE_CODE_LENGTH + 50),
+    code: "c".repeat(128 + 50),
   });
 
   assert.equal(failure.message.length, MAX_PROVIDER_FAILURE_MESSAGE_LENGTH);
-  assert.equal(failure.code?.length, MAX_PROVIDER_FAILURE_CODE_LENGTH);
+  assert.equal(failure.code?.length, 128);
   assert.match(failure.message, /…$/u);
   assert.match(failure.code ?? "", /…$/u);
 });

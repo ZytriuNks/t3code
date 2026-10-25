@@ -1,3 +1,4 @@
+import { observeResize } from "~/lib/observeResize";
 import { useLayoutEffect, useState } from "react";
 
 export function useElementWidth<T extends HTMLElement>() {
@@ -12,13 +13,9 @@ export function useElementWidth<T extends HTMLElement>() {
     };
 
     update(element.getBoundingClientRect().width);
-    if (typeof ResizeObserver === "undefined") return;
-
-    const observer = new ResizeObserver(([entry]) => {
+    return observeResize(element, ([entry]) => {
       if (entry) update(entry.contentRect.width);
     });
-    observer.observe(element);
-    return () => observer.disconnect();
   }, [element]);
 
   return [setElement, width] as const;

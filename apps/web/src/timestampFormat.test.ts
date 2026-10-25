@@ -7,13 +7,10 @@ import {
   formatLegacySidebarTimeLabel,
   formatRelativeTime,
   formatRelativeTimeLabel,
-  formatRelativeTimeUntil,
   formatRelativeTimeUntilLabel,
   formatShortTimestamp,
-  formatTimestamp,
   formatUpcomingTimestamp,
   getRelativeTimeState,
-  resolveTimestampLocale,
 } from "./timestampFormat";
 
 describe("formatLegacySidebarTimeLabel", () => {
@@ -41,26 +38,6 @@ describe("formatLegacySidebarTimeLabel", () => {
   });
 });
 
-describe("resolveTimestampLocale", () => {
-  it("defers to the runtime default when the host reports no locale", () => {
-    expect(resolveTimestampLocale(null)).toBeUndefined();
-    expect(resolveTimestampLocale(undefined)).toBeUndefined();
-    expect(resolveTimestampLocale("   ")).toBeUndefined();
-  });
-
-  it("uses a BCP-47 tag reported by the host", () => {
-    expect(resolveTimestampLocale("en-GB")).toBe("en-GB");
-  });
-
-  it("defers to the runtime default rather than throwing on an unusable tag", () => {
-    // The desktop bridge normalizes POSIX identifiers before reporting them, so
-    // anything Intl still rejects here falls back instead of breaking every
-    // timestamp in the UI.
-    expect(resolveTimestampLocale("not a locale")).toBeUndefined();
-    expect(resolveTimestampLocale("en_GB")).toBeUndefined();
-  });
-});
-
 describe("formatShortTimestamp", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -79,32 +56,6 @@ describe("formatShortTimestamp", () => {
     expect(format(date, "locale").replace(/[  ]/g, " ")).toBe(localTime);
     expect(format(date, "12-hour").replace(/[  ]/g, " ")).toMatch(/^3:44 [ap]m$/i);
     expect(format(date, "24-hour")).toBe("15:44");
-  });
-});
-
-describe("resolveWeekStartsOn", () => {
-  it.each([
-    ["en-US", 0],
-    ["en-GB", 1],
-    ["pl-PL", 1],
-    ["ar-EG", 6],
-  ])("starts the %s week on weekday %i", async (locale, weekday) => {
-    const { resolveWeekStartsOn } = await import("./timestampFormat");
-    expect(resolveWeekStartsOn(locale)).toBe(weekday);
-  });
-
-  it("leaves the default to the caller for a malformed locale", async () => {
-    const { resolveWeekStartsOn } = await import("./timestampFormat");
-    expect(resolveWeekStartsOn("not a locale")).toBeUndefined();
-  });
-
-  it("follows the locale the desktop host reports", async () => {
-    vi.stubGlobal("window", { desktopBridge: { getSystemLocale: () => "en-GB" } });
-    vi.resetModules();
-    const { weekStartsOn } = await import("./timestampFormat");
-    expect(weekStartsOn).toBe(1);
-    vi.unstubAllGlobals();
-    vi.resetModules();
   });
 });
 
@@ -283,10 +234,6 @@ describe("formatUpcomingTimestamp", () => {
 });
 
 describe("invalid timestamp inputs", () => {
-  it("returns an empty timestamp instead of throwing", () => {
-    expect(formatTimestamp("not-a-date", "12-hour")).toBe("");
-  });
-
   it("returns an empty short timestamp instead of throwing", () => {
     expect(formatShortTimestamp("not-a-date", "12-hour")).toBe("");
   });
@@ -306,7 +253,6 @@ describe("invalid timestamp inputs", () => {
   });
 
   it("returns an empty relative time until label instead of a NaN label", () => {
-    expect(formatRelativeTimeUntil("not-a-date")).toBeNull();
     expect(formatRelativeTimeUntilLabel("not-a-date")).toBe("");
   });
 

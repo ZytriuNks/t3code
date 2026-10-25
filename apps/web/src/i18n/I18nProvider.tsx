@@ -1,6 +1,6 @@
 import type { ConnectionStatusCopy } from "@t3tools/client-runtime/connection";
 import type { LanguagePreference } from "@t3tools/contracts/settings";
-import { createContext, type ReactNode, useCallback, useContext, useEffect, useMemo } from "react";
+import { createContext, type ReactNode, useContext, useEffect, useState } from "react";
 
 import { useClientSettings } from "../hooks/useSettings";
 import { resolveAppLanguage, resolveSystemLocale, type AppLanguage } from "./locale";
@@ -36,13 +36,10 @@ function readSystemLocale(): string | null {
 
 export function I18nProvider({ children }: { readonly children: ReactNode }) {
   const preference = useClientSettings((settings) => settings.language);
-  const systemLocale = useMemo(() => readSystemLocale(), []);
+  const [systemLocale] = useState(readSystemLocale);
   const language = resolveAppLanguage(preference, systemLocale);
-  const t = useCallback(
-    (key: MessageKey, values?: MessageValues) => translate(language, key, values),
-    [language],
-  );
-  const value = useMemo(() => ({ language, preference, t }), [language, preference, t]);
+  const t = (key: MessageKey, values?: MessageValues) => translate(language, key, values);
+  const value = (() => ({ language, preference, t }))();
 
   useEffect(() => {
     document.documentElement.lang = language;
@@ -57,18 +54,15 @@ export function useI18n(): I18nContextValue {
 
 export function useConnectionStatusCopy(): ConnectionStatusCopy {
   const { t } = useI18n();
-  return useMemo(
-    () => ({
-      available: t("connection.available"),
-      offline: t("connection.offline"),
-      connecting: t("connection.connecting"),
-      reconnecting: t("connection.reconnecting"),
-      reconnectingWithReason: (reason) => t("connection.reconnectingWithReason", { reason }),
-      connected: t("connection.connected"),
-      connectionFailed: t("connection.failed"),
-      connectionFailedWithReason: (reason) => t("connection.failedWithReason", { reason }),
-      reconnectingTitle: t("connection.reconnectingTitle"),
-    }),
-    [t],
-  );
+  return (() => ({
+    available: t("connection.available"),
+    offline: t("connection.offline"),
+    connecting: t("connection.connecting"),
+    reconnecting: t("connection.reconnecting"),
+    reconnectingWithReason: (reason) => t("connection.reconnectingWithReason", { reason }),
+    connected: t("connection.connected"),
+    connectionFailed: t("connection.failed"),
+    connectionFailedWithReason: (reason) => t("connection.failedWithReason", { reason }),
+    reconnectingTitle: t("connection.reconnectingTitle"),
+  }))();
 }

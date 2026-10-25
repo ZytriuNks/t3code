@@ -21,10 +21,6 @@ function settingsBreadcrumbLabel(pathname: string, t: SettingsTranslator): strin
   return key ? t(key) : null;
 }
 
-/**
- * `Settings / Section`. The scope a change applies to lives at the top of the
- * page content, see `SettingsScopeSentence`.
- */
 export function SettingsBreadcrumb({ pathname }: { pathname: string }) {
   const { t } = useI18n();
   const sectionLabel = settingsBreadcrumbLabel(pathname, t);

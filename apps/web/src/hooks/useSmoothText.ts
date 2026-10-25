@@ -1,3 +1,4 @@
+import { observeResize } from "~/lib/observeResize";
 import { useLayoutEffect, useRef, type RefObject } from "react";
 import type { SmoothOutputMode, SmoothOutputLineMode } from "@t3tools/contracts";
 
@@ -218,9 +219,15 @@ function readText(element: HTMLElement, cache: ReturnType<typeof createTextReadC
     const excluded = candidate.closest(EXCLUDED_TEXT);
     if (excluded && element.contains(excluded)) continue;
     const owner = candidate.closest<HTMLElement>(ATOMIC_CONTENT) ?? candidate;
+    // 公式按可见外框播放；KaTeX 的 MathML 和 TeX 注释不占字形时钟，
+    // 也不能用其隐藏几何阻塞后续正文。源码回退与排版完成共用同一单位。
     // Labels already own their icons and media. An empty media/atomic frame
     // still needs one display unit, without adding text to the authored DOM.
-    if (!owner.matches("[data-smooth-media]") && /\S/u.test(owner.textContent ?? "")) continue;
+    if (
+      !owner.matches("[data-smooth-media], [data-markdown-math]") &&
+      /\S/u.test(owner.textContent ?? "")
+    )
+      continue;
     if (candidate.matches(MEDIA_CONTENT) || owner.matches(ATOMIC_CONTENT)) objectRoots.add(owner);
   }
   const objectOwner = (node: Node) => {
@@ -4811,32 +4818,37 @@ function observeSmoothText(
     }
     if (!paused && frame === null) frame = requestSmoothTextLayoutFrame(element, tick);
   };
-  const resize =
-    typeof ResizeObserver === "undefined"
-      ? null
-      : new ResizeObserver(() => {
-          // Observe natural content, never the animated outer frame. Loaded
-          // font/size changes can reflow text without changing the root width.
-          const rect = element.getBoundingClientRect();
-          if (rect.width === lastWidth && rect.height === lastNaturalHeight) return;
-          lastWidth = rect.width;
-          lastNaturalHeight = rect.height;
-          invalidateGeometry();
-        });
-  resize?.observe(element);
-  const boundaryResize =
-    !boundaryRoot || !frameElement || typeof ResizeObserver === "undefined"
-      ? null
-      : new ResizeObserver(() => refreshPaintBoundary());
+  const stopResize = observeResize(element, () => {
+    // Observe natural content, never the animated outer frame. Loaded
+    // font/size changes can reflow text without changing the root width.
+    const rect = element.getBoundingClientRect();
+    if (rect.width === lastWidth && rect.height === lastNaturalHeight) return;
+    lastWidth = rect.width;
+    lastNaturalHeight = rect.height;
+    invalidateGeometry();
+  });
+  const boundaryObservers = new Map<HTMLElement, () => void>();
   const observeBoundaries = () => {
     const next = [
       ...(boundaryRoot?.querySelectorAll<HTMLElement>(paintBoundarySelector) ?? []),
     ].filter((boundary) => !boundary.closest("[data-smooth-text-measure]"));
     const previous = new Set(paintBoundaries);
     const current = new Set(next);
-    for (const boundary of previous)
-      if (!current.has(boundary)) boundaryResize?.unobserve(boundary);
-    for (const boundary of next) if (!previous.has(boundary)) boundaryResize?.observe(boundary);
+    for (const boundary of previous) {
+      if (current.has(boundary)) continue;
+      boundaryObservers.get(boundary)?.();
+      boundaryObservers.delete(boundary);
+    }
+    if (boundaryRoot && frameElement) {
+      for (const boundary of next) {
+        if (!boundaryObservers.has(boundary)) {
+          boundaryObservers.set(
+            boundary,
+            observeResize(boundary, () => refreshPaintBoundary()),
+          );
+        }
+      }
+    }
     paintBoundaries = next;
     legacyActivity = null;
     refreshPaintBoundary();
@@ -4905,8 +4917,8 @@ function observeSmoothText(
     mutations.disconnect();
     themeChanges.disconnect();
     intersection?.disconnect();
-    resize?.disconnect();
-    boundaryResize?.disconnect();
+    stopResize();
+    for (const stop of boundaryObservers.values()) stop();
     boundaryMutations.disconnect();
     boundaryRoot?.removeEventListener("scroll", refreshPaintBoundary, true);
     boundaryRoot?.removeEventListener(SMOOTH_TEXT_LAYOUT_COMMIT_EVENT, refreshPaintBoundary);
@@ -5149,7 +5161,7 @@ function observeSmoothText(
 
 /** Reveal newly received text without parsing or reconciling Markdown on animation frames. */
 export function useSmoothText(
-  ref: RefObject<HTMLDivElement | null>,
+  ref: RefObject<HTMLElement | null>,
   {
     enabled,
     candidate,

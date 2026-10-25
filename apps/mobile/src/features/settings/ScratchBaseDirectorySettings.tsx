@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
 import { Pressable, View } from "react-native";
 
-import { AppText as Text, AppTextInput } from "../../components/AppText";
+import { AppText as Text, AppTextInput } from "../../components/ui/AppText";
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { SettingsSection } from "./components/SettingsSection";

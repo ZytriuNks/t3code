@@ -1,4 +1,3 @@
-// @vitest-environment jsdom
 import { DEFAULT_SERVER_SETTINGS, EnvironmentId, type ServerSettings } from "@t3tools/contracts";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -44,14 +43,14 @@ vi.mock("react-native", async () => {
 vi.mock("react-native-safe-area-context", () => ({
   useSafeAreaInsets: () => ({ top: 0, bottom: 0, left: 0, right: 0 }),
 }));
-vi.mock("../../components/ScreenScrollView", async () => {
+vi.mock("../../components/ui/ScreenScrollView", async () => {
   const { createElement } = await import("react");
   return {
     ScreenScrollView: (props: { readonly children?: unknown }) =>
       createElement("div", null, props.children as never),
   };
 });
-vi.mock("../../components/AppText", async () => {
+vi.mock("../../components/ui/AppText", async () => {
   const { createElement } = await import("react");
   return {
     AppText: (props: { readonly children?: unknown }) =>
@@ -70,6 +69,7 @@ vi.mock("../../components/AppText", async () => {
       }),
   };
 });
+vi.mock("../../components/ui/Button", () => ({ Button: () => null }));
 vi.mock("../../state/server", () => ({
   serverEnvironment: { updateSettings: Symbol("updateSettings") },
 }));

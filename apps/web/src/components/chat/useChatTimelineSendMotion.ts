@@ -1,4 +1,4 @@
-import { type RefObject, useCallback, useLayoutEffect, useRef, useState } from "react";
+import { type RefObject, useLayoutEffect, useRef, useState } from "react";
 
 import { CHAT_TIMELINE_ANCHOR_OFFSET } from "./timelineScrollAnchoring";
 import { createTimelineSendMotion } from "./timelineSendMotion";
@@ -30,47 +30,44 @@ export function useChatTimelineSendMotion({
     onPositionRef.current = onPosition;
   });
   const [motion] = useState(createTimelineSendMotion);
-  const positionAtIndex = useCallback(
-    (messageId: string, anchorIndex: number) => {
-      if (!motion.isPending(messageId))
-        return motion.position(
-          messageId,
-          () => {},
-          () => {},
-        );
-      const list = listRef.current;
-      if (!list) return false;
-      const onSettled = onPositionRef.current(messageId, anchorIndex);
+  const positionAtIndex = (messageId: string, anchorIndex: number) => {
+    if (!motion.isPending(messageId))
       return motion.position(
         messageId,
-        () => {
-          const viewport = list.getScrollableNode();
-          const row = list.getState().elementAtIndex(anchorIndex);
-          if (row) {
-            const offset = Math.max(
-              0,
-              Math.min(
-                viewport.scrollTop +
-                  row.getBoundingClientRect().top -
-                  viewport.getBoundingClientRect().top -
-                  CHAT_TIMELINE_ANCHOR_OFFSET,
-                viewport.scrollHeight - viewport.clientHeight,
-              ),
-            );
-            if (Math.abs(offset - viewport.scrollTop) <= 1) return;
-          }
-          return list.scrollToIndex({
-            index: anchorIndex,
-            animated: false,
-            viewPosition: 0,
-            viewOffset: CHAT_TIMELINE_ANCHOR_OFFSET,
-          });
-        },
-        onSettled,
+        () => {},
+        () => {},
       );
-    },
-    [listRef, motion],
-  );
+    const list = listRef.current;
+    if (!list) return false;
+    const onSettled = onPositionRef.current(messageId, anchorIndex);
+    return motion.position(
+      messageId,
+      () => {
+        const viewport = list.getScrollableNode();
+        const row = list.getState().elementAtIndex(anchorIndex);
+        if (row) {
+          const offset = Math.max(
+            0,
+            Math.min(
+              viewport.scrollTop +
+                row.getBoundingClientRect().top -
+                viewport.getBoundingClientRect().top -
+                CHAT_TIMELINE_ANCHOR_OFFSET,
+              viewport.scrollHeight - viewport.clientHeight,
+            ),
+          );
+          if (Math.abs(offset - viewport.scrollTop) <= 1) return;
+        }
+        return list.scrollToIndex({
+          index: anchorIndex,
+          animated: false,
+          viewPosition: 0,
+          viewOffset: CHAT_TIMELINE_ANCHOR_OFFSET,
+        });
+      },
+      onSettled,
+    );
+  };
   useLayoutEffect(
     () =>
       motion.observeTargetLayout((messageId, element) => {

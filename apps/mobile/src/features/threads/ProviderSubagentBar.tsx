@@ -5,23 +5,15 @@ import {
 import { isOrchestrationV2WorkActive } from "@t3tools/contracts";
 import { View } from "react-native";
 
-import { AppText as Text } from "../../components/AppText";
+import { AppText as Text } from "../../components/ui/AppText";
 import { ProviderIcon } from "../../components/ProviderIcon";
-import { RequestActionButton } from "./RequestActionButton";
+import { Button } from "../../components/ui/Button";
 import { useVisibleSecondClock } from "./use-visible-second-clock";
 
-/**
- * Replaces the composer on a provider-native subagent thread. The provider
- * runs that conversation, so there is nothing to send; the bar says which
- * model is working, for how long, and leads back to the parent.
- */
 export function ProviderSubagentBar(props: {
-  /** Driver and catalog icon of the provider running the subagent. */
   readonly provider: { readonly driver: string; readonly iconUrl?: string | undefined } | null;
   readonly modelLabel: string;
-  /** Reasoning effort as the composer names it, when the subagent has one. */
   readonly effortLabel: string | null;
-  /** Null until the subagent's root turn arrives. */
   readonly status: ProviderSubagentStatus | null;
   readonly onOpenParent: (() => void) | null;
   readonly onContinueInNewThread?: (() => void) | null;
@@ -70,11 +62,11 @@ export function ProviderSubagentBar(props: {
         </Text>
       </View>
       {props.onOpenParent ? (
-        <RequestActionButton label="Open parent" tone="secondary" onPress={props.onOpenParent} />
+        <Button label="Open parent" tone="secondary" onPress={props.onOpenParent} />
       ) : null}
       {props.onContinueInNewThread ? (
         <View className="w-full items-end">
-          <RequestActionButton
+          <Button
             label="Continue in new thread"
             tone="secondary"
             disabled={props.isContinuingInNewThread}

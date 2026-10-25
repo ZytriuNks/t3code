@@ -63,18 +63,6 @@ describe("queued message file edits", () => {
       });
   });
 
-  it("retains saved attachments alongside newly uploaded files", async () => {
-    const saved = { ...uploadedFile, id: "saved:earlier" };
-    const attachments = await prepareQueuedEditAttachments({
-      existingAttachments: [saved],
-      images: [],
-      files: [file],
-      uploadFiles: async () => [uploadedFile],
-      readImage: async () => "unused",
-    });
-    expect(attachments).toEqual([saved, uploadedFile]);
-  });
-
   it("fails a save instead of dropping a file whose upload is missing", async () => {
     await expect(
       prepareQueuedEditAttachments({

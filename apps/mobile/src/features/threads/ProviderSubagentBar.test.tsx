@@ -1,4 +1,3 @@
-// @vitest-environment jsdom
 import { act, createElement, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
@@ -15,10 +14,21 @@ vi.mock("react-native", () => ({
     onPress?: () => void;
   }) => createElement("button", { disabled, onClick: onPress }, children),
 }));
-vi.mock("../../components/AppText", () => ({
+vi.mock("../../components/ui/AppText", () => ({
   AppText: ({ children }: { children?: ReactNode }) => createElement("span", null, children),
 }));
 vi.mock("../../components/ProviderIcon", () => ({ ProviderIcon: () => null }));
+vi.mock("../../components/ui/Button", () => ({
+  Button: ({
+    label,
+    disabled,
+    onPress,
+  }: {
+    label: string;
+    disabled?: boolean;
+    onPress: () => void;
+  }) => createElement("button", { disabled, onClick: onPress }, label),
+}));
 vi.mock("./use-visible-second-clock", () => ({ useVisibleSecondClock: () => 0 }));
 
 import { ProviderSubagentBar } from "./ProviderSubagentBar";

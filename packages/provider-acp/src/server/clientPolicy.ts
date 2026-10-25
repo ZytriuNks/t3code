@@ -48,13 +48,9 @@ function acpPathIsWithinRoot(path: string, root: string): boolean {
 }
 
 /**
- * Canonicalize a path for an authorization containment check.
- *
- * `realpath` cannot resolve a file that has not been created yet, so walk up
- * to the deepest existing ancestor and append the missing suffix to that
- * ancestor's canonical path. This follows symlinked directories while still
- * allowing normal writes to new files. If an existing entry cannot be
- * canonicalized (for example, a broken symlink), fail closed.
+ * `realpath` cannot resolve a file that has not been created yet, so walk up to the deepest
+ * existing ancestor and append the missing suffix to that ancestor's canonical path. If an
+ * existing entry cannot be canonicalized (for example, a broken symlink), fail closed.
  */
 function acpCanonicalPathForContainment(path: string): string | undefined {
   // Do not lexically normalize before realpath. For a path such as
@@ -75,8 +71,6 @@ function acpCanonicalPathForContainment(path: string): string | undefined {
 
     try {
       NodeFS.lstatSync(candidate);
-      // The entry exists but realpath could not resolve it, as with a broken
-      // symlink. Treat it as untrusted rather than authorizing its lexical path.
       return undefined;
     } catch (cause) {
       if ((cause as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") {
@@ -91,7 +85,6 @@ function acpCanonicalPathForContainment(path: string): string | undefined {
   }
 }
 
-/** The parts of a native operation the disposition logic reads. */
 interface AcpPolicyOperation {
   readonly kind: string | null | undefined;
   readonly locations: ReadonlyArray<{ readonly path: string }> | null | undefined;
@@ -108,11 +101,8 @@ function isAcpReadKind(toolKind: string): boolean {
 }
 
 /**
- * Reads follow the sandbox alone and never ask. Approval policy governs writes
- * and commands, as it does for Codex and Claude, and every sandbox T3 knows
- * lets the agent read. That includes no explicit sandbox, since the strictest
- * runtime mode (approval-required) implies a read-only one. Unknown sandbox
- * types still fail closed.
+ * Reads follow the sandbox alone and never ask. That includes no explicit sandbox, since the
+ * strictest runtime mode (approval-required) implies a read-only one.
  */
 function acpReadDisposition(runtimePolicy: AcpRuntimePolicy): "allow" | "deny" {
   switch (unknownRecord(runtimePolicy.sandboxPolicy)?.type) {
@@ -170,10 +160,6 @@ function acpWorkspaceWriteAllowsMutation(
   return true;
 }
 
-/**
- * Disposition of one native operation under the active runtime policy. Shared
- * by provider permission requests and the client fs/terminal handlers.
- */
 function acpOperationDisposition(
   runtimePolicy: AcpRuntimePolicy,
   operation: AcpPolicyOperation,
@@ -206,8 +192,6 @@ function acpOperationDisposition(
       return "allow";
     case undefined:
       if (runtimePolicy.runtimeMode === "approval-required") return "deny";
-      // Auto-accept edits approves file changes wherever the agent makes them
-      // (ACP prompts need not carry locations to confine); other actions still ask.
       if (
         runtimePolicy.runtimeMode === "auto-accept-edits" &&
         runtimePolicy.approvalPolicy === undefined &&
@@ -235,7 +219,6 @@ export function acpPermissionDisposition(
   });
 }
 
-/** Resolve explicitly tagged MCP approvals through the thread's normal policy. */
 export function acpMcpToolApprovalElicitationDisposition(
   runtimePolicy: AcpRuntimePolicy,
   request: EffectAcpSchema.CreateElicitationRequest,

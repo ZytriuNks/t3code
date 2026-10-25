@@ -16,7 +16,7 @@ export function useSubagentConversation({
   onNavigate,
 }: {
   owner: ScopedThreadRef;
-  projection: OrchestrationV2ThreadProjection | null;
+  projection: Pick<OrchestrationV2ThreadProjection, "subagents"> | null;
   onNavigate: (threadRef: ScopedThreadRef) => void;
 }) {
   const ownerKey = scopedThreadKey(owner);
@@ -25,7 +25,11 @@ export function useSubagentConversation({
     threadRef: ScopedThreadRef;
     closing: boolean;
   } | null>(null);
-  useEffect(() => setSelection(null), [ownerKey]);
+  const [previousOwnerKey, setPreviousOwnerKey] = useState(ownerKey);
+  if (previousOwnerKey !== ownerKey) {
+    setPreviousOwnerKey(ownerKey);
+    setSelection(null);
+  }
   const current = selection?.ownerKey === ownerKey ? selection : null;
   const openThread = (threadRef: ScopedThreadRef) => {
     setSelection(null);

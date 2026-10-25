@@ -1,4 +1,4 @@
-import { createContext, use, useCallback } from "react";
+import { createContext, use } from "react";
 
 import {
   afterSmoothTextLayoutCommit,
@@ -228,10 +228,7 @@ export const TimelineSendMotionContext = createContext<ReturnType<
 
 export function useTimelineSendMotionTarget(messageId: string) {
   const motion = use(TimelineSendMotionContext);
-  return useCallback(
-    (element: HTMLDivElement | null) => {
-      if (element) return motion?.attach(messageId, element);
-    },
-    [messageId, motion],
-  );
+  return (element: HTMLDivElement | null) => {
+    if (element) return motion?.attach(messageId, element);
+  };
 }

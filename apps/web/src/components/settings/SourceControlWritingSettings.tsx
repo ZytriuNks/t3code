@@ -30,6 +30,7 @@ import {
   resolveAppModelSelectionState,
   selectsPlanAgent,
 } from "../../modelSelection";
+import { useEnvironmentProviders } from "../../state/environments";
 import { EMPTY_SERVER_PROVIDERS } from "../../state/server";
 import { ProviderModelPicker } from "../chat/ProviderModelPicker";
 import { TraitsPicker } from "../chat/TraitsPicker";
@@ -71,12 +72,13 @@ export function SourceControlWritingSettingsSection() {
   const mixedReviewGuidesEnabled = useScopedSettingsMixed(["reviewGuidesEnabled"]);
   const navigate = useNavigate();
   const { environment, connectedEnvironments, targets, target } = useSettingsScope();
-  // The representative supplies the provider list; a model choice is checked
-  // against every target before it fans out.
   const environmentId = environment?.environmentId ?? null;
   const hasServerTargets = connectedEnvironments.length > 0;
-  const serverProviders = environment?.serverConfig?.providers ?? EMPTY_SERVER_PROVIDERS;
-  // The writing style is one object; each control only cares about its own field.
+  const providersByEnvironment = useEnvironmentProviders();
+  const serverProviders =
+    (environment?.serverConfig
+      ? providersByEnvironment.get(environment.environmentId)
+      : undefined) ?? EMPTY_SERVER_PROVIDERS;
   const styleFieldMixed = (field: keyof ServerSettings["sourceControlWritingStyle"]) => {
     const first = targets[0];
     return (
@@ -117,7 +119,6 @@ export function SourceControlWritingSettingsSection() {
       target?.projectId ?? null,
     ),
   );
-  // The environment default can name an instance this project turned off.
   const projectEnabledInstanceIds = new Set(
     instanceEntries
       .filter((entry) => entry.enabled && entry.isAvailable)
@@ -168,7 +169,6 @@ export function SourceControlWritingSettingsSection() {
     },
     textGenerationProviders,
   );
-  // Its own list: a custom model chosen for guides is not among the writer model's options.
   const reviewGuideModelOptionsByInstance = getCustomModelOptionsByInstance(
     settings,
     textGenerationProviders,
@@ -189,7 +189,7 @@ export function SourceControlWritingSettingsSection() {
         serverScoped
         settingKeys={["sourceControlWritingStyle"]}
         mixed={writingStyleMixed}
-        {...searchableSetting("source-control-writing-style")}
+        {...searchableSetting("source-control-writing-style", t)}
         description={MODE_OPTIONS[style.mode].description}
         resetAction={
           isSourceControlWritingStyleDirty ? (
@@ -308,7 +308,7 @@ export function SourceControlWritingSettingsSection() {
         serverScoped
         settingKeys={["sourceControlWritingStyle"]}
         mixed={templatesMixed}
-        {...searchableSetting("follow-change-request-templates")}
+        {...searchableSetting("follow-change-request-templates", t)}
         description={t("settings.sourceControl.writing.templatesDescription")}
         resetAction={
           templatesMixed ||
@@ -344,7 +344,7 @@ export function SourceControlWritingSettingsSection() {
       <SettingsRow
         serverScoped
         settingKeys={["sourceControlWriterModelSelection"]}
-        {...searchableSetting("source-control-writer-model")}
+        {...searchableSetting("source-control-writer-model", t)}
         description={t("settings.sourceControl.writing.modelDescription")}
         control={
           !hasServerTargets ? (
@@ -406,8 +406,6 @@ export function SourceControlWritingSettingsSection() {
                   provider={writerInstanceEntry.driverKind}
                   models={writerInstanceEntry.models}
                   model={activeSelection.model}
-                  prompt=""
-                  onPromptChange={() => {}}
                   modelOptions={activeSelection.options ?? []}
                   allowPromptInjectedEffort={false}
                   planModeEnabled={
@@ -446,12 +444,11 @@ export function SourceControlWritingSettingsSection() {
         }
       />
 
-      {/* A beta the server owns: off hides the Guide tab in every client and refuses agents. */}
       <SettingsRow
         serverScoped
         settingKeys={["reviewGuidesEnabled"]}
         mixed={mixedReviewGuidesEnabled}
-        {...searchableSetting("review-guides")}
+        {...searchableSetting("review-guides", t)}
         description="Adds a Guide tab to pull requests: an agent writes a tour of the change, stop by stop, with the calls a maintainer should make."
         control={
           <Switch
@@ -468,7 +465,7 @@ export function SourceControlWritingSettingsSection() {
           <SettingsRow
             serverScoped
             settingKeys={["reviewGuideModelSelection"]}
-            {...searchableSetting("review-guide-model")}
+            {...searchableSetting("review-guide-model", t)}
             description="Model that reads a pull request to write its review guide. It reads the change itself over many steps, so a stronger model helps. Off uses the source control writer model."
             control={
               !hasServerTargets ? (
@@ -513,8 +510,6 @@ export function SourceControlWritingSettingsSection() {
                       provider={reviewGuideInstanceEntry.driverKind}
                       models={reviewGuideInstanceEntry.models}
                       model={reviewGuideSelection.model}
-                      prompt=""
-                      onPromptChange={() => {}}
                       modelOptions={reviewGuideSelection.options ?? []}
                       allowPromptInjectedEffort={false}
                       planModeEnabled={
@@ -541,7 +536,6 @@ export function SourceControlWritingSettingsSection() {
                         updateSettings({ reviewGuideModelSelection: null });
                         return;
                       }
-                      // Every selected target gets this model, so it must run on all of them.
                       const reason = writerModelDisabledReason(
                         activeSelection.instanceId,
                         activeSelection.model,
@@ -572,7 +566,7 @@ export function SourceControlWritingSettingsSection() {
           <SettingsRow
             serverScoped
             settingKeys={["reviewGuideInstructions"]}
-            {...searchableSetting("review-guide-instructions")}
+            {...searchableSetting("review-guide-instructions", t)}
             description="Your preferences for review guides: what to show first, dwell on, or skip. The guide's format and coverage stay the same."
             resetAction={
               mixedReviewGuideInstructions || settings.reviewGuideInstructions !== "" ? (

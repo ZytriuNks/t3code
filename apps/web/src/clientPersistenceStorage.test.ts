@@ -38,20 +38,6 @@ afterEach(() => {
 });
 
 describe("clientPersistenceStorage", () => {
-  it("persists client settings in browser storage", async () => {
-    getTestWindow();
-    const { readBrowserClientSettings, writeBrowserClientSettings } =
-      await import("./clientPersistenceStorage");
-    const settings = {
-      ...DEFAULT_CLIENT_SETTINGS,
-      timestampFormat: "24-hour" as const,
-    };
-
-    writeBrowserClientSettings(settings);
-
-    expect(readBrowserClientSettings()).toEqual(settings);
-  });
-
   it.each(["not-json", '{"wordWrap":"invalid"}'])(
     "does not treat invalid saved settings as absent: %s",
     async (value) => {

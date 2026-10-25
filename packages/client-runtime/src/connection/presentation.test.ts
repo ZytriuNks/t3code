@@ -16,9 +16,9 @@ import {
 } from "./model.ts";
 import {
   connectionCatalogDisplayUrl,
-  environmentMcpUrl,
   connectionStatusText,
   connectionStatusTitle,
+  environmentMcpUrl,
   presentEnvironmentConnection,
   presentConnectionState,
 } from "./presentation.ts";
@@ -106,10 +106,10 @@ describe("connection presentation", () => {
     expect(environmentMcpUrl({ entry, connectedTarget: tailnet.target })).toBe(
       "http://100.115.1.44:3773/mcp",
     );
-    // Not connected: the preferred route, plain http or not.
     expect(environmentMcpUrl({ entry })).toBe("http://192.168.4.53:3773/mcp");
   });
 
+  // regression: #16909 Copy MCP URL falls back to an alternate route when the relay route has no address
   it("passes over routes without an address of their own", () => {
     const relay = new RelayConnectionTarget({
       environmentId: TARGET.environmentId,
@@ -122,7 +122,6 @@ describe("connection presentation", () => {
       alternateRoutes: [{ target: ENTRY.target, profile: ENTRY.profile }],
     };
 
-    // Relay discovery has not reported the tunnel address yet.
     expect(environmentMcpUrl({ entry, connectedTarget: relay })).toBe(
       "https://environment.example.test/mcp",
     );

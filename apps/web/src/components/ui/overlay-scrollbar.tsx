@@ -1,7 +1,10 @@
 "use client";
 
-import { useCallback, useLayoutEffect, useRef, useState } from "react";
+import { useStableCallback } from "~/hooks/useStableCallback";
 
+import { useLayoutEffect, useRef, useState } from "react";
+
+import { observeResize } from "~/lib/observeResize";
 import { cn } from "~/lib/utils";
 import {
   SCROLLBAR_TRIANGLE_SIZE,
@@ -121,7 +124,7 @@ function OverlayScrollbar({
   const showTriangles = triangles && !horizontal;
   const laneRef = useRef<HTMLDivElement | null>(null);
   const thumbRef = useRef<HTMLDivElement | null>(null);
-  const trackHeightRef = useRef(0);
+  const [trackLength, setTrackLength] = useState(0);
   const [laneElement, setLaneElement] = useState<HTMLDivElement | null>(null);
   const [geometry, setGeometry] = useState<ScrollbarGeometry | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -162,10 +165,10 @@ function OverlayScrollbar({
   // effect the ref is still null, so measuring there would always bail out
   // and the bar would never appear. Holding the node in state breaks the
   // cycle — the effect re-runs once it mounts.
-  const laneCallbackRef = useCallback((node: HTMLDivElement | null) => {
+  const laneCallbackRef = useStableCallback((node: HTMLDivElement | null) => {
     laneRef.current = node;
     setLaneElement(node);
-  }, []);
+  });
 
   // Re-measure whenever the content resizes. Virtualized lists change content
   // height without the viewport changing, so observe the content element too.
@@ -205,7 +208,7 @@ function OverlayScrollbar({
       const trackHeight = horizontal
         ? laneElement.clientWidth
         : laneElement.clientHeight - (showTriangles ? TRIANGLE_SIZE_PX * 2 : 0);
-      trackHeightRef.current = trackHeight;
+      setTrackLength(trackHeight);
       setGeometry(
         horizontal && !["auto", "scroll"].includes(getComputedStyle(scrollable).overflowX)
           ? null
@@ -224,20 +227,13 @@ function OverlayScrollbar({
       measure();
     });
     scrollable.addEventListener("scroll", measure, { passive: true });
-    // Guard for render environments without ResizeObserver; the scroll
-    // listener above still keeps the thumb in sync there.
-    const observer =
-      typeof ResizeObserver === "undefined"
-        ? null
-        : new ResizeObserver(() => {
-            measureWindowEdge();
-            measure();
-          });
+    let stopResize = () => {};
     const observeContent = () => {
-      observer?.disconnect();
-      observer?.observe(scrollable);
-      observer?.observe(laneElement);
-      for (const child of scrollable.children) observer?.observe(child);
+      stopResize();
+      stopResize = observeResize([scrollable, laneElement, ...scrollable.children], () => {
+        measureWindowEdge();
+        measure();
+      });
       measureWindowEdge();
       measure();
     };
@@ -251,7 +247,7 @@ function OverlayScrollbar({
     return () => {
       cancelAnimationFrame(frame);
       scrollable.removeEventListener("scroll", measure);
-      observer?.disconnect();
+      stopResize();
       mutations?.disconnect();
       scrollable.removeEventListener("input", measure);
       window.removeEventListener("resize", measureWindowEdge);
@@ -263,33 +259,30 @@ function OverlayScrollbar({
     };
   }, [scrollable, horizontal, showTriangles, laneElement, scrollFade, embedded, thumbInset]);
 
-  const scrollByPage = useCallback(
-    (direction: StepDirection) => {
-      if (heldRef.current) {
-        heldRef.current = false;
-        return;
-      }
-      if (
-        scrollable &&
-        (direction < 0
-          ? scrollable.scrollTop > 0
-          : scrollable.scrollTop < scrollable.scrollHeight - scrollable.clientHeight)
-      ) {
-        onScrollStart?.(direction);
-      }
-      if (onStep) {
-        onStep(direction);
-      } else {
-        scrollable?.scrollBy({
-          top: direction * scrollable.clientHeight * 0.3,
-          behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches
-            ? "auto"
-            : "smooth",
-        });
-      }
-    },
-    [onScrollStart, onStep, scrollable],
-  );
+  const scrollByPage = (direction: StepDirection) => {
+    if (heldRef.current) {
+      heldRef.current = false;
+      return;
+    }
+    if (
+      scrollable &&
+      (direction < 0
+        ? scrollable.scrollTop > 0
+        : scrollable.scrollTop < scrollable.scrollHeight - scrollable.clientHeight)
+    ) {
+      onScrollStart?.(direction);
+    }
+    if (onStep) {
+      onStep(direction);
+    } else {
+      scrollable?.scrollBy({
+        top: direction * scrollable.clientHeight * 0.3,
+        behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches
+          ? "auto"
+          : "smooth",
+      });
+    }
+  };
 
   // Holding a triangle scrolls at a steady rate. A timer that re-issued the
   // same step produced a stutter — a long dead pause, then a series of discrete
@@ -297,200 +290,191 @@ function OverlayScrollbar({
   // continuous motion. The click step is handled by the host's onStep; this
   // only takes over once the press is sustained. The pointer may leave the
   // button while held, so stop on the next pointerup anywhere.
-  const startHold = useCallback(
-    (direction: StepDirection) => {
-      stopHoldRef.current?.();
-      heldRef.current = false;
-      const element = scrollable;
-      if (!element) return;
-      let frame: number | null = null;
-      let lastFrameAt: number | null = null;
-      let startTimer: number | undefined;
-      const stop = () => {
-        window.clearTimeout(startTimer);
-        if (frame !== null) window.cancelAnimationFrame(frame);
-        frame = null;
-        window.removeEventListener("pointerup", stop, true);
-        window.removeEventListener("pointercancel", stop, true);
-        window.removeEventListener("blur", stop);
-        stopHoldRef.current = null;
-      };
-      const coast = (now: number) => {
-        frame = null;
-        // Use only RAF timestamps. A frame can start before the timer fires;
-        // subtracting performance.now() can reverse the first step at an edge.
-        const elapsedSeconds =
-          lastFrameAt === null ? 0 : Math.max(0, Math.min((now - lastFrameAt) / 1000, 0.05));
-        lastFrameAt = now;
-        const maxOffset = Math.max(0, element.scrollHeight - element.clientHeight);
-        if (direction < 0 ? element.scrollTop <= 0 : element.scrollTop >= maxOffset) {
-          return;
-        }
-        element.scrollTop = Math.max(
-          0,
-          Math.min(
-            maxOffset,
-            element.scrollTop + direction * HOLD_SPEED_PX_PER_SECOND * elapsedSeconds,
-          ),
-        );
-        frame = window.requestAnimationFrame(coast);
-      };
-      // Short grace period so an ordinary click does not also start coasting.
-      startTimer = window.setTimeout(() => {
-        heldRef.current = true;
-        if (
-          direction < 0
-            ? element.scrollTop > 0
-            : element.scrollTop < element.scrollHeight - element.clientHeight
-        ) {
+  const startHold = (direction: StepDirection) => {
+    stopHoldRef.current?.();
+    heldRef.current = false;
+    const element = scrollable;
+    if (!element) return;
+    let frame: number | null = null;
+    let lastFrameAt: number | null = null;
+    let startTimer: number | undefined;
+    const stop = () => {
+      window.clearTimeout(startTimer);
+      if (frame !== null) window.cancelAnimationFrame(frame);
+      frame = null;
+      window.removeEventListener("pointerup", stop, true);
+      window.removeEventListener("pointercancel", stop, true);
+      window.removeEventListener("blur", stop);
+      stopHoldRef.current = null;
+    };
+    const coast = (now: number) => {
+      frame = null;
+      // Use only RAF timestamps. A frame can start before the timer fires;
+      // subtracting performance.now() can reverse the first step at an edge.
+      const elapsedSeconds =
+        lastFrameAt === null ? 0 : Math.max(0, Math.min((now - lastFrameAt) / 1000, 0.05));
+      lastFrameAt = now;
+      const maxOffset = Math.max(0, element.scrollHeight - element.clientHeight);
+      if (direction < 0 ? element.scrollTop <= 0 : element.scrollTop >= maxOffset) {
+        return;
+      }
+      element.scrollTop = Math.max(
+        0,
+        Math.min(
+          maxOffset,
+          element.scrollTop + direction * HOLD_SPEED_PX_PER_SECOND * elapsedSeconds,
+        ),
+      );
+      frame = window.requestAnimationFrame(coast);
+    };
+    // Short grace period so an ordinary click does not also start coasting.
+    startTimer = window.setTimeout(() => {
+      heldRef.current = true;
+      if (
+        direction < 0
+          ? element.scrollTop > 0
+          : element.scrollTop < element.scrollHeight - element.clientHeight
+      ) {
+        onScrollStart?.(direction);
+      }
+      frame = window.requestAnimationFrame(coast);
+    }, HOLD_START_DELAY_MS);
+    stopHoldRef.current = stop;
+    window.addEventListener("pointerup", stop, true);
+    window.addEventListener("pointercancel", stop, true);
+    window.addEventListener("blur", stop);
+  };
+
+  const onThumbPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0 || !scrollable || !geometry) return;
+    stopDragRef.current?.();
+    event.preventDefault();
+    const lane = laneRef.current;
+    const thumb = thumbRef.current;
+    if (!lane || !thumb) return;
+    const thumbRect = thumb.getBoundingClientRect();
+    const pointerOffset = horizontal
+      ? event.clientX - thumbRect.left
+      : event.clientY - thumbRect.top;
+    setDragging(true);
+    event.currentTarget.setPointerCapture(event.pointerId);
+    // React nulls `event.currentTarget` once the handler returns, and the
+    // window-level safety net below can fire after that. Capture the element
+    // now so teardown never dereferences a dead event.
+    const captureTarget = event.currentTarget;
+    // Both the thumb and the window can deliver the terminating event, so
+    // the teardown must be idempotent.
+    let settled = false;
+    let previousDirection: StepDirection | null = null;
+
+    const onMove = (moveEvent: PointerEvent) => {
+      const laneRect = lane.getBoundingClientRect();
+      const trackHeight = horizontal
+        ? laneRect.width
+        : laneRect.height - (showTriangles ? TRIANGLE_SIZE_PX * 2 : 0);
+      const trackTop = horizontal
+        ? laneRect.left
+        : laneRect.top + (showTriangles ? TRIANGLE_SIZE_PX : 0);
+      const next = scrollbarOffsetAtPointer(
+        {
+          total: horizontal ? scrollable.scrollWidth : scrollable.scrollHeight,
+          offset: horizontal ? scrollable.scrollLeft : scrollable.scrollTop,
+          len: horizontal ? scrollable.clientWidth : scrollable.clientHeight,
+        },
+        trackHeight,
+        (horizontal ? moveEvent.clientX : moveEvent.clientY) - trackTop,
+        // Where inside the thumb the pointer grabbed it. This must be the
+        // offset from the thumb's top, unchanged since pointerdown —
+        // subtracting it from the pointer position beforehand as well made
+        // the thumb accelerate away from the cursor and come to rest at the
+        // wrong offset, which then read as a jump on the next hover.
+        pointerOffset,
+      );
+      const offset = horizontal ? scrollable.scrollLeft : scrollable.scrollTop;
+      if (next !== offset) {
+        const direction = next < offset ? -1 : 1;
+        if (direction !== previousDirection) {
+          previousDirection = direction;
           onScrollStart?.(direction);
         }
-        frame = window.requestAnimationFrame(coast);
-      }, HOLD_START_DELAY_MS);
-      stopHoldRef.current = stop;
-      window.addEventListener("pointerup", stop, true);
-      window.addEventListener("pointercancel", stop, true);
-      window.addEventListener("blur", stop);
-    },
-    [onScrollStart, scrollable],
-  );
-
-  const onThumbPointerDown = useCallback(
-    (event: React.PointerEvent<HTMLDivElement>) => {
-      if (event.button !== 0 || !scrollable || !geometry) return;
-      stopDragRef.current?.();
-      event.preventDefault();
-      const lane = laneRef.current;
-      const thumb = thumbRef.current;
-      if (!lane || !thumb) return;
-      const thumbRect = thumb.getBoundingClientRect();
-      const pointerOffset = horizontal
-        ? event.clientX - thumbRect.left
-        : event.clientY - thumbRect.top;
-      setDragging(true);
-      event.currentTarget.setPointerCapture(event.pointerId);
-      // React nulls `event.currentTarget` once the handler returns, and the
-      // window-level safety net below can fire after that. Capture the element
-      // now so teardown never dereferences a dead event.
-      const captureTarget = event.currentTarget;
-      // Both the thumb and the window can deliver the terminating event, so
-      // the teardown must be idempotent.
-      let settled = false;
-      let previousDirection: StepDirection | null = null;
-
-      const onMove = (moveEvent: PointerEvent) => {
-        const laneRect = lane.getBoundingClientRect();
-        const trackHeight = horizontal
-          ? laneRect.width
-          : laneRect.height - (showTriangles ? TRIANGLE_SIZE_PX * 2 : 0);
-        const trackTop = horizontal
-          ? laneRect.left
-          : laneRect.top + (showTriangles ? TRIANGLE_SIZE_PX : 0);
-        const next = scrollbarOffsetAtPointer(
-          {
-            total: horizontal ? scrollable.scrollWidth : scrollable.scrollHeight,
-            offset: horizontal ? scrollable.scrollLeft : scrollable.scrollTop,
-            len: horizontal ? scrollable.clientWidth : scrollable.clientHeight,
-          },
-          trackHeight,
-          (horizontal ? moveEvent.clientX : moveEvent.clientY) - trackTop,
-          // Where inside the thumb the pointer grabbed it. This must be the
-          // offset from the thumb's top, unchanged since pointerdown —
-          // subtracting it from the pointer position beforehand as well made
-          // the thumb accelerate away from the cursor and come to rest at the
-          // wrong offset, which then read as a jump on the next hover.
-          pointerOffset,
-        );
-        const offset = horizontal ? scrollable.scrollLeft : scrollable.scrollTop;
-        if (next !== offset) {
-          const direction = next < offset ? -1 : 1;
-          if (direction !== previousDirection) {
-            previousDirection = direction;
-            onScrollStart?.(direction);
-          }
-        }
-        if (horizontal) {
-          scrollable.scrollLeft = next;
-        } else {
-          scrollable.scrollTop = next;
-        }
-      };
-      const onUp = () => {
-        if (settled) return;
-        settled = true;
-        // Remove the listeners *before* releasing capture. releasePointerCapture
-        // throws NotFoundError once the pointer id is no longer active, and that
-        // exception would skip every removal below — leaving a live pointermove
-        // handler that drags the list to the cursor on each later hover.
-        captureTarget.removeEventListener("pointermove", onMove);
-        captureTarget.removeEventListener("pointerup", onUp);
-        captureTarget.removeEventListener("pointercancel", onUp);
-        captureTarget.removeEventListener("lostpointercapture", onUp);
-        window.removeEventListener("pointerup", onUp);
-        window.removeEventListener("pointercancel", onUp);
-        window.removeEventListener("blur", onUp);
-        stopDragRef.current = null;
-        setDragging(false);
-        try {
-          captureTarget.releasePointerCapture(event.pointerId);
-        } catch {
-          // Already released; the removals above are what mattered.
-        }
-      };
-      event.currentTarget.addEventListener("pointermove", onMove);
-      event.currentTarget.addEventListener("pointerup", onUp);
-      event.currentTarget.addEventListener("pointercancel", onUp);
-      event.currentTarget.addEventListener("lostpointercapture", onUp);
-      stopDragRef.current = onUp;
-      // Safety net: if the thumb is re-rendered or loses capture mid-drag, the
-      // element listener may never fire and the drag would otherwise stick.
-      window.addEventListener("pointerup", onUp);
-      window.addEventListener("pointercancel", onUp);
-      window.addEventListener("blur", onUp);
-    },
-    [geometry, horizontal, onScrollStart, scrollable, showTriangles],
-  );
-
-  const onLaneKeyDown = useCallback(
-    (event: React.KeyboardEvent<HTMLDivElement>) => {
-      if (!scrollable || !geometry) return;
-      const page = horizontal ? scrollable.clientWidth : scrollable.clientHeight;
-      const offset = horizontal ? scrollable.scrollLeft : scrollable.scrollTop;
-      const step = 40;
-      const max = geometry.maxOffset;
-      const clamp = (value: number) => Math.max(0, Math.min(value, max));
-      let next: number;
-      switch (event.key) {
-        case horizontal ? "ArrowLeft" : "ArrowUp":
-          next = clamp(offset - step);
-          break;
-        case horizontal ? "ArrowRight" : "ArrowDown":
-          next = clamp(offset + step);
-          break;
-        case "PageUp":
-          next = clamp(offset - page);
-          break;
-        case "PageDown":
-          next = clamp(offset + page);
-          break;
-        case "Home":
-          next = 0;
-          break;
-        case "End":
-          next = max;
-          break;
-        default:
-          return;
       }
-      if (next !== offset) onScrollStart?.(next < offset ? -1 : 1);
-      scrollable.scrollTo({
-        ...(horizontal ? { left: next } : { top: next }),
-        behavior: "instant",
-      });
-      event.preventDefault();
-    },
-    [geometry, horizontal, onScrollStart, scrollable],
-  );
+      if (horizontal) {
+        scrollable.scrollLeft = next;
+      } else {
+        scrollable.scrollTop = next;
+      }
+    };
+    const onUp = () => {
+      if (settled) return;
+      settled = true;
+      // Remove the listeners *before* releasing capture. releasePointerCapture
+      // throws NotFoundError once the pointer id is no longer active, and that
+      // exception would skip every removal below — leaving a live pointermove
+      // handler that drags the list to the cursor on each later hover.
+      captureTarget.removeEventListener("pointermove", onMove);
+      captureTarget.removeEventListener("pointerup", onUp);
+      captureTarget.removeEventListener("pointercancel", onUp);
+      captureTarget.removeEventListener("lostpointercapture", onUp);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+      window.removeEventListener("blur", onUp);
+      stopDragRef.current = null;
+      setDragging(false);
+      try {
+        captureTarget.releasePointerCapture(event.pointerId);
+      } catch {
+        // Already released; the removals above are what mattered.
+      }
+    };
+    event.currentTarget.addEventListener("pointermove", onMove);
+    event.currentTarget.addEventListener("pointerup", onUp);
+    event.currentTarget.addEventListener("pointercancel", onUp);
+    event.currentTarget.addEventListener("lostpointercapture", onUp);
+    stopDragRef.current = onUp;
+    // Safety net: if the thumb is re-rendered or loses capture mid-drag, the
+    // element listener may never fire and the drag would otherwise stick.
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+    window.addEventListener("blur", onUp);
+  };
+
+  const onLaneKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!scrollable || !geometry) return;
+    const page = horizontal ? scrollable.clientWidth : scrollable.clientHeight;
+    const offset = horizontal ? scrollable.scrollLeft : scrollable.scrollTop;
+    const step = 40;
+    const max = geometry.maxOffset;
+    const clamp = (value: number) => Math.max(0, Math.min(value, max));
+    let next: number;
+    switch (event.key) {
+      case horizontal ? "ArrowLeft" : "ArrowUp":
+        next = clamp(offset - step);
+        break;
+      case horizontal ? "ArrowRight" : "ArrowDown":
+        next = clamp(offset + step);
+        break;
+      case "PageUp":
+        next = clamp(offset - page);
+        break;
+      case "PageDown":
+        next = clamp(offset + page);
+        break;
+      case "Home":
+        next = 0;
+        break;
+      case "End":
+        next = max;
+        break;
+      default:
+        return;
+    }
+    if (next !== offset) onScrollStart?.(next < offset ? -1 : 1);
+    scrollable.scrollTo({
+      ...(horizontal ? { left: next } : { top: next }),
+      behavior: "instant",
+    });
+    event.preventDefault();
+  };
 
   // The lane itself is always hit-testable so a hover can reach a bar that is
   // currently faded out; only its contents fade. That makes the hover branch
@@ -505,7 +489,7 @@ function OverlayScrollbar({
   // its height from, so returning early on a null geometry would leave the
   // thumb permanently unmeasured. Only the thumb and triangles wait for it.
   const ready = geometry !== null;
-  const travel = Math.max(1, trackHeightRef.current - (geometry?.thumbHeight ?? 0));
+  const travel = Math.max(1, trackLength - (geometry?.thumbHeight ?? 0));
 
   useLayoutEffect(() => {
     const parent = laneElement?.parentElement;
@@ -573,6 +557,7 @@ function OverlayScrollbar({
     if (!scrollable || !laneElement || horizontal || thumbInset !== "gutter" || !ready) return;
     let frame: number | undefined;
     let rows = new Set<HTMLElement>();
+    const rowObservers = new Map<HTMLElement, () => void>();
     const clearRow = (row: HTMLElement) => {
       row.removeAttribute("data-scrollbar-row-fade");
       row.style.removeProperty("--overlay-scrollbar-row-fade-end");
@@ -595,12 +580,13 @@ function OverlayScrollbar({
       const nextRows = new Set(measurements.map(({ row }) => row));
       for (const row of rows) {
         if (!nextRows.has(row)) {
-          observer?.unobserve(row);
+          rowObservers.get(row)?.();
+          rowObservers.delete(row);
           clearRow(row);
         }
       }
       for (const { row, rect } of measurements) {
-        if (!rows.has(row)) observer?.observe(row);
+        if (!rows.has(row)) rowObservers.set(row, observeResize(row, schedule));
         if ((thumbLeft - rect.right) / scale >= 2.99) {
           clearRow(row);
         } else {
@@ -616,16 +602,15 @@ function OverlayScrollbar({
     const schedule = () => {
       if (frame === undefined) frame = requestAnimationFrame(measureRows);
     };
-    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(schedule);
-    observer?.observe(scrollable);
-    observer?.observe(laneElement);
+    const stopResize = observeResize([scrollable, laneElement], schedule);
     const mutations = new MutationObserver(schedule);
     mutations.observe(scrollable, { childList: true, subtree: true });
     scrollable.addEventListener("scroll", schedule, { passive: true });
     measureRows();
     return () => {
       if (frame !== undefined) cancelAnimationFrame(frame);
-      observer?.disconnect();
+      stopResize();
+      for (const stop of rowObservers.values()) stop();
       mutations.disconnect();
       scrollable.removeEventListener("scroll", schedule);
       rows.forEach(clearRow);

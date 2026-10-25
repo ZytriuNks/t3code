@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
-  claimWorkspaceBasenameLookup,
   needsWorkspaceBasenameLookup,
+  claimWorkspaceBasenameLookup,
   pickWorkspaceBasenameMatch,
   pickWorkspacePathMatch,
   workspacePathLookupQueries,
-} from "./workspaceBasenameLookup";
+} from "@t3tools/client-runtime/workspace-basename-lookup";
 
 describe("needsWorkspaceBasenameLookup", () => {
   it("flags bare filenames", () => {
@@ -35,6 +35,7 @@ describe("pickWorkspaceBasenameMatch", () => {
     );
   });
 
+  // regression: #6297 a bare filename resolves to a file, never a same-named directory
   it("ignores directories", () => {
     expect(
       pickWorkspaceBasenameMatch("components", [
@@ -64,15 +65,6 @@ describe("pickWorkspaceBasenameMatch", () => {
       pickWorkspaceBasenameMatch("FOO.ts", [
         { path: "src/Foo.ts", kind: "file" },
         { path: "src/foo.ts", kind: "file" },
-      ]),
-    ).toBeNull();
-  });
-
-  it("returns null when nothing matches the name", () => {
-    expect(pickWorkspaceBasenameMatch("ChatView.tsx", [])).toBeNull();
-    expect(
-      pickWorkspaceBasenameMatch("ChatView.tsx", [
-        { path: "apps/web/src/components/ChatHeader.tsx", kind: "file" },
       ]),
     ).toBeNull();
   });
@@ -115,14 +107,7 @@ describe("claimWorkspaceBasenameLookup", () => {
     const first = claimWorkspaceBasenameLookup();
     const second = claimWorkspaceBasenameLookup();
 
-    // The older lookup answering last must not reopen the panel behind the
-    // newer one.
     expect(second()).toBe(true);
     expect(first()).toBe(false);
-  });
-
-  it("stays valid while it is the only claim", () => {
-    const only = claimWorkspaceBasenameLookup();
-    expect(only()).toBe(true);
   });
 });

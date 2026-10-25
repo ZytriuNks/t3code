@@ -10,11 +10,11 @@ import type {
   ThreadId,
 } from "@t3tools/contracts";
 import { Bot, ChevronRight, ArrowLeft } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useState } from "react";
 
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { useThreadShells } from "~/state/entities";
-import { useEnvironment } from "~/state/environments";
+import { useEnvironmentProviders } from "~/state/environments";
 import { cn } from "~/lib/utils";
 import { ScrollArea } from "~/components/ui/scroll-area";
 import { Button } from "~/components/ui/button";
@@ -175,8 +175,8 @@ export function ThreadAgentsPanel({
     ready: boolean;
   } | null>(null);
   const shells = useThreadShells();
-  const environment = useEnvironment(environmentId);
-  const providers = environment?.serverConfig?.providers ?? [];
+  const providersByEnvironment = useEnvironmentProviders();
+  const providers = providersByEnvironment.get(environmentId) ?? [];
   const backgroundModelInfo = resolveSubagentModelInfo({
     modelSelection: shell?.modelSelection,
     providers,
@@ -184,7 +184,7 @@ export function ThreadAgentsPanel({
   const environmentShells = shells.filter((candidate) => candidate.environmentId === environmentId);
   const childThreads = new Map(environmentShells.map((candidate) => [candidate.id, candidate]));
   const subagents = projection?.subagents ?? [];
-  const subagentTaskIds = useMemo(() => {
+  const subagentTaskIds = (() => {
     const ids = new Set<string>();
     for (const subagent of subagents) {
       ids.add(subagent.id);
@@ -198,28 +198,25 @@ export function ThreadAgentsPanel({
       if (nativeId) ids.add(nativeId);
     }
     return ids;
-  }, [projection?.turnItems, subagents]);
-  const backgroundTasks = useMemo(
-    () => (shell?.pendingBackgroundTasks ?? []).filter((task) => !subagentTaskIds.has(task.taskId)),
-    [shell?.pendingBackgroundTasks, subagentTaskIds],
-  );
+  })();
+  const backgroundTasks = (() =>
+    (shell?.pendingBackgroundTasks ?? []).filter((task) => !subagentTaskIds.has(task.taskId)))();
   const currentThreadRef = scopeThreadRef(environmentId, threadId);
 
-  useEffect(() => {
+  const [owner, setOwner] = useState({ environmentId, threadId });
+  if (owner.environmentId !== environmentId || owner.threadId !== threadId) {
+    setOwner({ environmentId, threadId });
     setSelection(null);
-  }, [environmentId, threadId]);
+  }
 
   const selectedThreadRef = selection?.threadRef;
-  const onConversationReadyChange = useCallback(
-    (ready: boolean) => {
-      setSelection((current) =>
-        current === null || current.threadRef !== selectedThreadRef || current.ready === ready
-          ? current
-          : { ...current, ready },
-      );
-    },
-    [selectedThreadRef],
-  );
+  const onConversationReadyChange = (ready: boolean) => {
+    setSelection((current) =>
+      current === null || current.threadRef !== selectedThreadRef || current.ready === ready
+        ? current
+        : { ...current, ready },
+    );
+  };
   const selectedTask = selection?.task;
   const selectedChildShell =
     selectedThreadRef === undefined || selectedTask !== undefined

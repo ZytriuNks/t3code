@@ -1,5 +1,6 @@
+import type { ServerProviderSkill } from "@t3tools/contracts";
 import { preloadPatchFile } from "@pierre/diffs/ssr";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ComposerPromptEditor,
   type ComposerAccessibleCopy,
@@ -7,23 +8,16 @@ import {
 } from "../ComposerPromptEditor";
 import { EMPTY_COMPOSER_CONTEXT_RECORDS } from "../composerContextPresentation";
 import { terminalThemeFromApp } from "../ThreadTerminalDrawer";
-import { useTheme } from "../../hooks/useTheme";
+import { useRenderedAppearance, useTheme } from "../../hooks/useTheme";
 import { useI18n } from "../../i18n/I18nProvider";
 import { resolveDiffThemeName, type DiffThemeName } from "../../lib/diffRendering";
 import { PREFERRED_HIGHLIGHTER } from "../../lib/syntaxHighlighting";
 import { GhosttyTerminalSurface } from "~/terminal/ghostty/surface";
 
-// The font previews are the real surfaces, not lookalikes: the composer's
-// Tiptap editor, the diff panel's file diff, and the Ghostty canvas
-// renderer. Each already consumes the appearance font tokens (or, for the
-// terminal, the settings passed down as props), so what the row shows is
-// exactly what the app renders.
+const PREVIEW_SKILLS: ReadonlyArray<ServerProviderSkill> = [
+  { name: "frontend-design", path: ".agents/skills/frontend-design/SKILL.md", enabled: true },
+];
 
-const EMPTY_SKILLS: ReadonlyArray<never> = [];
-
-// Serialized the way the composer stores inline tokens: the $skill and the
-// markdown-style file links render as chips, so the preview shows prompt
-// text and pills exactly as the real composer draws them.
 const PROMPT_PREVIEW_TEXT =
   "Use $frontend-design to fix the flaky test in " +
   "[surface.test.ts](apps/web/src/terminal/ghostty/surface.test.ts) and align the header with " +
@@ -31,28 +25,24 @@ const PROMPT_PREVIEW_TEXT =
 
 function noop() {}
 
-/** A live composer editor: type in it to feel the family and size. */
 export function PromptFontPreview() {
   const { t } = useI18n();
   const editorRef = useRef<ComposerPromptEditorHandle>(null);
   const [prompt, setPrompt] = useState(PROMPT_PREVIEW_TEXT);
   const [cursor, setCursor] = useState(PROMPT_PREVIEW_TEXT.length);
-  const onChange = useCallback((nextValue: string, nextCursor: number) => {
+  const onChange = (nextValue: string, nextCursor: number) => {
     setPrompt(nextValue);
     setCursor(nextCursor);
-  }, []);
+  };
   // The chips inside the preview name themselves for screen readers; the
   // paths and skill names they frame stay exactly as the app spells them.
-  const accessibleCopy = useMemo<ComposerAccessibleCopy>(
-    () => ({
-      accessibleLabelSuffix: t("composer.accessible.showDetailsSuffix"),
-      mentionPreview: (path) => t("composer.accessible.mentionPreview", { path }),
-      skillLabel: (skillLabel) => t("composer.accessible.skillLabel", { skill: skillLabel }),
-      skillNoDescription: t("composer.accessible.skillNoDescription"),
-      skillViewInstructions: t("composer.accessible.skillViewInstructions"),
-    }),
-    [t],
-  );
+  const accessibleCopy = ((): ComposerAccessibleCopy => ({
+    accessibleLabelSuffix: t("composer.accessible.showDetailsSuffix"),
+    mentionPreview: (path) => t("composer.accessible.mentionPreview", { path }),
+    skillLabel: (skillLabel) => t("composer.accessible.skillLabel", { skill: skillLabel }),
+    skillNoDescription: t("composer.accessible.skillNoDescription"),
+    skillViewInstructions: t("composer.accessible.skillViewInstructions"),
+  }))();
   return (
     <div className="mt-1 mb-2 rounded-lg border border-border bg-background px-3 py-2">
       <ComposerPromptEditor
@@ -61,7 +51,7 @@ export function PromptFontPreview() {
         value={prompt}
         cursor={cursor}
         contextRecords={EMPTY_COMPOSER_CONTEXT_RECORDS}
-        skills={EMPTY_SKILLS}
+        skills={PREVIEW_SKILLS}
         accessibleCopy={accessibleCopy}
         disabled={false}
         placeholder={t("composer.placeholder.disconnected")}
@@ -85,12 +75,10 @@ const DIFF_PREVIEW_PATCH = [
   "",
 ].join("\n");
 
-// Rendered once per theme through the SSR pipeline, which always awaits the
-// shared highlighter before producing HTML. The interactive FileDiff's mount
-// lifecycle can race that highlighter when the typography views remount it
-// (toggling Advanced) and lock in an unhighlighted frame; a static preview
-// needs none of that lifecycle, so it uses the deterministic renderer and
-// injects the finished HTML into a shadow root, exactly as FileDiff would.
+// The interactive FileDiff's mount lifecycle can race that highlighter when the typography views
+// remount it (toggling Advanced) and lock in an unhighlighted frame; a static preview needs none
+// of that lifecycle, so it uses the deterministic renderer and injects the finished HTML into a
+// shadow root, exactly as FileDiff would.
 const diffPreviewHtmlByTheme = new Map<DiffThemeName, Promise<readonly string[]>>();
 
 function loadDiffPreviewHtml(theme: DiffThemeName): Promise<readonly string[]> {
@@ -139,9 +127,8 @@ function StaticDiffHtml({ html }: { html: string }) {
   return <div ref={hostRef} />;
 }
 
-/** The diff panel's file diff, statically rendered by its real pipeline. */
 export function CodeFontPreview() {
-  const { resolvedTheme } = useTheme();
+  const resolvedTheme = useRenderedAppearance();
   const themeName = resolveDiffThemeName(resolvedTheme);
   const [htmlByFile, setHtmlByFile] = useState<readonly string[] | null>(null);
   useEffect(() => {
@@ -163,14 +150,8 @@ export function CodeFontPreview() {
   );
 }
 
-// A zsh-style prompt: green arrow, cyan project, blue/red git segment,
-// yellow dirty marker. It doubles as the echo loop's fresh-line prompt.
 const TERMINAL_PROMPT =
   "\x1b[1;32m→\x1b[0m \x1b[1;36mt3code\x1b[0m \x1b[1;34mgit:(\x1b[1;31mmain\x1b[1;34m)\x1b[0m \x1b[1;33m✗\x1b[0m ";
-// A dev-server startup: brand line, addresses, a test summary, and a READY
-// badge. Together the lines cover bold, dim, underline, the six accent
-// colors, and a background cell, so a font choice shows every SGR the
-// terminal actually renders.
 const TERMINAL_PREVIEW_TRANSCRIPT =
   `${TERMINAL_PROMPT}vpr dev\r\n` +
   "\r\n" +
@@ -185,18 +166,11 @@ const TERMINAL_PREVIEW_TRANSCRIPT =
   "\r\n" +
   TERMINAL_PROMPT;
 
-/** The surface treats an omitted family or size as "use the built-in default". */
 function previewTerminalFont(family: string, size: number): { family?: string; size: number } {
   const trimmed = family.trim();
   return trimmed.length > 0 ? { family: trimmed, size } : { size };
 }
 
-/**
- * The real Ghostty canvas renderer against a local echo loop instead of a
- * PTY: keys print, Enter starts a new prompt line, Backspace erases. That
- * exercises the same glyph atlas, cell metrics, and monospace gate the
- * terminal drawer uses.
- */
 export function TerminalFontPreview({ family, size }: { family: string; size: number }) {
   const { t } = useI18n();
   const mountRef = useRef<HTMLDivElement>(null);
@@ -218,14 +192,13 @@ export function TerminalFontPreview({ family, size }: { family: string; size: nu
     const surface = surfaceRef.current;
     if (!mount || !surface) return;
     surface.setTheme(terminalThemeFromApp(mount));
+    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- The tokens come from the DOM's computed styles, which a theme change rewrites.
   }, [theme, resolvedTheme]);
 
   useEffect(() => {
     const mount = mountRef.current;
     if (!mount) return;
     let cancelled = false;
-    // Column of the caret on the current input line, so Backspace stops at
-    // the prompt instead of eating it.
     let lineLength = 0;
 
     const echo = (data: string) => {
@@ -243,7 +216,6 @@ export function TerminalFontPreview({ family, size }: { family: string; size: nu
         }
         return;
       }
-      // Arrow keys and other escape reports have no cursor to move here.
       if (data.startsWith("\x1b")) return;
       const printable = [...data]
         .filter((character) => character >= " " && character !== "\x7f")
@@ -259,11 +231,9 @@ export function TerminalFontPreview({ family, size }: { family: string; size: nu
       onData: echo,
       onResize: noop,
       onSelectionChange: noop,
-      // Tab keeps walking the settings page instead of feeding the echo loop.
       beforeKey: (event) => event.key !== "Tab",
       onLinkActivate: noop,
-      // The surface names its own elements at create time, so these follow the
-      // language the preview mounted with.
+      // Ghostty names its elements at creation, so a language change recreates this preview.
       inputAriaLabel: t("terminal.accessible.input"),
       scrollbackAriaLabel: t("terminal.accessible.scrollback"),
     }).then((surface) => {
@@ -272,7 +242,6 @@ export function TerminalFontPreview({ family, size }: { family: string; size: nu
         return;
       }
       surfaceRef.current = surface;
-      // The theme and font may both have changed while the WASM surface loaded.
       surface.setTheme(terminalThemeFromApp(mount));
       const font = fontRef.current;
       void surface.setFont(previewTerminalFont(font.family, font.size));
@@ -284,7 +253,7 @@ export function TerminalFontPreview({ family, size }: { family: string; size: nu
       surfaceRef.current?.dispose();
       surfaceRef.current = null;
     };
-  }, []);
+  }, [t]);
 
   return (
     <div

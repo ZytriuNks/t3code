@@ -5,16 +5,15 @@ import type {
 } from "@t3tools/contracts";
 import type { I18nContextValue } from "../../i18n/I18nProvider";
 
-/**
- * Visual treatment for each server-reported provider status. Centralized so
- * the default-driver card and per-instance cards share the same language.
- */
 export const PROVIDER_STATUS_STYLES = {
   disabled: {
     dot: "bg-muted-foreground/50",
   },
   error: {
     dot: "bg-destructive",
+  },
+  neutral: {
+    dot: "bg-muted-foreground",
   },
   ready: {
     dot: "bg-success",
@@ -25,6 +24,26 @@ export const PROVIDER_STATUS_STYLES = {
 } as const;
 
 export type ProviderStatusKey = keyof typeof PROVIDER_STATUS_STYLES;
+
+// Antigravity's local health check verifies installation, not Google sign-in.
+// API-key and Agent Platform warnings still need attention.
+function isAntigravitySignInUnchecked(provider: ServerProvider): boolean {
+  return (
+    provider.driver === "antigravity" &&
+    provider.installed &&
+    provider.status === "warning" &&
+    provider.auth.status === "unknown" &&
+    (provider.auth.type === undefined ||
+      provider.auth.type === "oauth-personal" ||
+      provider.auth.type === "oauth-business")
+  );
+}
+
+export function getProviderStatusKey(provider: ServerProvider | undefined): ProviderStatusKey {
+  if (provider && !provider.enabled) return "disabled";
+  if (provider && isAntigravitySignInUnchecked(provider)) return "neutral";
+  return provider?.status ?? "warning";
+}
 
 /**
  * Derive the headline + detail copy shown under a provider's name in the
@@ -79,6 +98,12 @@ export function getProviderSummary(
       detail: provider.message ?? null,
     };
   }
+  if (isAntigravitySignInUnchecked(provider)) {
+    return {
+      headline: "Installed · Sign-in not checked",
+      detail: provider.message ?? null,
+    };
+  }
   if (provider.status === "warning") {
     return {
       headline: copy("settings.providers.summary.needsAttention", "Needs attention"),
@@ -118,21 +143,14 @@ export function getProviderSummary(
   };
 }
 
-/**
- * Normalize a version string for display. Adds the `v` prefix when the
- * driver reported a bare version (e.g. `1.2.3`) so cards render
- * consistently regardless of driver.
- */
 export function getProviderVersionLabel(version: string | null | undefined) {
   if (!version) return null;
   // Antigravity reports a release tag such as `agy_acp_server_20260818_01_RC01`.
-  // Show the date and candidate so the row title keeps room for the name.
   const antigravity = /^agy_acp_server_(\d{4})(\d{2})(\d{2})_\d+(?:_(\w+))?$/.exec(version);
   if (antigravity) {
     const [, year, month, day, candidate] = antigravity;
     return `${year}-${month}-${day}${candidate ? ` ${candidate}` : ""}`;
   }
-  // Only bare semver-like versions get a `v` prefix. Other tags are shown as-is.
   return /^\d/.test(version) ? `v${version}` : version;
 }
 
@@ -178,6 +196,9 @@ export function getProviderVersionAdvisoryPresentation(
   ) {
     const targetVersion = compatibility.recommendedVersion;
     const recommendation = getProviderVersionLabel(targetVersion) ?? compatibility.recommendedRange;
+    // An installed version that is already the package's latest cannot be fixed by
+    // updating it, e.g. when the recommendation needs a different package.
+    const isAlreadyLatest = advisory?.status === "current";
     return {
       title: t
         ? t(COMPATIBILITY_TITLE_KEYS[compatibility.status])
@@ -190,7 +211,9 @@ export function getProviderVersionAdvisoryPresentation(
             })
           : copy("settings.providers.version.updateForSupport", "Update for full support.")),
       updateCommand:
-        targetVersion || latestIsIncompatible ? null : (advisory?.updateCommand ?? null),
+        targetVersion || latestIsIncompatible || isAlreadyLatest
+          ? null
+          : (advisory?.updateCommand ?? null),
       emphasis: compatibility.status === "graceful" ? "normal" : "strong",
       targetVersion,
     };

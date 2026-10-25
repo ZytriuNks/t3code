@@ -45,12 +45,6 @@ export function summarizeGitHubRouting(
   return groups.length === 0 ? null : groups.join(" · ");
 }
 
-/**
- * Folded section under the environments list. One row per switched-on machine
- * with how much of its GitHub access the other machines may use. The trust
- * warning is the first line of the body so it sits next to the control.
- * Rendered only when two or more machines are on.
- */
 export function GitHubRoutingSettings({
   environments,
 }: {

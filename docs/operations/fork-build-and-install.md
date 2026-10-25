@@ -24,13 +24,14 @@ Alpha）、Experimental（待审验候选）、Dev（参考对照）。本指南
 否则会出现安装目录正确、窗口名称和系统身份却回落为 Experimental 的情况。
 构建结束后还原源码中的 `productName` 不会改变已生成安装包的身份。
 
-`install-dir-override.nsh` 在 staging 阶段写入两个 hook：
+表中是维护者已有安装的位置。升级优先沿用各阶段的注册目录；全新安装默认使用
+`%LOCALAPPDATA%\Programs\<productName>`，不在安装包中强制写入维护者的盘符。
+Beta 与 Alpha 共用安装注册身份，主程序继续使用 `T3 Code (Alpha).exe`，以便
+覆盖原文件并保留已有快捷方式。
 
-- `customInit`：把 `$INSTDIR` 强行改写到 `D:\t3code\<stage>\<productName>\`
-  后缀包含 productName 段，以免 `instFilesPre` 再次追加。
-- `customUnInstallCheck` / `customUnInstallCheckCurrentUser`：用
-  `ClearErrors` 短路 `handleUninstallResult` 的错误检查，使
-  uninstaller 退出码不再触发 `SetErrorLevel 2 / Quit`。
+三个阶段共用 `installer.nsh`。其 `customInit` 在调用旧卸载器之前，将
+`$INSTDIR` 和该阶段注册表中的 `InstallLocation` 规范化，修复旧包写入的重复
+反斜杠。卸载失败仍会阻止升级；不跳过失败，也不清除卸载项来伪装安装成功。
 
 ## 一次性安装后看到什么
 
@@ -38,7 +39,7 @@ Alpha）、Experimental（待审验候选）、Dev（参考对照）。本指南
 
 1. Beta 覆盖当前 Alpha 的安装目录；Experimental 和 Dev 保持各自目录。
 2. `HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall` 下保留
-   当前阶段的卸载项，Beta 安装前会清理 Beta/Alpha 的旧项。
+   当前阶段的卸载项，Beta 正常卸载旧 Alpha 后更新为 Beta 的版本信息。
 3. Beta/Alpha 共用 `~\.t3-alpha\` 和 `%APPDATA%\t3code\`；
    `~\.t3-experimental\`、`~\.t3-dev\` 仍各自隔离。
 
@@ -82,19 +83,21 @@ try {
 
 ## 安装流程
 
-### 为什么不能用裸 `/S`
+### 旧路径导致“应用无法关闭”
 
-`app-builder-lib` 的 `installUtil.nsh` 在 silent install 同版本
-fork build 时会进入 `UninstallLoop`：调旧版 uninstaller，失败 5 次
-后弹 `appCannotBeClosed` 提示框，默认按钮 Cancel。用户点 Cancel
-后旧 uninstaller 已部分清理，第二次 silent install 才能正常完成。
+旧包注册的安装路径可能含重复反斜杠。NSIS 将该路径传给旧卸载器后，卸载器会
+在执行卸载前返回错误码 2。安装器重试五次后统一显示“应用无法关闭”，即使应用
+没有运行也会如此。点击取消后的 `Failed to uninstall old application files: 2`
+说明升级未完成，不能据此判断新版本已覆盖旧版本。
 
-### 标准做法：先清注册表再装
+新安装包在普通双击和 `/S` 静默安装时均修复这一旧路径，再正常执行升级。
+无需手动删除卸载注册项。
 
-`scripts/fork-build/install-fork.ps1` 在运行 silent install 之前删
-除对应 productName 在 `HKCU\…\Uninstall` 下的键。NSIS 找不到卸载
-项就直接跳过 `uninstallOldVersion`、跳过整个 UninstallLoop，覆盖
-安装一次成功。
+### 安装并核对实际版本
+
+`scripts/fork-build/install-fork.ps1` 校验安装包阶段，解析已注册的实际安装目录，
+确认该目录下没有运行中的进程后再安装。完成后同时核对主程序的产品名、文件版本、
+注册版本和安装目录；退出码为 0 但未实际覆盖的情况也会报错。
 
 ```powershell
 # 用户先关闭要升级的 Beta / Experimental / Dev，再按阶段分别调用
@@ -103,12 +106,13 @@ pwsh .\scripts\fork-build\install-fork.ps1 -Stage Dev
 pwsh .\scripts\fork-build\install-fork.ps1 -Stage Experimental
 ```
 
-`Stage` 是单值参数，不支持 `-Stage Experimental,Dev`。不要使用 `-Force`：
-当前脚本会停止所有匹配的 T3 进程，可能关闭主用 Beta。Beta 安装按维护者
-明确安排执行。
+`Stage` 是单值参数，不支持 `-Stage Experimental,Dev`。`-Force` 会明确报错，
+脚本不再终止任何应用。用户先关闭目标阶段；Beta 升级时应先关闭原 Alpha。
+Beta 安装按维护者明确安排执行。
 
 显式使用 `-InstallerPath` 时必须与单个 `-Stage` 匹配；不要将它与 `-Stage All`
-组合，否则三个阶段会重复执行同一个安装包，并清理其他阶段的卸载项。
+组合，脚本会拒绝这种用法。显式指定的安装包不存在或阶段不匹配时立即报错，
+不会回退到目录中另一份包。归档安装包建议始终使用 `-InstallerPath` 指定。
 
 ## 数据迁移 / 备份
 
