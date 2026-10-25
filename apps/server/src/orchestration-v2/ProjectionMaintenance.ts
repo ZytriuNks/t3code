@@ -226,17 +226,26 @@ export const layer: Layer.Layer<
 
     const supersedableThreadEventTypes = new Set(SUPERSEDABLE_THREAD_EVENT_TYPES);
     const readStateThreadEventTypes = new Set(READ_STATE_THREAD_EVENT_TYPES);
+    // These payloads cannot change admission or visibility in a partial timeline.
+    const turnItemTransparentEventTypes = new Set([
+      "node.updated",
+      "message.updated",
+      "provider-thread.updated",
+      "provider-turn.updated",
+      "provider-session.updated",
+    ]);
     // Keep subagent.updated rows and subagent turn items: slimmed payloads reference their prompts.
     // Small pages bound work on the reader worker and synchronous fallback.
     const COMPACTION_PAGE_SIZE = 50;
 
     /**
      * Scan newest first to retain the newest state for each entity. Keyed
-     * entities (messages, nodes, turn items, PR links) also keep their oldest
-     * event: client reducers append an entity where they first see it, and
-     * replay assigns turn-item positions on first write, so a replay from any
-     * cursor must either carry that first event or find the entity already
-     * present. Only the events in between are deleted.
+     * entities (messages, nodes, PR links) also keep their oldest event: client
+     * reducers append an entity where they first see it. Turn items retain the
+     * first and last update of each consecutive segment, not their whole history:
+     * crossing another item or a run/attempt transition can remove the only update
+     * that admits an older item into a partial snapshot during cursor catch-up.
+     * Unknown and control item types remain intact and end a segment.
      * Page every event, including non-candidates: filtering before LIMIT could
      * still scan the entire history when superseded events are sparse.
      */
@@ -256,6 +265,7 @@ export const layer: Layer.Layer<
       // Per key: the lowest sequence seen so far after the newest. It is
       // deleted once an even older event turns up and kept otherwise.
       const oldestCandidateByEntityKey = new Map<string, number | null>();
+      const turnItemSegments = new Map<string, { itemId: string; candidate: number | null }>();
       let deletedEventCount = 0;
       let deletedReceiptCount = 0;
 
@@ -281,7 +291,9 @@ export const layer: Layer.Layer<
               THEN json_extract(event.payload_json, '$.id')
               WHEN event.application_event_version = 2
                 AND event.event_type = 'turn-item.updated'
-                AND json_extract(event.payload_json, '$.type') IS NOT 'subagent'
+                AND json_extract(event.payload_json, '$.type') IN (
+                  'command_execution', 'dynamic_tool', 'reasoning', 'assistant_message', 'file_change'
+                )
               THEN json_extract(event.payload_json, '$.id')
               WHEN event.application_event_version = 2
                 AND event.event_type = 'thread.pull-request-link-updated'
@@ -306,6 +318,24 @@ export const layer: Layer.Layer<
         `.pipe(NodeSqliteClient.readOnly);
         const obsolete: number[] = [];
         for (const row of rows) {
+          if (
+            row.application_event_version === 2 &&
+            row.event_type === "turn-item.updated" &&
+            row.entity_id !== null
+          ) {
+            const segment = turnItemSegments.get(row.stream_id);
+            if (segment?.itemId === row.entity_id) {
+              if (segment.candidate !== null) obsolete.push(segment.candidate);
+              segment.candidate = row.sequence;
+            } else {
+              turnItemSegments.set(row.stream_id, { itemId: row.entity_id, candidate: null });
+            }
+          } else if (
+            row.application_event_version !== 2 ||
+            !turnItemTransparentEventTypes.has(row.event_type)
+          ) {
+            turnItemSegments.delete(row.stream_id);
+          }
           if (row.imported_legacy_thread === 1) {
             obsolete.push(row.sequence);
           } else if (row.application_event_version === 2) {
@@ -334,8 +364,7 @@ export const layer: Layer.Layer<
             } else if (
               row.event_type === "thread.pull-request-link-updated" ||
               row.event_type === "message.updated" ||
-              row.event_type === "node.updated" ||
-              (row.event_type === "turn-item.updated" && row.entity_id !== null)
+              row.event_type === "node.updated"
             ) {
               const key = encodeEntityKey([row.event_type, row.stream_id, row.entity_id]);
               const candidate = oldestCandidateByEntityKey.get(key);

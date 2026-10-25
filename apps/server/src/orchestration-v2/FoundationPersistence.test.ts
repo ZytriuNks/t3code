@@ -57,6 +57,8 @@ import * as ProjectionMaintenance from "./ProjectionMaintenance.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import * as ProviderRuntimeRecovery from "./ProviderRuntimeRecoveryService.ts";
+import { buildBoundedThreadProjection } from "./threadHistoryPaging.ts";
+import { applyOrchestrationV2ProjectionEvent } from "../../../../packages/client-runtime/src/state/orchestrationV2Projection.ts";
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
 
 const isLiveStreamBufferError = Schema.is(LiveStreamBufferError);
@@ -788,16 +790,18 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
           messageEvent("message-1", "streaming"),
           nodeEvent("node-1", "running"),
           itemEvent("item-1", "streaming"),
-          subagentItemEvent("subagent-item-1", "starting"),
+          nodeEvent("node-mid", "running"),
           itemEvent("item-mid", "streaming more"),
-          subagentItemEvent("subagent-item-mid", "reading files"),
+          messageEvent("message-mid", "streaming more"),
+          itemEvent("item-2", "final"),
+          subagentItemEvent("subagent-item-1", "starting"),
           ...Array.from({ length: 501 }, (_, index) =>
             threadStateEvent(`history-${index}`, "thread.visited"),
           ),
           threadStateEvent("visit-2", "thread.visited"),
           messageEvent("message-2", "final"),
           nodeEvent("node-2", "completed"),
-          itemEvent("item-2", "final"),
+          subagentItemEvent("subagent-item-mid", "reading files"),
           subagentItemEvent("subagent-item-2", "done"),
         ],
       });
@@ -839,12 +843,10 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
       `;
 
       const summary = yield* maintenance.compactEventStore;
-      // Superseded state spans several discovery pages. The first and last
-      // update of the message, node, and turn item stay (replay order); only
-      // the turn item's middle update goes. Subagent items keep every update
-      // because later rows reference an earlier row's prompt. The rename stays
-      // too: visits are read state and only supersede each other.
-      assert.isAtLeast(summary.deletedEventCount, 505);
+      // Superseded state spans several discovery pages. The item updates can
+      // cross node/message updates, but subagent prompt anchors remain intact.
+      // The rename stays too: visits only supersede other read state.
+      assert.isAtLeast(summary.deletedEventCount, 507);
       assert.isAtLeast(summary.deletedReceiptCount, 1);
 
       const remaining = yield* sql<{ readonly event_id: string }>`
@@ -862,12 +864,12 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
           "event:foundation-compact:message-1",
           "event:foundation-compact:node-1",
           "event:foundation-compact:item-1",
+          "event:foundation-compact:item-2",
           "event:foundation-compact:subagent-item-1",
-          "event:foundation-compact:subagent-item-mid",
           "event:foundation-compact:visit-2",
           "event:foundation-compact:message-2",
           "event:foundation-compact:node-2",
-          "event:foundation-compact:item-2",
+          "event:foundation-compact:subagent-item-mid",
           "event:foundation-compact:subagent-item-2",
         ],
       );
@@ -896,6 +898,157 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
       assert.isTrue((yield* maintenance.verify).valid);
       assert.isTrue((yield* maintenance.rebuild).valid);
       assert.deepEqual(yield* projections.getThreadProjection(threadId), beforeCompaction);
+    }),
+  );
+
+  it.effect("preserves partial replay when a tool finishes after its run", () =>
+    Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const store = yield* EventStore.EventStoreV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("thread:compact-partial-replay");
+      const thread = makeThread(threadId, now);
+      const run: OrchestrationV2Run = {
+        id: RunId.make("run:compact-partial-replay:old"),
+        threadId,
+        ordinal: 1,
+        providerInstanceId,
+        modelSelection,
+        providerThreadId: null,
+        userMessageId: MessageId.make("message:compact-partial-replay"),
+        rootNodeId: null,
+        activeAttemptId: null,
+        status: "running",
+        queuePosition: null,
+        requestedAt: now,
+        startedAt: now,
+        completedAt: null,
+        checkpointId: null,
+        contextHandoffId: null,
+      };
+      const newerRun: OrchestrationV2Run = {
+        ...run,
+        id: RunId.make("run:compact-partial-replay:new"),
+        ordinal: 2,
+        status: "completed",
+        completedAt: now,
+      };
+      const itemId = TurnItemId.make("item:compact-partial-replay:old");
+      const item = (
+        suffix: string,
+        text: string,
+      ): Extract<OrchestrationV2DomainEvent, { type: "turn-item.updated" }> => ({
+        id: EventId.make(`event:compact-partial-replay:${suffix}`),
+        type: "turn-item.updated",
+        threadId,
+        occurredAt: now,
+        payload: {
+          id: itemId,
+          threadId,
+          runId: run.id,
+          nodeId: null,
+          providerThreadId: null,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: 1,
+          type: "dynamic_tool",
+          toolName: "background-command",
+          input: {},
+          output: text,
+          status: suffix === "final" ? "completed" : "running",
+          title: null,
+          startedAt: now,
+          completedAt: suffix === "final" ? now : null,
+          updatedAt: now,
+        },
+      });
+      const runEvent = (
+        suffix: string,
+        payload: OrchestrationV2Run,
+      ): OrchestrationV2DomainEvent => ({
+        id: EventId.make(`event:compact-partial-replay:${suffix}`),
+        type: "run.updated",
+        threadId,
+        occurredAt: now,
+        payload,
+      });
+      const newerItem = item("newer-item", "newer");
+      yield* sink.write({
+        events: [
+          threadCreatedEvent({ id: "event:compact-partial-replay:create", thread, now }),
+          runEvent("old-run", run),
+          runEvent("new-run", newerRun),
+          item("first", "first"),
+          {
+            ...newerItem,
+            payload: {
+              ...newerItem.payload,
+              id: TurnItemId.make("item:compact-partial-replay:new"),
+              runId: newerRun.id,
+            },
+          },
+        ],
+      });
+      const cursor = yield* store.latestSequence();
+      const bounded = buildBoundedThreadProjection({
+        projection: yield* projections.getThreadProjection(threadId),
+        snapshotSequence: cursor,
+        policy: { maxItems: 1, maxUserTurns: 1, maxEncodedBytes: 256 * 1024 },
+      });
+      assert.isFalse(bounded.projection.turnItems.some((row) => row.id === itemId));
+      assert.equal(bounded.projection.runs.find((row) => row.id === run.id)?.status, "running");
+      yield* sink.write({
+        events: [
+          ...Array.from({ length: 60 }, (_, index) =>
+            item(`progress-${index}`, `progress ${index}`),
+          ),
+          runEvent("completed-run", { ...run, status: "completed", completedAt: now }),
+          item("final", "final output"),
+        ],
+      });
+      const replay = (events: ReadonlyArray<OrchestrationV2DomainEvent>) => {
+        let projection: OrchestrationV2ThreadProjection | null = bounded.projection;
+        let watermark = bounded.latestLocalTurnOrdinal;
+        for (const event of events) {
+          projection = applyOrchestrationV2ProjectionEvent(projection, event, {
+            partialTimeline: true,
+            latestLocalTurnOrdinal: watermark,
+          });
+          if (event.type === "turn-item.updated") {
+            watermark = Math.max(watermark ?? 0, event.payload.ordinal);
+          }
+        }
+        return projection;
+      };
+      const readTail = store.read({ threadId, afterSequence: cursor }).pipe(Stream.runCollect);
+      const before = replay((yield* readTail).map((row) => row.event));
+      const originalItem = before?.turnItems.find((row) => row.id === itemId);
+      assert.equal(
+        originalItem?.type === "dynamic_tool" ? originalItem.output : undefined,
+        "final output",
+      );
+
+      yield* maintenance.compactEventStore;
+      const compactedTail = yield* readTail;
+      assert.deepEqual(
+        compactedTail.map((row) => row.event.id),
+        [
+          "event:compact-partial-replay:progress-0",
+          "event:compact-partial-replay:progress-59",
+          "event:compact-partial-replay:completed-run",
+          "event:compact-partial-replay:final",
+        ],
+      );
+      const after = replay(compactedTail.map((row) => row.event));
+      const recoveredItem = after?.turnItems.find((row) => row.id === itemId);
+      assert.equal(
+        recoveredItem?.type === "dynamic_tool" ? recoveredItem.output : undefined,
+        "final output",
+      );
+      assert.deepEqual(after, before);
     }),
   );
 
