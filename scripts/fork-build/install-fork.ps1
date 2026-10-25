@@ -64,20 +64,35 @@ function Resolve-InstallDirectory {
   }
   if ($directories.Count -eq 1) { return $directories[0] }
 
-  $legacyStage = if ($StageName -eq "Beta") { "Alpha" } else { $StageName }
-  $executableName = "T3 Code ($legacyStage)"
+  $stageNames = @($StageName)
+  if ($StageName -eq "Beta") { $stageNames += "Alpha" }
   $candidates = @()
   if ($StageName -eq "Beta" -and $env:T3CODE_ALPHA_INSTALL_DIR) {
     $candidates += $env:T3CODE_ALPHA_INSTALL_DIR
   }
-  $candidates += "D:\t3code\$($legacyStage.ToLowerInvariant())\$executableName"
-  $candidates += Join-Path $env:LOCALAPPDATA "Programs\$executableName"
+  foreach ($name in $stageNames) {
+    $candidates += "D:\t3code\$($name.ToLowerInvariant())\T3 Code ($name)"
+    $candidates += Join-Path $env:LOCALAPPDATA "Programs\T3 Code ($name)"
+  }
   foreach ($candidate in $candidates) {
-    if (Test-Path -LiteralPath (Join-Path $candidate "$executableName.exe")) {
-      return [IO.Path]::GetFullPath($candidate).TrimEnd('\')
+    foreach ($name in $stageNames) {
+      if (Test-Path -LiteralPath (Join-Path $candidate "T3 Code ($name).exe")) {
+        return [IO.Path]::GetFullPath($candidate).TrimEnd('\')
+      }
     }
   }
   return Join-Path $env:LOCALAPPDATA "Programs\T3 Code ($StageName)"
+}
+
+function Resolve-BetaInstallDirectory {
+  param([string]$Directory)
+  $directory = [IO.Path]::GetFullPath($Directory).TrimEnd('\')
+  if ((Split-Path -Leaf $directory) -ne "T3 Code (Alpha)") { return $directory }
+  $parent = Split-Path -Parent $directory
+  if ((Split-Path -Leaf $parent) -eq "alpha") {
+    $parent = Join-Path (Split-Path -Parent $parent) "beta"
+  }
+  return Join-Path $parent "T3 Code (Beta)"
 }
 
 function Resolve-Installer {
@@ -102,13 +117,18 @@ $plans = foreach ($name in $stages) {
   if ($version.ProductName -ne "T3 Code ($name)" -or -not $version.FileVersion) {
     throw "Installer identity does not match $name`: $installer"
   }
-  [pscustomobject]@{ Stage = $name; Installer = $installer; Version = $version.FileVersion; Directory = Resolve-InstallDirectory $name }
+  $previousDirectory = Resolve-InstallDirectory $name
+  $directory = if ($name -eq "Beta") { Resolve-BetaInstallDirectory $previousDirectory } else { $previousDirectory }
+  [pscustomobject]@{ Stage = $name; Installer = $installer; Version = $version.FileVersion; Directory = $directory; PreviousDirectory = $previousDirectory }
 }
 
 foreach ($plan in $plans) {
-  $prefix = $plan.Directory.TrimEnd('\') + '\'
+  $prefixes = @($plan.PreviousDirectory, $plan.Directory) | Select-Object -Unique | ForEach-Object { $_.TrimEnd('\') + '\' }
   $running = @(Get-CimInstance Win32_Process | Where-Object {
-    $_.ExecutablePath -and [IO.Path]::GetFullPath($_.ExecutablePath).StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)
+    if ($_.ExecutablePath) {
+      $processPath = [IO.Path]::GetFullPath($_.ExecutablePath)
+      @($prefixes | Where-Object { $processPath.StartsWith($_, [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0
+    }
   })
   if ($running.Count -gt 0) {
     throw "Close $($plan.Stage) before installing (process IDs: $($running.ProcessId -join ', '))."
@@ -118,7 +138,7 @@ foreach ($plan in $plans) {
   $proc = Start-Process -FilePath $plan.Installer -ArgumentList @('/S', "/D=$($plan.Directory)") -WindowStyle Hidden -Wait -PassThru
   if ($proc.ExitCode -ne 0) { throw "Installer for $($plan.Stage) exited with code $($proc.ExitCode)." }
 
-  $executableName = if ($plan.Stage -eq "Beta") { "T3 Code (Alpha)" } else { "T3 Code ($($plan.Stage))" }
+  $executableName = "T3 Code ($($plan.Stage))"
   $executable = Join-Path $plan.Directory "$executableName.exe"
   if (-not (Test-Path -LiteralPath $executable)) { throw "Installed executable is missing: $executable" }
   $installed = [Diagnostics.FileVersionInfo]::GetVersionInfo($executable)

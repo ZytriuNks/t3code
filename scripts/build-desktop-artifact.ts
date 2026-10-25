@@ -2820,11 +2820,6 @@ export function resolveDesktopProductName(version: string): string {
     : (desktopPackageJson.productName ?? "T3 Code");
 }
 
-export function resolveWindowsExecutableName(productName: string): string {
-  // Preserve existing shortcuts and overwrite the legacy executable in place.
-  return productName === "T3 Code (Beta)" ? "T3 Code (Alpha)" : productName;
-}
-
 export function resolveDesktopIdentity(productName: string): {
   readonly appId: string;
   readonly scheme: string;
@@ -3047,7 +3042,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     const winConfig: Record<string, unknown> = {
       target: [target],
       icon: "icon.ico",
-      executableName: resolveWindowsExecutableName(productName),
+      executableName: productName,
       // Smart App Control validates unpacked native addons independently from
       // the signed desktop executable. Extend release signing to every native
       // Windows library that Electron or the server sidecar loads at runtime.
@@ -4158,7 +4153,7 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
   if (options.platform === "win") {
     yield* validateWindowsPackagedPayload({
       stageDistDir,
-      appExecutableName: `${resolveWindowsExecutableName(stagePackageJson.productName)}.exe`,
+      appExecutableName: `${stagePackageJson.productName}.exe`,
       targetArch: options.arch,
       appVersion,
       expectWslRuntime: bundlesWslRuntime({

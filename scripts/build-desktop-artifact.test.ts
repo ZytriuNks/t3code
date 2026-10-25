@@ -45,7 +45,6 @@ import {
   resolveBuildOptions,
   resolveDesktopIdentity,
   resolveDesktopProductName,
-  resolveWindowsExecutableName,
   stageLinuxCaptureHelper,
   stageWslRuntimeArchive,
   ancestorNodeModulesPaths,
@@ -246,12 +245,6 @@ const makeWindowsPayloadFixture = Effect.fn("test.makeWindowsPayloadFixture")(fu
 });
 
 it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
-  it("preserves Windows executable names across channel upgrades", () => {
-    assert.equal(resolveWindowsExecutableName("T3 Code (Beta)"), "T3 Code (Alpha)");
-    assert.equal(resolveWindowsExecutableName("T3 Code (Dev)"), "T3 Code (Dev)");
-    assert.equal(resolveWindowsExecutableName("T3 Code (Experimental)"), "T3 Code (Experimental)");
-  });
-
   it("switches desktop packaging product names to nightly for nightly builds", () => {
     assert.equal(resolveDesktopProductName("0.1.0"), "T3 Code (Beta)");
     assert.equal(resolveDesktopProductName("0.0.17-nightly.20260413.42"), "T3 Code (Experimental)");
@@ -281,7 +274,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       productName: "T3 Code (Beta)",
       appId: "com.t3tools.t3code",
       scheme: "t3code",
-      executableName: "T3 Code (Alpha)",
+      executableName: "T3 Code (Beta)",
     },
     {
       version: "0.0.17-nightly.20260413.42",

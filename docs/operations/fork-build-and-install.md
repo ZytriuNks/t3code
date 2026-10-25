@@ -10,7 +10,7 @@ Alpha）、Experimental（待审验候选）、Dev（参考对照）。本指南
 
 | productName              | 安装目录                                         | Chromium userData                | Server t3Home         |
 | ------------------------ | ------------------------------------------------ | -------------------------------- | --------------------- |
-| `T3 Code (Beta)`         | 复用当前 Alpha 安装目录（由安装脚本解析）        | `%APPDATA%\t3code\`              | `~\.t3-alpha\`        |
+| `T3 Code (Beta)`         | `D:\t3code\beta\T3 Code (Beta)\`                 | `%APPDATA%\t3code\`              | `~\.t3-alpha\`        |
 | `T3 Code (Experimental)` | `D:\t3code\experimental\T3 Code (Experimental)\` | `%APPDATA%\t3code-experimental\` | `~\.t3-experimental\` |
 | `T3 Code (Dev)`          | `D:\t3code\dev\T3 Code (Dev)\`                   | `%APPDATA%\t3code-dev\`          | `~\.t3-dev\`          |
 
@@ -24,10 +24,12 @@ Alpha）、Experimental（待审验候选）、Dev（参考对照）。本指南
 否则会出现安装目录正确、窗口名称和系统身份却回落为 Experimental 的情况。
 构建结束后还原源码中的 `productName` 不会改变已生成安装包的身份。
 
-表中是维护者已有安装的位置。升级优先沿用各阶段的注册目录；全新安装默认使用
+表中是维护者安装目录的约定。升级优先沿用各阶段的注册目录；全新安装默认使用
 `%LOCALAPPDATA%\Programs\<productName>`，不在安装包中强制写入维护者的盘符。
-Beta 与 Alpha 共用安装注册身份，主程序继续使用 `T3 Code (Alpha).exe`，以便
-覆盖原文件并保留已有快捷方式。
+Beta 与 Alpha 共用安装注册身份。Beta 的主程序为 `T3 Code (Beta).exe`；升级时
+先正常卸载旧版，再安装新程序并更新快捷方式。标准目录末尾的 `T3 Code (Alpha)`
+改为 `T3 Code (Beta)`，其直接父目录若为 `alpha`，一并改为 `beta`。其他自定义
+目录保持原位置；安装器显式收到 `/D` 时按指定位置安装。
 
 三个阶段共用 `installer.nsh`。其 `customInit` 在调用旧卸载器之前，将
 `$INSTDIR` 和该阶段注册表中的 `InstallLocation` 规范化，修复旧包写入的重复
@@ -37,7 +39,7 @@ Beta 与 Alpha 共用安装注册身份，主程序继续使用 `T3 Code (Alpha)
 
 安装完成后您能在以下三处看到 fork：
 
-1. Beta 覆盖当前 Alpha 的安装目录；Experimental 和 Dev 保持各自目录。
+1. Beta 将标准 Alpha 程序目录迁至 Beta；Experimental 和 Dev 保持各自目录。
 2. `HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall` 下保留
    当前阶段的卸载项，Beta 正常卸载旧 Alpha 后更新为 Beta 的版本信息。
 3. Beta/Alpha 共用 `~\.t3-alpha\` 和 `%APPDATA%\t3code\`；
@@ -96,7 +98,7 @@ try {
 ### 安装并核对实际版本
 
 `scripts/fork-build/install-fork.ps1` 校验安装包阶段，解析已注册的实际安装目录，
-确认该目录下没有运行中的进程后再安装。完成后同时核对主程序的产品名、文件版本、
+确认新旧目录下没有运行中的进程后再安装。完成后同时核对主程序的产品名、文件版本、
 注册版本和安装目录；退出码为 0 但未实际覆盖的情况也会报错。
 
 ```powershell

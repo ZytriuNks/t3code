@@ -51,6 +51,42 @@ function Assert-Throws([scriptblock]$Action, [string]$Expected) {
   Assert-Equal (Resolve-InstallDirectory Beta) 'D:\custom\existing Alpha'
 }
 
+$betaDirectories = @(
+  @{ Before = 'D:\t3code\alpha\T3 Code (Alpha)'; After = 'D:\t3code\beta\T3 Code (Beta)' },
+  @{ Before = 'D:\Apps\T3 Code (Alpha)'; After = 'D:\Apps\T3 Code (Beta)' },
+  @{ Before = 'D:\Apps\ALPHA\T3 CODE (ALPHA)'; After = 'D:\Apps\beta\T3 Code (Beta)' },
+  @{ Before = 'D:\t3code\beta\T3 Code (Beta)'; After = 'D:\t3code\beta\T3 Code (Beta)' },
+  @{ Before = 'D:\custom\existing Alpha'; After = 'D:\custom\existing Alpha' },
+  @{ Before = 'D:\alpha-projects\T3 Code (Alpha)'; After = 'D:\alpha-projects\T3 Code (Beta)' },
+  @{ Before = 'D:\T3 Code (Alpha)'; After = 'D:\T3 Code (Beta)' }
+)
+foreach ($directory in $betaDirectories) {
+  Assert-Equal (Resolve-BetaInstallDirectory $directory.Before) $directory.After
+}
+
+$installLoop = $ast.EndBlock.Statements | Where-Object {
+  $_ -is [Management.Automation.Language.ForEachStatementAst] -and $_.Variable.VariablePath.UserPath -eq 'plan'
+}
+$processPaths = @(
+  @{ Path = 'D:\sandbox\alpha\T3 Code (Alpha)\T3 Code (Alpha).exe'; Error = 'Close Beta before installing' },
+  @{ Path = 'D:\sandbox\beta\T3 Code (Beta)\T3 Code (Beta).exe'; Error = 'Close Beta before installing' },
+  @{ Path = 'D:\sandbox\alpha\T3 Code (Alpha) other\unrelated.exe'; Error = 'Installer launch reached' }
+)
+foreach ($process in $processPaths) {
+  & {
+    function Get-CimInstance {
+      [pscustomobject]@{ ExecutablePath = $process.Path; ProcessId = 123 }
+    }
+    function Start-Process { throw 'Installer launch reached' }
+    $plans = @([pscustomobject]@{
+      Stage = 'Beta'; Version = '1.0.0'; Installer = 'unused.exe'
+      PreviousDirectory = 'D:\sandbox\alpha\T3 Code (Alpha)'
+      Directory = 'D:\sandbox\beta\T3 Code (Beta)'
+    })
+    Assert-Throws { & ([scriptblock]::Create($installLoop.Extent.Text)) 6>$null } $process.Error
+  }
+}
+
 & {
   function Get-StageRegistration {
     [pscustomobject]@{ Directory = 'D:\one' }
@@ -86,4 +122,4 @@ foreach ($case in $cases) {
     throw "Unexpected preflight result: $output"
   }
 }
-Write-Output '8 installer helper regression checks passed.'
+Write-Output '18 installer helper regression checks passed.'

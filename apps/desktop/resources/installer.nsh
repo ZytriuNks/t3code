@@ -11,7 +11,7 @@
     Push $1
     ; Legacy registrations contain doubled separators. NSIS rejects that
     ; InstallLocation before the old uninstaller reaches its uninstall section.
-    ; Beta shares the legacy Alpha registry identity and installation directory.
+    ; Keep the registered old directory until its uninstaller has finished.
     GetFullPathName $INSTDIR "$INSTDIR"
     ReadRegStr $0 SHELL_CONTEXT "${INSTALL_REGISTRY_KEY}" InstallLocation
     ${If} $0 != ""
@@ -32,6 +32,28 @@
     Pop $0
     ClearErrors
     !undef T3_NORMALIZE_INSTALL_PATH
+  !endif
+  !if "${PRODUCT_NAME}" == "T3 Code (Beta)"
+    Push $0
+    Push $1
+    Push $2
+    ; An explicit /D remains authoritative, including custom installation paths.
+    !insertmacro GetDParameter $0
+    ${If} $0 == ""
+      ${GetFileName} "$INSTDIR" $0
+      ${If} $0 == "T3 Code (Alpha)"
+        ${GetParent} "$INSTDIR" $1
+        ${GetFileName} "$1" $2
+        ${If} $2 == "alpha"
+          ${GetParent} "$1" $1
+          StrCpy $1 "$1\beta"
+        ${EndIf}
+        StrCpy $INSTDIR "$1\T3 Code (Beta)"
+      ${EndIf}
+    ${EndIf}
+    Pop $2
+    Pop $1
+    Pop $0
   !endif
 !macroend
 
