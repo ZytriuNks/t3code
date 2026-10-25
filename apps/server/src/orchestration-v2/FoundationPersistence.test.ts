@@ -748,6 +748,37 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
           streaming: false,
         },
       });
+      const subagentItemEvent = (suffix: string, progress: string): OrchestrationV2DomainEvent => ({
+        id: EventId.make(`event:foundation-compact:${suffix}`),
+        type: "turn-item.updated",
+        threadId,
+        occurredAt: now,
+        payload: {
+          id: TurnItemId.make("turn-item:foundation-compact:subagent"),
+          threadId,
+          runId: null,
+          nodeId: null,
+          providerThreadId: null,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: 2,
+          status: "running",
+          title: null,
+          startedAt: now,
+          completedAt: null,
+          updatedAt: now,
+          type: "subagent",
+          subagentId: NodeId.make("node:foundation-compact:subagent"),
+          origin: "provider_native",
+          driver: ProviderDriverKind.make("codex"),
+          providerInstanceId,
+          childThreadId: null,
+          prompt: "inspect the repository",
+          progress,
+          result: null,
+        },
+      });
 
       yield* eventSink.write({
         events: [
@@ -757,6 +788,9 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
           messageEvent("message-1", "streaming"),
           nodeEvent("node-1", "running"),
           itemEvent("item-1", "streaming"),
+          subagentItemEvent("subagent-item-1", "starting"),
+          itemEvent("item-mid", "streaming more"),
+          subagentItemEvent("subagent-item-mid", "reading files"),
           ...Array.from({ length: 501 }, (_, index) =>
             threadStateEvent(`history-${index}`, "thread.visited"),
           ),
@@ -764,6 +798,7 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
           messageEvent("message-2", "final"),
           nodeEvent("node-2", "completed"),
           itemEvent("item-2", "final"),
+          subagentItemEvent("subagent-item-2", "done"),
         ],
       });
       const beforeCompaction = yield* projections.getThreadProjection(threadId);
@@ -804,10 +839,12 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
       `;
 
       const summary = yield* maintenance.compactEventStore;
-      // Superseded state spans several discovery pages. Both turn-item updates
-      // stay, and so do the first message and node events (replay order). The
-      // rename stays too: visits are read state and only supersede each other.
-      assert.isAtLeast(summary.deletedEventCount, 504);
+      // Superseded state spans several discovery pages. The first and last
+      // update of the message, node, and turn item stay (replay order); only
+      // the turn item's middle update goes. Subagent items keep every update
+      // because later rows reference an earlier row's prompt. The rename stays
+      // too: visits are read state and only supersede each other.
+      assert.isAtLeast(summary.deletedEventCount, 505);
       assert.isAtLeast(summary.deletedReceiptCount, 1);
 
       const remaining = yield* sql<{ readonly event_id: string }>`
@@ -825,10 +862,13 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
           "event:foundation-compact:message-1",
           "event:foundation-compact:node-1",
           "event:foundation-compact:item-1",
+          "event:foundation-compact:subagent-item-1",
+          "event:foundation-compact:subagent-item-mid",
           "event:foundation-compact:visit-2",
           "event:foundation-compact:message-2",
           "event:foundation-compact:node-2",
           "event:foundation-compact:item-2",
+          "event:foundation-compact:subagent-item-2",
         ],
       );
 
