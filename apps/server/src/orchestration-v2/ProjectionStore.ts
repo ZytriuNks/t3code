@@ -88,6 +88,7 @@ import type * as Statement from "effect/sql/Statement";
 
 import { MCP_APP_OUTPUT_KEY } from "@t3tools/shared/mcpApp";
 import { threadHtmlRenderAttachmentIds } from "../attachmentStore.ts";
+import type { LifecycleThread } from "./ThreadOwnership.ts";
 import {
   isThreadHistoryUserTurn,
   isConversationHistoryItem,
@@ -384,6 +385,12 @@ export interface ShellSnapshotOptions {
 }
 
 export interface ProjectionStoreV2Shape {
+  readonly getOwnershipPath: (
+    threadId: ThreadId,
+  ) => Effect.Effect<ReadonlyArray<LifecycleThread>, ProjectionStoreV2Error>;
+  readonly getSubagentDescendants: (
+    threadId: ThreadId,
+  ) => Effect.Effect<ReadonlyArray<LifecycleThread>, ProjectionStoreV2Error>;
   readonly searchThreadStream: (
     input: OrchestrationV2SearchThreadInput,
   ) => Stream.Stream<OrchestrationV2SearchThreadResult, ProjectionStoreV2Error>;
@@ -1902,6 +1909,86 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
   ProjectionStoreV2,
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
+
+    const decodeLifecycleThread = Schema.decodeUnknownEffect(
+      Schema.fromJsonString(
+        Schema.Struct({
+          id: OrchestrationV2AppThreadJsonSchema.fields.id,
+          projectId: OrchestrationV2AppThreadJsonSchema.fields.projectId,
+          lineage: OrchestrationV2AppThreadJsonSchema.fields.lineage,
+          archivedAt: OrchestrationV2AppThreadJsonSchema.fields.archivedAt,
+          deletedAt: OrchestrationV2AppThreadJsonSchema.fields.deletedAt,
+        }),
+      ),
+    );
+    const lifecyclePayload = sql`
+      json_object(
+        'id', thread.thread_id,
+        'projectId', thread.project_id,
+        'lineage', json_extract(thread.payload_json, '$.lineage'),
+        'archivedAt', thread.archived_at,
+        'deletedAt', thread.deleted_at
+      ) AS payload_json
+    `;
+
+    const getOwnershipPath: ProjectionStoreV2Shape["getOwnershipPath"] = Effect.fn(
+      "ProjectionStore.getOwnershipPath",
+    )(
+      function* (threadId) {
+        const rows = yield* sql<{ readonly payload_json: string }>`
+        WITH RECURSIVE ownership_path(thread_id) AS (
+          SELECT thread_id FROM orchestration_v2_projection_threads WHERE thread_id = ${threadId}
+          UNION
+          SELECT parent.thread_id
+          FROM ownership_path AS path
+          JOIN orchestration_v2_projection_threads AS child ON child.thread_id = path.thread_id
+          JOIN orchestration_v2_projection_threads AS parent
+            ON parent.thread_id = json_extract(child.payload_json, '$.lineage.parentThreadId')
+          WHERE json_extract(child.payload_json, '$.lineage.relationshipToParent') = 'subagent'
+        )
+        SELECT ${lifecyclePayload}
+        FROM ownership_path AS path
+        CROSS JOIN orchestration_v2_projection_threads AS thread
+        WHERE thread.thread_id = path.thread_id
+      `;
+        if (rows.length === 0) return yield* new ProjectionStoreThreadNotFoundError({ threadId });
+        return yield* Effect.forEach(rows, (row) => decodeLifecycleThread(row.payload_json));
+      },
+      (effect, threadId) =>
+        Effect.mapError(effect, (cause) =>
+          isProjectionStoreThreadNotFoundError(cause)
+            ? cause
+            : new ProjectionStoreReadError({ threadId, cause }),
+        ),
+    );
+
+    const getSubagentDescendants: ProjectionStoreV2Shape["getSubagentDescendants"] = Effect.fn(
+      "ProjectionStore.getSubagentDescendants",
+    )(
+      function* (threadId) {
+        // Keep the recursive IDs outermost. Unary + removes their TEXT affinity so
+        // SQLite can seek the JSON expression index instead of scanning every child.
+        const rows = yield* sql<{ readonly payload_json: string }>`
+        WITH RECURSIVE descendants(thread_id) AS (
+          SELECT thread_id FROM orchestration_v2_projection_threads WHERE thread_id = ${threadId}
+          UNION
+          SELECT child.thread_id
+          FROM descendants AS parent
+          CROSS JOIN orchestration_v2_projection_threads AS child
+            INDEXED BY orchestration_v2_projection_threads_subagent_parent_idx
+          WHERE json_extract(child.payload_json, '$.lineage.relationshipToParent') = 'subagent'
+            AND json_extract(child.payload_json, '$.lineage.parentThreadId') = +parent.thread_id
+        )
+        SELECT ${lifecyclePayload}
+        FROM descendants
+        CROSS JOIN orchestration_v2_projection_threads AS thread
+        WHERE thread.thread_id = descendants.thread_id AND descendants.thread_id <> ${threadId}
+      `;
+        return yield* Effect.forEach(rows, (row) => decodeLifecycleThread(row.payload_json));
+      },
+      (effect, threadId) =>
+        Effect.mapError(effect, (cause) => new ProjectionStoreReadError({ threadId, cause })),
+    );
 
     // For run upserts: a snapshot without `path` keeps the value another event recorded there.
     const keepRecordedRunField = (payload: Statement.Fragment, path: string) => sql`
@@ -6484,6 +6571,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
 
     return {
       apply,
+      getOwnershipPath,
+      getSubagentDescendants,
       getShellSnapshot,
       readShellSnapshot,
       getThreadShell,
@@ -6533,7 +6622,60 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
     const replayState = yield* Ref.make(makeProjectionReplayState());
     const sequence = yield* Ref.make(0);
 
+    const lifecycleThread = (thread: OrchestrationV2AppThread): LifecycleThread => ({
+      id: thread.id,
+      projectId: thread.projectId,
+      lineage: thread.lineage,
+      archivedAt: thread.archivedAt,
+      deletedAt: thread.deletedAt,
+    });
+
     const service: ProjectionStoreV2Shape = {
+      getOwnershipPath: Effect.fn("ProjectionStore.getOwnershipPath")(function* (threadId) {
+        const { projections } = yield* Ref.get(replayState);
+        if (!projections.has(threadId))
+          return yield* new ProjectionStoreThreadNotFoundError({ threadId });
+        const path: Array<LifecycleThread> = [];
+        const seen = new Set<ThreadId>();
+        let currentId: ThreadId | null = threadId;
+        while (currentId !== null && !seen.has(currentId)) {
+          seen.add(currentId);
+          const current: OrchestrationV2AppThread | undefined = projections.get(currentId)?.thread;
+          if (current === undefined) break;
+          path.push(lifecycleThread(current));
+          currentId =
+            current.lineage.relationshipToParent === "subagent"
+              ? current.lineage.parentThreadId
+              : null;
+        }
+        return path;
+      }),
+      getSubagentDescendants: Effect.fn("ProjectionStore.getSubagentDescendants")(
+        function* (threadId) {
+          const { projections } = yield* Ref.get(replayState);
+          if (!projections.has(threadId)) return [];
+          const children = new Map<ThreadId, Array<LifecycleThread>>();
+          for (const { thread } of projections.values()) {
+            const parentId = thread.lineage.parentThreadId;
+            if (thread.lineage.relationshipToParent !== "subagent" || parentId === null) continue;
+            const siblings = children.get(parentId) ?? [];
+            siblings.push(lifecycleThread(thread));
+            children.set(parentId, siblings);
+          }
+          const descendants: Array<LifecycleThread> = [];
+          const seen = new Set([threadId]);
+          const pending = [threadId];
+          for (let index = 0; index < pending.length; index++) {
+            for (const child of children.get(pending[index]!) ?? []) {
+              if (seen.has(child.id)) continue;
+              seen.add(child.id);
+              descendants.push(child);
+              pending.push(child.id);
+            }
+          }
+          return descendants;
+        },
+      ),
       apply:
         /* This helper runs for individual orchestration events; the enclosing operation owns the span. */
         Effect.fnUntraced(function* (event) {
