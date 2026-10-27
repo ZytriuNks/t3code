@@ -1,6 +1,7 @@
 import * as NodeOS from "node:os";
 
 import {
+  type NativeSessionStorage as Storage,
   AgentSessionScanError,
   ClaudeSettings,
   CodexSettings,
@@ -33,6 +34,8 @@ import {
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { normalizeProjectPathForComparison } from "@t3tools/shared/path";
 
+import * as NativeSessionStorage from "@t3tools/provider-core/server/NativeSessionStorage";
+import { nativeStorageScope } from "@t3tools/provider-core/server/IdAllocator";
 import * as ServerConfig from "../config.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
@@ -146,10 +149,19 @@ export type AgentSessionRecentThread =
   | {
       readonly _tag: "Importable";
       readonly thread: AgentSessionThread;
+      readonly nativeStorage: Storage;
       readonly source: AgentSessionImportSource;
     }
-  | { readonly _tag: "AlreadyImported"; readonly source: AgentSessionImportSource }
-  | { readonly _tag: "Duplicate"; readonly source: AgentSessionImportSource }
+  | {
+      readonly _tag: "AlreadyImported";
+      readonly source: AgentSessionImportSource;
+      readonly nativeStorage: Storage;
+    }
+  | {
+      readonly _tag: "Duplicate";
+      readonly source: AgentSessionImportSource;
+      readonly nativeStorage: Storage;
+    }
   | { readonly _tag: "Skipped" };
 
 export class AgentSessionScanner extends Context.Service<
@@ -166,6 +178,7 @@ export class AgentSessionScanner extends Context.Service<
 type AgentSessionSource = AgentSessionProjectCandidate["sources"][number];
 
 interface RawCandidate {
+  readonly storageRoot: string;
   readonly cwd: string;
   readonly source: AgentSessionSource;
   readonly providerInstanceId: ProviderInstanceId;
@@ -178,6 +191,7 @@ interface RawCandidate {
 }
 
 interface TranscriptCandidate {
+  readonly storageRoot: string;
   readonly filePath: string;
   readonly mtimeMs: number;
   readonly providerInstanceId: ProviderInstanceId;
@@ -644,6 +658,7 @@ export const make = Effect.gen(function* () {
   const foldWorktreeCase = (yield* HostProcess.Platform) === "win32";
   const hostEnvironment = yield* HostProcess.Environment;
   const homeDir = yield* HostProcess.HomeDirectory;
+  const storage = yield* NativeSessionStorage.NativeSessionStorage;
   // `/private/tmp` is what macOS reports for sessions started in `/tmp`.
   const excludedProjectRoots = new Set(
     [homeDir, NodeOS.tmpdir(), "/tmp", "/private/tmp"].map((directory) =>
@@ -964,6 +979,7 @@ export const make = Effect.gen(function* () {
             continue;
           }
           transcripts.push({
+            storageRoot: homePath,
             filePath,
             mtimeMs: stats.value.mtime.value.getTime(),
             providerInstanceId,
@@ -1025,6 +1041,7 @@ export const make = Effect.gen(function* () {
                 Option.isSome(stats.value.mtime)
               ) {
                 transcripts.push({
+                  storageRoot: homePath,
                   filePath,
                   mtimeMs: stats.value.mtime.value.getTime(),
                   providerInstanceId,
@@ -1048,6 +1065,7 @@ export const make = Effect.gen(function* () {
       string,
       {
         cwd: string;
+        storageRoot: string;
         providerInstanceId: ProviderInstanceId;
         lastActiveAtMs: number;
         transcripts: Array<{ filePath: string; mtimeMs: number }>;
@@ -1065,6 +1083,7 @@ export const make = Effect.gen(function* () {
       } else {
         byOwnerAndCwd.set(key, {
           cwd,
+          storageRoot: transcript.storageRoot,
           providerInstanceId: transcript.providerInstanceId,
           lastActiveAtMs: transcript.mtimeMs,
           transcripts: [transcript],
@@ -1074,6 +1093,7 @@ export const make = Effect.gen(function* () {
 
     return Array.from(byOwnerAndCwd.values(), (group): RawCandidate => ({
       cwd: group.cwd,
+      storageRoot: group.storageRoot,
       source,
       providerInstanceId: group.providerInstanceId,
       threadCount: group.transcripts.length,
@@ -1389,11 +1409,28 @@ export const make = Effect.gen(function* () {
               source.provider === candidate.source && sameTranscriptIdentity(source, identity),
           );
           if (completedSource !== undefined) {
-            const sessionKey = `${completedSource.providerInstanceId}\0${completedSource.providerSessionId}`;
+            const nativeStorage = yield* storage
+              .resolve({
+                driver: ProviderDriverKind.make(candidate.source),
+                nativeId: completedSource.providerSessionId,
+                storageRoot: candidate.storageRoot,
+              })
+              .pipe(
+                Effect.mapError(
+                  (cause) => new AgentSessionScanError({ operation: "read-projects", cause }),
+                ),
+              );
+            const sessionKey =
+              nativeStorageScope({
+                driver: ProviderDriverKind.make(candidate.source),
+                nativeId: completedSource.providerSessionId,
+                storage: nativeStorage,
+              }) ?? `${completedSource.providerInstanceId}\0${completedSource.providerSessionId}`;
             if (importedSessions.has(sessionKey)) return Option.none<AgentSessionRecentThread>();
             importedSessions.add(sessionKey);
             return Option.some<AgentSessionRecentThread>({
               _tag: "AlreadyImported",
+              nativeStorage,
               source: completedSource,
             });
           }
@@ -1449,13 +1486,34 @@ export const make = Effect.gen(function* () {
             providerInstanceId: parsedThread.providerInstanceId,
             providerSessionId: parsedThread.providerSessionId,
           };
-          const sessionKey = `${parsedThread.providerInstanceId}\0${parsedThread.providerSessionId}`;
+          const nativeStorage = yield* storage
+            .resolve({
+              driver: ProviderDriverKind.make(candidate.source),
+              nativeId: parsedThread.providerSessionId,
+              storageRoot: candidate.storageRoot,
+            })
+            .pipe(
+              Effect.mapError(
+                (cause) => new AgentSessionScanError({ operation: "read-projects", cause }),
+              ),
+            );
+          const sessionKey =
+            nativeStorageScope({
+              driver: ProviderDriverKind.make(candidate.source),
+              nativeId: parsedThread.providerSessionId,
+              storage: nativeStorage,
+            }) ?? `${parsedThread.providerInstanceId}\0${parsedThread.providerSessionId}`;
           if (importedSessions.has(sessionKey)) {
-            return Option.some<AgentSessionRecentThread>({ _tag: "Duplicate", source });
+            return Option.some<AgentSessionRecentThread>({
+              _tag: "Duplicate",
+              source,
+              nativeStorage,
+            });
           }
           importedSessions.add(sessionKey);
           return Option.some<AgentSessionRecentThread>({
             _tag: "Importable",
+            nativeStorage,
             thread: parsedThread,
             source,
           });
@@ -1474,4 +1532,6 @@ export const make = Effect.gen(function* () {
   return AgentSessionScanner.of({ scan, recentThreads });
 });
 
-export const layer = Layer.effect(AgentSessionScanner, make);
+export const layer = Layer.effect(AgentSessionScanner, make).pipe(
+  Layer.provide(NativeSessionStorage.layer),
+);

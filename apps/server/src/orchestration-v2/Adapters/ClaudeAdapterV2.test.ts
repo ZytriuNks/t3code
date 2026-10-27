@@ -69,6 +69,7 @@ import * as TestClock from "effect/testing/TestClock";
 import { Tool } from "effect/ai";
 import { formatClaudeResumeCompactionQuestion } from "@t3tools/shared/claudeCompaction";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { normalizeProjectPathForComparison } from "@t3tools/shared/path";
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import { SpawnExecutableResolution } from "@t3tools/shared/shell";
 
@@ -2379,6 +2380,48 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       };
     });
   const makeWakeHarness = makeWakeHarnessWithOptions();
+
+  it.effect(
+    "storage uses Claude's effective config home, keeps old ids and scopes new bindings",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const x = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-storage-X-" });
+        const y = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-storage-Y-" });
+        const first = yield* makeWakeHarnessWithOptions({
+          settings: { ...DEFAULT_CLAUDE_SETTINGS, homePath: x },
+          environment: { CLAUDE_CONFIG_DIR: y },
+          nativeSessionId: "same-native",
+        });
+        const second = yield* makeWakeHarnessWithOptions({
+          environment: { CLAUDE_CONFIG_DIR: y },
+          nativeSessionId: "same-native",
+        });
+        assert.deepEqual(first.providerThread.nativeStorage, {
+          type: "resolved",
+          canonicalRoot: normalizeProjectPathForComparison(yield* fs.realPath(x)),
+        });
+        assert.deepEqual(second.providerThread.nativeStorage, {
+          type: "resolved",
+          canonicalRoot: normalizeProjectPathForComparison(yield* fs.realPath(y)),
+        });
+        assert.notEqual(first.providerThread.id, second.providerThread.id);
+        const resumed = yield* second.runtime.resumeThread({
+          providerThread: first.providerThread,
+        });
+        assert.equal(resumed.id, first.providerThread.id);
+        assert.deepEqual(first.providerThread.nativeStorage, {
+          type: "resolved",
+          canonicalRoot: normalizeProjectPathForComparison(yield* fs.realPath(x)),
+        });
+        assert.deepEqual(resumed.nativeStorage, second.providerThread.nativeStorage);
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+  );
 
   describe("Claude settings restrictions", () => {
     it.effect("resolves cached managed policy from the configured home through the real SDK", () =>
@@ -11201,7 +11244,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
   ) =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
-      const configDir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-claude-wf-" });
+      const configDir =
+        options?.environment?.CLAUDE_CONFIG_DIR ??
+        (yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-claude-wf-" }));
       const transcriptDir = NodePath.join(configDir, "projects", "workflow");
       yield* fileSystem.makeDirectory(transcriptDir, { recursive: true });
       yield* fileSystem.writeFileString(
@@ -12993,8 +13038,13 @@ describe("ClaudeAdapterV2 background wake turns", () => {
   it.effect("re-reads a workflow member's transcript after a restart without new items", () =>
     Effect.scoped(
       Effect.gen(function* () {
+        const configDir = yield* (yield* FileSystem.FileSystem).makeTempDirectoryScoped({
+          prefix: "t3-claude-wf-restart-",
+        });
         const runOnce = Effect.fnUntraced(function* (attemptId: string) {
-          const harness = yield* makeWorkflowHarness;
+          const harness = yield* makeWorkflowHarnessWithOptions({
+            environment: { CLAUDE_CONFIG_DIR: configDir },
+          });
           NodeFS.writeFileSync(
             NodePath.join(harness.transcriptDir, "agent-a1.jsonl"),
             memberTranscript,

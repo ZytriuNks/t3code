@@ -170,6 +170,7 @@ import {
 } from "@t3tools/provider-core/server/mcpToolPresentation";
 import * as McpProviderSession from "@t3tools/provider-core/server/mcpSession";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
+import * as NativeSessionStorage from "@t3tools/provider-core/server/NativeSessionStorage";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import {
   makeProviderFailure,
@@ -1641,15 +1642,24 @@ function makeProviderThread(input: {
   readonly ownerNodeId?: OrchestrationV2ProviderThread["ownerNodeId"];
   readonly providerSessionId: OrchestrationV2ProviderThread["providerSessionId"];
   readonly nativeThreadId: string;
+  readonly nativeStorage: NonNullable<OrchestrationV2ProviderThread["nativeStorage"]>;
+  readonly existingProviderThread?: OrchestrationV2ProviderThread;
   readonly forkedFrom?: NonNullable<OrchestrationV2ProviderThread["forkedFrom"]>;
   readonly nativeMetadata?: NonNullable<OrchestrationV2ProviderThread["nativeMetadata"]>;
   readonly now: DateTime.Utc;
 }): OrchestrationV2ProviderThread {
   return {
-    id: input.idAllocator.derive.providerThread({
-      driver: CLAUDE_PROVIDER,
-      nativeThreadId: input.nativeThreadId,
-    }),
+    id:
+      input.existingProviderThread?.id ??
+      input.idAllocator.derive.providerThread({
+        driver: CLAUDE_PROVIDER,
+        nativeThreadId: input.nativeThreadId,
+        storageScope: IdAllocator.nativeStorageScope({
+          driver: CLAUDE_PROVIDER,
+          nativeId: input.nativeThreadId,
+          storage: input.nativeStorage,
+        }),
+      }),
     driver: CLAUDE_PROVIDER,
     providerInstanceId: input.providerInstanceId,
     providerSessionId: input.providerSessionId,
@@ -1660,6 +1670,7 @@ function makeProviderThread(input: {
       nativeId: input.nativeThreadId,
       strength: "strong",
     },
+    nativeStorage: input.nativeStorage,
     nativeConversationHeadRef: null,
     status: "idle",
     firstRunOrdinal: null,
@@ -3916,6 +3927,12 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
     adapterOptions.settings,
     adapterOptions.environment,
   ).pipe(Effect.provideService(Path.Path, path));
+  const storage = yield* NativeSessionStorage.make.pipe(
+    Effect.provideService(FileSystem.FileSystem, fileSystem),
+    Effect.provideService(Path.Path, path),
+  );
+  const locateStorage = (nativeId: string) =>
+    storage.resolve({ driver: CLAUDE_PROVIDER, nativeId, storageRoot: homePath });
   const hostEnvironment = yield* HostProcess.Environment;
   const customHome =
     adapterOptions.settings.homePath.trim().length > 0 ||
@@ -10092,6 +10109,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               const createdAt = yield* DateTime.now;
               const nativeThreadId = yield* queryRunner.allocateSessionId;
               return makeProviderThread({
+                nativeStorage: yield* locateStorage(nativeThreadId),
+                ...(threadInput.existingProviderThread === undefined
+                  ? {}
+                  : { existingProviderThread: threadInput.existingProviderThread }),
                 idAllocator,
                 providerInstanceId: adapterOptions.instanceId,
                 appThreadId: threadInput.threadId,
@@ -10133,6 +10154,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               const updatedAt = yield* DateTime.now;
               return {
                 ...threadInput.providerThread,
+                nativeStorage:
+                  nativeThreadId == null
+                    ? threadInput.providerThread.nativeStorage
+                    : yield* locateStorage(nativeThreadId),
                 providerSessionId: input.providerSessionId,
                 status: "idle" as const,
                 updatedAt,
@@ -10326,6 +10351,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 return {
                   providerThread: {
                     ...makeProviderThread({
+                      nativeStorage: yield* locateStorage(resetNativeThreadId),
                       idAllocator,
                       providerInstanceId: adapterOptions.instanceId,
                       appThreadId: rollbackInput.providerThread.appThreadId,
@@ -10412,6 +10438,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               });
               const now = yield* DateTime.now;
               return makeProviderThread({
+                nativeStorage: yield* locateStorage(forked.sessionId),
                 idAllocator,
                 providerInstanceId: adapterOptions.instanceId,
                 appThreadId: forkInput.targetThreadId,

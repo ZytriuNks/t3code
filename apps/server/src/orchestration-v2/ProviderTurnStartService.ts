@@ -872,7 +872,24 @@ export const layer: Layer.Layer<
         previousSelection === undefined ||
         modelSelectionsEqual(previousSelection, run.modelSelection);
       const sameNativeThread =
-        loadedProviderThread.nativeThreadRef?.nativeId === providerThread.nativeThreadRef?.nativeId;
+        loadedProviderThread.nativeThreadRef?.nativeId ===
+          providerThread.nativeThreadRef?.nativeId &&
+        IdAllocator.nativeStorageScope({
+          driver: loadedProviderThread.driver,
+          nativeId: loadedProviderThread.nativeThreadRef?.nativeId ?? "",
+          storage: loadedProviderThread.nativeStorage ?? {
+            type: "unresolved",
+            reason: "legacy_missing_locator",
+          },
+        }) ===
+          IdAllocator.nativeStorageScope({
+            driver: providerThread.driver,
+            nativeId: providerThread.nativeThreadRef?.nativeId ?? "",
+            storage: providerThread.nativeStorage ?? {
+              type: "unresolved",
+              reason: "legacy_missing_locator",
+            },
+          });
       const threadUsage = loadedProviderThread.contextUsage ?? providerThread.contextUsage;
       const previousUsage = measuredContext
         ? { ...threadUsage, ...measuredContext.usage }

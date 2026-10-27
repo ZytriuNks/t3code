@@ -22,6 +22,9 @@ import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
+import { normalizeProjectPathForComparison } from "@t3tools/shared/path";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
@@ -526,6 +529,41 @@ const startTurn = Effect.fnUntraced(function* (
 });
 
 describe("PiAdapterV2", () => {
+  it.effect(
+    "storage records the RPC sessionFile and restores the same locator and persisted id after restart",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pi-storage-" });
+        const sessionFile = path.join(root, "session.jsonl");
+        yield* fs.writeFileString(sessionFile, "");
+        const fake = yield* makeFakePi;
+        fake.queueState({ sessionFile });
+        const { runtime } = yield* openRuntime(fake);
+        const providerThread = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+        assert.equal(providerThread.nativeThreadRef?.nativeId, sessionFile);
+        assert.deepEqual(providerThread.nativeStorage, {
+          type: "resolved",
+          canonicalRoot: normalizeProjectPathForComparison(yield* fs.realPath(root)),
+          canonicalFile: normalizeProjectPathForComparison(yield* fs.realPath(sessionFile)),
+        });
+        const restart = yield* makeFakePi;
+        restart.queueState({ sessionFile });
+        const restarted = yield* openRuntime(restart);
+        const legacy = { ...providerThread, id: ProviderThreadId.make("persisted-pi-id") };
+        const resumed = yield* restarted.runtime.resumeThread({ providerThread: legacy });
+        assert.equal(resumed.id, legacy.id);
+        assert.deepEqual(resumed.nativeStorage, providerThread.nativeStorage);
+        const request = yield* restart.takeRequest("switch_session");
+        assert.equal(request["sessionPath"], sessionFile);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   it.effect.each([false, true])(
     "completes a resumed user turn before native wake events arrive, Pi streaming=%s",
     (streaming) =>

@@ -150,6 +150,7 @@ import {
   makeSubagentConversationArtifacts,
   subagentThreadTitle,
 } from "@t3tools/provider-core/server/subagentProjection";
+import * as NativeSessionStorage from "@t3tools/provider-core/server/NativeSessionStorage";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 
@@ -857,13 +858,26 @@ function providerThreadFromCodexThread(input: {
     readonly id: string;
     readonly updatedAt: number;
   };
+  readonly nativeStorage: OrchestrationV2ProviderThread["nativeStorage"];
+  readonly existingProviderThread?: OrchestrationV2ProviderThread;
   readonly forkedFrom?: OrchestrationV2ProviderThread["forkedFrom"];
 }): OrchestrationV2ProviderThread {
   return {
-    id: input.idAllocator.derive.providerThread({
-      driver: CODEX_PROVIDER,
-      nativeThreadId: input.thread.id,
-    }),
+    id:
+      input.existingProviderThread?.id ??
+      input.idAllocator.derive.providerThread({
+        driver: CODEX_PROVIDER,
+        nativeThreadId: input.thread.id,
+        ...(input.nativeStorage === undefined
+          ? {}
+          : {
+              storageScope: IdAllocator.nativeStorageScope({
+                driver: CODEX_PROVIDER,
+                nativeId: input.thread.id,
+                storage: input.nativeStorage,
+              }),
+            }),
+      }),
     driver: CODEX_PROVIDER,
     providerInstanceId: input.providerInstanceId,
     providerSessionId: input.providerSessionId,
@@ -874,6 +888,7 @@ function providerThreadFromCodexThread(input: {
       nativeId: input.thread.id,
       strength: "strong" as const,
     },
+    nativeStorage: input.nativeStorage,
     nativeConversationHeadRef: null,
     status: "idle",
     firstRunOrdinal: null,
@@ -1609,9 +1624,9 @@ export type CodexAdapterV2DriverEnv =
   | CodexAppServerClientFactory
   | Crypto.Crypto
   | FileSystem.FileSystem
+  | Path.Path
   | IdAllocator.IdAllocatorV2
   | McpProviderSessions.McpProviderSessions
-  | Path.Path
   | ServerConfig;
 
 export const createCodexAdapterV2 = Effect.fn("CodexAdapterV2.createCodexAdapterV2")(function* (
@@ -1625,7 +1640,14 @@ export const createCodexAdapterV2 = Effect.fn("CodexAdapterV2.createCodexAdapter
   const hostEnvironment = yield* HostProcess.Environment;
   const idAllocator = yield* IdAllocator.IdAllocatorV2;
   const serverConfig = yield* ServerConfig;
-  const homeLayout = yield* resolveCodexHomeLayout(config);
+  const mergedEnvironment = yield* mergeProviderInstanceEnvironment(environment, hostEnvironment);
+  const homeConfig =
+    config.homePath.trim() === "" &&
+    config.shadowHomePath.trim() === "" &&
+    mergedEnvironment.CODEX_HOME?.trim()
+      ? { ...config, homePath: mergedEnvironment.CODEX_HOME }
+      : config;
+  const homeLayout = yield* resolveCodexHomeLayout(homeConfig);
 
   yield* materializeCodexShadowHome(homeLayout).pipe(
     Effect.mapError(
@@ -1649,7 +1671,8 @@ export const createCodexAdapterV2 = Effect.fn("CodexAdapterV2.createCodexAdapter
   return yield* makeCodexAdapterV2({
     instanceId,
     settings,
-    environment: yield* mergeProviderInstanceEnvironment(environment, hostEnvironment),
+    storageRoot: homeLayout.sharedHomePath,
+    environment: mergedEnvironment,
     clientFactory,
     crypto,
     fileSystem,
@@ -1673,6 +1696,7 @@ const layer: Layer.Layer<
   | CodexAppServerClientFactory
   | Crypto.Crypto
   | FileSystem.FileSystem
+  | Path.Path
   | IdAllocator.IdAllocatorV2
   | McpProviderSessions.McpProviderSessions
   | ServerConfig
@@ -1704,6 +1728,7 @@ const layer: Layer.Layer<
 export interface CodexAdapterV2Options {
   readonly instanceId: ProviderInstanceId;
   readonly settings: CodexSettings;
+  readonly storageRoot?: string;
   readonly environment: NodeJS.ProcessEnv;
   readonly clientFactory: CodexAppServerClientFactoryShape;
   readonly onUsageLimits?: ManagedServerProvider["applyUsageLimits"];
@@ -1732,6 +1757,19 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
     threadId === null ? Effect.succeed(undefined) : mcpSessions.read(threadId);
   const { clientFactory, crypto, fileSystem, idAllocator, serverConfig } = adapterOptions;
   const continuationRequests = adapterOptions.continuationRequests;
+  const storage = yield* NativeSessionStorage.make.pipe(
+    Effect.provideService(FileSystem.FileSystem, fileSystem),
+  );
+  const homeConfig =
+    adapterOptions.settings.homePath.trim() === "" &&
+    adapterOptions.settings.shadowHomePath.trim() === "" &&
+    adapterOptions.environment.CODEX_HOME?.trim()
+      ? { ...adapterOptions.settings, homePath: adapterOptions.environment.CODEX_HOME }
+      : adapterOptions.settings;
+  const sharedHome =
+    adapterOptions.storageRoot ?? (yield* resolveCodexHomeLayout(homeConfig)).sharedHomePath;
+  const locateStorage = (nativeId: string) =>
+    storage.resolve({ driver: CODEX_PROVIDER, nativeId, storageRoot: sharedHome });
 
   return ProviderAdapter.ProviderAdapterV2.of({
     instanceId: adapterOptions.instanceId,
@@ -2847,19 +2885,28 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               driver: CODEX_PROVIDER,
               nativeItemId: `${input.nativeItemId}:thread-root`,
             });
+            const nativeStorage = yield* locateStorage(input.nativeThreadId);
+            const storageScope = IdAllocator.nativeStorageScope({
+              driver: CODEX_PROVIDER,
+              nativeId: input.nativeThreadId,
+              storage: nativeStorage,
+            });
             const childThreadId = idAllocator.derive.threadFromProviderThread({
               driver: CODEX_PROVIDER,
               nativeThreadId: input.nativeThreadId,
+              ...(storageScope === undefined ? {} : { storageScope }),
             });
             const turnItemOrdinal = yield* resolveItemOrdinal(input.context, input.nativeItemId);
             const providerThread = {
               id: idAllocator.derive.providerThread({
                 driver: CODEX_PROVIDER,
                 nativeThreadId: input.nativeThreadId,
+                ...(storageScope === undefined ? {} : { storageScope }),
               }),
               driver: CODEX_PROVIDER,
               providerInstanceId: input.context.input.modelSelection.instanceId,
               providerSessionId: input.context.providerThread.providerSessionId,
+              nativeStorage,
               appThreadId: childThreadId,
               ownerNodeId: null,
               nativeThreadRef: {
@@ -6701,15 +6748,23 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                   }),
                 ),
               ),
-              Effect.map((response): OrchestrationV2ProviderThread =>
-                providerThreadFromCodexThread({
-                  appThreadId: threadInput.threadId,
-                  idAllocator,
-                  ownerNodeId: null,
-                  providerSessionId: input.providerSessionId,
-                  providerInstanceId: adapterOptions.instanceId,
-                  thread: response.thread,
-                }),
+              Effect.flatMap((response) =>
+                locateStorage(response.thread.id).pipe(
+                  Effect.map((nativeStorage): OrchestrationV2ProviderThread =>
+                    providerThreadFromCodexThread({
+                      nativeStorage,
+                      ...(threadInput.existingProviderThread === undefined
+                        ? {}
+                        : { existingProviderThread: threadInput.existingProviderThread }),
+                      appThreadId: threadInput.threadId,
+                      idAllocator,
+                      ownerNodeId: null,
+                      providerSessionId: input.providerSessionId,
+                      providerInstanceId: adapterOptions.instanceId,
+                      thread: response.thread,
+                    }),
+                  ),
+                ),
               ),
               Effect.mapError(
                 (cause) =>
@@ -6762,6 +6817,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               );
               return {
                 ...threadInput.providerThread,
+                nativeStorage: yield* locateStorage(response.thread.id),
                 providerSessionId: input.providerSessionId,
                 providerInstanceId: adapterOptions.instanceId,
                 status: "idle",
@@ -7581,6 +7637,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 )).thread;
               }
               return providerThreadFromCodexThread({
+                nativeStorage: yield* locateStorage(forkedThread.id),
                 appThreadId: threadInput.targetThreadId,
                 idAllocator,
                 ownerNodeId: threadInput.ownerNodeId ?? null,

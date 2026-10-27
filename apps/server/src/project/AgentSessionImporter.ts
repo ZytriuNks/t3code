@@ -30,6 +30,8 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as SqlClient from "effect/sql/SqlClient";
+import * as NativeSessionBindings from "../orchestration-v2/NativeSessionBindings.ts";
 
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
@@ -167,6 +169,8 @@ function messageEvents(input: {
 
 const make = Effect.gen(function* () {
   const scanner = yield* AgentSessionScanner.AgentSessionScanner;
+  const sql = yield* SqlClient.SqlClient;
+  const bindings = yield* NativeSessionBindings.NativeSessionBindings;
   const orchestrator = yield* Orchestrator.OrchestratorV2;
   const projects = yield* ProjectService.ProjectService;
   const eventSink = yield* EventSink.EventSinkV2;
@@ -212,7 +216,6 @@ const make = Effect.gen(function* () {
       return payload.value.importedTranscripts ?? [];
     });
     const outcomes = scanner.recentThreads(project.workspaceRoot, completedSources);
-    const importedThreadIds = new Set<ThreadId>();
     let importedCount = 0;
     let skippedCount = 0;
 
@@ -223,17 +226,81 @@ const make = Effect.gen(function* () {
           return;
         }
         const source = outcome.source;
-        const threadId = ThreadId.make(
+        const nativeIdentity = {
+          driver: ProviderDriverKind.make(source.provider),
+          providerInstanceId: source.providerInstanceId,
+          nativeId: source.providerSessionId,
+          storage: outcome.nativeStorage,
+        };
+        const storageScope = IdAllocator.nativeStorageScope(nativeIdentity);
+        const legacyThreadId = ThreadId.make(
           `import:${source.providerInstanceId}:${source.providerSessionId}`,
         );
-        if (outcome._tag === "AlreadyImported") {
-          importedThreadIds.add(threadId);
-          importedCount += 1;
+        const legacy = yield* Effect.option(
+          orchestrator.getThreadRecords(legacyThreadId, ["providerThreads"]),
+        );
+        const matchesStorage = (providerThread: OrchestrationV2ProviderThread) =>
+          providerThread.nativeThreadRef?.nativeId === source.providerSessionId &&
+          providerThread.nativeStorage !== undefined &&
+          storageScope !== undefined &&
+          IdAllocator.nativeStorageScope({
+            ...nativeIdentity,
+            storage: providerThread.nativeStorage,
+          }) === storageScope;
+        const threadId =
+          Option.isSome(legacy) && legacy.value.providerThreads.some(matchesStorage)
+            ? legacyThreadId
+            : idAllocator.derive.threadFromProviderThread({
+                driver: nativeIdentity.driver,
+                providerInstanceId: source.providerInstanceId,
+                nativeThreadId: source.providerSessionId,
+                ...(storageScope === undefined ? {} : { storageScope }),
+              });
+        const ownership = yield* bindings
+          .checkImport(nativeIdentity)
+          .pipe(
+            Effect.mapError(
+              (cause) => new AgentSessionScanError({ operation: "read-projects", cause }),
+            ),
+          );
+        if (ownership === "deleted" || ownership === "unresolved_conflict") {
+          if (ownership === "unresolved_conflict")
+            yield* Effect.logWarning("Native session import skipped", { reason: ownership });
           return;
         }
-        if (outcome._tag === "Duplicate") {
-          if (importedThreadIds.has(threadId)) {
-            yield* runtimes.recordImportedTranscript({ threadId, source }).pipe(Effect.ignore);
+        const existing = yield* Effect.option(
+          orchestrator.getThreadRecords(threadId, ["providerThreads"]),
+        );
+        if (
+          ownership === "owned" &&
+          (Option.isNone(existing) || !existing.value.providerThreads.some(matchesStorage))
+        )
+          return;
+        // Fast paths also commit under SQLite: deletion may land after the scan or preflight.
+        const finishExisting = Effect.fn("AgentSessionImporter.finishExisting")(function* <A, E>(
+          persist: Effect.Effect<A, E>,
+        ) {
+          const currentOwnership = yield* bindings.checkImport(nativeIdentity);
+          if (currentOwnership !== "owned") {
+            if (currentOwnership === "unresolved_conflict")
+              yield* Effect.logWarning("Native session import skipped", {
+                reason: currentOwnership,
+              });
+            return false;
+          }
+          const current = yield* orchestrator.getThreadRecords(threadId, ["providerThreads"]);
+          if (current.thread.deletedAt !== null || !current.providerThreads.some(matchesStorage))
+            return false;
+          yield* persist;
+          yield* runtimes.recordImportedTranscript({ threadId, source });
+          return true;
+        }, sql.withTransaction);
+        if (outcome._tag === "AlreadyImported" || outcome._tag === "Duplicate") {
+          const finished = yield* finishExisting(Effect.void).pipe(
+            Effect.orElseSucceed(() => false),
+          );
+          if (finished && outcome._tag === "AlreadyImported") {
+            importedCount += 1;
           }
           return;
         }
@@ -267,7 +334,6 @@ const make = Effect.gen(function* () {
             },
             { onConflict: "ignore" },
           );
-          const existing = yield* Effect.option(orchestrator.getThreadRecords(threadId, []));
           if (Option.isSome(existing)) {
             if (existing.value.thread.projectId !== input.projectId) {
               return yield* new AgentSessionThreadProjectConflictError({
@@ -279,9 +345,7 @@ const make = Effect.gen(function* () {
             if (existing.value.thread.historyOrigin !== "v1_import") {
               return yield* new AgentSessionThreadModifiedError({ threadId });
             }
-            yield* persistRuntime;
-            yield* runtimes.recordImportedTranscript({ threadId, source });
-            return true;
+            return yield* finishExisting(persistRuntime);
           }
 
           const model = thread.model ?? DEFAULT_MODEL_BY_PROVIDER[driver] ?? DEFAULT_MODEL;
@@ -289,6 +353,7 @@ const make = Effect.gen(function* () {
             driver,
             providerInstanceId: thread.providerInstanceId,
             nativeThreadId: thread.providerSessionId,
+            ...(storageScope === undefined ? {} : { storageScope }),
           });
           const createdAt = dateTime(thread.createdAt);
           const updatedAt = dateTime(thread.updatedAt);
@@ -340,6 +405,7 @@ const make = Effect.gen(function* () {
               nativeId: thread.providerSessionId,
               strength: "strong",
             },
+            nativeStorage: outcome.nativeStorage,
             nativeConversationHeadRef: null,
             status: "idle",
             firstRunOrdinal: null,
@@ -377,9 +443,7 @@ const make = Effect.gen(function* () {
             ],
           });
           if (committed.length === 0) return null;
-          yield* persistRuntime;
-          yield* runtimes.recordImportedTranscript({ threadId, source });
-          return true;
+          return (yield* finishExisting(persistRuntime)) ? true : null;
         }).pipe(
           Effect.catch((cause) =>
             Effect.logWarning("Could not import an agent session", {
@@ -390,7 +454,6 @@ const make = Effect.gen(function* () {
           ),
         );
         if (imported === true) {
-          importedThreadIds.add(threadId);
           importedCount += 1;
         } else if (imported === false) {
           skippedCount += 1;

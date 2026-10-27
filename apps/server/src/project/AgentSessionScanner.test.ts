@@ -1,3 +1,5 @@
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- Effect FileSystem cannot create Windows junctions for real alias fixtures.
+import * as NodeFSP from "node:fs/promises";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeOS from "node:os";
 import { describe, expect, it } from "@effect/vitest";
@@ -9,6 +11,8 @@ import {
   ProviderInstanceId,
   type ServerSettings as ContractServerSettings,
 } from "@t3tools/contracts";
+import { normalizeProjectPathForComparison } from "@t3tools/shared/path";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -333,13 +337,15 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
     it.effect("returns the imported project ID through a realpath alias", () =>
       Effect.gen(function* () {
         const path = yield* Path.Path;
-        const fileSystem = yield* FileSystem.FileSystem;
         const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
         const codexHomePath = yield* makeTempDir("t3code-codex-home-");
         const workspace = yield* makeTempDir("t3code-workspace-");
         const linkParent = yield* makeTempDir("t3code-scanner-links-");
         const workspaceAlias = path.join(linkParent, "workspace-alias");
-        yield* fileSystem.symlink(workspace, workspaceAlias);
+        const platform = yield* HostProcess.Platform;
+        yield* Effect.promise(() =>
+          NodeFSP.symlink(workspace, workspaceAlias, platform === "win32" ? "junction" : "dir"),
+        );
 
         yield* writeTranscript({
           filePath: path.join(claudeHomePath, "projects", "-slug", "a.jsonl"),
@@ -882,7 +888,10 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
         const worktreeCwd = path.join(configBaseDir, "worktrees", "t3code", "wt-3");
         yield* fileSystem.makeDirectory(worktreeCwd, { recursive: true });
         const symlinkCwd = path.join(linkParent, "innocent-project");
-        yield* fileSystem.symlink(worktreeCwd, symlinkCwd);
+        const platform = yield* HostProcess.Platform;
+        yield* Effect.promise(() =>
+          NodeFSP.symlink(worktreeCwd, symlinkCwd, platform === "win32" ? "junction" : "dir"),
+        );
         yield* writeTranscript({
           filePath: path.join(claudeHomePath, "projects", "-slug", "a.jsonl"),
           contents: claudeSessionLine(symlinkCwd),
@@ -980,6 +989,96 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
   });
 
   describe("recentThreads", () => {
+    it.effect(
+      "storage candidates use shared homes, dedupe real aliases and retain locators on fast paths",
+      () =>
+        Effect.gen(function* () {
+          const platform = yield* HostProcess.Platform;
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
+          yield* TestClock.setTime(nowMs);
+          const temp = yield* makeTempDir("t3-scanner-storage-");
+          const workspace = path.join(temp, "workspace");
+          const x = path.join(temp, "X");
+          const y = path.join(temp, "Y");
+          const alias = path.join(temp, "alias-X");
+          const claude = path.join(temp, "claude");
+          for (const directory of [workspace, x, y, claude]) yield* fs.makeDirectory(directory);
+          yield* Effect.promise(() =>
+            NodeFSP.symlink(x, alias, platform === "win32" ? "junction" : "dir"),
+          );
+          for (const root of [x, y]) {
+            yield* writeTranscript({
+              filePath: path.join(root, "sessions", "2026", "08", "24", "rollout-session.jsonl"),
+              contents: [
+                encodeTranscriptRecord({
+                  type: "session_meta",
+                  payload: { id: "same-native", cwd: workspace },
+                }),
+                encodeTranscriptRecord({
+                  type: "event_msg",
+                  payload: { type: "user_message", message: "Hello" },
+                }),
+              ].join("\n"),
+              mtimeMs: nowMs,
+            });
+          }
+          yield* Effect.gen(function* () {
+            const scanner = yield* AgentSessionScanner.AgentSessionScanner;
+            const first = yield* scanner.recentThreads(workspace).pipe(Stream.runCollect);
+            expect(first.map((outcome) => outcome._tag)).toEqual(["Importable", "Importable"]);
+            const locators = first.flatMap((outcome) =>
+              outcome._tag === "Skipped" ? [] : [outcome.nativeStorage],
+            );
+            expect(locators).toEqual(
+              expect.arrayContaining(
+                [x, y].map((root) => ({
+                  type: "resolved",
+                  canonicalRoot: normalizeProjectPathForComparison(root),
+                })),
+              ),
+            );
+            const completed = first.flatMap((outcome) =>
+              outcome._tag === "Skipped" ? [] : [outcome.source],
+            );
+            const second = yield* scanner
+              .recentThreads(workspace, completed)
+              .pipe(Stream.runCollect);
+            expect(second.map((outcome) => outcome._tag)).toEqual([
+              "AlreadyImported",
+              "AlreadyImported",
+            ]);
+            expect(
+              second.flatMap((outcome) =>
+                outcome._tag === "Skipped" ? [] : [outcome.nativeStorage],
+              ),
+            ).toEqual(locators);
+          }).pipe(
+            Effect.provide(
+              layerScannerTest({
+                claudeHomePath: claude,
+                codexHomePath: x,
+                providerInstances: {
+                  [ProviderInstanceId.make("codex")]: {
+                    driver: ProviderDriverKind.make("codex"),
+                    config: { homePath: x, shadowHomePath: path.join(temp, "shadow") },
+                  },
+                  [ProviderInstanceId.make("codex-alias")]: {
+                    driver: ProviderDriverKind.make("codex"),
+                    config: { homePath: alias },
+                  },
+                  [ProviderInstanceId.make("codex-Y")]: {
+                    driver: ProviderDriverKind.make("codex"),
+                    config: { homePath: y },
+                  },
+                },
+              }),
+            ),
+          );
+        }).pipe(Effect.scoped),
+    );
+
     it.effect("imports recent Claude and Codex sessions for the selected project only", () =>
       Effect.gen(function* () {
         const path = yield* Path.Path;

@@ -44,6 +44,8 @@ import { mcpToolPresentation } from "@t3tools/provider-core/server/mcpToolPresen
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import { parsePiCompactCommand, type PiCompactCommand } from "./commands.ts";
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
+import * as Path from "effect/Path";
+import * as NativeSessionStorage from "@t3tools/provider-core/server/NativeSessionStorage";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
@@ -424,6 +426,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const agentScope = yield* AgentScope;
   const fileSystem = yield* FileSystem.FileSystem;
+  const storage = yield* NativeSessionStorage.make;
   const idAllocator = yield* IdAllocator.IdAllocatorV2;
   const host = yield* ProviderHost.ProviderHost;
   const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
@@ -2229,12 +2232,23 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           return yield* protocolError("Pi did not create a distinct session file");
         }
         lastNativeThreadId = nativeId;
+        const nativeStorage = yield* storage.resolve({
+          driver: PI_PROVIDER,
+          nativeId,
+          sessionFile: nativeId,
+        });
+        const storageScope = IdAllocator.nativeStorageScope({
+          driver: PI_PROVIDER,
+          nativeId,
+          storage: nativeStorage,
+        });
         const createdAt = yield* DateTime.now;
         const providerThread: OrchestrationV2ProviderThread =
           existing !== undefined
             ? {
                 ...existing,
                 providerSessionId: input.providerSessionId,
+                nativeStorage,
                 nativeThreadRef: providerRef(nativeId),
                 ...(needsNewSession ? { nativeConversationHeadRef: null, contextUsage: null } : {}),
                 status: "idle",
@@ -2244,12 +2258,14 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                 id: idAllocator.derive.providerThread({
                   driver: PI_PROVIDER,
                   nativeThreadId: nativeId,
+                  ...(storageScope === undefined ? {} : { storageScope }),
                 }),
                 driver: PI_PROVIDER,
                 providerInstanceId: options.instanceId,
                 providerSessionId: input.providerSessionId,
                 appThreadId: threadInput.threadId,
                 ownerNodeId: null,
+                nativeStorage,
                 nativeThreadRef: providerRef(nativeId),
                 nativeConversationHeadRef: null,
                 status: "idle",
@@ -2973,6 +2989,11 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                       lastKnownLeaf = leafId;
                       leafCursorStale = entriesData === undefined;
                       yield* updateProviderThread(state, {
+                        nativeStorage: yield* storage.resolve({
+                          driver: PI_PROVIDER,
+                          nativeId: forkSessionFile,
+                          sessionFile: forkSessionFile,
+                        }),
                         nativeThreadRef: providerRef(forkSessionFile),
                         nativeConversationHeadRef: leafId === null ? null : providerRef(leafId),
                       });
@@ -3071,6 +3092,11 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                 return file;
               }),
             ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
+            const nativeStorage = yield* storage.resolve({
+              driver: PI_PROVIDER,
+              nativeId,
+              sessionFile: nativeId,
+            });
             const now = yield* DateTime.now;
             return yield* registerThread(
               {
@@ -3082,11 +3108,17 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                   id: idAllocator.derive.providerThread({
                     driver: PI_PROVIDER,
                     nativeThreadId: nativeId,
+                    storageScope: IdAllocator.nativeStorageScope({
+                      driver: PI_PROVIDER,
+                      nativeId,
+                      storage: nativeStorage,
+                    }),
                   }),
                   appThreadId: forkInput.targetThreadId,
                   providerSessionId: input.providerSessionId,
                   providerInstanceId: options.instanceId,
                   ownerNodeId: forkInput.ownerNodeId ?? null,
+                  nativeStorage,
                   nativeThreadRef: providerRef(nativeId),
                   nativeConversationHeadRef: null,
                   firstRunOrdinal: null,
@@ -3367,6 +3399,7 @@ function piUiResponse(
 export type PiAdapterV2DriverEnv =
   | ChildProcessSpawner.ChildProcessSpawner
   | FileSystem.FileSystem
+  | Path.Path
   | IdAllocator.IdAllocatorV2
   | McpProviderSessions.McpProviderSessions
   | ProviderHost.ProviderHost;

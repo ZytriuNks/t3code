@@ -249,6 +249,7 @@ const layerAgentSessionImporterProvided = AgentSessionImporter.layer.pipe(
   Layer.provide(
     Layer.mergeAll(
       AgentSessionScanner.layer,
+      NativeSessionBindings.layer,
       layerProjectService,
       layerOrchestratorProvided,
       layerEventSinkProvided,

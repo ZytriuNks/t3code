@@ -33,6 +33,7 @@ import * as EffectOutbox from "./EffectOutbox.ts";
 import * as EventStore from "./EventStore.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProjectStore from "./ProjectStore.ts";
+import * as NativeSessionBindings from "./NativeSessionBindings.ts";
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
 
 export class EventSinkWriteError extends Schema.TaggedError<EventSinkWriteError>()(
@@ -71,7 +72,7 @@ export interface EventSinkV2Shape {
     /** Return no events if another thread owns this native session at commit time. */
     readonly unlessNativeThreadOwned?: Pick<
       OrchestrationV2ProviderThread,
-      "driver" | "providerInstanceId" | "appThreadId" | "nativeThreadRef"
+      "driver" | "providerInstanceId" | "appThreadId" | "nativeThreadRef" | "nativeStorage"
     >;
     readonly guardPendingUserInputCancellations?: boolean;
     readonly commandId?: CommandId;
@@ -85,7 +86,7 @@ export interface EventSinkV2Shape {
     readonly updateDelegatedCompletionOnly?: boolean;
     readonly unlessNativeThreadOwned?: Pick<
       OrchestrationV2ProviderThread,
-      "driver" | "providerInstanceId" | "appThreadId" | "nativeThreadRef"
+      "driver" | "providerInstanceId" | "appThreadId" | "nativeThreadRef" | "nativeStorage"
     >;
     readonly guardPendingUserInputCancellations?: boolean;
     readonly commandId?: CommandId;
@@ -217,11 +218,13 @@ const layerBase: Layer.Layer<
   | ProjectionStore.ProjectionStoreV2
   | ProjectStore.ProjectStoreV2
   | SqlClient.SqlClient
+  | NativeSessionBindings.NativeSessionBindings
   | TurnItemPositionStore.TurnItemPositionStoreV2
 > = Layer.effect(
   EventSinkV2,
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
+    const nativeBindings = yield* NativeSessionBindings.NativeSessionBindings;
     const commandReceipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
     const effectOutbox = yield* EffectOutbox.EffectOutboxV2;
     const eventStore = yield* EventStore.EventStoreV2;
@@ -407,16 +410,20 @@ const layerBase: Layer.Layer<
           // Check ownership in the same transaction that claims the native session.
           const imported = input.unlessNativeThreadOwned;
           if (imported?.nativeThreadRef != null) {
-            const owners = yield* sql`
-              SELECT provider_thread_id
-              FROM orchestration_v2_projection_provider_threads
-              WHERE driver = ${imported.driver}
-                AND provider_instance_id = ${imported.providerInstanceId}
-                AND thread_id IS NOT ${imported.appThreadId}
-                AND json_extract(payload_json, '$.nativeThreadRef.nativeId') = ${imported.nativeThreadRef.nativeId}
-              LIMIT 1
-            `;
-            if (owners.length > 0) return { committed: [], outcomes: [] };
+            const ownership = yield* nativeBindings.checkImport({
+              driver: imported.driver,
+              providerInstanceId: imported.providerInstanceId,
+              nativeId: imported.nativeThreadRef.nativeId,
+              storage: imported.nativeStorage ?? {
+                type: "unresolved",
+                reason: "legacy_missing_locator",
+              },
+            });
+            if (ownership !== "unowned") {
+              if (ownership === "unresolved_conflict")
+                yield* Effect.logWarning("Native session import skipped", { reason: ownership });
+              return { committed: [], outcomes: [] };
+            }
           }
           // Checkpoint capture can finish after a cohort writer reads its parent run.
           // Merge in this transaction so the event log and projection keep that completion.
@@ -999,7 +1006,7 @@ const layerBase: Layer.Layer<
  * Keeping the outbox instance shared with the worker is important because enqueue notifications
  * are in-memory wakeups backed by the durable SQL queue.
  */
-export const layerFromStores = layerBase;
+export const layerFromStores = layerBase.pipe(Layer.provide(NativeSessionBindings.layer));
 
 export const layer: Layer.Layer<
   EventSinkV2,
@@ -1008,6 +1015,7 @@ export const layer: Layer.Layer<
 > = layerBase.pipe(
   Layer.provide(
     Layer.mergeAll(
+      NativeSessionBindings.layer,
       CommandReceiptStore.layer,
       EffectOutbox.layer,
       ProjectStore.layer,

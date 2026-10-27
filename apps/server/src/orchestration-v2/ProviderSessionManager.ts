@@ -276,7 +276,11 @@ function providerThreadRuntimeKey(
   const nativeThreadRef = providerThread.nativeThreadRef;
   return nativeThreadRef === null
     ? String(providerThread.id)
-    : `${nativeThreadRef.driver}:${nativeThreadRef.nativeId}`;
+    : JSON.stringify([
+        nativeThreadRef.driver,
+        nativeThreadRef.nativeId,
+        providerThread.nativeStorage ?? null,
+      ]);
 }
 
 function providerThreadLoadKey(input: {
