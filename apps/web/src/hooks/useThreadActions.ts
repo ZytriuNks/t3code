@@ -57,6 +57,7 @@ import { buildThreadRouteParams, resolveThreadRouteRef } from "../threadRoutes";
 import { formatWorktreePathForDisplay, getOrphanedWorktreePathForThread } from "../worktreeCleanup";
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
 import { useClientSettings } from "./useSettings";
+import { useThreadDeleteConfirmation } from "./useThreadDeleteConfirmation";
 import * as ThreadUndo from "./threadUndo";
 import { showThreadUndoNotice } from "./showThreadUndoNotice";
 import { useAtomCommand } from "../state/use-atom-command";
@@ -320,7 +321,7 @@ export function useThreadActions() {
     reportFailure: false,
   });
   const sidebarThreadSortOrder = useClientSettings((settings) => settings.sidebarThreadSortOrder);
-  const confirmThreadDelete = useClientSettings((settings) => settings.confirmThreadDelete);
+  const confirmThreadDeletion = useThreadDeleteConfirmation();
   const confirmThreadUnpin = useClientSettings((settings) => settings.confirmThreadUnpin);
   const clearComposerDraftForThread = useComposerDraftStore((store) => store.clearDraftThread);
   const clearProjectDraftThreadById = useComposerDraftStore(
@@ -902,32 +903,9 @@ export function useThreadActions() {
   const confirmAndDeleteThread = async (target: ScopedThreadRef) => {
     const permissionFailure = threadOperationFailure(target);
     if (permissionFailure) return permissionFailure;
-    const localApi = readLocalApi();
-    const resolved = resolveThreadTarget(target);
-
-    if (confirmThreadDelete && localApi) {
-      const title = resolved?.thread.title ?? "this thread";
-      const confirmationResult = await settlePromise(() =>
-        localApi.dialogs.confirm(
-          [
-            `Delete thread "${title}"?`,
-            t(
-              appAtomRegistry.get(environmentServerConfigsAtom).get(target.environmentId)
-                ?.environment.capabilities.threadLifecycleCascade === true
-                ? "thread.lifecycle.deleteConfirm"
-                : "thread.lifecycle.deleteConfirmLegacy",
-            ),
-          ].join("\n"),
-          { variant: "destructive" },
-        ),
-      );
-      if (confirmationResult._tag === "Failure") {
-        return confirmationResult;
-      }
-      if (!confirmationResult.value) {
-        return AsyncResult.success(undefined);
-      }
-    }
+    const confirmed = await confirmThreadDeletion([target]);
+    if (confirmed._tag === "Failure") return confirmed;
+    if (!confirmed.value) return AsyncResult.success(undefined);
 
     return deleteThread(target);
   };

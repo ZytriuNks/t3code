@@ -8,6 +8,7 @@ import {
 import * as DateTime from "effect/DateTime";
 import { useNavigate } from "@tanstack/react-router";
 import { expect, it, vi } from "vite-plus/test";
+import { page } from "vite-plus/test/browser";
 import { act, render } from "../../../test/render";
 import { ThreadRelationshipsPanel } from "./ThreadRelationshipsControl";
 import { SubagentTooltipContent } from "./SubagentTooltipContent";
@@ -193,6 +194,10 @@ it("opens an archived child and disables a deleted child despite a stale archive
   ];
   await screen.rerender(panel("parent", "remote", open));
   await expect.element(screen.getByRole("button", { name: /Archived worker/ })).toBeDisabled();
+  await screen.getByRole("button", { name: /Archived worker/ }).hover();
+  await expect
+    .element(page.getByText("This related thread is unavailable", { exact: true }))
+    .toBeVisible();
   expect(
     screen.getByRole("button", { name: /Stop|Archive|Unarchive|Delete/ }).elements(),
   ).toHaveLength(0);

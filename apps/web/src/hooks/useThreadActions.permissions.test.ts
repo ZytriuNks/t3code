@@ -12,6 +12,8 @@ import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { appAtomRegistry } from "../rpc/atomRegistry";
+import { scopedThreadKey } from "@t3tools/client-runtime/environment";
+import { useThreadDeleteConfirmation } from "./useThreadDeleteConfirmation";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -115,6 +117,7 @@ vi.mock("../state/entities", () => ({
       .map((thread) => ({ environmentId, threadId: thread.id })),
   readProject: () => ({ workspaceRoot: "/project" }),
 }));
+vi.mock("@dnd-kit/sortable", () => ({ defaultAnimateLayoutChanges: () => true }));
 vi.mock("../components/Sidebar.logic", () => ({
   getFallbackThreadIdAfterDelete: () => null,
   pinOrderKeyBetween: () => "a",
@@ -372,3 +375,118 @@ describe("thread action permissions", () => {
     }
   });
 });
+
+it.each([
+  { capability: undefined, metadata: false },
+  { capability: undefined, metadata: true },
+  { capability: true, metadata: false },
+  { capability: true, metadata: true },
+])(
+  "keeps delete confirmation and feedback honest for $capability / metadata $metadata",
+  async ({ capability, metadata }) => {
+    state.scopes.get(secondary)!.add(AuthOrchestrationOperateScope);
+    using _configs = vi
+      .spyOn(appAtomRegistry, "get")
+      .mockReturnValue(
+        new Map([
+          [secondary, { environment: { capabilities: { threadLifecycleCascade: capability } } }],
+        ]),
+      );
+    if (metadata)
+      state.dispatchResult = {
+        sequence: 18,
+        lifecycle: {
+          commandId: CommandId.make("delete"),
+          rootThreadId: target.threadId,
+          affectedThreadIds: [target.threadId, ThreadId.make("child")],
+          cleanup: { pendingCount: 0, failedCount: 0 },
+        },
+      };
+    const result = await useThreadActions().confirmAndDeleteThread(target);
+    expect(result._tag).toBe("Success");
+    expect(state.confirm.mock.calls[0]![0]).toContain(
+      capability === true
+        ? "thread.lifecycle.deleteConfirm"
+        : "thread.lifecycle.deleteConfirmLegacy",
+    );
+    expect(state.requests).toEqual([
+      { action: "stopSession", environmentId: secondary, input: { threadId: target.threadId } },
+      { action: "delete", environmentId: secondary, input: { threadId: target.threadId } },
+    ]);
+    expect(state.toasts.includes("thread.lifecycle.deleted")).toBe(capability === true && metadata);
+  },
+);
+
+it("cancels confirmed delete without sending a lifecycle command", async () => {
+  state.scopes.get(secondary)!.add(AuthOrchestrationOperateScope);
+  state.confirm.mockResolvedValue(false);
+  await useThreadActions().confirmAndDeleteThread(target);
+  expect(state.requests).toEqual([]);
+  expect(state.toasts).toEqual([]);
+});
+
+it.each([
+  { capability: undefined, metadata: false },
+  { capability: undefined, metadata: true },
+  { capability: true, metadata: false },
+  { capability: true, metadata: true },
+])(
+  "confirms a bulk selection once and reports each root result for $capability / metadata $metadata",
+  async ({ capability, metadata }) => {
+    const { deleteSelectedThreadEntries } = await vi.importActual<
+      typeof import("../components/Sidebar.logic")
+    >("../components/Sidebar.logic");
+    state.scopes.get(secondary)!.add(AuthOrchestrationOperateScope);
+    state.threads.push({ ...state.threads[0]!, environmentId: primary });
+    const targets = [target, { ...target, environmentId: primary }];
+    using _configs = vi
+      .spyOn(appAtomRegistry, "get")
+      .mockReturnValue(
+        new Map(
+          targets.map(({ environmentId }) => [
+            environmentId,
+            { environment: { capabilities: { threadLifecycleCascade: capability } } },
+          ]),
+        ),
+      );
+    const confirmed = await useThreadDeleteConfirmation()(targets);
+    expect(confirmed).toMatchObject({ _tag: "Success", value: true });
+    const actions = useThreadActions();
+    const result = await deleteSelectedThreadEntries({
+      entries: targets.map((threadRef) => ({ threadRef, threadKey: scopedThreadKey(threadRef) })),
+      delete: ({ threadRef }, deletedThreadKeys) => {
+        state.dispatchResult = metadata
+          ? {
+              sequence: 20,
+              lifecycle: {
+                commandId: CommandId.make(`delete:${threadRef.environmentId}`),
+                rootThreadId: threadRef.threadId,
+                affectedThreadIds: [threadRef.threadId, ThreadId.make("child")],
+                cleanup: { pendingCount: 0, failedCount: 0 },
+              },
+            }
+          : { sequence: 20 };
+        return actions.deleteThread(threadRef, { deletedThreadKeys });
+      },
+    });
+    expect(result.firstFailure).toBeNull();
+    expect([...result.deletedThreadKeys]).toEqual(targets.map(scopedThreadKey));
+    expect(state.confirm).toHaveBeenCalledOnce();
+    expect(state.confirm.mock.calls[0]![0].split("\n")[1]).toBe(
+      capability === true
+        ? "thread.lifecycle.deleteConfirmMany"
+        : "thread.lifecycle.deleteConfirmManyLegacy",
+    );
+    expect(state.requests.filter(({ action }) => action === "delete")).toEqual(
+      targets.map(({ environmentId, threadId }) => ({
+        action: "delete",
+        environmentId,
+        input: { threadId },
+      })),
+    );
+    expect(state.requests.every(({ input }) => input.threadId === target.threadId)).toBe(true);
+    expect(state.toasts.filter((title) => title === "thread.lifecycle.deleted")).toHaveLength(
+      capability === true && metadata ? 2 : 0,
+    );
+  },
+);

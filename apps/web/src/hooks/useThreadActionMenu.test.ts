@@ -20,6 +20,7 @@ function deferred<T>() {
 const state = vi.hoisted(() => ({
   granted: new Set<string>(),
   effects: [] as string[],
+  confirmations: [] as string[],
   completed: deferred<void>(),
   show: vi.fn<
     (
@@ -35,6 +36,15 @@ function recordEffect(action: string) {
 }
 
 vi.mock("../components/CustomSnoozeDialog", () => ({ requestCustomSnooze: vi.fn() }));
+vi.mock("../i18n/I18nProvider", async () => {
+  const { translate } = await import("../i18n/messages");
+  return {
+    useI18n: () => ({
+      t: (key: Parameters<typeof translate>[1], values?: Parameters<typeof translate>[2]) =>
+        translate("en", key, values),
+    }),
+  };
+});
 vi.mock("react", () => ({
   useCallback: (callback: unknown) => callback,
   useMemo: (factory: () => unknown) => factory(),
@@ -64,6 +74,10 @@ vi.mock("../state/entities", () => ({
   }),
   useProjects: () => [{ id: "project", environmentId: "secondary" }],
 }));
+vi.mock("../state/server", async () => {
+  const { Atom } = await import("effect/reactivity");
+  return { environmentServerConfigsAtom: Atom.make(new Map()) };
+});
 vi.mock("../state/environments", () => ({ usePrimaryEnvironmentId: () => "primary" }));
 vi.mock("../state/threads", () => ({ threadEnvironment: { updateMetadata: "metadata" } }));
 vi.mock("../state/use-atom-command", () => ({
@@ -76,7 +90,8 @@ vi.mock("../localApi", () => ({
   readLocalApi: () => ({
     contextMenu: { show: state.show, close: () => {} },
     dialogs: {
-      confirm: async () => {
+      confirm: async (message: string) => {
+        state.confirmations.push(message);
         recordEffect("confirm");
         return false;
       },
@@ -161,6 +176,7 @@ const createMenu = () =>
 beforeEach(() => {
   state.granted = new Set(["primary"]);
   state.effects = [];
+  state.confirmations = [];
   state.completed = deferred<void>();
   state.show.mockReset().mockResolvedValue(null);
 });
@@ -179,4 +195,15 @@ describe("thread menu permissions", () => {
       expect(state.effects).toEqual([]);
     },
   );
+});
+
+it("asks to delete from T3 without promising physical history removal", async () => {
+  state.granted.add("secondary");
+  state.show.mockResolvedValue("delete");
+  createMenu().openMenu(position);
+  await state.completed.promise;
+  expect(state.confirmations).toHaveLength(1);
+  expect(state.confirmations[0]).toContain("Delete this thread from T3?");
+  expect(state.confirmations[0]).not.toMatch(/permanently clears|transcript|terminal/i);
+  expect(state.effects).toEqual(["confirm"]);
 });

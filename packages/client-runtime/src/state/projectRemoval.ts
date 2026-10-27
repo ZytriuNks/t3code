@@ -35,8 +35,8 @@ export function planProjectRemoval<
         ]
       : [`This removes ${members.length} grouped project entries.`]),
     ...(projectThreads.length > 0
-      ? ["This permanently clears conversation history for those threads and any archived threads."]
-      : ["This permanently clears any archived conversation history."]),
+      ? ["This deletes these threads, including archived threads, from T3."]
+      : ["This deletes any archived threads from T3."]),
     isWholeGroup && !hasOtherMembers
       ? "This removes only the project entries, not the files on disk."
       : "Other entries in this grouped project are unaffected.",

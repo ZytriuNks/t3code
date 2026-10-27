@@ -925,3 +925,19 @@ describe("translation messages", () => {
     );
   });
 });
+
+it.each(["en", "zh-CN"] as const)(
+  "describes project thread deletion in %s without physical removal claims",
+  (locale) => {
+    expect(translate(locale, "settings.project.clearHistory")).toBe(
+      locale === "en"
+        ? "This deletes these threads, including archived threads, from T3."
+        : "这会从 T3 删除这些线程（包括归档线程）。",
+    );
+    expect(translate(locale, "settings.project.clearArchivedHistory")).toBe(
+      locale === "en"
+        ? "This deletes any archived threads from T3."
+        : "这会从 T3 删除所有归档线程。",
+    );
+  },
+);

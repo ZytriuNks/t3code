@@ -2,6 +2,13 @@ import type { OrchestrationV2DispatchCommandResult } from "@t3tools/contracts";
 
 export const THREAD_LIFECYCLE_MESSAGES = {
   en: {
+    "thread.lifecycle.deleteTitle": 'Delete thread "{title}"?',
+    "thread.lifecycle.deleteTitleMany": "Delete {count} threads?",
+    "thread.lifecycle.untitled": "Untitled thread",
+    "thread.lifecycle.deleteConfirmMany":
+      "Delete these threads from T3? Subagents are included if the server confirms cascading deletion. This cannot be undone.",
+    "thread.lifecycle.deleteConfirmManyLegacy":
+      "Delete these threads from T3? This cannot be undone.",
     "thread.relationship.unavailable": "This related thread is unavailable",
     "thread.lifecycle.saved": "Thread state saved",
     "thread.lifecycle.archived": "Thread and its subagents archived",
@@ -12,10 +19,16 @@ export const THREAD_LIFECYCLE_MESSAGES = {
     "thread.lifecycle.cleanupFailed":
       "The thread state is saved. Resource cleanup needs attention ({count} failed).",
     "thread.lifecycle.deleteConfirm":
-      "Delete this thread and its subagents from T3? This cannot be undone.",
+      "Delete this thread from T3? Subagents are included if the server confirms cascading deletion. This cannot be undone.",
     "thread.lifecycle.deleteConfirmLegacy": "Delete this thread from T3? This cannot be undone.",
   },
   "zh-CN": {
+    "thread.lifecycle.deleteTitle": "删除线程“{title}”？",
+    "thread.lifecycle.deleteTitleMany": "删除 {count} 个线程？",
+    "thread.lifecycle.untitled": "未命名线程",
+    "thread.lifecycle.deleteConfirmMany":
+      "从 T3 删除这些线程？若服务端确认级联删除，子代理也会被删除。此操作无法撤销。",
+    "thread.lifecycle.deleteConfirmManyLegacy": "从 T3 删除这些线程？此操作无法撤销。",
     "thread.relationship.unavailable": "此关联线程不可用",
     "thread.lifecycle.saved": "线程状态已保存",
     "thread.lifecycle.archived": "线程及其子代理已归档",
@@ -23,7 +36,8 @@ export const THREAD_LIFECYCLE_MESSAGES = {
     "thread.lifecycle.deleted": "线程及其子代理已从 T3 删除",
     "thread.lifecycle.cleanupPending": "线程状态已保存。资源清理尚待完成（{count} 项）。",
     "thread.lifecycle.cleanupFailed": "线程状态已保存。资源清理需要处理（{count} 项失败）。",
-    "thread.lifecycle.deleteConfirm": "从 T3 删除此线程及其子代理？此操作无法撤销。",
+    "thread.lifecycle.deleteConfirm":
+      "从 T3 删除此线程？若服务端确认级联删除，子代理也会被删除。此操作无法撤销。",
     "thread.lifecycle.deleteConfirmLegacy": "从 T3 删除此线程？此操作无法撤销。",
   },
 } as const;
