@@ -29,7 +29,7 @@ it.effect(
       `;
       }
       assert.deepEqual(
-        (yield* runMigrations()).map(([id]) => id),
+        (yield* runMigrations({ toMigrationInclusive: 68 })).map(([id]) => id),
         [68],
       );
       yield* Migration0068;

@@ -251,6 +251,37 @@ const addRolledBackRecoveryCandidate = Effect.fn("addRolledBackRecoveryCandidate
 it.effect.each([
   ["memory", ProjectionStore.layerMemory],
   ["SQL", layerTest],
+] as const)("%s preserves lifecycle revisions in thread/run payloads and shells", ([, layer]) =>
+  Effect.gen(function* () {
+    const store = yield* ProjectionStore.ProjectionStoreV2;
+    const threadId = yield* addRolledBackRecoveryCandidate("lifecycle-revision");
+    const initial = yield* store.getThreadProjection(threadId);
+    assert.equal((yield* store.getThreadShell(threadId))?.lifecycleRevision, 0);
+    yield* store.apply({
+      id: EventId.make("revision:thread"),
+      type: "thread.metadata-updated",
+      threadId,
+      occurredAt: initial.updatedAt,
+      payload: { ...initial.thread, lifecycleRevision: 4 },
+    });
+    yield* store.apply({
+      id: EventId.make("revision:run"),
+      type: "run.updated",
+      threadId,
+      occurredAt: initial.updatedAt,
+      payload: { ...initial.runs[0]!, lifecycleRevision: 4 },
+    });
+    const projection = yield* store.getThreadProjection(threadId);
+    assert.equal(projection.thread.lifecycleRevision, 4);
+    assert.equal(projection.runs[0]?.lifecycleRevision, 4);
+    assert.equal((yield* store.getThreadShell(threadId))?.lifecycleRevision, 4);
+    assert.equal((yield* store.getShellSnapshot()).threads[0]?.lifecycleRevision, 4);
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect.each([
+  ["memory", ProjectionStore.layerMemory],
+  ["SQL", layerTest],
 ] as const)("%s shells flag only an active turn blocked solely on T3 thread waits", ([, layer]) =>
   Effect.gen(function* () {
     const store = yield* ProjectionStore.ProjectionStoreV2;

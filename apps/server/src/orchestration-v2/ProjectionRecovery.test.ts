@@ -20,6 +20,7 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -32,6 +33,162 @@ import * as EventStore from "./EventStore.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderRuntimeRecovery from "./ProviderRuntimeRecoveryService.ts";
 import { restartContinuationRun } from "./RestartContinuation.ts";
+import * as NativeSessionBindings from "./NativeSessionBindings.ts";
+import * as ThreadDeletionRecords from "./ThreadDeletionRecords.ts";
+import * as ProjectionMaintenance from "./ProjectionMaintenance.ts";
+
+const layerLifecycleStores = Layer.mergeAll(
+  EventStore.layer,
+  ProjectionStore.layer,
+  NativeSessionBindings.layer,
+  ThreadDeletionRecords.layer,
+);
+const layerLifecycleTest = ProjectionMaintenance.layer.pipe(
+  Layer.provideMerge(layerLifecycleStores),
+  Layer.provideMerge(SqlitePersistence.layerMemory),
+);
+
+it.effect(
+  "rebuilds historical native bindings and idempotently restores independent deletion records",
+  () =>
+    Effect.gen(function* () {
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const events = yield* EventStore.EventStoreV2;
+      const bindings = yield* NativeSessionBindings.NativeSessionBindings;
+      const deletions = yield* ThreadDeletionRecords.ThreadDeletionRecords;
+      const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+      const sql = yield* SqlClient.SqlClient;
+      const threadId = yield* createThread("lifecycle", { lifecycleRevision: 7 });
+      const thread = yield* projections.getThread(threadId);
+      const at = DateTime.makeUnsafe("2026-10-26T00:00:00.000Z");
+      yield* events.append({
+        events: [
+          {
+            id: EventId.make("lifecycle:create"),
+            type: "thread.created",
+            threadId,
+            occurredAt: at,
+            payload: thread,
+          },
+        ],
+      });
+      for (const [driverName, canonicalRoot] of [
+        ["claude", "C:/claude"],
+        ["codex", "C:/codex"],
+        ["codex", "C:/other-codex"],
+      ] as const) {
+        const event = {
+          id: EventId.make(`lifecycle:${canonicalRoot}`),
+          type: "provider-thread.updated" as const,
+          threadId,
+          occurredAt: at,
+          payload: {
+            id: ProviderThreadId.make(`lifecycle:${driverName}`),
+            driver: ProviderDriverKind.make(driverName),
+            providerInstanceId: ProviderInstanceId.make(driverName),
+            providerSessionId: null,
+            appThreadId: threadId,
+            ownerNodeId: null,
+            nativeThreadRef: {
+              driver: ProviderDriverKind.make(driverName),
+              nativeId: `${driverName}-session`,
+              strength: "strong" as const,
+            },
+            nativeConversationHeadRef: null,
+            nativeStorage: { type: "resolved" as const, canonicalRoot },
+            status: "idle" as const,
+            firstRunOrdinal: null,
+            lastRunOrdinal: null,
+            handoffIds: [],
+            forkedFrom: null,
+            createdAt: at,
+            updatedAt: at,
+          },
+        };
+        yield* events.append({ events: [event] });
+        yield* projections.apply(event);
+      }
+      const sessions = yield* bindings.listForThreads([threadId]);
+      assert.equal(sessions.length, 3);
+      assert.equal((yield* projections.getThreadShell(threadId))?.lifecycleRevision, 7);
+      for (const type of ["thread.archived", "thread.unarchived"] as const) {
+        yield* projections.apply({
+          id: EventId.make(type),
+          type,
+          threadId,
+          occurredAt: at,
+          payload: thread,
+        });
+        assert.isTrue(Option.isNone(yield* deletions.get(threadId)));
+      }
+      const record = {
+        threadId,
+        projectId: thread.projectId,
+        parentThreadId: null,
+        operationRootThreadId: threadId,
+        deletedAt: DateTime.formatIso(at),
+        commandId: CommandId.make("lifecycle:delete"),
+        scope: "t3_only" as const,
+        sessions,
+      };
+      const deletionEvent = {
+        id: EventId.make("lifecycle:delete"),
+        type: "thread.deleted" as const,
+        threadId,
+        occurredAt: at,
+        payload: { ...thread, deletedAt: at },
+        deletionRecord: record,
+      };
+      yield* events.append({ events: [deletionEvent] });
+      yield* projections.apply(deletionEvent);
+      // A record whose source event is unavailable must survive projection rebuild too.
+      const independent = { ...record, threadId: ThreadId.make("independent"), sessions: [] };
+      yield* deletions.apply(independent);
+      yield* sql`DELETE FROM orchestration_v2_thread_deletions WHERE thread_id = ${threadId}`;
+      yield* sql`DELETE FROM orchestration_v2_native_session_bindings`;
+      assert.isTrue((yield* maintenance.rebuild).valid);
+      assert.deepEqual(yield* bindings.listForThreads([threadId]), sessions);
+      assert.deepEqual(Option.getOrThrow(yield* deletions.get(threadId)), record);
+      assert.deepEqual(Option.getOrThrow(yield* deletions.get(independent.threadId)), independent);
+      assert.equal((yield* projections.getThread(threadId)).lifecycleRevision, 7);
+      assert.isTrue((yield* maintenance.rebuild).valid);
+      assert.deepEqual(Option.getOrThrow(yield* deletions.get(threadId)), record);
+    }).pipe(Effect.provide(layerLifecycleTest)),
+);
+
+it.effect("rolls back deletion records together with a failed thread projection update", () =>
+  Effect.gen(function* () {
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const deletions = yield* ThreadDeletionRecords.ThreadDeletionRecords;
+    const sql = yield* SqlClient.SqlClient;
+    const threadId = yield* createThread("lifecycle-rollback");
+    const thread = yield* projections.getThread(threadId);
+    yield* sql`CREATE TRIGGER reject_lifecycle_update BEFORE UPDATE ON orchestration_v2_projection_threads BEGIN SELECT RAISE(ABORT, 'test projection failure'); END`;
+    const deletedAt = thread.updatedAt;
+    const error = yield* Effect.flip(
+      projections.apply({
+        id: EventId.make("lifecycle:rollback"),
+        type: "thread.deleted",
+        threadId,
+        occurredAt: deletedAt,
+        payload: { ...thread, deletedAt },
+        deletionRecord: {
+          threadId,
+          projectId: thread.projectId,
+          parentThreadId: null,
+          operationRootThreadId: threadId,
+          deletedAt: DateTime.formatIso(deletedAt),
+          commandId: CommandId.make("lifecycle:rollback"),
+          scope: "t3_only",
+          sessions: [],
+        },
+      }),
+    );
+    assert.equal(error._tag, "ProjectionStoreApplyEventError");
+    assert.isTrue(Option.isNone(yield* deletions.get(threadId)));
+    assert.isNull((yield* projections.getThread(threadId)).deletedAt);
+  }).pipe(Effect.provide(layerLifecycleTest)),
+);
 
 const layerTest = Layer.mergeAll(ProjectionStore.layer, EffectOutbox.layer).pipe(
   Layer.provideMerge(SqlitePersistence.layerMemory),

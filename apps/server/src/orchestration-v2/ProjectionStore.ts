@@ -89,6 +89,8 @@ import type * as Statement from "effect/sql/Statement";
 import { MCP_APP_OUTPUT_KEY } from "@t3tools/shared/mcpApp";
 import { threadHtmlRenderAttachmentIds } from "../attachmentStore.ts";
 import type { LifecycleThread } from "./ThreadOwnership.ts";
+import * as NativeSessionBindings from "./NativeSessionBindings.ts";
+import * as ThreadDeletionRecords from "./ThreadDeletionRecords.ts";
 import {
   isThreadHistoryUserTurn,
   isConversationHistoryItem,
@@ -597,7 +599,7 @@ export class ProjectionStoreV2 extends Context.Service<ProjectionStoreV2, Projec
   "t3/orchestration-v2/ProjectionStore/ProjectionStoreV2",
 ) {}
 
-export const ORCHESTRATION_V2_PROJECTION_SCHEMA_VERSION = 2;
+export const ORCHESTRATION_V2_PROJECTION_SCHEMA_VERSION = 3;
 
 function needsRecovery(
   projection: OrchestrationV2ThreadProjection,
@@ -1577,6 +1579,7 @@ export function threadShellFromProjection(
   });
   return {
     createdBy: projection.thread.createdBy,
+    lifecycleRevision: projection.thread.lifecycleRevision ?? 0,
     creationSource: projection.thread.creationSource,
     id: projection.thread.id,
     projectId: projection.thread.projectId,
@@ -1836,6 +1839,7 @@ function shellFromState(input: {
 }): OrchestrationV2ThreadShell {
   return {
     createdBy: input.state.thread.createdBy,
+    lifecycleRevision: input.state.thread.lifecycleRevision ?? 0,
     creationSource: input.state.thread.creationSource,
     id: input.state.thread.id,
     projectId: input.state.thread.projectId,
@@ -1909,6 +1913,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
   ProjectionStoreV2,
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
+    const nativeSessionBindings = yield* NativeSessionBindings.NativeSessionBindings;
+    const threadDeletionRecords = yield* ThreadDeletionRecords.ThreadDeletionRecords;
 
     const decodeLifecycleThread = Schema.decodeUnknownEffect(
       Schema.fromJsonString(
@@ -2008,6 +2014,9 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       /* This helper runs for individual orchestration events; the enclosing operation owns the span. */
       Effect.fnUntraced(
         function* (event) {
+          if (event.type === "thread.deleted" && event.deletionRecord !== undefined) {
+            yield* threadDeletionRecords.apply(event.deletionRecord);
+          }
           switch (event.type) {
             case "thread.pull-request-link-updated": {
               const thread = yield* getThread(event.threadId);
@@ -2377,6 +2386,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               break;
             }
             case "provider-thread.updated": {
+              yield* nativeSessionBindings.applyProviderThread(event);
               const payloadJson = yield* encodeProviderThreadPayload(event.payload);
               const payload = parseEncodedPayload(payloadJson);
               yield* sql`
@@ -2884,7 +2894,11 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           }
         },
         (effect, event) =>
-          effect.pipe(
+          (event.type === "provider-thread.updated" ||
+          (event.type === "thread.deleted" && event.deletionRecord !== undefined)
+            ? sql.withTransaction(effect)
+            : effect
+          ).pipe(
             Effect.mapError(
               (cause) =>
                 new ProjectionStoreApplyEventError({
@@ -6614,7 +6628,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getThreadAttachmentIds,
     } satisfies ProjectionStoreV2Shape;
   }),
-);
+).pipe(Layer.provide(Layer.mergeAll(NativeSessionBindings.layer, ThreadDeletionRecords.layer)));
 
 export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
   ProjectionStoreV2,

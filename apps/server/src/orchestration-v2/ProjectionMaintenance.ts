@@ -117,6 +117,9 @@ export const layer: Layer.Layer<
       yield* sql.withTransaction(
         Effect.gen(function* () {
           const throughSequence = yield* eventStore.latestSequence();
+          // Bindings are replayable. Deletion records outlive the large projections
+          // and must remain even when their original event is no longer available.
+          yield* sql`DELETE FROM orchestration_v2_native_session_bindings`;
           yield* sql`DELETE FROM orchestration_v2_projection_context_transfers`;
           yield* sql`DELETE FROM orchestration_v2_projection_context_handoffs`;
           yield* sql`DELETE FROM orchestration_v2_projection_checkpoints`;

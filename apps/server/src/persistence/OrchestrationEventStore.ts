@@ -192,6 +192,9 @@ function metadataForV2Event(event: OrchestrationV2DomainEvent): Record<string, u
       ? {}
       : { providerInstanceId: event.providerInstanceId }),
     ...(event.rawEventId === undefined ? {} : { rawEventId: event.rawEventId }),
+    ...(event.type === "thread.deleted" && event.deletionRecord !== undefined
+      ? { deletionRecord: event.deletionRecord }
+      : {}),
   };
 }
 
@@ -215,6 +218,9 @@ const rowToV2StoredEvent = Effect.fn("OrchestrationEventStore.rowToV2StoredEvent
       ? {}
       : { providerInstanceId: values.providerInstanceId }),
     ...(values.rawEventId === undefined ? {} : { rawEventId: values.rawEventId }),
+    ...(row.event_type === "thread.deleted" && values.deletionRecord !== undefined
+      ? { deletionRecord: values.deletionRecord }
+      : {}),
   });
   return yield* decodeV2StoredEvent({
     sequence: row.sequence,

@@ -65,6 +65,7 @@ import {
   RuntimeMode,
 } from "./providerPolicy.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
+import { NativeSessionStorage, ThreadDeletionRecord } from "./threadLifecycle.ts";
 import { OrchestrationProjectShell } from "./orchestrationProject.ts";
 import {
   TurnTokenUsage,
@@ -371,6 +372,9 @@ export const OrchestrationV2LimitRecoveryUpdate = Schema.Struct({
 export type OrchestrationV2LimitRecoveryUpdate = typeof OrchestrationV2LimitRecoveryUpdate.Type;
 
 export const OrchestrationV2AppThread = Schema.Struct({
+  lifecycleRevision: Schema.optional(NonNegativeInt).pipe(
+    Schema.withDecodingDefault(Effect.succeed(0)),
+  ),
   ...OrchestrationV2CreationFields,
   id: ThreadId,
   projectId: ProjectId,
@@ -535,6 +539,7 @@ export type OrchestrationV2ThreadLaunchWorkspaceStrategy =
 export const ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE = "workspace_preparation_failed";
 
 export const OrchestrationV2Run = Schema.Struct({
+  lifecycleRevision: Schema.optional(NonNegativeInt),
   id: RunId,
   threadId: ThreadId,
   ordinal: PositiveInt,
@@ -875,7 +880,23 @@ export const OrchestrationV2ProviderGoal = Schema.Struct({
 });
 export type OrchestrationV2ProviderGoal = typeof OrchestrationV2ProviderGoal.Type;
 
+const nativeSessionStorageHasFile = Schema.makeFilter(
+  (thread: {
+    readonly driver: ProviderDriverKind;
+    readonly nativeStorage?: NativeSessionStorage | undefined;
+  }) =>
+    thread.driver !== "pi" ||
+    thread.nativeStorage?.type !== "resolved" ||
+    thread.nativeStorage.canonicalFile !== undefined ||
+    "Resolved Pi sessions require a canonical file.",
+);
+
 export const OrchestrationV2ProviderThread = Schema.Struct({
+  nativeStorage: Schema.optional(NativeSessionStorage).pipe(
+    Schema.withDecodingDefault(
+      Effect.succeed({ type: "unresolved" as const, reason: "legacy_missing_locator" as const }),
+    ),
+  ),
   id: ProviderThreadId,
   driver: ProviderDriverKind,
   providerInstanceId: ProviderInstanceId,
@@ -909,7 +930,7 @@ export const OrchestrationV2ProviderThread = Schema.Struct({
   ),
   createdAt: Schema.DateTimeUtc,
   updatedAt: Schema.DateTimeUtc,
-});
+}).check(nativeSessionStorageHasFile);
 export type OrchestrationV2ProviderThread = typeof OrchestrationV2ProviderThread.Type;
 
 export const OrchestrationV2HistoricalMessage = Schema.Struct({
@@ -1603,6 +1624,12 @@ const OrchestrationV2EventBase = Schema.Struct({
 export const OrchestrationV2DomainEvent = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2EventBase.fields,
+    type: Schema.Literal("thread.deleted"),
+    payload: OrchestrationV2AppThread,
+    deletionRecord: Schema.optional(ThreadDeletionRecord),
+  }),
+  Schema.Struct({
+    ...OrchestrationV2EventBase.fields,
     type: Schema.Literal("thread.created"),
     payload: OrchestrationV2AppThread,
   }),
@@ -1611,7 +1638,6 @@ export const OrchestrationV2DomainEvent = Schema.Union([
     type: Schema.Literals([
       "thread.archived",
       "thread.unarchived",
-      "thread.deleted",
       "thread.settled",
       "thread.unsettled",
       "thread.snoozed",
@@ -1807,6 +1833,7 @@ export type OrchestrationV2LatestVisibleMessageSummary =
   typeof OrchestrationV2LatestVisibleMessageSummary.Type;
 
 export const OrchestrationV2ThreadShell = Schema.Struct({
+  lifecycleRevision: OrchestrationV2AppThread.fields.lifecycleRevision,
   ...OrchestrationV2CreationFields,
   id: ThreadId,
   projectId: ProjectId,
@@ -2032,7 +2059,7 @@ export const OrchestrationV2ProviderThreadJson = OrchestrationV2ProviderThread.m
     createdAt: Schema.DateTimeUtcFromString,
     updatedAt: Schema.DateTimeUtcFromString,
   }),
-);
+).check(nativeSessionStorageHasFile);
 export type OrchestrationV2ProviderThreadJson = typeof OrchestrationV2ProviderThreadJson.Type;
 
 export const OrchestrationV2ContextHandoffJson = OrchestrationV2ContextHandoff.mapFields(
@@ -2417,6 +2444,12 @@ export type OrchestrationV2RawProviderEventJson = typeof OrchestrationV2RawProvi
 export const OrchestrationV2DomainEventJson = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2JsonEventBaseFields,
+    type: Schema.Literal("thread.deleted"),
+    payload: OrchestrationV2AppThreadJson,
+    deletionRecord: Schema.optional(ThreadDeletionRecord),
+  }),
+  Schema.Struct({
+    ...OrchestrationV2JsonEventBaseFields,
     type: Schema.Literal("thread.created"),
     payload: OrchestrationV2AppThreadJson,
   }),
@@ -2425,7 +2458,6 @@ export const OrchestrationV2DomainEventJson = Schema.Union([
     type: Schema.Literals([
       "thread.archived",
       "thread.unarchived",
-      "thread.deleted",
       "thread.settled",
       "thread.unsettled",
       "thread.snoozed",

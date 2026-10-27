@@ -395,6 +395,10 @@ describe("orchestration V2 contracts", () => {
     expect(providerThread.pendingBackgroundTasks).toEqual([]);
     expect(providerThread.contextUsage).toBeNull();
     expect(providerThread.nativeMetadata).toBeNull();
+    expect(providerThread.nativeStorage).toEqual({
+      type: "unresolved",
+      reason: "legacy_missing_locator",
+    });
 
     const runtimeThread = decodeOrchestrationV2ProviderThread({
       id: "provider-thread-2",
@@ -416,6 +420,10 @@ describe("orchestration V2 contracts", () => {
     expect(runtimeThread.pendingBackgroundTasks).toEqual([]);
     expect(runtimeThread.contextUsage).toBeNull();
     expect(runtimeThread.nativeMetadata).toBeNull();
+    expect(runtimeThread.nativeStorage).toEqual({
+      type: "unresolved",
+      reason: "legacy_missing_locator",
+    });
   });
 });
 
