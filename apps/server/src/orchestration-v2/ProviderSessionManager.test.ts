@@ -3587,6 +3587,23 @@ it.effect.each(["session", "thread", "revision", "source", "ordinary"] as const)
         const oldId = ids.derive.providerSession({ providerInstanceId: modelSelection.instanceId });
         yield* manager.open({ threadId, providerSessionId: oldId, modelSelection, runtimePolicy });
         const old = yield* guards.resolveLifecycleSource(threadId);
+        yield* sink.write({
+          lifecycleGuard: old,
+          events: [
+            {
+              id: yield* ids.allocate.event({ threadId }),
+              type: "provider-thread.updated",
+              threadId,
+              occurredAt: now,
+              payload: makeProviderThread({
+                idAllocator: ids,
+                threadId,
+                providerSessionId: oldId,
+                now,
+              }),
+            },
+          ],
+        });
         yield* manager.release({ providerSessionId: oldId, reason: "manual_shutdown" });
         yield* sink.write({
           events: [

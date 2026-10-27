@@ -541,6 +541,9 @@ export const layerWithOptions = (
           if (
             old !== undefined &&
             old.sourceToken !== source.sourceToken &&
+            // A detached session that never loaded a native thread needs no native receipt.
+            (entry.attachedThreadIds.has(input.threadId) ||
+              entry.loadedThreads.get(input.threadId)?.nativeThreadRef != null) &&
             (!entry.retiredThreadIds.has(input.threadId) ||
               !retirements.some(
                 (receipt) =>

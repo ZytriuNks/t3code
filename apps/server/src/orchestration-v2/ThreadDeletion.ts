@@ -207,7 +207,6 @@ export const planThreadDeletion = Effect.fn("ThreadDeletion.planThreadDeletion")
         providerSessionId: session.id,
         detail: "Thread deleted.",
         revokeMcpCredential: true,
-        retirementRevision: projection.thread.lifecycleRevision ?? 0,
       },
     });
   }

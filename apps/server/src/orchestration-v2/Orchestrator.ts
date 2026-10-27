@@ -963,7 +963,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     ) {
       const sources = yield* projectionStore.getProviderAttachmentSources(command.threadId);
       const receipts = yield* effectOutbox.attachmentRetirements(command.threadId);
-      return sources.flatMap((source): Array<PendingOrchestrationEffectV2> => {
+      const effects = sources.flatMap((source): Array<PendingOrchestrationEffectV2> => {
         // Pending/failed intents remain durable and blocked; neither a detached
         // projection nor a repeated archive replaces their captured provenance.
         if (
@@ -993,6 +993,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           },
         ];
       });
+      return {
+        nativeSessionIds: new Set(sources.map((source) => source.providerSessionId)),
+        effects,
+      };
     },
     (effect, command) => effect.pipe(mapDispatchError(command)),
   );
@@ -3822,8 +3826,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       });
     }
 
-    // Ordinary detaches retain their existing live-session semantics. Archive
-    // below also retires historical bindings, regardless of projection status.
+    const lifecycleRetirements =
+      command.type === "thread.archive" ? yield* planLifecycleRetirements(command) : undefined;
+    // Sessions without a native attachment use ordinary detach. Native bindings
+    // require strict retirement, including historical stopped/error bindings.
     const detachSessionIds = new Set(
       command.type === "thread.archive" || command.type === "thread.settle"
         ? (providerContext?.providerSessions ?? []).map((session) => session.id)
@@ -3839,10 +3845,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 .map((session) => session.id)
             : (providerSwitchPlan?.releaseProviderSessionIds ?? []),
     );
-    if (detachSessionIds.size > 0 && command.type !== "thread.archive") {
+    if (detachSessionIds.size > 0) {
       const liveSessions = (providerContext?.providerSessions ?? []).filter(
         (session) =>
           detachSessionIds.has(session.id) &&
+          !lifecycleRetirements?.nativeSessionIds.has(session.id) &&
           session.status !== "stopped" &&
           session.status !== "error",
       );
@@ -3863,13 +3870,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 providerSessionId: session.id,
                 detachedAt: now,
                 reason:
-                  command.type === "thread.settle"
-                    ? "Thread settled."
-                    : command.type === "thread.metadata.update"
-                      ? "Workspace changed."
-                      : command.type === "thread.runtime-mode.set"
-                        ? "Runtime mode changed."
-                        : "Provider or model selection changed.",
+                  command.type === "thread.archive"
+                    ? "Thread archived."
+                    : command.type === "thread.settle"
+                      ? "Thread settled."
+                      : command.type === "thread.metadata.update"
+                        ? "Workspace changed."
+                        : command.type === "thread.runtime-mode.set"
+                          ? "Runtime mode changed."
+                          : "Provider or model selection changed.",
               },
             });
             const pendingEffect = {
@@ -3880,13 +3889,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 type: "provider-session.detach",
                 providerSessionId: session.id,
                 detail:
-                  command.type === "thread.settle"
-                    ? "Thread settled."
-                    : command.type === "thread.metadata.update"
-                      ? "Workspace changed."
-                      : command.type === "thread.runtime-mode.set"
-                        ? "Runtime mode changed."
-                        : "Provider or model selection changed.",
+                  command.type === "thread.archive"
+                    ? "Thread archived."
+                    : command.type === "thread.settle"
+                      ? "Thread settled."
+                      : command.type === "thread.metadata.update"
+                        ? "Workspace changed."
+                        : command.type === "thread.runtime-mode.set"
+                          ? "Runtime mode changed."
+                          : "Provider or model selection changed.",
+                ...(command.type === "thread.archive" ? { revokeMcpCredential: true } : {}),
               },
             } satisfies PendingOrchestrationEffectV2;
             yield* Ref.update(effects, (existing) => [...existing, pendingEffect]);
@@ -3896,7 +3908,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     }
 
     if (command.type === "thread.archive") {
-      const retirements = yield* planLifecycleRetirements(command);
+      const retirements = lifecycleRetirements!.effects;
       yield* Ref.update(effects, (existing) => [...existing, ...retirements]);
       for (const effect of retirements) {
         if (effect.request.type !== "provider-session.detach") continue;
@@ -11557,11 +11569,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             idAllocator,
           }),
         );
+        const retirements = yield* planLifecycleRetirements(command);
         return {
           ...plan,
           effects: [
-            ...plan.effects.filter((effect) => effect.request.type !== "provider-session.detach"),
-            ...(yield* planLifecycleRetirements(command)),
+            ...plan.effects.filter(
+              (effect) =>
+                effect.request.type !== "provider-session.detach" ||
+                !retirements.nativeSessionIds.has(effect.request.providerSessionId),
+            ),
+            ...retirements.effects,
           ],
         };
       }

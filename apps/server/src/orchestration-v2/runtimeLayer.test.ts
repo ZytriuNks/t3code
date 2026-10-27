@@ -6331,6 +6331,348 @@ it.layer(layerQueueResumeDisabledInstanceTest)(
   },
 );
 
+it.effect.each(["exclusive", "exclusive-failed", "shared", "shared-placeholder"] as const)(
+  "lifecycle archive uses ordinary detach for a %s session without native threads",
+  (mode) =>
+    Effect.gen(function* () {
+      const shared = mode.startsWith("shared");
+      const closeFails = mode === "exclusive-failed";
+      const capabilities = {
+        ...CodexProviderCapabilitiesV2,
+        sessions: {
+          ...CodexProviderCapabilitiesV2.sessions,
+          supportsMultipleProviderThreadsPerSession: shared,
+        },
+      };
+      let closes = 0;
+      let otherResumes = 0;
+      using _capabilities = vi
+        .spyOn(orchestrationAdapter, "getCapabilities")
+        .mockReturnValue(Effect.succeed(capabilities));
+      using _open = vi.spyOn(orchestrationAdapter, "openSession").mockImplementation((input) =>
+        Effect.gen(function* () {
+          const now = yield* DateTime.now;
+          yield* Effect.addFinalizer(() =>
+            Effect.sync(() => {
+              closes++;
+              if (closeFails && closes === 1) throw new Error("fixture close failed");
+            }),
+          );
+          return {
+            instanceId: modelSelection.instanceId,
+            driver,
+            providerSessionId: input.providerSessionId,
+            providerSession: {
+              id: input.providerSessionId,
+              driver,
+              providerInstanceId: modelSelection.instanceId,
+              status: "ready",
+              cwd: process.cwd(),
+              model: modelSelection.model,
+              capabilities,
+              createdAt: now,
+              updatedAt: now,
+              lastError: null,
+            },
+            supportsConfirmedThreadRetirement: true,
+            backgroundTasksEndWithProcess: true,
+            events: Stream.never,
+            ensureThread: () => Effect.die("unused ensure"),
+            resumeThread: (request) =>
+              Effect.sync(() => {
+                otherResumes++;
+                return request.providerThread;
+              }),
+            startTurn: () => Effect.void,
+            steerTurn: () => Effect.void,
+            interruptTurn: () => Effect.void,
+            unloadThread: () => Effect.void,
+            respondToRuntimeRequest: () => Effect.void,
+            readThreadSnapshot: () => Effect.die("unused snapshot"),
+            rollbackThread: () => Effect.die("unused rollback"),
+            forkThread: () => Effect.die("unused fork"),
+          } satisfies ProviderAdapter.ProviderAdapterV2SessionRuntime;
+        }),
+      );
+      yield* Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        const sink = yield* EventSink.EventSinkV2;
+        const ids = yield* IdAllocator.IdAllocatorV2.pipe(Effect.provide(IdAllocator.layer));
+        const threadId = ThreadId.make(`session-only:${mode}:A`);
+        const otherId = ThreadId.make(`session-only:${mode}:B`);
+        const projectId = ProjectId.make(`session-only:${mode}:project`);
+        const now = yield* DateTime.now;
+        yield* seedProject({
+          projectId,
+          title: "Session only",
+          workspaceRoot: process.cwd(),
+          defaultModelSelection: null,
+          createdAt: DateTime.formatIso(now),
+        });
+        for (const id of shared ? [threadId, otherId] : [threadId])
+          yield* orchestrator.dispatch({
+            type: "thread.create",
+            commandId: CommandId.make(`${id}:create`),
+            threadId: id,
+            projectId,
+            title: "Session only",
+            modelSelection,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+            createdBy: "user",
+            creationSource: "web",
+          });
+        const providerSessionId = ids.derive.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+        });
+        const runtimePolicy = {
+          runtimeMode: "full-access" as const,
+          interactionMode: "default" as const,
+          cwd: process.cwd(),
+        };
+        const oldRuntime = yield* sessions.open({
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        const otherNative = {
+          id: ProviderThreadId.make(`${otherId}:native`),
+          driver,
+          providerInstanceId: modelSelection.instanceId,
+          appThreadId: otherId,
+          ownerNodeId: null,
+          providerSessionId,
+          nativeThreadRef: { driver, nativeId: "native-B", strength: "strong" as const },
+          nativeConversationHeadRef: null,
+          status: "idle" as const,
+          firstRunOrdinal: null,
+          lastRunOrdinal: null,
+          handoffIds: [],
+          forkedFrom: null,
+          createdAt: now,
+          updatedAt: now,
+        };
+        if (shared) {
+          assert.strictEqual(
+            yield* sessions.open({
+              threadId: otherId,
+              providerSessionId,
+              modelSelection,
+              runtimePolicy,
+            }),
+            oldRuntime,
+          );
+          assert.deepEqual(
+            yield* oldRuntime.resumeThread({ threadId: otherId, providerThread: otherNative }),
+            otherNative,
+          );
+        }
+        assert.isEmpty(
+          (yield* store.getThreadRecords(threadId, ["providerThreads"])).providerThreads,
+        );
+        if (mode === "shared-placeholder")
+          yield* sink.write({
+            lifecycleGuard: yield* orchestrator.resolveLifecycleSource(threadId),
+            events: [
+              {
+                id: EventId.make(`${threadId}:placeholder`),
+                type: "provider-thread.updated",
+                threadId,
+                occurredAt: now,
+                payload: {
+                  ...otherNative,
+                  id: ProviderThreadId.make(`${threadId}:placeholder`),
+                  appThreadId: threadId,
+                  nativeThreadRef: null,
+                },
+              },
+            ],
+          });
+        assert.isEmpty(yield* store.getProviderAttachmentSources(threadId));
+        const archiveId = CommandId.make(`${threadId}:archive`);
+        yield* orchestrator.dispatch({ type: "thread.archive", commandId: archiveId, threadId });
+        const detaches = (yield* outbox.listByCommandId(archiveId)).filter(
+          (effect) => effect.request.type === "provider-session.detach",
+        );
+        yield* orchestrator.dispatch({
+          type: "thread.unarchive",
+          commandId: CommandId.make(`${threadId}:restore`),
+          threadId,
+        });
+        const fresh = yield* orchestrator.resolveLifecycleSource(threadId);
+        const activate = {
+          threadId,
+          providerSessionId: ids.derive.providerSession({
+            providerInstanceId: modelSelection.instanceId,
+            incarnation: { threadId, sourceToken: fresh.sourceToken },
+          }),
+          modelSelection,
+          runtimePolicy,
+        };
+        assert.isTrue(Exit.isFailure(yield* sessions.open(activate).pipe(Effect.exit)));
+        assert.isAtLeast(yield* worker.drain(), 1);
+        const detached = yield* outbox.get(detaches[0]!.id);
+        const activation = yield* sessions.open(activate).pipe(Effect.exit);
+        const oldReuse = yield* oldRuntime
+          .resumeThread({
+            threadId,
+            providerThread: { ...otherNative, appThreadId: threadId },
+          })
+          .pipe(Effect.exit);
+        if (shared) {
+          assert.strictEqual(
+            yield* sessions.open({
+              threadId: otherId,
+              providerSessionId,
+              modelSelection,
+              runtimePolicy,
+            }),
+            oldRuntime,
+          );
+          yield* oldRuntime.resumeThread({ threadId: otherId, providerThread: otherNative });
+        }
+        assert.deepEqual(
+          {
+            detaches: detaches.length,
+            nativeRetirements: detaches.filter(
+              (effect) =>
+                effect.request.type === "provider-session.detach" &&
+                effect.request.retirementRevision !== undefined,
+            ).length,
+            detachStatus: Option.isSome(detached) ? detached.value.status : "missing",
+            detachFailed: Option.isSome(detached) && detached.value.lastError !== null,
+            retirementReceipts: (yield* outbox.attachmentRetirements(threadId)).length,
+            oldLive: yield* sessions.isLive(providerSessionId),
+            activation: activation._tag,
+            oldReuse: oldReuse._tag,
+            closes,
+            otherResumes,
+          },
+          {
+            detaches: 1,
+            nativeRetirements: 0,
+            detachStatus: closeFails ? "pending" : "succeeded",
+            detachFailed: closeFails,
+            retirementReceipts: 0,
+            oldLive: shared,
+            activation: "Success",
+            oldReuse: "Failure",
+            closes: shared ? 0 : 1,
+            otherResumes: shared ? 1 : 0,
+          },
+        );
+      }).pipe(Effect.provide(layerTest));
+    }),
+);
+
+it.effect.each([false, true])(
+  "lifecycle delete requires native evidence before planning strict retirement (%s)",
+  (native) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const sink = yield* EventSink.EventSinkV2;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const threadId = ThreadId.make(`delete-native-evidence:${native}`);
+      const projectId = ProjectId.make(`delete-native-evidence:${native}`);
+      const providerSessionId = ProviderSessionId.make(`${threadId}:S0`);
+      const now = yield* DateTime.now;
+      yield* seedProject({
+        projectId,
+        title: "Native evidence",
+        workspaceRoot: process.cwd(),
+        defaultModelSelection: null,
+        createdAt: DateTime.formatIso(now),
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make(`${threadId}:create`),
+        threadId,
+        projectId,
+        title: "Native evidence",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdBy: "user",
+        creationSource: "web",
+      });
+      const source = yield* orchestrator.resolveLifecycleSource(threadId);
+      yield* sink.write({
+        lifecycleGuard: source,
+        events: [
+          {
+            id: EventId.make(`${threadId}:attached`),
+            type: "provider-session.attached",
+            threadId,
+            occurredAt: now,
+            payload: {
+              id: providerSessionId,
+              driver,
+              providerInstanceId: modelSelection.instanceId,
+              status: "ready",
+              cwd: process.cwd(),
+              model: modelSelection.model,
+              capabilities: CodexProviderCapabilitiesV2,
+              createdAt: now,
+              updatedAt: now,
+              lastError: null,
+            },
+          },
+          {
+            id: EventId.make(`${threadId}:provider-thread`),
+            type: "provider-thread.updated",
+            threadId,
+            occurredAt: now,
+            payload: {
+              id: ProviderThreadId.make(`${threadId}:provider-thread`),
+              driver,
+              providerInstanceId: modelSelection.instanceId,
+              appThreadId: threadId,
+              ownerNodeId: null,
+              providerSessionId,
+              nativeThreadRef: native ? { driver, nativeId: "native-A", strength: "strong" } : null,
+              nativeConversationHeadRef: null,
+              status: "idle",
+              firstRunOrdinal: null,
+              lastRunOrdinal: null,
+              handoffIds: [],
+              forkedFrom: null,
+              createdAt: now,
+              updatedAt: now,
+            },
+          },
+        ],
+      });
+      const commandId = CommandId.make(`${threadId}:delete`);
+      yield* orchestrator.dispatch({ type: "thread.delete", commandId, threadId });
+      const detaches = (yield* outbox.listByCommandId(commandId)).filter(
+        (effect) => effect.request.type === "provider-session.detach",
+      );
+      assert.lengthOf(detaches, 1);
+      assert.deepEqual(detaches[0]!.request, {
+        type: "provider-session.detach",
+        providerSessionId,
+        detail: "Thread deleted.",
+        revokeMcpCredential: true,
+        ...(native
+          ? {
+              retirementRevision: source.lifecycleRevision,
+              retirementSourceToken: source.sourceToken,
+            }
+          : {}),
+      });
+      assert.lengthOf(yield* outbox.attachmentRetirements(threadId), native ? 1 : 0);
+    }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect("lifecycle archive after a close timeout keeps the real retirement worker blocked", () =>
   Effect.gen(function* () {
     const closing = yield* Deferred.make<void>();
@@ -6565,6 +6907,7 @@ it.effect.each(["stopped", "error", "detached"] as const)(
       };
       const source = yield* orchestrator.resolveLifecycleSource(threadId);
       yield* sink.write({
+        lifecycleGuard: source,
         events: [
           {
             id: EventId.make(`${threadId}:captured`),
@@ -6573,6 +6916,29 @@ it.effect.each(["stopped", "error", "detached"] as const)(
             occurredAt: now,
             payload: session,
             lifecycleSource: source,
+          },
+          {
+            id: EventId.make(`${threadId}:native`),
+            type: "provider-thread.updated",
+            threadId,
+            occurredAt: now,
+            payload: {
+              id: ProviderThreadId.make(`${threadId}:native`),
+              driver,
+              providerInstanceId: modelSelection.instanceId,
+              appThreadId: threadId,
+              ownerNodeId: null,
+              providerSessionId: session.id,
+              nativeThreadRef: { driver, nativeId: `native-${status}`, strength: "strong" },
+              nativeConversationHeadRef: null,
+              status: "idle",
+              firstRunOrdinal: null,
+              lastRunOrdinal: null,
+              handoffIds: [],
+              forkedFrom: null,
+              createdAt: now,
+              updatedAt: now,
+            },
           },
         ],
       });
@@ -6616,6 +6982,32 @@ it.effect.each(["stopped", "error", "detached"] as const)(
         detail: "Thread archived.",
         revokeMcpCredential: true,
       });
+      yield* orchestrator.dispatch({
+        type: "thread.unarchive",
+        commandId: CommandId.make(`${threadId}:restore`),
+        threadId,
+      });
+      const fresh = yield* orchestrator.resolveLifecycleSource(threadId);
+      const ids = yield* IdAllocator.IdAllocatorV2.pipe(Effect.provide(IdAllocator.layer));
+      const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      assert.equal(
+        (yield* sessions
+          .open({
+            threadId,
+            providerSessionId: ids.derive.providerSession({
+              providerInstanceId: modelSelection.instanceId,
+              incarnation: { threadId, sourceToken: fresh.sourceToken },
+            }),
+            modelSelection,
+            runtimePolicy: {
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              cwd: process.cwd(),
+            },
+          })
+          .pipe(Effect.flip))._tag,
+        "ProviderSessionStaleBindingError",
+      );
     }).pipe(Effect.provide(layerTest)),
 );
 

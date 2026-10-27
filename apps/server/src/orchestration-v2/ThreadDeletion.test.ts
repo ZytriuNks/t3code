@@ -291,7 +291,6 @@ it.effect("queues provider and resource cleanup and preserves an earlier deletio
           providerSessionId: ProviderSessionId.make("session:delete-plan:running"),
           detail: "Thread deleted.",
           revokeMcpCredential: true,
-          retirementRevision: 0,
         },
         { type: "scheduled-tasks.cleanup" },
         { type: "terminal.cleanup" },

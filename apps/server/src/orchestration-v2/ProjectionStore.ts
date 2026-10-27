@@ -387,7 +387,7 @@ export interface ShellSnapshotOptions {
 }
 
 export interface ProjectionStoreV2Shape {
-  /** Immutable attachment provenance survives detach, row replacement and process loss. */
+  /** Native attachment provenance survives detach, row replacement and process loss. */
   readonly getProviderAttachmentSources: (threadId: ThreadId) => Effect.Effect<
     ReadonlyArray<{
       readonly providerSessionId: ProviderSessionId;
@@ -6601,17 +6601,11 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             readonly lifecycleRevision: number | null;
             readonly sourceToken: string | null;
           }>`
-            WITH attachments AS (
-            SELECT json_extract(payload_json, '$.id') AS providerSessionId,
+            WITH nativeAttachments AS (
+            SELECT json_extract(payload_json, '$.providerSessionId') AS providerSessionId,
               json_extract(metadata_json, '$.lifecycleSource.lifecycleRevision') AS lifecycleRevision,
               json_extract(metadata_json, '$.lifecycleSource.sourceToken') AS sourceToken,
               0 AS priority, sequence
-            FROM orchestration_events
-            WHERE stream_id = ${threadId} AND event_type = 'provider-session.attached'
-            UNION ALL
-            SELECT json_extract(payload_json, '$.providerSessionId'),
-              json_extract(metadata_json, '$.lifecycleSource.lifecycleRevision'),
-              json_extract(metadata_json, '$.lifecycleSource.sourceToken'), 0, sequence
             FROM orchestration_events
             WHERE stream_id = ${threadId} AND event_type = 'provider-thread.updated'
               AND json_extract(payload_json, '$.providerSessionId') IS NOT NULL
@@ -6621,13 +6615,20 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             FROM orchestration_v2_projection_provider_threads
             WHERE thread_id = ${threadId} AND provider_session_id IS NOT NULL
               AND json_extract(payload_json, '$.nativeThreadRef') IS NOT NULL
+            ), attachments AS (
+            SELECT json_extract(payload_json, '$.id') AS providerSessionId,
+              json_extract(metadata_json, '$.lifecycleSource.lifecycleRevision') AS lifecycleRevision,
+              json_extract(metadata_json, '$.lifecycleSource.sourceToken') AS sourceToken,
+              0 AS priority, sequence
+            FROM orchestration_events
+            WHERE stream_id = ${threadId} AND event_type = 'provider-session.attached'
+              AND json_extract(payload_json, '$.id') IN (SELECT providerSessionId FROM nativeAttachments)
             UNION ALL
-            SELECT provider_session_id, NULL, NULL, 2, 0
-            FROM orchestration_v2_projection_provider_session_bindings
-            WHERE thread_id = ${threadId}
+            SELECT * FROM nativeAttachments
             ) SELECT providerSessionId, lifecycleRevision, sourceToken FROM attachments
             ORDER BY priority, sequence
           `;
+          // A session attachment supplies provenance only for a proven native binding.
           // Keep the first binding's provenance, including unknown legacy sources.
           // A later row replacement must never upgrade an old runtime's source.
           const first = new Map<ProviderSessionId, (typeof rows)[number]>();
@@ -6701,12 +6702,13 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
       getProviderAttachmentSources: Effect.fn("ProjectionStore.getProviderAttachmentSources")(
         function* (threadId) {
           const projection = (yield* Ref.get(replayState)).projections.get(threadId);
-          const ids = new Set([
-            ...(projection?.providerSessions.map((session) => session.id) ?? []),
-            ...(projection?.providerThreads.flatMap((thread) =>
-              thread.providerSessionId === null ? [] : [thread.providerSessionId],
-            ) ?? []),
-          ]);
+          const ids = new Set(
+            projection?.providerThreads.flatMap((thread) =>
+              thread.providerSessionId === null || thread.nativeThreadRef === null
+                ? []
+                : [thread.providerSessionId],
+            ) ?? [],
+          );
           // Historical replay does not establish a live attachment's retirement proof.
           return [...ids].map((providerSessionId) => ({
             providerSessionId,
