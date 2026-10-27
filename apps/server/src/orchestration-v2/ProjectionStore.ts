@@ -320,6 +320,8 @@ export interface ProjectionRuntimeResponseContext {
 }
 
 export interface ProjectionRecordFilter {
+  /** Retain live execution and open completion cohorts without historical timeline bodies. */
+  readonly lifecycleOnly?: boolean;
   readonly messageRoles?: ReadonlyArray<OrchestrationV2ConversationMessage["role"]>;
   readonly turnItemRunId?: RunId;
   readonly messageIds?: ReadonlyArray<MessageId>;
@@ -3123,11 +3125,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           (window === undefined &&
             matchesNothing(filter?.turnItemTypes, filter?.turnItemStatuses, filter?.turnItemRunIds))
             ? []
-            : window === undefined
+            : window === undefined || filter?.lifecycleOnly
               ? yield* sql<PayloadRow>`
                 SELECT payload_json
                 FROM orchestration_v2_projection_turn_items
                 WHERE thread_id = ${threadId}
+                  ${filter?.lifecycleOnly ? sql`AND status IN ('pending','running','waiting')` : sql``}
                   ${filter?.turnItemTypes === undefined ? sql`` : sql`AND type IN (SELECT value FROM json_each(${encodeIdList(filter.turnItemTypes)}))`}
                   ${filter?.turnItemStatuses === undefined ? sql`` : sql`AND status IN (SELECT value FROM json_each(${encodeIdList(filter.turnItemStatuses)}))`}
                   ${filter?.turnItemRunId === undefined ? sql`` : sql`AND run_id = ${filter.turnItemRunId}`}
@@ -3155,7 +3158,22 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               return value === null ? [] : [value];
             }),
           );
-        const cohortRunIds = cohortJson("runId");
+        const cohortRunIds = filter?.lifecycleOnly
+          ? encodeIdList(
+              (yield* sql<{ readonly run_id: string }>`
+              SELECT run_id FROM orchestration_v2_projection_runs
+              WHERE thread_id = ${threadId} AND (
+                json_extract(payload_json, '$.delegatedCompletion.disposition') = 'open'
+                OR json_extract(payload_json, '$.delegatedCompletion.delivery') IS NOT NULL
+                OR run_id IN (
+                  SELECT run_id FROM orchestration_v2_projection_subagents
+                  WHERE thread_id = ${threadId} AND json_extract(payload_json, '$.origin') = 'app_owned'
+                    AND COALESCE(json_extract(payload_json, '$.completionDelivery.state'), '') NOT IN ('acknowledged', 'delivered', 'disposed')
+                )
+              )
+            `).map((row) => row.run_id),
+            )
+          : cohortJson("runId");
         const cohortNodeIds =
           window === undefined ||
           (fields !== undefined &&
@@ -3215,6 +3233,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         // A newer completion must keep an older active list from resurfacing after paging.
         const [latestTodoList] =
           window === undefined ||
+          filter?.lifecycleOnly ||
           (fields !== undefined &&
             !fields.some(
               (field) => field === "plans" || field === "runs" || field === "providerThreads",
@@ -3397,7 +3416,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             LEFT JOIN orchestration_v2_projection_provider_threads AS threads
               ON threads.provider_session_id = sessions.provider_session_id
             WHERE bindings.thread_id = ${threadId}
-              AND (sessions.status IN ('starting','running','waiting')
+              AND (${filter?.lifecycleOnly ? sql`sessions.status NOT IN ('stopped','error')` : sql`sessions.status IN ('starting','running','waiting')`}
                 OR threads.provider_thread_id IN (SELECT value FROM json_each(${cohortProviderThreadIds})))
             ORDER BY sessions.updated_at ASC, sessions.provider_session_id ASC
           `,
@@ -3424,6 +3443,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               : sql<PayloadRow>`
             SELECT payload_json FROM orchestration_v2_projection_provider_threads
             WHERE (thread_id = ${threadId} AND status = 'active')
+              ${filter?.lifecycleOnly ? sql`OR (thread_id = ${threadId} AND json_array_length(json_extract(payload_json, '$.pendingBackgroundTasks')) > 0)` : sql``}
               OR provider_thread_id IN (SELECT value FROM json_each(${cohortProviderThreadIds}))
               OR owner_node_id IN (SELECT value FROM json_each(${cohortNodeIds}))
               OR (thread_id = ${threadId}
@@ -3442,7 +3462,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               : sql<PayloadRow>`
             SELECT payload_json FROM orchestration_v2_projection_provider_turns
             WHERE thread_id = ${threadId}
-              AND (status IN ('starting','running','waiting')
+              AND (${filter?.lifecycleOnly ? sql`status IN ('pending','running')` : sql`status IN ('starting','running','waiting')`}
                 OR provider_turn_id IN (SELECT value FROM json_each(${cohortProviderTurnIds}))
                 OR node_id IN (SELECT value FROM json_each(${cohortNodeIds})))
             ORDER BY provider_thread_id ASC, ordinal ASC
@@ -5354,16 +5374,25 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       fields,
       filter,
     ) =>
-      sql.withTransaction(readCanonicalProjection(threadId, undefined, fields, filter)).pipe(
-        Effect.map(
-          (projection) =>
-            Object.fromEntries([
-              ["thread", projection.thread],
-              ...fields.map((field) => [field, projection[field]]),
-            ]) as ProjectionRecords<(typeof fields)[number]>,
-        ),
-        Effect.mapError(controlReadError(threadId)),
-      );
+      sql
+        .withTransaction(
+          readCanonicalProjection(
+            threadId,
+            filter?.lifecycleOnly ? { rowLimit: 0 } : undefined,
+            fields,
+            filter,
+          ),
+        )
+        .pipe(
+          Effect.map(
+            (projection) =>
+              Object.fromEntries([
+                ["thread", projection.thread],
+                ...fields.map((field) => [field, projection[field]]),
+              ]) as ProjectionRecords<(typeof fields)[number]>,
+          ),
+          Effect.mapError(controlReadError(threadId)),
+        );
 
     const getThreadSnapshot: ProjectionStoreV2Shape["getThreadSnapshot"] = (threadId) =>
       sql
@@ -7086,6 +7115,40 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                 ? projection.nodes.filter((node) => !isSettledLeafNode(node, projection.runs))
                 : projection.nodes,
           };
+          if (filter?.lifecycleOnly) {
+            const live = (status: string) =>
+              ["pending", "preparing", "queued", "starting", "running", "waiting"].includes(status);
+            const tasks = projection.subagents.filter(
+              (task) =>
+                task.origin === "app_owned" &&
+                !["acknowledged", "delivered", "disposed"].includes(
+                  task.completionDelivery?.state ?? "",
+                ),
+            );
+            selected.runs = projection.runs.filter(
+              (run) =>
+                live(run.status) ||
+                run.delegatedCompletion?.disposition === "open" ||
+                run.delegatedCompletion?.delivery != null ||
+                tasks.some((task) => task.runId === run.id),
+            );
+            selected.attempts = projection.attempts.filter(
+              (attempt) =>
+                live(attempt.status) || selected.runs.some((run) => run.id === attempt.runId),
+            );
+            selected.nodes = projection.nodes.filter((node) => live(node.status));
+            selected.runtimeRequests = projection.runtimeRequests.filter(
+              (request) => request.status === "pending",
+            );
+            selected.subagents = projection.subagents.filter(
+              (task) =>
+                live(task.status) ||
+                tasks.includes(task) ||
+                selected.runs.some((run) => task.runId === run.id),
+            );
+            selected.providerTurns = projection.providerTurns.filter((turn) => live(turn.status));
+            selected.turnItems = selected.turnItems.filter((item) => live(item.status));
+          }
           return Object.fromEntries([
             ["thread", projection.thread],
             ...fields.map((field) => [field, selected[field]]),

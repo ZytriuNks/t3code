@@ -29,7 +29,9 @@ import {
 } from "../orchestration-v2/ProjectCommands.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecutor.ts";
-import { planThreadDeletion } from "../orchestration-v2/ThreadDeletion.ts";
+import * as EffectOutbox from "../orchestration-v2/EffectOutbox.ts";
+import * as ThreadLifecyclePlan from "../orchestration-v2/ThreadLifecyclePlan.ts";
+import * as ThreadOwnership from "../orchestration-v2/ThreadOwnership.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as ProjectEnrichmentService from "./ProjectEnrichmentService.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
@@ -147,6 +149,8 @@ export const make = Effect.gen(function* () {
   const threadProjections = yield* ProjectionStore.ProjectionStoreV2;
   const eventSink = yield* EventSink.EventSinkV2;
   const idAllocator = yield* IdAllocator.IdAllocatorV2;
+  const lifecyclePlanner = yield* ThreadLifecyclePlan.ThreadLifecyclePlanner;
+  const ownership = yield* ThreadOwnership.ThreadOwnership;
   const legacyImporter = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
   const threadCommands = yield* ThreadCommandExecutor.ThreadCommandExecutor;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
@@ -395,31 +399,16 @@ export const make = Effect.gen(function* () {
     input: ProjectDeleteInput,
     threadId: ThreadId,
   ) {
-    yield* legacyImporter.ensureTranscript(threadId);
-    const projection = yield* threadProjections.getThreadRecords(threadId, [
-      "runs",
-      "attempts",
-      "nodes",
-      "runtimeRequests",
-      "subagents",
-      "providerSessions",
-    ]);
-    if (projection.thread.deletedAt !== null || projection.thread.projectId !== input.projectId) {
-      return;
-    }
+    const scope = yield* ownership.resolveScope({ rootThreadId: threadId, operation: "delete" });
+    if (scope.members.some((member) => member.projectId !== input.projectId)) return;
+    for (const member of scope.members) yield* legacyImporter.ensureTranscript(member.id);
     const command = {
       type: "thread.delete" as const,
       commandId: CommandId.make(`${input.commandId}:delete-thread:${threadId}`),
       threadId,
     };
     const now = yield* DateTime.now;
-    const plan = yield* planThreadDeletion({
-      command,
-      projection,
-      attachmentIds: yield* threadProjections.getThreadAttachmentIds(threadId),
-      now,
-      idAllocator,
-    });
+    const plan = yield* lifecyclePlanner.plan(command);
     const committed = yield* eventSink.commitCommand({
       commandId: command.commandId,
       commandType: command.type,
@@ -427,6 +416,7 @@ export const make = Effect.gen(function* () {
       acceptedAt: now,
       events: plan.events,
       effects: plan.effects,
+      cancelUnsettledEffectsByThread: plan.cancelUnsettledEffectsByThread,
     });
     if (
       committed.receipt.threadId !== command.threadId ||
@@ -458,12 +448,21 @@ export const make = Effect.gen(function* () {
     if (projectThreads.length > 0 && input.force !== true) {
       return yield* new ProjectNotEmptyError({ projectId });
     }
-    // Delete children durably before the project so a failed cascade can be retried.
+    const roots = [
+      ...new Set(
+        yield* Effect.forEach(projectThreads, (thread) => ownership.resolveRoot(thread.id)).pipe(
+          Effect.mapError(
+            (cause) => new ProjectOperationError({ operation: "delete-thread", projectId, cause }),
+          ),
+        ),
+      ),
+    ].sort();
+    // Commit each independent tree before the project; a later failure can retry remaining roots.
     yield* Effect.forEach(
-      projectThreads,
-      (thread) =>
-        threadCommands
-          .withLock(thread.id, deleteChildThread(input, thread.id))
+      roots,
+      (root) =>
+        ownership
+          .withRoots([root], threadCommands.withLock(root, deleteChildThread(input, root)))
           .pipe(
             Effect.mapError(
               (cause) =>
@@ -576,5 +575,8 @@ export const make = Effect.gen(function* () {
 });
 
 export const layer = Layer.effect(ProjectService, make).pipe(
+  Layer.provide(ThreadLifecyclePlan.layer),
+  Layer.provide(ThreadOwnership.layer),
+  Layer.provide(EffectOutbox.layer),
   Layer.provide(ThreadCommandExecutor.layer),
 );

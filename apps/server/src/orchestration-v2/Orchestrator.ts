@@ -30,7 +30,6 @@ import {
   type OrchestrationV2LimitRecoveryUpdate,
   type OrchestrationV2ServerCommand,
   type ThreadPullRequestLink,
-  type ThreadPullRequestWatch,
   type OrchestrationV2AppThread,
   type OrchestrationV2ContextHandoff,
   type OrchestrationV2ContextSourcePoint,
@@ -145,7 +144,8 @@ import {
   isForkableSourceRunStatus,
   ThreadForkServiceV2,
 } from "./ThreadForkService.ts";
-import { planThreadDeletion } from "./ThreadDeletion.ts";
+import * as ThreadLifecyclePlan from "./ThreadLifecyclePlan.ts";
+import { withPullRequestWatch } from "./pullRequestWatch.ts";
 import * as ThreadOwnership from "./ThreadOwnership.ts";
 import * as ThreadLifecycleGuard from "./ThreadLifecycleGuard.ts";
 import * as ThreadDeletionRecords from "./ThreadDeletionRecords.ts";
@@ -582,16 +582,6 @@ function hasLiveRun(projection: Pick<OrchestrationV2ThreadProjection, "runs">): 
   );
 }
 
-function withPullRequestWatch(
-  link: ThreadPullRequestLink,
-  watch: ThreadPullRequestWatch | undefined,
-): ThreadPullRequestLink {
-  const { watch: previous, endedWatch, ...rest } = link;
-  if (watch !== undefined) return { ...rest, watch };
-  const ended = previous ?? endedWatch;
-  return ended === undefined ? rest : { ...rest, endedWatch: ended };
-}
-
 function legacyPullRequestLink(
   thread: OrchestrationV2AppThread,
   linked: ThreadLinkedPullRequest,
@@ -957,49 +947,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
 
   const deletions = yield* ThreadDeletionRecords.ThreadDeletionRecords;
 
-  const planLifecycleRetirements = Effect.fn("Orchestrator.planLifecycleRetirements")(
-    function* (
-      command: Extract<OrchestrationV2Command, { type: "thread.archive" | "thread.delete" }>,
-    ) {
-      const sources = yield* projectionStore.getProviderAttachmentSources(command.threadId);
-      const receipts = yield* effectOutbox.attachmentRetirements(command.threadId);
-      const effects = sources.flatMap((source): Array<PendingOrchestrationEffectV2> => {
-        // Pending/failed intents remain durable and blocked; neither a detached
-        // projection nor a repeated archive replaces their captured provenance.
-        if (
-          receipts.some(
-            (receipt) =>
-              receipt.providerSessionId === source.providerSessionId &&
-              receipt.retirementRevision === (source.lifecycleRevision ?? 0) &&
-              receipt.retirementSourceToken === source.sourceToken,
-          )
-        )
-          return [];
-        return [
-          {
-            id: `effect:${command.commandId}:provider-session.detach:${source.providerSessionId}`,
-            commandId: command.commandId,
-            threadId: command.threadId,
-            request: {
-              type: "provider-session.detach",
-              providerSessionId: source.providerSessionId,
-              // Legacy payloads default revision to zero; missing provenance never
-              // becomes the current token and cannot prove retirement on activation.
-              retirementRevision: source.lifecycleRevision ?? 0,
-              ...(source.sourceToken === null ? {} : { retirementSourceToken: source.sourceToken }),
-              detail: command.type === "thread.archive" ? "Thread archived." : "Thread deleted.",
-              revokeMcpCredential: true,
-            },
-          },
-        ];
-      });
-      return {
-        nativeSessionIds: new Set(sources.map((source) => source.providerSessionId)),
-        effects,
-      };
-    },
-    (effect, command) => effect.pipe(mapDispatchError(command)),
-  );
+  const lifecyclePlanner = yield* ThreadLifecyclePlan.ThreadLifecyclePlanner;
 
   const sourceForPlannedThread = Effect.fn("Orchestrator.sourceForPlannedThread")(
     function* (thread: OrchestrationV2AppThread) {
@@ -2542,36 +2490,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     }
   });
 
-  const disposeAllDelegatedCompletionCohorts = (input: {
-    readonly command: OrchestrationV2Command;
-    readonly events: Ref.Ref<Array<OrchestrationV2DomainEvent>>;
-    readonly projection: Pick<
-      OrchestrationV2ThreadProjection,
-      "runs" | "subagents" | "messages" | "nodes" | "attempts"
-    >;
-    readonly now: DateTime.Utc;
-    readonly cancelQueuedDelivery?: boolean;
-  }) =>
-    Effect.forEach(
-      Array.from(
-        new Set([
-          ...input.projection.runs
-            .filter((run) => run.delegatedCompletion !== undefined)
-            .map((run) => run.id),
-          ...input.projection.subagents
-            .filter((task) => task.origin === "app_owned" && task.runId !== null)
-            .map((task) => task.runId!),
-        ]),
-      ),
-      (parentRunId) =>
-        disposeDelegatedCompletionCohort({
-          ...input,
-          parentRunId,
-          disposition: "disposed",
-        }),
-      { concurrency: 1, discard: true },
-    );
-
   const dispatchThreadCreate = Effect.fn("orchestrationV2.dispatch.threadCreate")(function* (
     command: Extract<OrchestrationV2Command, { readonly type: "thread.create" }>,
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
@@ -2782,8 +2700,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       OrchestrationV2ServerCommand,
       {
         readonly type:
-          | "thread.archive"
-          | "thread.unarchive"
           | "thread.settle"
           | "thread.unsettle"
           | "thread.snooze"
@@ -2917,20 +2833,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           commandType: command.type,
           cause: `Thread ${command.threadId} is no longer empty.`,
         });
-    }
-    if (command.type === "thread.archive" && thread.archivedAt !== null) {
-      return yield* new OrchestratorDispatchError({
-        commandId: command.commandId,
-        commandType: command.type,
-        cause: `Thread ${command.threadId} is already archived.`,
-      });
-    }
-    if (command.type === "thread.unarchive" && thread.archivedAt === null) {
-      return yield* new OrchestratorDispatchError({
-        commandId: command.commandId,
-        commandType: command.type,
-        cause: `Thread ${command.threadId} is not archived.`,
-      });
     }
     if (
       (command.type === "thread.settle" ||
@@ -3080,7 +2982,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       command.type === "thread.runtime-mode.set" ||
       command.type === "thread.model-selection.set" ||
       command.type === "provider.switch" ||
-      command.type === "thread.archive" ||
       command.type === "thread.settle" ||
       (command.type === "thread.metadata.update" &&
         command.worktreePath !== undefined &&
@@ -3213,22 +3114,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     }
     const updatedThread: OrchestrationV2AppThread = (() => {
       switch (command.type) {
-        case "thread.archive":
-          return {
-            ...thread,
-            lifecycleRevision: (thread.lifecycleRevision ?? 0) + 1,
-            archivedAt: now,
-            titleRegeneration: null,
-            pullRequests: thread.pullRequests?.map((link) => withPullRequestWatch(link, undefined)),
-            updatedAt: now,
-          };
-        case "thread.unarchive":
-          return {
-            ...thread,
-            lifecycleRevision: (thread.lifecycleRevision ?? 0) + 1,
-            archivedAt: null,
-            updatedAt: now,
-          };
         case "thread.settle": {
           const wasPinned = thread.pinnedAt != null;
           const alreadySettled =
@@ -3665,10 +3550,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     }
     const eventType = (() => {
       switch (command.type) {
-        case "thread.archive":
-          return "thread.archived" as const;
-        case "thread.unarchive":
-          return "thread.unarchived" as const;
         case "thread.settle":
           return "thread.settled" as const;
         case "thread.unsettle":
@@ -3729,109 +3610,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ]);
     }
 
-    if (command.type === "thread.archive") {
-      const projection = yield* loadProjectionForCommand(
-        command,
-        ["runs", "attempts", "nodes", "subagents", "messages"],
-        { turnItemTypes: [], messageRoles: ["user"] },
-      );
-      const emitEvent = emit(events, command);
-      const activeRunIds = new Set(
-        projection.runs
-          .filter((run) => run.status === "queued" || run.status === "preparing")
-          .map((run) => run.id),
-      );
-      const preparingRuns = projection.runs.filter((run) => run.status === "preparing");
-      const preparationItems =
-        preparingRuns.length === 0
-          ? []
-          : (yield* loadProjectionForCommand(command, ["turnItems"], {
-              turnItemTypes: ["command_execution"],
-              turnItemRunIds: preparingRuns.map((run) => run.id),
-            })).turnItems;
-      for (const run of projection.runs.filter((candidate) => activeRunIds.has(candidate.id))) {
-        yield* emitEvent({
-          type: "run.updated",
-          threadId: command.threadId,
-          runId: run.id,
-          providerInstanceId: run.providerInstanceId,
-          occurredAt: now,
-          payload: { ...run, status: "cancelled", queuePosition: null, completedAt: now },
-        });
-      }
-      for (const run of preparingRuns) {
-        const preparationItem = preparationItems.find(
-          (item) =>
-            item.runId === run.id &&
-            item.type === "command_execution" &&
-            item.input === WORKSPACE_PREPARATION_INPUT &&
-            item.status === "running",
-        );
-        if (preparationItem === undefined) continue;
-        yield* emitEvent({
-          type: "turn-item.updated",
-          threadId: command.threadId,
-          runId: run.id,
-          nodeId: preparationItem.nodeId ?? undefined,
-          providerInstanceId: run.providerInstanceId,
-          occurredAt: now,
-          payload: {
-            ...preparationItem,
-            status: "cancelled",
-            title: "Workspace preparation cancelled",
-            completedAt: now,
-            updatedAt: now,
-          },
-        });
-      }
-      for (const attempt of projection.attempts.filter(
-        (candidate) =>
-          activeRunIds.has(candidate.runId) &&
-          (candidate.status === "pending" || candidate.status === "running"),
-      )) {
-        const run = projection.runs.find((candidate) => candidate.id === attempt.runId)!;
-        yield* emitEvent({
-          type: "run-attempt.updated",
-          threadId: command.threadId,
-          runId: attempt.runId,
-          nodeId: attempt.rootNodeId,
-          providerInstanceId: run.providerInstanceId,
-          occurredAt: now,
-          payload: { ...attempt, status: "cancelled", completedAt: now },
-        });
-      }
-      for (const node of projection.nodes.filter(
-        (candidate) =>
-          candidate.runId !== null &&
-          activeRunIds.has(candidate.runId) &&
-          ["pending", "running", "waiting"].includes(candidate.status),
-      )) {
-        const run = projection.runs.find((candidate) => candidate.id === node.runId)!;
-        yield* emitEvent({
-          type: "node.updated",
-          threadId: command.threadId,
-          runId: run.id,
-          nodeId: node.id,
-          providerInstanceId: run.providerInstanceId,
-          occurredAt: now,
-          payload: { ...node, status: "cancelled", completedAt: now },
-        });
-      }
-      yield* disposeAllDelegatedCompletionCohorts({
-        command,
-        events,
-        projection: yield* getProjectionWithPendingEvents(command.threadId, events),
-        now,
-        cancelQueuedDelivery: false,
-      });
-    }
-
-    const lifecycleRetirements =
-      command.type === "thread.archive" ? yield* planLifecycleRetirements(command) : undefined;
-    // Sessions without a native attachment use ordinary detach. Native bindings
-    // require strict retirement, including historical stopped/error bindings.
     const detachSessionIds = new Set(
-      command.type === "thread.archive" || command.type === "thread.settle"
+      command.type === "thread.settle"
         ? (providerContext?.providerSessions ?? []).map((session) => session.id)
         : command.type === "thread.metadata.update" &&
             command.worktreePath !== undefined &&
@@ -3849,7 +3629,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const liveSessions = (providerContext?.providerSessions ?? []).filter(
         (session) =>
           detachSessionIds.has(session.id) &&
-          !lifecycleRetirements?.nativeSessionIds.has(session.id) &&
           session.status !== "stopped" &&
           session.status !== "error",
       );
@@ -3870,15 +3649,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 providerSessionId: session.id,
                 detachedAt: now,
                 reason:
-                  command.type === "thread.archive"
-                    ? "Thread archived."
-                    : command.type === "thread.settle"
-                      ? "Thread settled."
-                      : command.type === "thread.metadata.update"
-                        ? "Workspace changed."
-                        : command.type === "thread.runtime-mode.set"
-                          ? "Runtime mode changed."
-                          : "Provider or model selection changed.",
+                  command.type === "thread.settle"
+                    ? "Thread settled."
+                    : command.type === "thread.metadata.update"
+                      ? "Workspace changed."
+                      : command.type === "thread.runtime-mode.set"
+                        ? "Runtime mode changed."
+                        : "Provider or model selection changed.",
               },
             });
             const pendingEffect = {
@@ -3889,52 +3666,19 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 type: "provider-session.detach",
                 providerSessionId: session.id,
                 detail:
-                  command.type === "thread.archive"
-                    ? "Thread archived."
-                    : command.type === "thread.settle"
-                      ? "Thread settled."
-                      : command.type === "thread.metadata.update"
-                        ? "Workspace changed."
-                        : command.type === "thread.runtime-mode.set"
-                          ? "Runtime mode changed."
-                          : "Provider or model selection changed.",
-                ...(command.type === "thread.archive" ? { revokeMcpCredential: true } : {}),
+                  command.type === "thread.settle"
+                    ? "Thread settled."
+                    : command.type === "thread.metadata.update"
+                      ? "Workspace changed."
+                      : command.type === "thread.runtime-mode.set"
+                        ? "Runtime mode changed."
+                        : "Provider or model selection changed.",
               },
             } satisfies PendingOrchestrationEffectV2;
             yield* Ref.update(effects, (existing) => [...existing, pendingEffect]);
           }),
         { concurrency: 1, discard: true },
       );
-    }
-
-    if (command.type === "thread.archive") {
-      const retirements = lifecycleRetirements!.effects;
-      yield* Ref.update(effects, (existing) => [...existing, ...retirements]);
-      for (const effect of retirements) {
-        if (effect.request.type !== "provider-session.detach") continue;
-        yield* emit(
-          events,
-          command,
-        )({
-          type: "provider-session.detached",
-          threadId: command.threadId,
-          occurredAt: now,
-          payload: {
-            providerSessionId: effect.request.providerSessionId,
-            detachedAt: now,
-            reason: "Thread archived.",
-          },
-        });
-      }
-      yield* Ref.update(effects, (existing) => [
-        ...existing,
-        {
-          id: `effect:${command.commandId}:terminal.cleanup`,
-          commandId: command.commandId,
-          threadId: command.threadId,
-          request: { type: "terminal.cleanup" },
-        } satisfies PendingOrchestrationEffectV2,
-      ]);
     }
   });
 
@@ -11481,6 +11225,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     {
       readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
       readonly effects: ReadonlyArray<PendingOrchestrationEffectV2>;
+      readonly cancelUnsettledEffectsByThread?: ThreadLifecyclePlan.ThreadLifecyclePlan["cancelUnsettledEffectsByThread"];
       readonly cancelUnsettledEffects?: {
         readonly effectTypes: ReadonlyArray<OrchestrationEffectRequestV2["type"]>;
         readonly reason: string;
@@ -11543,47 +11288,20 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         );
         break;
       }
-      case "thread.delete": {
-        const projection = yield* projectionStore
-          .getThreadRecords(command.threadId, [
-            "runs",
-            "attempts",
-            "nodes",
-            "runtimeRequests",
-            "subagents",
-            "providerSessions",
-          ])
-          .pipe(
-            Effect.mapError(
-              (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
-            ),
-          );
-        const plan = yield* mapDispatchError(command)(
-          planThreadDeletion({
-            command,
-            projection,
-            attachmentIds: yield* projectionStore
-              .getThreadAttachmentIds(command.threadId)
-              .pipe(mapDispatchError(command)),
-            now: yield* DateTime.now,
-            idAllocator,
-          }),
-        );
-        const retirements = yield* planLifecycleRetirements(command);
-        return {
-          ...plan,
-          effects: [
-            ...plan.effects.filter(
-              (effect) =>
-                effect.request.type !== "provider-session.detach" ||
-                !retirements.nativeSessionIds.has(effect.request.providerSessionId),
-            ),
-            ...retirements.effects,
-          ],
-        };
-      }
+      case "thread.delete":
       case "thread.archive":
       case "thread.unarchive":
+        return yield* lifecyclePlanner.plan(command).pipe(
+          Effect.mapError((cause) =>
+            cause._tag === "ProjectionStoreThreadNotFoundError"
+              ? new OrchestratorProjectionError({ threadId: command.threadId, cause })
+              : new OrchestratorDispatchError({
+                  commandId: command.commandId,
+                  commandType: command.type,
+                  cause,
+                }),
+          ),
+        );
       case "thread.settle":
       case "thread.unsettle":
       case "thread.snooze":
@@ -12041,6 +11759,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               }
             : effect,
         ),
+        ...(plan.cancelUnsettledEffectsByThread === undefined
+          ? {}
+          : { cancelUnsettledEffectsByThread: plan.cancelUnsettledEffectsByThread }),
         ...(plan.cancelUnsettledEffects === undefined
           ? {}
           : { cancelUnsettledEffects: plan.cancelUnsettledEffects }),
@@ -12630,6 +12351,7 @@ export const layer: Layer.Layer<
   | ThreadForkServiceV2
   | import("effect/sql/SqlClient").SqlClient
 > = Layer.effect(OrchestratorV2, makeOrchestrator()).pipe(
+  Layer.provide(ThreadLifecyclePlan.layer),
   Layer.provide(ThreadCommandExecutor.layer),
   Layer.provide(
     Layer.mergeAll(ThreadOwnership.layer, ThreadDeletionRecords.layer, ThreadLifecycleGuard.layer),

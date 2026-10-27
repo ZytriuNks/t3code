@@ -170,6 +170,11 @@ export interface EventSinkV2Shape {
       readonly acceptedAt: DateTime.Utc;
       readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
       readonly effects: ReadonlyArray<EffectOutbox.PendingOrchestrationEffectV2>;
+      readonly cancelUnsettledEffectsByThread?: ReadonlyArray<{
+        readonly threadId: ThreadId;
+        readonly effectTypes: ReadonlyArray<EffectOutbox.OrchestrationEffectRequestV2["type"]>;
+        readonly reason: string;
+      }>;
       readonly cancelUnsettledEffects?: {
         readonly effectTypes: ReadonlyArray<EffectOutbox.OrchestrationEffectRequestV2["type"]>;
         readonly reason: string;
@@ -977,13 +982,31 @@ const layerBase: Layer.Layer<
             error: null,
           };
           yield* commandReceipts.upsert(receipt);
-          const cancelledEffectIds =
-            input.cancelUnsettledEffects === undefined
+          const cancellations = new Map<
+            ThreadId,
+            { effectTypes: Set<EffectOutbox.OrchestrationEffectRequestV2["type"]>; reason: string }
+          >();
+          for (const target of [
+            ...(input.cancelUnsettledEffectsByThread ?? []),
+            ...(input.cancelUnsettledEffects === undefined
               ? []
-              : yield* effectOutbox.cancelUnsettled({
-                  threadId: input.threadId,
-                  ...input.cancelUnsettledEffects,
-                });
+              : [{ threadId: input.threadId, ...input.cancelUnsettledEffects }]),
+          ]) {
+            const previous = cancellations.get(target.threadId);
+            cancellations.set(target.threadId, {
+              effectTypes: new Set([...(previous?.effectTypes ?? []), ...target.effectTypes]),
+              reason: target.reason,
+            });
+          }
+          const cancelledEffectIds: Array<string> = [];
+          for (const [threadId, target] of cancellations)
+            cancelledEffectIds.push(
+              ...(yield* effectOutbox.cancelUnsettled({
+                threadId,
+                effectTypes: [...target.effectTypes],
+                reason: target.reason,
+              })),
+            );
           return { receipt, storedEvents, outcomes, committed: true as const, cancelledEffectIds };
         }),
         (result) =>

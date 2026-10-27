@@ -17,6 +17,9 @@ import * as LegacyV1ThreadImporter from "../orchestration-v2/legacy/LegacyV1Thre
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as RuntimeLayer from "../orchestration-v2/runtimeLayer.ts";
+import * as ThreadLifecyclePlan from "../orchestration-v2/ThreadLifecyclePlan.ts";
+import * as ThreadOwnership from "../orchestration-v2/ThreadOwnership.ts";
+import * as EffectOutbox from "../orchestration-v2/EffectOutbox.ts";
 import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecutor.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -70,12 +73,13 @@ const layerTestFor = (
 const layerTest = layerTestFor(layerMetadata);
 
 const layerProjectServiceDependencies = Layer.mergeAll(
+  ThreadLifecyclePlan.layer,
   RuntimeLayer.layerEventSink,
   ProjectStore.layer,
-  ProjectionStore.layer,
-  IdAllocator.layer,
   ThreadCommandExecutor.layer,
 ).pipe(
+  Layer.provideMerge(ThreadOwnership.layer.pipe(Layer.provide(ProjectionStore.layer))),
+  Layer.provideMerge(Layer.mergeAll(ProjectionStore.layer, IdAllocator.layer, EffectOutbox.layer)),
   Layer.provideMerge(LegacyV1ThreadImporter.layer.pipe(Layer.provide(RuntimeLayer.layerEventSink))),
   Layer.provideMerge(ProjectEnrichmentService.layer),
   Layer.provideMerge(layerWorkspacePaths),
