@@ -374,6 +374,74 @@ const layerProjectDeletionTest = Layer.mergeAll(
 );
 
 it.layer(layerProjectDeletionTest)("project deletion during thread commands", (it) => {
+  it.effect(
+    "task6 archive suspends bound tasks through durable cleanup and restore leaves them disabled",
+    () =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        const lifecycle = yield* ThreadLifecycleService.ThreadLifecycleService;
+        const tasks = yield* ScheduledTaskService.ScheduledTaskService;
+        const threadId = ThreadId.make("task6:scheduled-integration");
+        const commandId = CommandId.make("task6:scheduled-archive");
+        const projectId = ProjectId.make("task6:scheduled-project");
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("task6:scheduled-create"),
+          threadId,
+          projectId,
+          title: "scheduled",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdBy: "user",
+          creationSource: "web",
+        });
+        for (const target of [threadId, null])
+          yield* tasks.upsert({
+            id: ScheduledTaskId.make(`task6:schedule:${target ?? "independent"}`),
+            title: "fixture",
+            prompt: "fixture",
+            enabled: true,
+            schedule: { type: "interval", everyMs: 60000 },
+            projectId,
+            threadId: target,
+            workspaceStrategy: { type: "root" },
+            modelSelection,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+          });
+        yield* lifecycle.archive({ commandId, threadId });
+        assert.deepEqual(yield* lifecycle.getCleanupStatus(commandId), {
+          pendingCount: 3,
+          failedCount: 0,
+        });
+        yield* lifecycle.unarchive({
+          commandId: CommandId.make("task6:scheduled-unarchive"),
+          threadId,
+        });
+        assert.equal(yield* worker.drain(), 3);
+        assert.deepEqual(yield* lifecycle.getCleanupStatus(commandId), {
+          pendingCount: 0,
+          failedCount: 0,
+        });
+        const saved = (yield* tasks.list()).tasks;
+        assert.lengthOf(saved, 2);
+        assert.isFalse(saved.find((task) => task.threadId === threadId)!.enabled);
+        assert.isNull(saved.find((task) => task.threadId === threadId)!.nextRunAt);
+        assert.isTrue(saved.find((task) => task.threadId === null)!.enabled);
+        assert.isNotNull(saved.find((task) => task.threadId === null)!.nextRunAt);
+        yield* lifecycle.delete({ commandId: CommandId.make("task6:scheduled-delete"), threadId });
+        yield* worker.drain();
+        assert.deepEqual(
+          (yield* tasks.list()).tasks.map((task) => task.threadId),
+          [null],
+        );
+      }).pipe(Effect.provide(ThreadLifecycleService.layer)),
+  );
+
   it.effect.each(["thread", "project"] as const)(
     "deleting a %s removes its thread-bound automations through the effect worker",
     (deletion) =>

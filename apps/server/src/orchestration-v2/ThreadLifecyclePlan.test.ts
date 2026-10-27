@@ -134,6 +134,34 @@ function makeProjection(): OrchestrationV2ThreadProjection {
   };
 }
 
+it.effect(
+  "lifecycle archive suspends schedules and marks each cleanup without duplicating effects",
+  () =>
+    Effect.gen(function* () {
+      const plan = yield* planThreadLifecycle({
+        command: { ...command, type: "thread.archive" },
+        operationRootThreadId: threadId,
+        members: [makeProjection()],
+        bindings: [],
+        attachmentIdsByThread: new Map([[threadId, ["attachment:exclusive"]]]),
+        now: deletedAt,
+        idAllocator: yield* IdAllocator.IdAllocatorV2,
+      });
+      assert.deepEqual(plan.effects.map((effect) => effect.request.type).sort(), [
+        "preview.cleanup",
+        "scheduled-tasks.suspend",
+        "terminal.cleanup",
+      ]);
+      for (const effect of plan.effects)
+        assert.deepPropertyVal(effect.request, "lifecycle", {
+          commandId: command.commandId,
+          rootThreadId: threadId,
+          revision: 1,
+        });
+      assert.equal(new Set(plan.effects.map((effect) => effect.id)).size, plan.effects.length);
+    }).pipe(Effect.provide(IdAllocator.layer)),
+);
+
 it.effect.each(["delete", "archive", "unarchive"] as const)(
   "plans %s for ordered R/A/B and invalidates live work only",
   (operation) =>

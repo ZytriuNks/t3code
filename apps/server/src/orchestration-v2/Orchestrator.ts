@@ -148,6 +148,7 @@ import * as ThreadLifecyclePlan from "./ThreadLifecyclePlan.ts";
 import { withPullRequestWatch } from "./pullRequestWatch.ts";
 import * as ThreadOwnership from "./ThreadOwnership.ts";
 import * as ThreadLifecycleGuard from "./ThreadLifecycleGuard.ts";
+import * as ThreadLifecycleResources from "./ThreadLifecycleResources.ts";
 import * as ThreadDeletionRecords from "./ThreadDeletionRecords.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ServerSettings from "../serverSettings.ts";
@@ -932,6 +933,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const threadDispatch = yield* ThreadCommandExecutor.ThreadCommandExecutor;
   const ownership = yield* ThreadOwnership.ThreadOwnership;
   const lifecycle = yield* ThreadLifecycleGuard.ThreadLifecycleGuard;
+  const lifecycleResources = yield* ThreadLifecycleResources.ThreadLifecycleResources;
   const resolveSource = (threadId: ThreadId) =>
     lifecycle
       .resolveLifecycleSource(threadId)
@@ -1516,6 +1518,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const queuedMessage = projection.messages.find(
         (candidate) => candidate.id === storedQueuedRun.userMessageId,
       );
+      yield* lifecycleResources
+        .assertCanCreate(threadId)
+        .pipe(Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })));
       const modelSelection = queuedRunModelSelection(projection, storedQueuedRun);
       const queuedRun = {
         ...storedQueuedRun,
@@ -3794,6 +3799,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     // The source is not under this command's lock, so check the modes this
     // command copies, not an earlier read the source's user could outrun.
     yield* refuseAboveDispatchModeLimit(command, command.sourceThreadId, sourceProjection.thread);
+
+    if (sourceProjection.thread.deletedAt !== null)
+      return yield* new OrchestratorCommandRejectedError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: "Cannot create a fork from a deleted source.",
+      });
 
     const sourceRun = runForSourcePoint(sourceProjection, command.sourcePoint);
 
@@ -11659,6 +11671,30 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       });
 
     const plan = yield* dispatchOnce(command).pipe(
+      Effect.tap(() =>
+        dispatchShell !== null &&
+        [
+          "message.dispatch",
+          "queue.resume",
+          "queued-run.start",
+          "queued-message.promote-to-steer",
+          "prepared-run.release",
+          "prepared-run.retry",
+          "runtime-request.respond",
+          "delegated_task.request",
+        ].includes(command.type)
+          ? lifecycleResources.assertCanCreate(commandThreadId(command)).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new OrchestratorDispatchError({
+                    commandId: command.commandId,
+                    commandType: command.type,
+                    cause,
+                  }),
+              ),
+            )
+          : Effect.void,
+      ),
       Effect.flatMap((planned) =>
         planned.events.length > 0 ||
         command.type === "thread.background-work.settle" ||
@@ -12351,6 +12387,7 @@ export const layer: Layer.Layer<
   | ThreadForkServiceV2
   | import("effect/sql/SqlClient").SqlClient
 > = Layer.effect(OrchestratorV2, makeOrchestrator()).pipe(
+  Layer.provide(ThreadLifecycleResources.layer),
   Layer.provide(ThreadLifecyclePlan.layer),
   Layer.provide(ThreadCommandExecutor.layer),
   Layer.provide(

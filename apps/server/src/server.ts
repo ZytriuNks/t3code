@@ -173,6 +173,7 @@ import * as CursorUsageAccounts from "@t3tools/provider-cursor/server/CursorUsag
 import * as UsageService from "./usage/UsageService.ts";
 import * as CodexUsageHistory from "./usage/CodexUsageHistory.ts";
 import * as RuntimeLayer from "./orchestration-v2/runtimeLayer.ts";
+import * as ThreadLifecycleResources from "./orchestration-v2/ThreadLifecycleResources.ts";
 import * as ProjectStore from "./orchestration-v2/ProjectStore.ts";
 import * as ThreadSearch from "./orchestration-v2/ThreadSearch.ts";
 import * as ThreadSettlementService from "./orchestration-v2/ThreadSettlementService.ts";
@@ -421,13 +422,14 @@ const layerCheckpointStore = CheckpointStore.layer.pipe(Layer.provide(layerVcsDr
 const layerPortScanner = PortScanner.layer.pipe(Layer.provide(ProcessRunner.layer));
 
 const layerTerminal = TerminalManager.layer.pipe(
+  Layer.provide(ThreadLifecycleResources.layer),
   Layer.provide(layerPtyAdapter),
   Layer.provide(layerPortScanner),
   Layer.provide(layerNativeTelemetry),
 );
 
 const layerPreview = Layer.empty.pipe(
-  Layer.provideMerge(PreviewManager.layer),
+  Layer.provideMerge(PreviewManager.layer.pipe(Layer.provide(ThreadLifecycleResources.layer))),
   Layer.provideMerge(layerPortScanner),
 );
 

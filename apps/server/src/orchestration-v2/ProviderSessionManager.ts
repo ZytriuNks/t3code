@@ -4,6 +4,7 @@ import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import {
   isOrchestrationV2WorkActive,
   ModelSelection,
+  type CommandId,
   OrchestrationV2DomainEvent,
   OrchestrationV2ProviderSession,
   type OrchestrationV2AppThread,
@@ -201,6 +202,12 @@ export interface ProviderSessionManagerV2Shape {
     readonly detail?: string;
   }) => Effect.Effect<void, ProviderSessionManagerV2Error>;
   readonly detach: (input: {
+    readonly lifecycle?: {
+      readonly commandId: CommandId;
+      readonly rootThreadId: ThreadId;
+      readonly revision: number;
+    };
+    readonly requireConfirmedDetach?: boolean;
     readonly retirementRevision?: number;
     readonly retirementSourceToken?: string;
     readonly providerSessionId: ProviderSessionId;
@@ -2818,7 +2825,11 @@ export const layerWithOptions = (
           function* (input) {
             const key = sessionKey(input.providerSessionId);
             const currentEntry = (yield* Ref.get(sessions)).get(key);
-            if (input.retirementRevision !== undefined)
+            if (
+              input.retirementRevision !== undefined ||
+              ((input.lifecycle !== undefined || input.requireConfirmedDetach === true) &&
+                currentEntry !== undefined)
+            )
               return yield* threadOperations.withLock(
                 threadAttachmentKey(input),
                 Effect.gen(function* () {
@@ -2831,11 +2842,12 @@ export const layerWithOptions = (
                     });
                   const source = currentEntry.lifecycleByThread.get(input.threadId);
                   if (
-                    source === undefined ||
-                    source.lifecycleRevision !== input.retirementRevision ||
-                    (input.retirementSourceToken === undefined
-                      ? !source.isLegacy
-                      : input.retirementSourceToken !== source.sourceToken)
+                    input.retirementRevision !== undefined &&
+                    (source === undefined ||
+                      source.lifecycleRevision !== input.retirementRevision ||
+                      (input.retirementSourceToken === undefined
+                        ? !source.isLegacy
+                        : input.retirementSourceToken !== source.sourceToken))
                   )
                     return yield* new ProviderSessionStaleBindingError({
                       threadId: input.threadId,
@@ -2859,12 +2871,54 @@ export const layerWithOptions = (
                         ...(observed === undefined ? [] : [observed]),
                       ].map((thread) => [thread.id, thread]),
                     ).values(),
-                  ];
+                  ].filter(
+                    (thread) =>
+                      input.retirementRevision !== undefined || thread.nativeThreadRef !== null,
+                  );
+                  if (input.retirementRevision === undefined && threads.length === 0) {
+                    if (
+                      projection.providerThreads.some(
+                        (thread) =>
+                          thread.providerSessionId === input.providerSessionId &&
+                          [...currentEntry.busyTurns].some((turn) =>
+                            turn.startsWith(busyTurnPrefix(thread.id)),
+                          ),
+                      )
+                    )
+                      return yield* new ProviderSessionStaleBindingError({
+                        threadId: input.threadId,
+                        providerSessionId: input.providerSessionId,
+                        reason: "retirement_unconfirmed",
+                      });
+                    yield* Ref.update(sessions, (current) => {
+                      const entry = current.get(key);
+                      if (entry?.runtime !== currentEntry.runtime) return current;
+                      return new Map(current).set(key, {
+                        ...entry,
+                        attachedThreadIds: new Set(
+                          [...entry.attachedThreadIds].filter((id) => id !== input.threadId),
+                        ),
+                      });
+                    });
+                    if (input.revokeMcpCredential) yield* clearMcpSession(input.threadId);
+                    if (
+                      !currentEntry.supportsMultipleProviderThreads &&
+                      currentEntry.attachedThreadIds.size <= 1
+                    )
+                      yield* releaseEntry({
+                        providerSessionId: input.providerSessionId,
+                        reason: "manual_shutdown",
+                        detachedThreadId: input.threadId,
+                      });
+                    return;
+                  }
                   const unload = currentEntry.runtime.unloadThread;
                   if (
                     currentEntry.runtime.supportsConfirmedThreadRetirement !== true ||
                     unload === undefined ||
-                    threads.length === 0
+                    threads.length === 0 ||
+                    (!currentEntry.supportsMultipleProviderThreads &&
+                      [...currentEntry.attachedThreadIds].some((id) => id !== input.threadId))
                   )
                     return yield* new ProviderSessionStaleBindingError({
                       threadId: input.threadId,

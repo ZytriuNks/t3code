@@ -405,3 +405,51 @@ it.effect("thread cleanup notifies subscribers and a finishing run cannot recrea
     }).pipe(Effect.provide(layer));
   }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
 );
+
+it.effect(
+  "lifecycle suspend keeps bound schedule definitions disabled and leaves independent project tasks active",
+  () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const layer = ScheduledTaskService.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
+            Layer.mock(ThreadManagementService.ThreadManagementService)({}),
+            Layer.mock(SecretRequests.SecretRequests)({}),
+            Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+              namedProjectsRoot: "/projects",
+              isScratchProject: () => Effect.succeed(false),
+            }),
+            NodeCrypto.layer,
+            Scheduler.layer,
+          ),
+        ),
+      );
+      yield* Effect.gen(function* () {
+        const service = yield* ScheduledTaskService.ScheduledTaskService;
+        const threadId = ThreadId.make("task6:scheduled:R");
+        const now = DateTime.formatIso(yield* DateTime.now);
+        for (const id of ["bound", "independent", "other-thread"])
+          yield* insertRow(sql, { id, next: now, enabled: 1, status: "never" }, now);
+        yield* sql`UPDATE scheduled_tasks SET thread_id = ${threadId} WHERE task_id = 'bound'`;
+        yield* sql`UPDATE scheduled_tasks SET thread_id = 'task6:scheduled:F' WHERE task_id = 'other-thread'`;
+        yield* service.disableForThread(threadId);
+        yield* service.disableForThread(threadId);
+        const rows = yield* sql<{
+          readonly task_id: string;
+          readonly enabled: number;
+          readonly next_run_at: string | null;
+        }>`
+        SELECT task_id, enabled, next_run_at FROM scheduled_tasks ORDER BY task_id`;
+        assert.lengthOf(rows, 3);
+        assert.deepEqual(rows[0], { task_id: "bound", enabled: 0, next_run_at: null });
+        assert.isTrue(rows.slice(1).every((row) => row.enabled === 1 && row.next_run_at === now));
+        yield* service.deleteForThread(threadId);
+        assert.deepEqual((yield* service.list()).tasks.map((task) => task.id).sort(), [
+          "independent",
+          "other-thread",
+        ]);
+      }).pipe(Effect.provide(layer));
+    }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+);

@@ -12,12 +12,14 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 
 import * as ThreadManagement from "./ThreadManagementService.ts";
+import * as ThreadLifecycleResources from "./ThreadLifecycleResources.ts";
 
 export class ThreadLifecycleError extends Schema.TaggedError<ThreadLifecycleError>()(
   "ThreadLifecycleError",
   {
     operation: Schema.Literals([
       "archive",
+      "cleanup-status",
       "unarchive",
       "delete",
       "update-metadata",
@@ -25,18 +27,28 @@ export class ThreadLifecycleError extends Schema.TaggedError<ThreadLifecycleErro
       "set-interaction-mode",
       "set-model-selection",
     ]),
-    threadId: ThreadId,
+    threadId: Schema.optional(ThreadId),
+    commandId: Schema.optional(CommandId),
     cause: Schema.Defect(),
   },
 ) {
   override get message(): string {
-    return `Thread lifecycle operation '${this.operation}' failed for ${this.threadId}.`;
+    return this.operation === "cleanup-status"
+      ? `Thread lifecycle cleanup status failed for command ${this.commandId}.`
+      : `Thread lifecycle operation '${this.operation}' failed for ${this.threadId}.`;
   }
 }
 
 export class ThreadLifecycleService extends Context.Service<
   ThreadLifecycleService,
   {
+    readonly getCleanupStatus: (commandId: CommandId) => Effect.Effect<
+      {
+        readonly pendingCount: number;
+        readonly failedCount: number;
+      },
+      ThreadLifecycleError
+    >;
     readonly archive: (input: {
       readonly commandId: CommandId;
       readonly threadId: ThreadId;
@@ -76,6 +88,7 @@ export class ThreadLifecycleService extends Context.Service<
 
 const make = Effect.gen(function* () {
   const threads = yield* ThreadManagement.ThreadManagementService;
+  const resources = yield* ThreadLifecycleResources.ThreadLifecycleResources;
 
   const dispatch = <Operation extends ThreadLifecycleError["operation"]>(
     operation: Operation,
@@ -88,6 +101,14 @@ const make = Effect.gen(function* () {
     );
 
   return ThreadLifecycleService.of({
+    getCleanupStatus: (commandId) =>
+      resources
+        .getCleanupStatus(commandId)
+        .pipe(
+          Effect.mapError(
+            (cause) => new ThreadLifecycleError({ operation: "cleanup-status", commandId, cause }),
+          ),
+        ),
     archive: (input) =>
       dispatch("archive", input.threadId, {
         type: "thread.archive",

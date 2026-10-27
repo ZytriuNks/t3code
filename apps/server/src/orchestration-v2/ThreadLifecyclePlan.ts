@@ -14,6 +14,7 @@ import * as EffectOutbox from "./EffectOutbox.ts";
 import * as NativeSessionBindings from "./NativeSessionBindings.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ThreadOwnership from "./ThreadOwnership.ts";
+import * as ThreadLifecycleResources from "./ThreadLifecycleResources.ts";
 import { withPullRequestWatch } from "./pullRequestWatch.ts";
 
 type PendingOrchestrationEffectV2 = EffectOutbox.PendingOrchestrationEffectV2;
@@ -66,6 +67,7 @@ export const planThreadLifecycle = Effect.fn("ThreadLifecyclePlan.planThreadLife
     const { now, idAllocator } = input;
     const events: Array<OrchestrationV2DomainEvent> = [];
     const effects: Array<PendingOrchestrationEffectV2> = [];
+    const revisions = new Map<ThreadId, number>();
     const cancelUnsettledEffectsByThread: Array<
       ThreadLifecyclePlan["cancelUnsettledEffectsByThread"][number]
     > = [];
@@ -108,6 +110,7 @@ export const planThreadLifecycle = Effect.fn("ThreadLifecyclePlan.planThreadLife
         lifecycleRevision: (projection.thread.lifecycleRevision ?? 0) + (changed ? 1 : 0),
         updatedAt: changed ? now : projection.thread.updatedAt,
       };
+      revisions.set(thread.id, thread.lifecycleRevision);
       if (command.type === "thread.delete") {
         yield* emitEvent<Extract<OrchestrationV2DomainEvent, { type: "thread.deleted" }>>({
           type: "thread.deleted",
@@ -371,12 +374,14 @@ export const planThreadLifecycle = Effect.fn("ThreadLifecyclePlan.planThreadLife
           },
         });
       }
-      if (command.type === "thread.delete") {
+      {
+        const type =
+          command.type === "thread.delete" ? "scheduled-tasks.cleanup" : "scheduled-tasks.suspend";
         effects.push({
-          id: `effect:${command.commandId}:${command.threadId}:scheduled-tasks.cleanup`,
+          id: `effect:${command.commandId}:${command.threadId}:${type}`,
           commandId: command.commandId,
           threadId: command.threadId,
-          request: { type: "scheduled-tasks.cleanup" },
+          request: { type },
         });
       }
       effects.push({
@@ -385,13 +390,13 @@ export const planThreadLifecycle = Effect.fn("ThreadLifecyclePlan.planThreadLife
         threadId: command.threadId,
         request: { type: "terminal.cleanup" },
       });
+      effects.push({
+        id: `effect:${command.commandId}:${command.threadId}:preview.cleanup`,
+        commandId: command.commandId,
+        threadId: command.threadId,
+        request: { type: "preview.cleanup" },
+      });
       if (command.type === "thread.delete") {
-        effects.push({
-          id: `effect:${command.commandId}:${command.threadId}:preview.cleanup`,
-          commandId: command.commandId,
-          threadId: command.threadId,
-          request: { type: "preview.cleanup" },
-        });
         const attachmentIds = Array.from(
           new Set(input.attachmentIdsByThread.get(command.threadId) ?? []),
         );
@@ -405,7 +410,21 @@ export const planThreadLifecycle = Effect.fn("ThreadLifecyclePlan.planThreadLife
         }
       }
     }
-    return { events, effects, cancelUnsettledEffectsByThread };
+    return {
+      events,
+      effects: effects.map((effect) => ({
+        ...effect,
+        request: {
+          ...effect.request,
+          lifecycle: {
+            commandId: input.command.commandId,
+            rootThreadId: input.operationRootThreadId,
+            revision: revisions.get(effect.threadId)!,
+          },
+        },
+      })),
+      cancelUnsettledEffectsByThread,
+    };
   },
 );
 
@@ -422,6 +441,7 @@ export class ThreadLifecyclePlanner extends Context.Service<
       | NativeSessionBindings.NativeSessionBindingError
       | IdAllocator.IdAllocatorV2Error
       | EffectOutbox.EffectOutboxError
+      | ThreadLifecycleResources.ThreadLifecycleResourceError
     >;
   }
 >()("t3/orchestration-v2/ThreadLifecyclePlan/ThreadLifecyclePlanner") {}
@@ -432,6 +452,7 @@ const make = Effect.gen(function* () {
   const bindings = yield* NativeSessionBindings.NativeSessionBindings;
   const outbox = yield* EffectOutbox.EffectOutboxV2;
   const idAllocator = yield* IdAllocator.IdAllocatorV2;
+  const resources = yield* ThreadLifecycleResources.ThreadLifecycleResources;
   const plan = Effect.fn("ThreadLifecyclePlanner.plan")(function* (command: LifecycleCommand) {
     const scope = yield* ownership.resolveScope({
       rootThreadId: command.threadId,
@@ -477,12 +498,16 @@ const make = Effect.gen(function* () {
             ),
     );
     const attachmentIdsByThread = new Map<ThreadId, ReadonlyArray<string>>();
-    if (command.type === "thread.delete")
+    if (command.type === "thread.delete") {
+      const safe = new Set(
+        yield* resources.safeAttachmentIds(members.map((member) => member.thread.id)),
+      );
       for (const member of members)
         attachmentIdsByThread.set(
           member.thread.id,
-          yield* store.getThreadAttachmentIds(member.thread.id),
+          (yield* store.getThreadAttachmentIds(member.thread.id)).filter((id) => safe.has(id)),
         );
+    }
     const now = yield* DateTime.now;
     const planned = yield* planThreadLifecycle({
       command,
@@ -530,6 +555,19 @@ const make = Effect.gen(function* () {
             type: "provider-session.detach",
             providerSessionId: source.providerSessionId,
             retirementRevision: source.lifecycleRevision ?? 0,
+            lifecycle: {
+              commandId: command.commandId,
+              rootThreadId: command.threadId,
+              revision:
+                (member.thread.lifecycleRevision ?? 0) +
+                (command.type === "thread.delete"
+                  ? member.thread.deletedAt === null
+                    ? 1
+                    : 0
+                  : member.thread.archivedAt === null
+                    ? 1
+                    : 0),
+            },
             ...(source.sourceToken === null ? {} : { retirementSourceToken: source.sourceToken }),
             detail,
             revokeMcpCredential: true,
@@ -561,5 +599,6 @@ const make = Effect.gen(function* () {
   return ThreadLifecyclePlanner.of({ plan });
 });
 export const layer = Layer.effect(ThreadLifecyclePlanner, make).pipe(
+  Layer.provide(ThreadLifecycleResources.layer),
   Layer.provide(NativeSessionBindings.layer),
 );

@@ -239,6 +239,7 @@ export class ScheduledTaskService extends Context.Service<
     ) => Effect.Effect<ScheduledTaskDeleteResult, ScheduledTaskError>;
     /** Deletes only tasks that still target this thread, including their webhook deliveries. */
     readonly deleteForThread: (threadId: ThreadId) => Effect.Effect<void, ScheduledTaskError>;
+    readonly disableForThread: (threadId: ThreadId) => Effect.Effect<void, ScheduledTaskError>;
     /** The dispatched thread, or null if dispatch failed; leaves the task's binding unchanged. */
     readonly runNow: (
       input: ScheduledTaskRunNowInput,
@@ -1254,6 +1255,19 @@ export const layer = Layer.effect(
         Effect.as({ id: input.id }),
       );
 
+    const disableForThread = Effect.fn("ScheduledTaskService.disableForThread")(function* (
+      threadId: ThreadId,
+    ) {
+      const now = iso(yield* localNow);
+      yield* sql`UPDATE scheduled_tasks SET enabled = 0, next_run_at = NULL, updated_at = ${now}
+        WHERE thread_id = ${threadId}`.pipe(
+        Effect.mapError((cause) =>
+          taskError("Could not suspend thread's schedule tasks.", { cause }),
+        ),
+      );
+      yield* notifyChanged;
+    });
+
     const deleteForThread = Effect.fn("ScheduledTaskService.deleteForThread")(function* (
       threadId: ThreadId,
     ) {
@@ -2157,6 +2171,7 @@ export const layer = Layer.effect(
       setEnabled,
       delete: deleteTask,
       deleteForThread,
+      disableForThread,
       runNow,
       rotateWebhookToken,
       listWebhookDeliveries,

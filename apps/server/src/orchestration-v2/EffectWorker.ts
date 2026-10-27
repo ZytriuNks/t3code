@@ -60,7 +60,7 @@ function isNonRetryableProviderTurnControlFailure(effectType: string, errorText:
 export interface OrchestrationEffectExecutorV2Shape {
   readonly execute: (
     effect: EffectOutbox.OrchestrationEffectV2,
-    options?: { readonly willRetry: boolean },
+    options?: { readonly willRetry: boolean; readonly lifecycleCleanup?: boolean },
   ) => Effect.Effect<void, OrchestrationEffectExecutionError>;
 }
 
@@ -124,6 +124,10 @@ export const layerExecutor: Layer.Layer<
               .detach({
                 providerSessionId: effect.request.providerSessionId,
                 threadId: effect.threadId,
+                ...(effect.request.lifecycle === undefined
+                  ? {}
+                  : { lifecycle: effect.request.lifecycle }),
+                ...(options?.lifecycleCleanup === true ? { requireConfirmedDetach: true } : {}),
                 ...(effect.request.retirementRevision === undefined
                   ? {}
                   : {
@@ -473,7 +477,12 @@ export const layerExecutor: Layer.Layer<
                 ),
               );
           case "scheduled-tasks.cleanup":
-            return resourceCleanup.cleanupScheduledTasks(effect.threadId).pipe(
+          case "scheduled-tasks.suspend":
+            return (
+              effect.request.type === "scheduled-tasks.suspend"
+                ? resourceCleanup.suspendScheduledTasks(effect.threadId)
+                : resourceCleanup.cleanupScheduledTasks(effect.threadId)
+            ).pipe(
               Effect.mapError(
                 (cause) =>
                   new OrchestrationEffectExecutionError({
@@ -506,16 +515,18 @@ export const layerExecutor: Layer.Layer<
               ),
             );
           case "attachment.cleanup":
-            return resourceCleanup.cleanupAttachments(effect.request.attachmentIds).pipe(
-              Effect.mapError(
-                (cause) =>
-                  new OrchestrationEffectExecutionError({
-                    effectId: effect.id,
-                    effectType: effect.request.type,
-                    cause,
-                  }),
-              ),
-            );
+            return resourceCleanup
+              .cleanupAttachments(effect.request.attachmentIds, effect.threadId)
+              .pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new OrchestrationEffectExecutionError({
+                      effectId: effect.id,
+                      effectType: effect.request.type,
+                      cause,
+                    }),
+                ),
+              );
           case "thread-title.generate":
             return threadTitleRegeneration
               .execute({
@@ -750,8 +761,22 @@ export const layerWithOptions = (
           }).pipe(Effect.onError((cause) => requeueClaim(effect, cause)));
           if (cancelledBeforeExecution) return true;
 
+          // Pre-marker archive/delete receipts are also lifecycle cleanup; ordinary switches stay ordinary.
+          const legacyLifecycleDetach =
+            effect.request.type === "provider-session.detach" &&
+            effect.request.lifecycle === undefined &&
+            effect.request.retirementRevision === undefined
+              ? (yield* outbox
+                  .listLifecycleCleanup([effect.threadId])
+                  .pipe(Effect.onError((cause) => requeueClaim(effect, cause)))).some(
+                  (cleanup) => cleanup.id === effect.id,
+                )
+              : false;
           const execution = executor
-            .execute(effect, { willRetry: effect.attemptCount < maxAttempts })
+            .execute(effect, {
+              willRetry: effect.attemptCount < maxAttempts,
+              ...(legacyLifecycleDetach ? { lifecycleCleanup: true } : {}),
+            })
             .pipe(Effect.as("executed" as const));
           const exit = yield* Effect.exit(Effect.raceFirst(execution, cancellation)).pipe(
             Effect.ensuring(outbox.clearCancellation(effect.id)),

@@ -54,6 +54,7 @@ import * as RuntimeRequestService from "./RuntimeRequestService.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ThreadLaunchService from "./ThreadLaunchService.ts";
 import * as ThreadLifecycleService from "./ThreadLifecycleService.ts";
+import * as ThreadLifecycleResources from "./ThreadLifecycleResources.ts";
 import * as ThreadForkService from "./ThreadForkService.ts";
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
@@ -293,6 +294,7 @@ const layerThreadLaunchProvided = ThreadLaunchService.layer.pipe(
   ),
 );
 const layerThreadLifecycleProvided = ThreadLifecycleService.layer.pipe(
+  Layer.provide(ThreadLifecycleResources.layer),
   Layer.provide(layerThreadManagementProvided),
 );
 const layerSecretRequestsProvided = SecretRequests.layer.pipe(
@@ -364,6 +366,7 @@ const layerMcpAppRequestsProvided = McpAppRequests.layer.pipe(
 );
 
 export const layer = Layer.mergeAll(
+  ThreadLifecycleResources.layer,
   ThreadLifecycleGuard.layer,
   layerThreadOwnershipProvided,
   layerCommandOutputHubProvided,

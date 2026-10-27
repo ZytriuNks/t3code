@@ -8,6 +8,7 @@ import {
   type TerminalRestartInput,
   ProviderDriverKind,
   ProviderInstanceId,
+  ThreadId,
   TerminalProviderInstanceNotFoundError,
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -33,6 +34,7 @@ import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as TerminalManager from "./Manager.ts";
+import * as ThreadLifecycleResources from "../orchestration-v2/ThreadLifecycleResources.ts";
 import { terminalOutputStream } from "./OutputProtocol.ts";
 import * as PtyAdapter from "@t3tools/shared/PtyAdapter";
 
@@ -250,6 +252,13 @@ interface CreateManagerOptions {
   managedBinaryToolsDir?: string;
 }
 
+const lifecycleResourcesFixture = {
+  assertCanCreate: () => Effect.void,
+  withCreateCommit: <A, E, R>(_threadId: ThreadId, commit: Effect.Effect<A, E, R>) => commit,
+  safeAttachmentIds: () => Effect.succeed([]),
+  getCleanupStatus: () => Effect.succeed({ pendingCount: 0, failedCount: 0 }),
+} satisfies ThreadLifecycleResources.ThreadLifecycleResources["Service"];
+
 interface ManagerFixture {
   readonly baseDir: string;
   readonly logsDir: string;
@@ -305,7 +314,12 @@ const createManager = (
               managedBinaryCacheDir: options.managedBinaryCacheDir,
               managedBinaryToolsDir: options.managedBinaryToolsDir,
             }),
-      });
+      }).pipe(
+        Effect.provideService(
+          ThreadLifecycleResources.ThreadLifecycleResources,
+          lifecycleResourcesFixture,
+        ),
+      );
       const eventsRef = yield* Ref.make<ReadonlyArray<TerminalEvent>>([]);
       const unsubscribe = yield* manager.subscribe((event) =>
         Ref.update(eventsRef, (events) => [...events, event]),

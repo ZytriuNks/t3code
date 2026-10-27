@@ -5018,6 +5018,92 @@ it.effect(
     }),
 );
 
+it.effect.each(["failed", "succeeded", "unsupported", "legacy-failed"] as const)(
+  "lifecycle ordinary detach %s preserves the surviving shared thread",
+  (outcome) =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      yield* Effect.gen(function* () {
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const sink = yield* EventSink.EventSinkV2;
+        const ids = yield* IdAllocator.IdAllocatorV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("task6:detach:R");
+        const otherId = ThreadId.make("task6:detach:F");
+        const providerSessionId = ids.derive.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+        });
+        for (const id of [threadId, otherId]) {
+          yield* sink.write({
+            events: [yield* makeThreadCreatedEvent({ idAllocator: ids, threadId: id, now })],
+          });
+          yield* manager.open({ threadId: id, providerSessionId, modelSelection, runtimePolicy });
+        }
+        yield* sink.write({
+          events: [
+            {
+              id: yield* ids.allocate.event({ threadId }),
+              type: "provider-thread.updated",
+              threadId,
+              occurredAt: now,
+              payload: makeProviderThread({ idAllocator: ids, threadId, providerSessionId, now }),
+            },
+          ],
+        });
+        const result = yield* manager
+          .detach({
+            threadId,
+            providerSessionId,
+            ...(outcome === "legacy-failed"
+              ? { requireConfirmedDetach: true }
+              : {
+                  lifecycle: {
+                    commandId: CommandId.make("task6:detach"),
+                    rootThreadId: threadId,
+                    revision: 1,
+                  },
+                }),
+          })
+          .pipe(Effect.result);
+        assert.equal(result._tag, outcome === "succeeded" ? "Success" : "Failure");
+        const survivor = yield* manager.open({
+          threadId: otherId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        yield* survivor.resumeThread({
+          threadId: otherId,
+          providerThread: makeProviderThread({
+            idAllocator: ids,
+            threadId: otherId,
+            providerSessionId,
+            now,
+          }),
+        });
+        assert.equal((yield* Ref.get(state)).resumeCount, 1);
+        assert.deepEqual(
+          (yield* Ref.get(state)).unloadedNativeThreadIds,
+          outcome === "succeeded" ? ["native-thread"] : [],
+        );
+        assert.equal((yield* Ref.get(state)).closeCount, 0);
+        assert.isTrue(yield* manager.isLive(providerSessionId));
+      }).pipe(
+        Effect.provide(
+          layerTest({
+            state,
+            idleTimeoutMs: 60000,
+            beforeUnload:
+              outcome === "failed" || outcome === "legacy-failed"
+                ? Effect.die("exact unload failed")
+                : Effect.void,
+            confirmsRetirement: outcome !== "unsupported",
+          }),
+        ),
+      );
+    }),
+);
+
 it.effect("lifecycle deletes a thread during startup and closes only that exact new session", () =>
   Effect.gen(function* () {
     const state = yield* Ref.make(emptyState);
