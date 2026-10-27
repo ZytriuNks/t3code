@@ -60,6 +60,7 @@ import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ThreadLaunch from "./ThreadLaunchService.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
+import * as ThreadLifecycleGuard from "./ThreadLifecycleGuard.ts";
 import * as ThreadTitleRegeneration from "./ThreadTitleRegenerationService.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -113,6 +114,10 @@ const claudeAdapter = {
 } as ProviderAdapter.ProviderAdapterV2["Service"];
 
 interface HarnessOptions {
+  readonly wrapDispatch?: (
+    dispatch: ThreadManagement.ThreadManagementService["Service"]["dispatch"],
+  ) => ThreadManagement.ThreadManagementService["Service"]["dispatch"];
+  readonly onPreparationFinished?: Effect.Effect<void>;
   readonly closeTerminal?: TerminalManager.TerminalManager["Service"]["close"];
   readonly adapters?: ReadonlyArray<ProviderAdapter.ProviderAdapterV2["Service"]>;
   readonly managedFolders?: Layer.Layer<ManagedProjectFolders.ManagedProjectFolders>;
@@ -139,11 +144,21 @@ function makeHarness(options: HarnessOptions = {}) {
   );
   const layerServerSettings = ServerSettings.layerTest(options.serverSettings);
   const layerReceipts = CommandReceiptStore.layer.pipe(Layer.provide(layerDatabase));
-  const layerThreadManagement = ThreadManagement.layer.pipe(
+  const layerThreadManagementBase = ThreadManagement.layer.pipe(
     Layer.provide(layerOrchestrator),
     Layer.provide(layerServerSettings),
     Layer.provide(layerReceipts),
   );
+  const layerThreadManagement =
+    options.wrapDispatch === undefined
+      ? layerThreadManagementBase
+      : Layer.effect(
+          ThreadManagement.ThreadManagementService,
+          Effect.gen(function* () {
+            const threads = yield* ThreadManagement.ThreadManagementService;
+            return { ...threads, dispatch: options.wrapDispatch!(threads.dispatch) };
+          }),
+        ).pipe(Layer.provide(layerThreadManagementBase));
   const layerOutbox = EffectOutbox.layer.pipe(Layer.provide(layerDatabase));
   const createWorktree = vi.fn(
     options.createWorktree ??
@@ -170,7 +185,19 @@ function makeHarness(options: HarnessOptions = {}) {
     options.generateTitle ?? (() => Effect.succeed({ title: "Generated title" })),
   );
   const layerExternalServices = Layer.mergeAll(
-    WorktreeSetupTracker.layer,
+    options.onPreparationFinished === undefined
+      ? WorktreeSetupTracker.layer
+      : Layer.effect(
+          WorktreeSetupTracker.WorktreeSetupTracker,
+          Effect.gen(function* () {
+            const tracker = yield* WorktreeSetupTracker.make;
+            return {
+              ...tracker,
+              finish: (...args: Parameters<typeof tracker.finish>) =>
+                tracker.finish(...args).pipe(Effect.tap(() => options.onPreparationFinished!)),
+            };
+          }),
+        ),
     Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({ get: () => Effect.succeed(null) }),
     Layer.mock(TerminalManager.TerminalManager)({ close: closeTerminal }),
     Layer.succeed(ProjectService.ProjectService, {
@@ -221,6 +248,7 @@ function makeHarness(options: HarnessOptions = {}) {
       }),
   );
   const layerLaunch = ThreadLaunch.layer.pipe(
+    Layer.provide(layerDatabase),
     Layer.provide(
       Layer.mergeAll(
         layerExternalServices,
@@ -252,6 +280,7 @@ function makeHarness(options: HarnessOptions = {}) {
       ),
   });
   const layerTitleRegeneration = ThreadTitleRegeneration.layer.pipe(
+    Layer.provide(layerDatabase),
     Layer.provide(
       Layer.mergeAll(layerThreadManagement, layerProjectedProjects, layerExternalServices),
     ),
@@ -598,7 +627,15 @@ it.effect.each([" /COMPACT "])(
           (yield* outbox.listByCommandId(commandId))
             .filter((effect) => effect.request.type === "thread-title.generate")
             .map((effect) => effect.request),
-          [{ type: "thread-title.generate", kind: { type: "initial", messageId } }],
+          [
+            {
+              type: "thread-title.generate",
+              kind: { type: "initial", messageId },
+              lifecycleRevision: 0,
+              lifecycleSourceToken: (yield* threads.resolveLifecycleSource(launched.threadId))
+                .sourceToken,
+            },
+          ],
         );
       }).pipe(Effect.provide(harness.layer));
     }),
@@ -726,6 +763,9 @@ it.effect("arms durable title generation after accepting the first message", () 
         [
           {
             type: "thread-title.generate",
+            lifecycleRevision: 0,
+            lifecycleSourceToken: (yield* threads.resolveLifecycleSource(launched.threadId))
+              .sourceToken,
             kind: { type: "initial", messageId: MessageId.make("Generate my title:id") },
           },
         ],
@@ -751,7 +791,15 @@ it.effect("arms durable title generation after accepting the first message", () 
       });
       assert.deepEqual(
         (yield* outbox.listByCommandId(manualRequestId)).map((effect) => effect.request),
-        [{ type: "thread-title.generate", kind: { type: "regenerate" } }],
+        [
+          {
+            type: "thread-title.generate",
+            kind: { type: "regenerate" },
+            lifecycleRevision: 0,
+            lifecycleSourceToken: (yield* threads.resolveLifecycleSource(launched.threadId))
+              .sourceToken,
+          },
+        ],
       );
       yield* titleRegeneration.execute({
         threadId: launched.threadId,
@@ -2170,3 +2218,124 @@ it.effect("replays an accepted send after the project disables the instance", ()
     }
   }).pipe(Effect.provide(Layer.mergeAll(harness.layer, layerFiles)));
 });
+
+it.effect("lifecycle shared branch updates retain the initiating root across dispatch", () =>
+  Effect.gen(function* () {
+    const entered = yield* Deferred.make<void>();
+    const release = yield* Deferred.make<void>();
+    const completed = yield* Deferred.make<void>();
+    const a = ThreadId.make("branch:A"),
+      b = ThreadId.make("branch:B");
+    const oldBranch = "t3code/deadbeef";
+    const harness = makeHarness({
+      createWorktree: () =>
+        Effect.succeed({
+          worktree: { path: "/shared", refName: oldBranch, headSha: "abc" },
+        } as never),
+      wrapDispatch: (dispatch) => (command) => {
+        if (command.commandId !== `branch:launch:branch-rename:${b}`) return dispatch(command);
+        return Effect.gen(function* () {
+          const captured = yield* ThreadLifecycleGuard.DispatchLifecycleGuard;
+          assert.equal(captured?.threadId, b);
+          assert.equal(captured?.prerequisites?.[0]?.threadId, a);
+          yield* Deferred.succeed(entered, undefined);
+          yield* Deferred.await(release);
+          return yield* dispatch(command);
+        }).pipe(Effect.ensuring(Deferred.succeed(completed, undefined)));
+      },
+    });
+    yield* Effect.gen(function* () {
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const launches = yield* ThreadLaunch.ThreadLaunchService;
+      yield* threads.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("branch:create:B"),
+        threadId: b,
+        projectId,
+        title: "Shared checkout",
+        createdBy: "user",
+        creationSource: "web",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: oldBranch,
+        worktreePath: "/shared",
+      });
+      yield* launches.launch(
+        launchInput({
+          command: "branch:launch",
+          thread: a,
+          message: "Start",
+          workspace: { type: "worktree", baseRef: "main" },
+        }),
+      );
+      yield* Deferred.await(entered);
+      yield* threads.dispatch({
+        type: "thread.archive",
+        commandId: CommandId.make("branch:archive:A"),
+        threadId: a,
+      });
+      yield* threads.dispatch({
+        type: "thread.unarchive",
+        commandId: CommandId.make("branch:restore:A"),
+        threadId: a,
+      });
+      yield* Deferred.succeed(release, undefined);
+      yield* Deferred.await(completed);
+      const target = yield* threads.getThreadProjection(b);
+      assert.equal(target.thread.branch, oldBranch);
+      assert.isNull(target.thread.archivedAt);
+      assert.equal((yield* threads.getThreadProjection(a)).thread.lifecycleRevision, 2);
+    }).pipe(Effect.provide(harness.layer));
+  }),
+);
+
+it.effect(
+  "lifecycle rejects preparation release and branch writes after archive and immediate restore",
+  () =>
+    Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const finished = yield* Deferred.make<void>();
+      const harness = makeHarness({
+        onPreparationFinished: Deferred.succeed(finished, undefined).pipe(Effect.asVoid),
+        runSetup: () =>
+          Deferred.succeed(entered, undefined).pipe(
+            Effect.andThen(Deferred.await(release)),
+            Effect.as({ status: "no-script" as const }),
+          ),
+      });
+      yield* Effect.gen(function* () {
+        const launches = yield* ThreadLaunch.ThreadLaunchService;
+        const threads = yield* ThreadManagement.ThreadManagementService;
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const input = launchInput({
+          command: "lifecycle:prepare",
+          thread: "lifecycle:prepare",
+          message: "Prepare",
+          workspace: { type: "existing_worktree", worktreePath: "/existing", branch: "existing" },
+        });
+        const launched = yield* launches.launch(input);
+        yield* Deferred.await(entered);
+        yield* threads.dispatch({
+          type: "thread.archive",
+          commandId: CommandId.make("lifecycle:prepare:archive"),
+          threadId: launched.threadId,
+        });
+        yield* threads.dispatch({
+          type: "thread.unarchive",
+          commandId: CommandId.make("lifecycle:prepare:restore"),
+          threadId: launched.threadId,
+        });
+        yield* Deferred.succeed(release, undefined);
+        yield* Deferred.await(finished);
+        const after = yield* threads.getThreadProjection(launched.threadId);
+        assert.equal(after.thread.lifecycleRevision, 2);
+        assert.isFalse(
+          after.runs.some((run) => run.status === "starting" || run.status === "running"),
+        );
+        assert.isEmpty(yield* outbox.listByCommandId(CommandId.make(`${input.commandId}:release`)));
+        assert.equal(after.thread.branch, "existing");
+      }).pipe(Effect.provide(harness.layer));
+    }),
+);

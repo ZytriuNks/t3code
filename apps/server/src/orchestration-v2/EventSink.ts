@@ -35,6 +35,12 @@ import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import * as NativeSessionBindings from "./NativeSessionBindings.ts";
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
+import * as ThreadLifecycleGuard from "./ThreadLifecycleGuard.ts";
+
+interface LifecycleWriteOptions {
+  readonly lifecycleGuard?: ThreadLifecycleGuard.LifecycleWriteGuard | undefined;
+  readonly lifecyclePurpose?: "activity" | "terminal_cleanup";
+}
 
 export class EventSinkWriteError extends Schema.TaggedError<EventSinkWriteError>()(
   "EventSinkWriteError",
@@ -68,41 +74,47 @@ export const EventSinkV2Error = Schema.Union([EventSinkWriteError, EventSinkStre
 export type EventSinkV2Error = typeof EventSinkV2Error.Type;
 
 export interface EventSinkV2Shape {
-  readonly write: (input: {
-    /** Return no events if another thread owns this native session at commit time. */
-    readonly unlessNativeThreadOwned?: Pick<
-      OrchestrationV2ProviderThread,
-      "driver" | "providerInstanceId" | "appThreadId" | "nativeThreadRef" | "nativeStorage"
-    >;
-    readonly guardPendingUserInputCancellations?: boolean;
-    readonly commandId?: CommandId;
-    readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
-  }) => Effect.Effect<ReadonlyArray<OrchestrationV2StoredEvent>, EventSinkV2Error>;
-  readonly writeWithEffects: (input: {
-    /**
-     * Rebuilds each run.updated from the stored row with only its delegatedCompletion replaced.
-     * The batch must not also change that run's lifecycle.
-     */
-    readonly updateDelegatedCompletionOnly?: boolean;
-    readonly unlessNativeThreadOwned?: Pick<
-      OrchestrationV2ProviderThread,
-      "driver" | "providerInstanceId" | "appThreadId" | "nativeThreadRef" | "nativeStorage"
-    >;
-    readonly guardPendingUserInputCancellations?: boolean;
-    readonly commandId?: CommandId;
-    readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
-    readonly effects: ReadonlyArray<EffectOutbox.PendingOrchestrationEffectV2>;
-  }) => Effect.Effect<ReadonlyArray<OrchestrationV2StoredEvent>, EventSinkV2Error>;
-  readonly writeIfRunCurrent: (input: {
-    readonly guardPendingUserInputCancellations?: boolean;
-    readonly commandId?: CommandId;
-    readonly threadId: ThreadId;
-    readonly runId: RunId;
-    readonly activeAttemptId: RunAttemptId;
-    readonly expectedStatus: OrchestrationV2Run["status"];
-    readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
-    readonly effects?: ReadonlyArray<EffectOutbox.PendingOrchestrationEffectV2>;
-  }) => Effect.Effect<
+  readonly write: (
+    input: LifecycleWriteOptions & {
+      /** Return no events if another thread owns this native session at commit time. */
+      readonly unlessNativeThreadOwned?: Pick<
+        OrchestrationV2ProviderThread,
+        "driver" | "providerInstanceId" | "appThreadId" | "nativeThreadRef" | "nativeStorage"
+      >;
+      readonly guardPendingUserInputCancellations?: boolean;
+      readonly commandId?: CommandId;
+      readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
+    },
+  ) => Effect.Effect<ReadonlyArray<OrchestrationV2StoredEvent>, EventSinkV2Error>;
+  readonly writeWithEffects: (
+    input: LifecycleWriteOptions & {
+      /**
+       * Rebuilds each run.updated from the stored row with only its delegatedCompletion replaced.
+       * The batch must not also change that run's lifecycle.
+       */
+      readonly updateDelegatedCompletionOnly?: boolean;
+      readonly unlessNativeThreadOwned?: Pick<
+        OrchestrationV2ProviderThread,
+        "driver" | "providerInstanceId" | "appThreadId" | "nativeThreadRef" | "nativeStorage"
+      >;
+      readonly guardPendingUserInputCancellations?: boolean;
+      readonly commandId?: CommandId;
+      readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
+      readonly effects: ReadonlyArray<EffectOutbox.PendingOrchestrationEffectV2>;
+    },
+  ) => Effect.Effect<ReadonlyArray<OrchestrationV2StoredEvent>, EventSinkV2Error>;
+  readonly writeIfRunCurrent: (
+    input: LifecycleWriteOptions & {
+      readonly guardPendingUserInputCancellations?: boolean;
+      readonly commandId?: CommandId;
+      readonly threadId: ThreadId;
+      readonly runId: RunId;
+      readonly activeAttemptId: RunAttemptId;
+      readonly expectedStatus: OrchestrationV2Run["status"];
+      readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
+      readonly effects?: ReadonlyArray<EffectOutbox.PendingOrchestrationEffectV2>;
+    },
+  ) => Effect.Effect<
     {
       readonly committed: boolean;
       readonly storedEvents: ReadonlyArray<OrchestrationV2StoredEvent>;
@@ -115,15 +127,17 @@ export interface EventSinkV2Shape {
    * provider_thread updates so a completed or superseded attempt cannot clobber
    * a newer attempt that already claimed the thread.
    */
-  readonly writeIfProviderThreadOwner: (input: {
-    readonly guardPendingUserInputCancellations?: boolean;
-    readonly commandId?: CommandId;
-    readonly providerThreadId: ProviderThreadId;
-    readonly runId: RunId;
-    readonly activeAttemptId: RunAttemptId;
-    readonly expectedLastRunOrdinal: number;
-    readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
-  }) => Effect.Effect<
+  readonly writeIfProviderThreadOwner: (
+    input: LifecycleWriteOptions & {
+      readonly guardPendingUserInputCancellations?: boolean;
+      readonly commandId?: CommandId;
+      readonly providerThreadId: ProviderThreadId;
+      readonly runId: RunId;
+      readonly activeAttemptId: RunAttemptId;
+      readonly expectedLastRunOrdinal: number;
+      readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
+    },
+  ) => Effect.Effect<
     {
       readonly committed: boolean;
       readonly storedEvents: ReadonlyArray<OrchestrationV2StoredEvent>;
@@ -136,28 +150,32 @@ export interface EventSinkV2Shape {
    * cannot overwrite an update published in between. The whole row is
    * compared because not every writer moves `updatedAt`.
    */
-  readonly writeIfProviderThreadUnchanged: (input: {
-    readonly expected: OrchestrationV2ProviderThread;
-    readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
-  }) => Effect.Effect<
+  readonly writeIfProviderThreadUnchanged: (
+    input: LifecycleWriteOptions & {
+      readonly expected: OrchestrationV2ProviderThread;
+      readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
+    },
+  ) => Effect.Effect<
     {
       readonly committed: boolean;
       readonly storedEvents: ReadonlyArray<OrchestrationV2StoredEvent>;
     },
     EventSinkV2Error
   >;
-  readonly commitCommand: (input: {
-    readonly commandId: CommandId;
-    readonly threadId: ThreadId;
-    readonly commandType: string;
-    readonly acceptedAt: DateTime.Utc;
-    readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
-    readonly effects: ReadonlyArray<EffectOutbox.PendingOrchestrationEffectV2>;
-    readonly cancelUnsettledEffects?: {
-      readonly effectTypes: ReadonlyArray<EffectOutbox.OrchestrationEffectRequestV2["type"]>;
-      readonly reason: string;
-    };
-  }) => Effect.Effect<
+  readonly commitCommand: (
+    input: LifecycleWriteOptions & {
+      readonly commandId: CommandId;
+      readonly threadId: ThreadId;
+      readonly commandType: string;
+      readonly acceptedAt: DateTime.Utc;
+      readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
+      readonly effects: ReadonlyArray<EffectOutbox.PendingOrchestrationEffectV2>;
+      readonly cancelUnsettledEffects?: {
+        readonly effectTypes: ReadonlyArray<EffectOutbox.OrchestrationEffectRequestV2["type"]>;
+        readonly reason: string;
+      };
+    },
+  ) => Effect.Effect<
     {
       readonly receipt: CommandReceiptStore.CommandReceiptV2;
       readonly storedEvents: ReadonlyArray<OrchestrationV2StoredEvent>;
@@ -219,11 +237,13 @@ const layerBase: Layer.Layer<
   | ProjectStore.ProjectStoreV2
   | SqlClient.SqlClient
   | NativeSessionBindings.NativeSessionBindings
+  | ThreadLifecycleGuard.ThreadLifecycleGuard
   | TurnItemPositionStore.TurnItemPositionStoreV2
 > = Layer.effect(
   EventSinkV2,
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
+    const lifecycle = yield* ThreadLifecycleGuard.ThreadLifecycleGuard;
     const nativeBindings = yield* NativeSessionBindings.NativeSessionBindings;
     const commandReceipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
     const effectOutbox = yield* EffectOutbox.EffectOutboxV2;
@@ -340,7 +360,130 @@ const layerBase: Layer.Layer<
         });
       });
 
-    const normalizeEvents = (events: ReadonlyArray<OrchestrationV2DomainEvent>) => {
+    const normalizeEvents = Effect.fn("EventSink.normalizeEvents")(function* (
+      offered: ReadonlyArray<OrchestrationV2DomainEvent>,
+      options: LifecycleWriteOptions = {},
+    ) {
+      const prepared = yield* Effect.forEach(offered, (event, index) =>
+        Effect.gen(function* () {
+          if (
+            event.type === "thread.metadata-updated" ||
+            event.type === "thread.model-selection-updated"
+          ) {
+            const shell = yield* projectionStore.getThreadShell(event.threadId);
+            const prior = offered
+              .slice(0, index)
+              .findLast(
+                (candidate) =>
+                  candidate.threadId === event.threadId &&
+                  (candidate.type === "thread.created" ||
+                    candidate.type === "thread.archived" ||
+                    candidate.type === "thread.unarchived" ||
+                    candidate.type === "thread.deleted"),
+              );
+            const current =
+              prior?.type === "thread.created" ||
+              prior?.type === "thread.archived" ||
+              prior?.type === "thread.unarchived" ||
+              prior?.type === "thread.deleted"
+                ? prior.payload
+                : shell;
+            if (current === null) return undefined;
+            return {
+              ...event,
+              payload: {
+                ...event.payload,
+                lifecycleRevision: current.lifecycleRevision,
+                archivedAt: current.archivedAt,
+                deletedAt: current.deletedAt,
+              },
+            };
+          }
+          if (options.lifecyclePurpose !== "terminal_cleanup") return event;
+          switch (event.type) {
+            case "provider-session.updated": {
+              const { providerSessions } = yield* projectionStore.getThreadRecords(event.threadId, [
+                "providerSessions",
+              ]);
+              const current = providerSessions.find((session) => session.id === event.payload.id);
+              if (current === undefined) return undefined;
+              return {
+                ...event,
+                payload: {
+                  ...current,
+                  status: event.payload.status,
+                  lastError: event.payload.lastError,
+                  updatedAt: event.payload.updatedAt,
+                },
+              };
+            }
+            case "runtime-request.updated": {
+              const current = yield* projectionStore.getRuntimeRequest(
+                event.threadId,
+                event.payload.id,
+              );
+              if (
+                current?.status !== "pending" ||
+                current.providerTurnId !== event.payload.providerTurnId
+              )
+                return undefined;
+              return {
+                ...event,
+                payload: {
+                  ...current,
+                  status: event.payload.status,
+                  responseCapability: event.payload.responseCapability,
+                  resolvedAt: event.payload.resolvedAt,
+                },
+              };
+            }
+            case "node.updated": {
+              const { nodes } = yield* projectionStore.getThreadRecords(event.threadId, ["nodes"]);
+              const current = nodes.find((node) => node.id === event.payload.id);
+              if (
+                current === undefined ||
+                current.runId !== event.payload.runId ||
+                !["pending", "running", "waiting"].includes(current.status)
+              )
+                return undefined;
+              return {
+                ...event,
+                payload: {
+                  ...current,
+                  status: event.payload.status,
+                  completedAt: event.payload.completedAt,
+                },
+              };
+            }
+            case "turn-item.updated": {
+              const { turnItems } = yield* projectionStore.getThreadRecords(event.threadId, [
+                "turnItems",
+              ]);
+              const current = turnItems.find((item) => item.id === event.payload.id);
+              if (
+                current === undefined ||
+                current.runId !== event.payload.runId ||
+                !["pending", "running", "waiting"].includes(current.status)
+              )
+                return undefined;
+              return {
+                ...event,
+                payload: {
+                  ...current,
+                  status: event.payload.status,
+                  completedAt: event.payload.completedAt,
+                  updatedAt: event.payload.updatedAt,
+                },
+              };
+            }
+            default:
+              return undefined;
+          }
+        }),
+      );
+      const events: ReadonlyArray<OrchestrationV2DomainEvent> = prepared.filter(
+        (event) => event !== undefined,
+      );
       const runOrdinals = new Map(
         events.flatMap((event) =>
           event.type === "run.created" || event.type === "run.updated"
@@ -348,7 +491,7 @@ const layerBase: Layer.Layer<
             : [],
         ),
       );
-      return Effect.forEach(
+      return yield* Effect.forEach(
         events,
         (event): Effect.Effect<OrchestrationV2DomainEvent, unknown> =>
           event.type === "turn-item.updated"
@@ -361,7 +504,7 @@ const layerBase: Layer.Layer<
             : Effect.succeed(event),
         { concurrency: 1 },
       );
-    };
+    });
 
     const applyStoredEvents =
       /* This helper runs for individual orchestration events; the enclosing operation owns the span. */
@@ -396,6 +539,115 @@ const layerBase: Layer.Layer<
         return yield* runOutcomes.prepare(storedEvents);
       });
 
+    const acceptLifecycle = Effect.fn("EventSink.acceptLifecycle")(function* (
+      input: LifecycleWriteOptions & {
+        readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
+        readonly commandType?: string;
+        readonly effects?: ReadonlyArray<EffectOutbox.PendingOrchestrationEffectV2>;
+      },
+    ) {
+      for (const event of input.events) {
+        if (event.type !== "thread.created") continue;
+        const deleted =
+          yield* sql`SELECT 1 FROM orchestration_v2_thread_deletions WHERE thread_id = ${event.threadId}`;
+        if (deleted.length > 0) return false;
+      }
+      if (input.lifecycleGuard === undefined) return true;
+      if (
+        [
+          "thread.archive",
+          "thread.unarchive",
+          "thread.delete",
+          "provider-runtime.reconcile",
+        ].includes(input.commandType ?? "")
+      ) {
+        for (const guard of input.lifecycleGuard.prerequisites ?? []) {
+          if ((yield* lifecycle.check({ guard, purpose: "activity" })) === "stale") return false;
+        }
+        const shell = yield* projectionStore.getThreadShell(input.lifecycleGuard.threadId);
+        const source = yield* lifecycle.resolveLifecycleSource(input.lifecycleGuard.threadId);
+        const tombstones =
+          yield* sql`SELECT 1 FROM orchestration_v2_thread_deletions WHERE thread_id=${input.lifecycleGuard.threadId}`;
+        return (
+          shell !== null &&
+          (shell.lifecycleRevision ?? 0) === input.lifecycleGuard.lifecycleRevision &&
+          (input.lifecycleGuard.sourceToken === undefined
+            ? source.isLegacy
+            : source.sourceToken === input.lifecycleGuard.sourceToken) &&
+          (input.commandType === "thread.delete" ||
+            (shell.deletedAt === null && tombstones.length === 0))
+        );
+      }
+      if (
+        (yield* lifecycle.check({
+          guard: input.lifecycleGuard,
+          purpose: input.lifecyclePurpose ?? "activity",
+        })) === "stale"
+      )
+        return false;
+      if (input.lifecyclePurpose === "terminal_cleanup") {
+        if ((input.effects?.length ?? 0) > 0) return false;
+        // Cleanup can acknowledge termination, never replay a snapshot of live work or a thread row.
+        return input.events.every(
+          (event) =>
+            (event.type === "provider-session.updated" &&
+              (event.payload.status === "stopped" || event.payload.status === "error")) ||
+            (event.type === "runtime-request.updated" &&
+              (event.payload.status === "cancelled" || event.payload.status === "expired")) ||
+            (event.type === "node.updated" &&
+              ["failed", "cancelled"].includes(event.payload.status)) ||
+            (event.type === "turn-item.updated" &&
+              ["failed", "cancelled"].includes(event.payload.status)),
+        );
+      }
+      for (const event of input.events) {
+        if (event.threadId === input.lifecycleGuard.threadId) continue;
+        const target = yield* projectionStore.getThreadShell(event.threadId);
+        if (target === null) {
+          const created = input.events.find(
+            (offered) => offered.type === "thread.created" && offered.threadId === event.threadId,
+          );
+          if (
+            created?.type !== "thread.created" ||
+            created.payload.lineage.relationshipToParent !== "subagent" ||
+            created.payload.lineage.parentThreadId !== input.lifecycleGuard.threadId
+          )
+            return false;
+          const deleted =
+            yield* sql`SELECT 1 FROM orchestration_v2_thread_deletions WHERE thread_id = ${event.threadId}`;
+          if (deleted.length > 0) return false;
+        } else {
+          // Commands name their targets explicitly (including independent fork/merge
+          // roots and legacy native Stop targets). Provider callbacks need ownership.
+          const path = yield* projectionStore.getOwnershipPath(event.threadId);
+          if (input.commandType === undefined) {
+            const sourcePath = yield* projectionStore.getOwnershipPath(
+              input.lifecycleGuard.threadId,
+            );
+            if (
+              !path.some((member) => member.id === input.lifecycleGuard?.threadId) &&
+              !sourcePath.some((member) => member.id === event.threadId)
+            )
+              return false;
+          }
+          // The immutable owner guard above is the event's source. These are
+          // additional target-state checks, never a replacement source token.
+          if (path.some((member) => member.archivedAt !== null || member.deletedAt !== null))
+            return false;
+          const deleted =
+            yield* sql`SELECT 1 FROM orchestration_v2_thread_deletions WHERE thread_id IN ${sql.in(path.map((member) => member.id))}`;
+          if (deleted.length > 0) return false;
+          if (
+            (event.type === "thread.metadata-updated" ||
+              event.type === "thread.model-selection-updated") &&
+            (event.payload.lifecycleRevision ?? 0) !== (target.lifecycleRevision ?? 0)
+          )
+            return false;
+        }
+      }
+      return true;
+    });
+
     const writeEffect = Effect.fn("orchestrationV2.EventSink.write")(function* (
       input: Parameters<EventSinkV2Shape["writeWithEffects"]>[0],
     ) {
@@ -407,6 +659,7 @@ const layerBase: Layer.Layer<
 
       const { committed } = yield* commitThenPublish(
         Effect.gen(function* () {
+          if (!(yield* acceptLifecycle(input))) return { committed: [], outcomes: [] };
           // Check ownership in the same transaction that claims the native session.
           const imported = input.unlessNativeThreadOwned;
           if (imported?.nativeThreadRef != null) {
@@ -453,6 +706,7 @@ const layerBase: Layer.Layer<
             input.guardPendingUserInputCancellations === true
               ? yield* guardUserInputCancellations(events)
               : events,
+            input,
           );
           const committed = yield* eventStore.append({
             ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
@@ -484,6 +738,11 @@ const layerBase: Layer.Layer<
 
         return yield* commitThenPublish(
           Effect.gen(function* () {
+            if (!(yield* acceptLifecycle(input)))
+              return {
+                committed: false as const,
+                storedEvents: [] as ReadonlyArray<OrchestrationV2StoredEvent>,
+              };
             const rows = yield* sql<{
               readonly status: string;
               readonly active_attempt_id: string | null;
@@ -512,6 +771,7 @@ const layerBase: Layer.Layer<
               input.guardPendingUserInputCancellations === true
                 ? yield* guardUserInputCancellations(input.events)
                 : input.events,
+              input,
             );
             const storedEvents = yield* eventStore.append({
               ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
@@ -547,6 +807,11 @@ const layerBase: Layer.Layer<
 
       return yield* commitThenPublish(
         Effect.gen(function* () {
+          if (!(yield* acceptLifecycle(input)))
+            return {
+              committed: false as const,
+              storedEvents: [] as ReadonlyArray<OrchestrationV2StoredEvent>,
+            };
           const rows = yield* sql<{
             readonly active_attempt_id: string | null;
             readonly last_run_ordinal: number | null;
@@ -577,6 +842,7 @@ const layerBase: Layer.Layer<
             input.guardPendingUserInputCancellations === true
               ? yield* guardUserInputCancellations(input.events)
               : input.events,
+            input,
           );
           const storedEvents = yield* eventStore.append({
             ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
@@ -603,6 +869,11 @@ const layerBase: Layer.Layer<
 
       return yield* commitThenPublish(
         Effect.gen(function* () {
+          if (!(yield* acceptLifecycle(input)))
+            return {
+              committed: false as const,
+              storedEvents: [] as ReadonlyArray<OrchestrationV2StoredEvent>,
+            };
           const rows = yield* sql<{ readonly payload_json: string }>`
             SELECT payload_json
             FROM orchestration_v2_projection_provider_threads
@@ -616,7 +887,7 @@ const layerBase: Layer.Layer<
             };
           }
 
-          const normalized = yield* normalizeEvents(input.events);
+          const normalized = yield* normalizeEvents(input.events, input);
           const storedEvents = yield* eventStore.append({ events: normalized });
           const outcomes = yield* applyStoredEvents(storedEvents);
           return { committed: true as const, storedEvents, outcomes };
@@ -649,6 +920,11 @@ const layerBase: Layer.Layer<
     ) {
       const result = yield* commitThenPublish(
         Effect.gen(function* () {
+          if (!(yield* acceptLifecycle(input)))
+            return yield* new EventSinkWriteError({
+              commandId: input.commandId,
+              eventCount: input.events.length,
+            });
           const reserved = yield* commandReceipts.insertIfAbsent({
             commandId: input.commandId,
             threadId: input.threadId,
@@ -663,7 +939,7 @@ const layerBase: Layer.Layer<
             return { ...existing, committed: false as const, cancelledEffectIds: [] };
           }
 
-          const normalized = yield* normalizeEvents(input.events);
+          const normalized = yield* normalizeEvents(input.events, input);
           const storedEvents = yield* eventStore.append({
             commandId: input.commandId,
             events: normalized,
@@ -1006,7 +1282,9 @@ const layerBase: Layer.Layer<
  * Keeping the outbox instance shared with the worker is important because enqueue notifications
  * are in-memory wakeups backed by the durable SQL queue.
  */
-export const layerFromStores = layerBase.pipe(Layer.provide(NativeSessionBindings.layer));
+export const layerFromStores = layerBase.pipe(
+  Layer.provide(Layer.mergeAll(NativeSessionBindings.layer, ThreadLifecycleGuard.layer)),
+);
 
 export const layer: Layer.Layer<
   EventSinkV2,
@@ -1016,6 +1294,7 @@ export const layer: Layer.Layer<
   Layer.provide(
     Layer.mergeAll(
       NativeSessionBindings.layer,
+      ThreadLifecycleGuard.layer,
       CommandReceiptStore.layer,
       EffectOutbox.layer,
       ProjectStore.layer,

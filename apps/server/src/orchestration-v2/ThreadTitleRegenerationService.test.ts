@@ -8,6 +8,8 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 
@@ -82,6 +84,7 @@ function makeHarness(
       ),
   });
   const layerTitleRegeneration = ThreadTitleRegeneration.layer.pipe(
+    Layer.provide(layerDatabase),
     Layer.provide(
       Layer.mergeAll(
         layerThreadManagement,
@@ -190,7 +193,14 @@ describe("ThreadTitleRegenerationService", () => {
         assert.equal(armed.thread.titleRegeneration?.requestId, firstRequest);
         assert.deepEqual(
           (yield* outbox.listByCommandId(firstRequest)).map((effect) => effect.request),
-          [{ type: "thread-title.generate", kind: { type: "regenerate" } }],
+          [
+            {
+              type: "thread-title.generate",
+              kind: { type: "regenerate" },
+              lifecycleRevision: 0,
+              lifecycleSourceToken: (yield* threads.resolveLifecycleSource(threadId)).sourceToken,
+            },
+          ],
         );
 
         yield* threads.dispatch({
@@ -307,3 +317,52 @@ describe("ThreadTitleRegenerationService", () => {
     }),
   );
 });
+
+it.effect(
+  "lifecycle accepts a fresh title after restore while rejecting an old generated title",
+  () =>
+    Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      let calls = 0;
+      const harness = makeHarness({
+        generateTitle: () =>
+          ++calls === 1
+            ? Deferred.succeed(entered, undefined).pipe(
+                Effect.andThen(Deferred.await(release)),
+                Effect.as({ title: "Old title" }),
+              )
+            : Effect.succeed({ title: "Fresh title" }),
+      });
+      yield* Effect.gen(function* () {
+        const threads = yield* ThreadManagement.ThreadManagementService;
+        const titles = yield* ThreadTitleRegeneration.ThreadTitleRegenerationService;
+        const threadId = yield* createThread({
+          command: "title:lifecycle:create",
+          thread: "title:lifecycle",
+        });
+        yield* dispatchUserMessage({ command: "title:lifecycle:message", threadId, text: "Topic" });
+        const requestId = yield* armRegeneration({ command: "title:lifecycle:old", threadId });
+        const old = yield* titles
+          .execute({ threadId, requestId, kind: { type: "regenerate" } })
+          .pipe(Effect.exit, Effect.forkScoped);
+        yield* Deferred.await(entered);
+        yield* threads.dispatch({
+          type: "thread.archive",
+          commandId: CommandId.make("title:lifecycle:archive"),
+          threadId,
+        });
+        yield* threads.dispatch({
+          type: "thread.unarchive",
+          commandId: CommandId.make("title:lifecycle:restore"),
+          threadId,
+        });
+        yield* Deferred.succeed(release, undefined);
+        yield* Fiber.join(old);
+        assert.notEqual((yield* threads.getThreadProjection(threadId)).thread.title, "Old title");
+        const freshId = yield* armRegeneration({ command: "title:lifecycle:fresh", threadId });
+        yield* titles.execute({ threadId, requestId: freshId, kind: { type: "regenerate" } });
+        assert.equal((yield* threads.getThreadProjection(threadId)).thread.title, "Fresh title");
+      }).pipe(Effect.provide(harness.layer));
+    }),
+);

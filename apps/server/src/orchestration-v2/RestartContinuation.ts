@@ -15,6 +15,7 @@ import type { ProjectionRuntimeRecoveryState } from "./ProjectionStore.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { isNativeMaintenanceCommand } from "./CommandPolicy.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
+import * as ThreadLifecycleGuard from "./ThreadLifecycleGuard.ts";
 import {
   awaitingProviderThreadId,
   cancelledRosterTaskWork,
@@ -137,6 +138,7 @@ export function restartContinuationRun(
     undefined,
   );
   if (!run) return;
+  if ((run.lifecycleRevision ?? 0) !== (projection.thread.lifecycleRevision ?? 0)) return;
   const preparedContinuation =
     run.status === "starting" && run.restartContinuationOfRunId !== undefined;
   const settled = run.status === "completed" || run.status === "waiting";
@@ -207,6 +209,7 @@ export const continueRestartedRun = Effect.fn("RestartContinuation.continueResta
     const source = projection.runs.find((run) => run.id === input.sourceRunId);
     if (
       !source ||
+      (source.lifecycleRevision ?? 0) !== (projection.thread.lifecycleRevision ?? 0) ||
       !isRestartContinuationSource(source, projection.providerTurns) ||
       restartContinuationBlocked(
         projection,
@@ -303,6 +306,12 @@ export const continueRestartedRun = Effect.fn("RestartContinuation.continueResta
         restartContinuationOfRunId: input.sourceRunId,
       })
       .pipe(
+        Effect.provideService(ThreadLifecycleGuard.DispatchLifecycleGuard, {
+          threadId: input.threadId,
+          lifecycleRevision: source.lifecycleRevision ?? 0,
+          sourceToken: source.lifecycleSourceToken,
+          runId: source.id,
+        }),
         // The project turned this instance off since the restart. No turn
         // resumes, and the success path below still runs so a delegated
         // child waiting on this run is recovered immediately instead of

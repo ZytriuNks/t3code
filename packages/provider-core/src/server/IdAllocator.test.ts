@@ -1,7 +1,46 @@
 import { expect, it } from "@effect/vitest";
-import { ProviderDriverKind, ProviderInstanceId } from "@t3tools/contracts";
+import { ProviderDriverKind, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 
 import { derive, nativeStorageScope } from "./IdAllocator.ts";
+
+it("lifecycle session incarnations preserve legacy bytes and reuse only the same thread revision", () => {
+  const providerInstanceId = ProviderInstanceId.make("codex");
+  const input = { providerInstanceId };
+  const incarnation = { threadId: ThreadId.make("A"), lifecycleRevision: 2 };
+  const session = derive.providerSession({ ...input, incarnation });
+  expect(derive.providerSession(input)).toBe("provider-session:provider-instance:codex:shared");
+  expect(session).not.toBe(derive.providerSession(input));
+  expect(session).toBe(derive.providerSession({ ...input, incarnation: { ...incarnation } }));
+  expect(session).not.toBe(
+    derive.providerSession({ ...input, incarnation: { ...incarnation, lifecycleRevision: 4 } }),
+  );
+  expect(session).not.toBe(
+    derive.providerSession({
+      ...input,
+      incarnation: { ...incarnation, threadId: ThreadId.make("B") },
+    }),
+  );
+});
+
+it("lifecycle source tokens isolate owner generations and reuse the same incarnation", () => {
+  const input = { providerInstanceId: ProviderInstanceId.make("codex") };
+  const incarnation = { threadId: ThreadId.make("C"), sourceToken: "owner-generation-2" };
+  const session = derive.providerSession({ ...input, incarnation });
+  expect(session).toBe(derive.providerSession({ ...input, incarnation: { ...incarnation } }));
+  expect(session).not.toBe(derive.providerSession(input));
+  expect(session).not.toBe(
+    derive.providerSession({
+      ...input,
+      incarnation: { ...incarnation, sourceToken: "owner-generation-4" },
+    }),
+  );
+  expect(session).not.toBe(
+    derive.providerSession({
+      ...input,
+      incarnation: { ...incarnation, threadId: ThreadId.make("B") },
+    }),
+  );
+});
 
 it("storage scopes isolate new ids while omitted scopes preserve legacy bytes", () => {
   const input = {

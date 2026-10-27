@@ -15,9 +15,10 @@ import * as Schedule from "effect/Schedule";
 
 import * as ServerSettings from "../serverSettings.ts";
 import * as TextGeneration from "../textGeneration/TextGeneration.ts";
-import type { OrchestratorV2Error } from "./Orchestrator.ts";
+import { OrchestratorProjectionError, type OrchestratorV2Error } from "./Orchestrator.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
+import * as ThreadLifecycleGuard from "./ThreadLifecycleGuard.ts";
 
 import { formatThreadTitleContext } from "@t3tools/provider-core/server/threadTitleContext";
 export { formatThreadTitleContext } from "@t3tools/provider-core/server/threadTitleContext";
@@ -28,6 +29,7 @@ export class ThreadTitleRegenerationService extends Context.Service<
     readonly execute: (input: {
       readonly threadId: ThreadId;
       readonly requestId: CommandId;
+      readonly lifecycleGuard?: ThreadLifecycleGuard.LifecycleWriteGuard;
       readonly kind:
         | { readonly type: "initial"; readonly messageId: MessageId }
         | { readonly type: "regenerate" };
@@ -46,6 +48,7 @@ const make = Effect.gen(function* () {
   const projects = yield* ProjectStore.ProjectStoreV2;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const textGeneration = yield* TextGeneration.TextGeneration;
+  const lifecycle = yield* ThreadLifecycleGuard.ThreadLifecycleGuard;
 
   const complete = (input: {
     readonly threadId: ThreadId;
@@ -65,6 +68,27 @@ const make = Effect.gen(function* () {
   const execute: ThreadTitleRegenerationService["Service"]["execute"] = Effect.fn(
     "ThreadTitleRegenerationService.execute",
   )(function* (input) {
+    const source = yield* threads.getThreadShell(input.threadId);
+    if (source === null) return;
+    const lifecycleGuard =
+      input.lifecycleGuard ??
+      (yield* lifecycle
+        .resolveLifecycleSource(input.threadId)
+        .pipe(
+          Effect.mapError(
+            (cause) => new OrchestratorProjectionError({ threadId: input.threadId, cause }),
+          ),
+        ));
+    if (
+      (yield* lifecycle
+        .check({ guard: lifecycleGuard, purpose: "activity" })
+        .pipe(
+          Effect.mapError(
+            (cause) => new OrchestratorProjectionError({ threadId: input.threadId, cause }),
+          ),
+        )) === "stale"
+    )
+      return;
     const outcome:
       | { readonly type: "stale" }
       | { readonly type: "complete"; readonly title?: string } = yield* Effect.gen(function* () {
@@ -75,7 +99,10 @@ const make = Effect.gen(function* () {
           ? { messageIds: [input.kind.messageId] }
           : { messageRoles: ["user", "assistant"] },
       );
-      if (projection.thread.titleRegeneration?.requestId !== input.requestId) {
+      if (
+        (projection.thread.lifecycleRevision ?? 0) !== lifecycleGuard.lifecycleRevision ||
+        projection.thread.titleRegeneration?.requestId !== input.requestId
+      ) {
         return { type: "stale" as const };
       }
 
@@ -144,10 +171,12 @@ const make = Effect.gen(function* () {
     yield* complete({
       ...input,
       ...(outcome.title === undefined ? {} : { title: outcome.title }),
-    });
+    }).pipe(Effect.provideService(ThreadLifecycleGuard.DispatchLifecycleGuard, lifecycleGuard));
   });
 
   return ThreadTitleRegenerationService.of({ execute });
 });
 
-export const layer = Layer.effect(ThreadTitleRegenerationService, make);
+export const layer = Layer.effect(ThreadTitleRegenerationService, make).pipe(
+  Layer.provide(ThreadLifecycleGuard.layer),
+);

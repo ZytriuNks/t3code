@@ -1947,6 +1947,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           new Map<string, ProviderAdapter.ProviderAdapterV2TurnInput>(),
         );
         const turnWaiters = yield* Ref.make(new Map<string, Deferred.Deferred<void, never>>());
+        const retirementWaiters = new Map<string, Deferred.Deferred<void>>();
         const subagentThreads = yield* Ref.make(new Map<string, CodexSubagentThreadContext>());
         const subagentSelections = new Map<string, Omit<ModelSelection, "instanceId">>();
         const pendingSubagentTurns = yield* Ref.make(
@@ -4811,6 +4812,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               });
               yield* releaseSettledTurnIfIdle(context.nativeTurnId);
             }
+            const retired = retirementWaiters.get(payload.threadId);
+            if (retired !== undefined) yield* Deferred.succeed(retired, undefined);
           }).pipe(Effect.orDie, turnTerminalizationPermit.withPermits(1)),
         );
 
@@ -6985,11 +6988,31 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           ),
           // Dropping this connection's subscription lets the shared app-server
           // shut the native thread (and its MCP servers) down once it is idle.
+          supportsConfirmedThreadRetirement: true,
           unloadThread: Effect.fn("CodexAdapterV2.unloadThread")(
             function* (unloadInput) {
               const nativeThreadId = yield* getNativeThreadId(unloadInput.providerThread);
               sessionApprovals.delete(nativeThreadId);
-              yield* client.request("thread/unsubscribe", { threadId: nativeThreadId });
+              if (unloadInput.awaitRetirement !== true) {
+                yield* client.request("thread/unsubscribe", { threadId: nativeThreadId });
+                return;
+              }
+              const completion = yield* Deferred.make<void>();
+              retirementWaiters.set(nativeThreadId, completion);
+              yield* Effect.gen(function* () {
+                const response = yield* client.request("thread/unsubscribe", {
+                  threadId: nativeThreadId,
+                });
+                if (response.status === "notLoaded") return;
+                yield* Deferred.await(completion);
+              }).pipe(
+                Effect.ensuring(
+                  Effect.sync(() => {
+                    if (retirementWaiters.get(nativeThreadId) === completion)
+                      retirementWaiters.delete(nativeThreadId);
+                  }),
+                ),
+              );
             },
             (effect, unloadInput) =>
               effect.pipe(

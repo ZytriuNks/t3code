@@ -38,6 +38,8 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
     providerSessionId: ProviderSessionId,
     detail: Schema.optional(Schema.String),
     revokeMcpCredential: Schema.optional(Schema.Boolean),
+    retirementRevision: Schema.optional(Schema.Number),
+    retirementSourceToken: Schema.optional(Schema.String),
   }),
   Schema.Struct({
     type: Schema.Literal("provider-turn.start"),
@@ -108,6 +110,8 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("thread-title.generate"),
+    lifecycleRevision: Schema.optional(Schema.Number),
+    lifecycleSourceToken: Schema.optional(Schema.String),
     kind: Schema.Union([
       Schema.Struct({ type: Schema.Literal("initial"), messageId: MessageId }),
       Schema.Struct({ type: Schema.Literal("regenerate") }),
@@ -199,6 +203,16 @@ export class EffectOutboxError extends Schema.TaggedError<EffectOutboxError>()(
 const isEffectOutboxError = Schema.is(EffectOutboxError);
 
 export interface EffectOutboxV2Shape {
+  readonly attachmentRetirements: (threadId: ThreadId) => Effect.Effect<
+    ReadonlyArray<{
+      readonly effectId: string;
+      readonly status: string;
+      readonly providerSessionId: string;
+      readonly retirementRevision: number;
+      readonly retirementSourceToken: string | null;
+    }>,
+    EffectOutboxError
+  >;
   readonly awaitAvailable: Effect.Effect<void>;
   readonly notifyAvailable: (count?: number) => Effect.Effect<void>;
   /** Persist rows only. Notify workers after the surrounding transaction commits. */
@@ -374,6 +388,22 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
       );
 
     const service: EffectOutboxV2Shape = {
+      attachmentRetirements: (threadId) =>
+        sql<{
+          readonly effectId: string;
+          readonly status: string;
+          readonly providerSessionId: string;
+          readonly retirementRevision: number;
+          readonly retirementSourceToken: string | null;
+        }>`
+        SELECT effect_id AS effectId, status,
+          json_extract(payload_json, '$.providerSessionId') AS providerSessionId,
+          json_extract(payload_json, '$.retirementRevision') AS retirementRevision,
+          json_extract(payload_json, '$.retirementSourceToken') AS retirementSourceToken
+        FROM orchestration_v2_effect_outbox
+        WHERE thread_id = ${threadId} AND effect_type = 'provider-session.detach'
+          AND json_type(payload_json, '$.retirementRevision') IS NOT NULL
+      `.pipe(Effect.mapError((cause) => new EffectOutboxError({ operation: "retirement", cause }))),
       enqueue: Effect.fn("EffectOutbox.enqueue")(
         function* (effects) {
           const now = yield* DateTime.now;
@@ -697,6 +727,8 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
             SELECT rowid
             FROM orchestration_v2_effect_outbox
             WHERE status IN ('succeeded', 'cancelled')
+              AND NOT (effect_type = 'provider-session.detach'
+                AND json_type(payload_json, '$.retirementRevision') IS NOT NULL)
               AND completed_at < ${cutoff}
             LIMIT ${PRUNE_BATCH_SIZE}
           )

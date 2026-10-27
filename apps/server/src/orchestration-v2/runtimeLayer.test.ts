@@ -6106,8 +6106,20 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
       }
       const before = yield* orchestrator.getThreadProjection(threadId);
       if (resume !== null) {
-        yield* orchestrator.dispatch(resume);
-        yield* orchestrator.dispatch(resume);
+        if (scenario === "archive") {
+          for (let repeat = 0; repeat < 2; repeat++) {
+            const rejected = yield* orchestrator.dispatch(resume).pipe(Effect.flip);
+            assert.equal(
+              rejected._tag,
+              repeat === 0
+                ? "OrchestratorCommandRejectedError"
+                : "OrchestratorCommandPreviouslyRejectedError",
+            );
+          }
+        } else {
+          yield* orchestrator.dispatch(resume);
+          yield* orchestrator.dispatch(resume);
+        }
       }
       const after = yield* orchestrator.getThreadProjection(threadId);
       assert.lengthOf(
@@ -6315,4 +6327,239 @@ it.layer(layerQueueResumeDisabledInstanceTest)(
         }),
     );
   },
+);
+
+it.effect.each(["old", "missing", "fresh"] as const)(
+  "lifecycle queue recovery checks persisted %s owner provenance",
+  (origin) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const r = ThreadId.make(`lifecycle:queue:R:${origin}`),
+        c = ThreadId.make(`lifecycle:queue:C:${origin}`);
+      const projectId = ProjectId.make(`lifecycle:queue:project:${origin}`);
+      yield* seedProject({
+        projectId,
+        title: "Queue source",
+        workspaceRoot: "/queue-source",
+        defaultModelSelection: null,
+        createdAt: "2026-09-07T00:00:00.000Z",
+      });
+      for (const threadId of [r, c])
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make(`${threadId}:create`),
+          threadId,
+          projectId,
+          title: "Queue source",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdBy: "user",
+          creationSource: "web",
+        });
+      const now = yield* DateTime.now;
+      const child = yield* store.getThread(c);
+      yield* store.apply({
+        id: EventId.make(`${c}:ownership`),
+        type: "thread.metadata-updated",
+        threadId: c,
+        occurredAt: now,
+        payload: {
+          ...child,
+          lineage: { parentThreadId: r, relationshipToParent: "subagent", rootThreadId: r },
+        },
+      });
+      for (const [index, mode] of ["defer_start", "queue_after_active"].entries())
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make(`${c}:message:${index}`),
+          threadId: c,
+          messageId: MessageId.make(`${c}:message:${index}`),
+          text: "Queue source",
+          attachments: [],
+          dispatchMode: { type: mode as "defer_start" | "queue_after_active" },
+          createdBy: "agent",
+          creationSource: "server",
+        });
+      const before = yield* store.getThreadRecords(c, ["runs"]);
+      const active = before.runs[0]!,
+        queued = before.runs[1]!;
+      const source = yield* orchestrator.resolveLifecycleSource(c);
+      assert.equal(queued.lifecycleSourceToken, source.sourceToken);
+      yield* orchestrator.dispatch({
+        type: "thread.archive",
+        commandId: CommandId.make(`${r}:archive`),
+        threadId: r,
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.unarchive",
+        commandId: CommandId.make(`${r}:restore`),
+        threadId: r,
+      });
+      const fresh = yield* orchestrator.resolveLifecycleSource(c);
+      assert.equal(fresh.lifecycleRevision, 0);
+      assert.notEqual(fresh.sourceToken, source.sourceToken);
+      yield* store.apply({
+        id: EventId.make(`${c}:finish`),
+        type: "run.updated",
+        threadId: c,
+        occurredAt: now,
+        payload: { ...active, status: "cancelled", completedAt: now },
+      });
+      yield* store.apply({
+        id: EventId.make(`${c}:queue-source`),
+        type: "run.updated",
+        threadId: c,
+        occurredAt: now,
+        payload: {
+          ...queued,
+          queueHeld: true,
+          lifecycleSourceToken:
+            origin === "old"
+              ? source.sourceToken
+              : origin === "fresh"
+                ? fresh.sourceToken
+                : undefined,
+        },
+      });
+      const resumed = yield* orchestrator
+        .dispatch({ type: "queue.resume", commandId: CommandId.make(`${c}:resume`), threadId: c })
+        .pipe(Effect.exit);
+      assert.equal(resumed._tag, origin === "fresh" ? "Success" : "Failure");
+      const after = (yield* store.getThreadRecords(c, ["runs"])).runs.find(
+        (run) => run.id === queued.id,
+      )!;
+      assert.equal(after.status, origin === "fresh" ? "starting" : "queued");
+      if (origin !== "fresh") assert.isTrue(after.queueHeld);
+    }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("lifecycle rejects persisted usage and restart wakes after the owner restores", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const store = yield* ProjectionStore.ProjectionStoreV2;
+    const r = ThreadId.make("lifecycle:wake:R"),
+      c = ThreadId.make("lifecycle:wake:C");
+    const projectId = ProjectId.make("lifecycle:wake:project");
+    const now = yield* DateTime.now;
+    yield* seedProject({
+      projectId,
+      title: "Wake source",
+      workspaceRoot: "/wake-source",
+      defaultModelSelection: null,
+      createdAt: "2026-09-07T00:00:00.000Z",
+    });
+    for (const threadId of [r, c])
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make(`${threadId}:create`),
+        threadId,
+        projectId,
+        title: "Wake source",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdBy: "user",
+        creationSource: "web",
+      });
+    const child = yield* store.getThread(c);
+    yield* store.apply({
+      id: EventId.make(`${c}:owner`),
+      type: "thread.metadata-updated",
+      threadId: c,
+      occurredAt: now,
+      payload: {
+        ...child,
+        lineage: { parentThreadId: r, relationshipToParent: "subagent", rootThreadId: r },
+      },
+    });
+    yield* orchestrator.dispatch({
+      type: "message.dispatch",
+      commandId: CommandId.make(`${c}:message`),
+      threadId: c,
+      messageId: MessageId.make(`${c}:message`),
+      text: "Wake source",
+      attachments: [],
+      dispatchMode: { type: "defer_start" },
+      createdBy: "agent",
+      creationSource: "server",
+    });
+    const run = (yield* store.getThreadRecords(c, ["runs"])).runs[0]!;
+    yield* store.apply({
+      id: EventId.make(`${c}:failed`),
+      type: "run.updated",
+      threadId: c,
+      occurredAt: now,
+      payload: { ...run, status: "failed", completedAt: now },
+    });
+    yield* store.apply({
+      id: EventId.make(`${c}:error`),
+      type: "turn-item.updated",
+      threadId: c,
+      occurredAt: now,
+      payload: {
+        id: TurnItemId.make(`${c}:error`),
+        type: "error",
+        threadId: c,
+        runId: run.id,
+        nodeId: run.rootNodeId,
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: 2,
+        status: "failed",
+        title: "Usage limit reached",
+        startedAt: now,
+        completedAt: now,
+        updatedAt: now,
+        failure: {
+          class: "usage_limit",
+          message: "Plan limit reached.",
+          code: "usageLimitExceeded",
+          retryable: null,
+          resetAt: DateTime.formatIso(DateTime.add(now, { minutes: 1 })),
+        },
+      },
+    });
+    yield* orchestrator.dispatch({
+      type: "thread.archive",
+      commandId: CommandId.make(`${r}:archive`),
+      threadId: r,
+    });
+    yield* orchestrator.dispatch({
+      type: "thread.unarchive",
+      commandId: CommandId.make(`${r}:restore`),
+      threadId: r,
+    });
+    assert.equal((yield* store.getThreadShell(c))?.lifecycleRevision, 0);
+    const before = yield* store.getThreadRecords(c, ["runs", "messages"]);
+    for (const kind of ["usage", "restart"] as const) {
+      const result = yield* orchestrator
+        .dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make(`${c}:${kind}`),
+          threadId: c,
+          messageId: MessageId.make(`${c}:${kind}`),
+          ...(kind === "usage"
+            ? { usageLimitContinuationOfRunId: run.id }
+            : { restartContinuationOfRunId: run.id }),
+          text: "Continue",
+          attachments: [],
+          dispatchMode: { type: "start_immediately" },
+          createdBy: "user",
+          creationSource: "server",
+        })
+        .pipe(Effect.exit);
+      assert.equal(result._tag, "Failure");
+    }
+    const after = yield* store.getThreadRecords(c, ["runs", "messages"]);
+    assert.deepEqual(after.runs, before.runs);
+    assert.deepEqual(after.messages, before.messages);
+  }).pipe(Effect.provide(layerTest)),
 );

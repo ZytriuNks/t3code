@@ -37,6 +37,8 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import { makeProviderFailureTurnItem } from "@t3tools/provider-core/server/failure";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
+import * as ThreadOwnership from "./ThreadOwnership.ts";
+import type { LifecycleWriteGuard } from "./ThreadLifecycleGuard.ts";
 import * as EventStore from "./EventStore.ts";
 import * as Stream from "effect/Stream";
 import { stripUnservedToolOutputImageBytes } from "./toolOutputImageBytes.ts";
@@ -249,6 +251,7 @@ function runsOffNativeBranch(input: {
 }
 
 export interface ProviderEventIngestInput {
+  readonly lifecycleGuard?: LifecycleWriteGuard;
   readonly providerSessionId: ProviderSessionId;
   readonly providerInstanceId: ProviderInstanceId;
   readonly commandId?: CommandId;
@@ -266,6 +269,7 @@ export interface ProviderEventIngestorV2Shape {
   ) => Effect.Effect<ReadonlyArray<OrchestrationV2DomainEvent>, ProviderEventIngestorV2Error>;
   readonly ingestNormalized: (
     input: ProviderEventIngestInput & {
+      readonly lifecycleGuard: LifecycleWriteGuard;
       readonly writeIfRunCurrent?: {
         readonly runId: RunId;
         readonly activeAttemptId: RunAttemptId;
@@ -310,6 +314,7 @@ export const layer: Layer.Layer<
     const projections = yield* ProjectionStore.ProjectionStoreV2;
     const idAllocator = yield* IdAllocator.IdAllocatorV2;
     const threadCommands = yield* ThreadCommandExecutor.ThreadCommandExecutor;
+    const ownership = yield* ThreadOwnership.ThreadOwnership;
     const analytics = yield* ProviderTurnAnalytics;
     const agentScope = yield* AgentScope;
     const completedTurnAnalytics = new Set<string>();
@@ -469,7 +474,10 @@ export const layer: Layer.Layer<
               },
               occurredAt: now,
             });
-            return yield* eventSink.write({ events: [event] });
+            return yield* eventSink.write({
+              lifecycleGuard: input.lifecycleGuard,
+              events: [event],
+            });
           }),
         );
       },
@@ -781,6 +789,7 @@ export const layer: Layer.Layer<
             if (input.writeIfProviderThreadOwner !== undefined) {
               const ownerResult = yield* eventSink
                 .writeIfProviderThreadOwner({
+                  lifecycleGuard: input.lifecycleGuard,
                   guardPendingUserInputCancellations: true,
                   ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
                   ...input.writeIfProviderThreadOwner,
@@ -792,6 +801,7 @@ export const layer: Layer.Layer<
             if (input.writeIfRunCurrent === undefined) {
               return yield* eventSink
                 .write({
+                  lifecycleGuard: input.lifecycleGuard,
                   guardPendingUserInputCancellations: true,
                   ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
                   events,
@@ -800,6 +810,7 @@ export const layer: Layer.Layer<
             }
             const result = yield* eventSink
               .writeIfRunCurrent({
+                lifecycleGuard: input.lifecycleGuard,
                 guardPendingUserInputCancellations: true,
                 ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
                 threadId: input.threadId,
@@ -810,7 +821,29 @@ export const layer: Layer.Layer<
             return result.storedEvents;
           },
           (effect, input) =>
-            effect.pipe(
+            Effect.gen(function* () {
+              const ownerId =
+                input.event.type === "app_thread.created" &&
+                input.event.appThread.lineage.relationshipToParent === "subagent"
+                  ? input.event.appThread.lineage.parentThreadId
+                  : (input.lifecycleGuard?.threadId ?? input.threadId);
+              if (ownerId === null) return [];
+              const root = yield* ownership.resolveRoot(ownerId);
+              return yield* ownership.withRoots(
+                [root],
+                input.event.type === "app_thread.created"
+                  ? threadCommands.withLock(input.event.appThread.id, effect)
+                  : effect,
+              );
+            }).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderEventPublishError({
+                    providerSessionId: input.providerSessionId,
+                    eventCount: 0,
+                    cause,
+                  }),
+              ),
               Effect.flatMap((storedEvents) =>
                 Effect.gen(function* () {
                   if (input.event.type !== "app_thread.created") return storedEvents;
@@ -836,7 +869,16 @@ export const layer: Layer.Layer<
                     payload: { ...child, branch, updatedAt: now },
                     occurredAt: now,
                   });
-                  const synced = yield* eventSink.write({ events: [event] });
+                  const root = yield* ownership.resolveRoot(
+                    input.lifecycleGuard?.threadId ?? input.threadId,
+                  );
+                  const synced = yield* ownership.withRoots(
+                    [root],
+                    threadCommands.withLock(
+                      child.id,
+                      eventSink.write({ lifecycleGuard: input.lifecycleGuard, events: [event] }),
+                    ),
+                  );
                   return [...storedEvents, ...synced];
                 }).pipe(
                   Effect.catchCause((cause) =>
@@ -853,7 +895,15 @@ export const layer: Layer.Layer<
               Effect.flatMap((storedEvents) =>
                 storedEvents.length === 0 || input.event.type !== "subagent.updated"
                   ? Effect.succeed(storedEvents)
-                  : syncSubagentThreadModel(input, input.event.subagent).pipe(
+                  : ownership.resolveRoot(input.lifecycleGuard?.threadId ?? input.threadId).pipe(
+                      Effect.flatMap((root) =>
+                        ownership.withRoots(
+                          [root],
+                          input.event.type === "subagent.updated"
+                            ? syncSubagentThreadModel(input, input.event.subagent)
+                            : Effect.succeed([]),
+                        ),
+                      ),
                       Effect.map((synced) => [...storedEvents, ...synced]),
                       Effect.mapError(
                         (cause) =>
@@ -895,12 +945,8 @@ export const layer: Layer.Layer<
                   );
                 }),
               ),
-              (effect) =>
-                input.event.type === "app_thread.created"
-                  ? threadCommands.withLock(input.event.appThread.id, effect)
-                  : effect,
             ),
         ),
     });
   }),
-);
+).pipe(Layer.provide(ThreadOwnership.layer));

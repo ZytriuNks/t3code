@@ -2909,6 +2909,79 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       ),
   );
 
+  it.effect("lifecycle retirement waits for the exact native thread closed acknowledgement", () =>
+    Effect.gen(function* () {
+      const request = (id: number, closedThread?: string) => [
+        {
+          type: "expect_outbound" as const,
+          label: `unsubscribe-${id}`,
+          frame: { id, method: "thread/unsubscribe", params: { threadId: BG_NATIVE_THREAD } },
+        },
+        ...(closedThread === undefined
+          ? []
+          : [
+              {
+                type: "emit_inbound" as const,
+                label: "closed",
+                frame: { method: "thread/closed", params: { threadId: closedThread } },
+              },
+            ]),
+        {
+          type: "emit_inbound" as const,
+          label: `reply-${id}`,
+          frame: { id, result: { status: "unsubscribed" } },
+        },
+      ];
+      const entered = yield* Deferred.make<void>();
+      const completed = yield* Deferred.make<void>();
+      const harness = yield* makeCodexReplayHarness(
+        makeCodexReplayTranscript({
+          scenario: "lifecycle-retirement-close",
+          entries: [
+            ...backgroundExecTranscript.entries.slice(0, -1),
+            ...request(4),
+            ...request(5, "unrelated-thread"),
+            ...request(6, BG_NATIVE_THREAD),
+          ],
+        }),
+        () => Effect.void,
+        (method) =>
+          method === "thread/unsubscribe"
+            ? Deferred.succeed(entered, undefined).pipe(Effect.asVoid)
+            : Effect.void,
+      );
+      yield* harness.runtime.startTurn(
+        makeCodexTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now: yield* DateTime.now,
+          attemptId: RunAttemptId.make("attempt-lifecycle-retirement"),
+          text: BG_PROMPT,
+        }),
+      );
+      yield* harness.firstTerminal;
+      const retiring = yield* harness.runtime.unloadThread!({
+        providerThread: harness.providerThread,
+        awaitRetirement: true,
+      }).pipe(
+        Effect.andThen(Deferred.succeed(completed, undefined)),
+        Effect.forkChild({ startImmediately: true }),
+      );
+      yield* Deferred.await(entered);
+      // The second response fences the first response and the unrelated close notification.
+      yield* harness.runtime.unloadThread!({ providerThread: harness.providerThread });
+      assert.isFalse(yield* Deferred.isDone(completed));
+      yield* harness.runtime.unloadThread!({ providerThread: harness.providerThread });
+      yield* Fiber.join(retiring);
+      assert.isTrue(yield* Deferred.isDone(completed));
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+      ),
+    ),
+  );
+
   const backgroundStopCases = [true, false, "still_running", "thread_unloaded"] as const;
   const makeBackgroundStopTranscript = (terminated: (typeof backgroundStopCases)[number]) => {
     const stillRunning = terminated === "still_running";

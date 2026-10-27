@@ -32,6 +32,8 @@ import * as EventSink from "./EventSink.ts";
 import * as EventStore from "./EventStore.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderRuntimeRecovery from "./ProviderRuntimeRecoveryService.ts";
+import * as ThreadOwnership from "./ThreadOwnership.ts";
+import * as ThreadLifecycleGuard from "./ThreadLifecycleGuard.ts";
 import { restartContinuationRun } from "./RestartContinuation.ts";
 import * as NativeSessionBindings from "./NativeSessionBindings.ts";
 import * as ThreadDeletionRecords from "./ThreadDeletionRecords.ts";
@@ -194,6 +196,8 @@ const layerTest = Layer.mergeAll(ProjectionStore.layer, EffectOutbox.layer).pipe
   Layer.provideMerge(SqlitePersistence.layerMemory),
 );
 const layerRecoveryTest = ProviderRuntimeRecovery.layer.pipe(
+  Layer.provide(ThreadLifecycleGuard.layer),
+  Layer.provide(ThreadOwnership.layer),
   Layer.provideMerge(
     EventSink.layer.pipe(
       Layer.provideMerge(

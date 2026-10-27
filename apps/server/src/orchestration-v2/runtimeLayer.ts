@@ -39,6 +39,7 @@ import * as ThreadTitleRegenerationService from "./ThreadTitleRegenerationServic
 import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import * as ThreadOwnership from "./ThreadOwnership.ts";
+import * as ThreadLifecycleGuard from "./ThreadLifecycleGuard.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as CommandOutputHub from "./CommandOutputHub.ts";
 import * as ProviderRuntimeRecoveryService from "./ProviderRuntimeRecoveryService.ts";
@@ -76,6 +77,7 @@ const layerCommandReceiptStoreProvided = CommandReceiptStore.layerFromApplicatio
 
 const layerStores = Layer.mergeAll(
   NativeSessionBindings.layer,
+  ThreadLifecycleGuard.layer,
   ThreadDeletionRecords.layer,
   layerEventInfrastructure,
   layerEventStoreProvided,
@@ -159,6 +161,7 @@ const layerProviderAuthServiceProvided = ProviderAuthService.layer.pipe(
 );
 
 const layerRunExecutionServiceProvided = RunExecutionService.layer.pipe(
+  Layer.provide(layerThreadOwnershipProvided),
   Layer.provide(
     Layer.mergeAll(
       McpAppModelContext.layer,
@@ -172,6 +175,7 @@ const layerRunExecutionServiceProvided = RunExecutionService.layer.pipe(
 );
 
 const layerProviderTurnStartServiceProvided = ProviderTurnStartService.layer.pipe(
+  Layer.provide(ThreadLifecycleGuard.layer),
   Layer.provide(
     Layer.mergeAll(
       layerContextHandoffServiceProvided,
@@ -193,6 +197,7 @@ const layerRuntimeRequestServiceProvided = RuntimeRequestService.layer.pipe(
   Layer.provide(Layer.merge(ProjectionStore.layer, layerProviderSessionManagerProvided)),
 );
 const layerCheckpointRollbackServiceProvided = CheckpointRollbackService.layer.pipe(
+  Layer.provide(ThreadLifecycleGuard.layer),
   Layer.provide(
     Layer.mergeAll(
       ProjectStore.layer,
@@ -335,6 +340,7 @@ const layerEffectWorkerProvided = EffectWorker.layer.pipe(
   Layer.provide(Layer.merge(layerStores, layerEffectExecutorProvided)),
 );
 const layerProviderRuntimeRecoveryProvided = ProviderRuntimeRecoveryService.layer.pipe(
+  Layer.provide(layerThreadOwnershipProvided),
   Layer.provide(
     Layer.mergeAll(
       layerEffectWorkerProvided,
@@ -358,6 +364,7 @@ const layerMcpAppRequestsProvided = McpAppRequests.layer.pipe(
 );
 
 export const layer = Layer.mergeAll(
+  ThreadLifecycleGuard.layer,
   layerThreadOwnershipProvided,
   layerCommandOutputHubProvided,
   layerOrchestratorProvided,

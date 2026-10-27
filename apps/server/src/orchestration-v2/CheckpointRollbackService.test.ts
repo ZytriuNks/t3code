@@ -45,11 +45,24 @@ import * as ProjectStore from "./ProjectStore.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
+import * as ThreadLifecycleGuard from "./ThreadLifecycleGuard.ts";
 
 const unrelatedProject = Option.some({
   workspaceRoot: "/nonexistent/t3-rollback-project",
 } as never);
 const layerCheckpointRollbackService = CheckpointRollbackService.layer.pipe(
+  Layer.provide(
+    Layer.mock(ThreadLifecycleGuard.ThreadLifecycleGuard)({
+      resolveLifecycleSource: (threadId) =>
+        Effect.succeed({
+          threadId,
+          lifecycleRevision: 0,
+          sourceToken: "rollback-fixture",
+          isLegacy: true,
+        }),
+      check: () => Effect.succeed("accept"),
+    }),
+  ),
   Layer.provide(
     Layer.mergeAll(
       NodeServices.layer,
@@ -222,6 +235,18 @@ it.effect.each([
     } as unknown as ProjectionStore.ProjectionCheckpointRollbackContext;
     const testLayer = CheckpointRollbackService.layer.pipe(
       Layer.provide(
+        Layer.mock(ThreadLifecycleGuard.ThreadLifecycleGuard)({
+          resolveLifecycleSource: (threadId) =>
+            Effect.succeed({
+              threadId,
+              lifecycleRevision: 0,
+              sourceToken: "rollback-fixture",
+              isLegacy: true,
+            }),
+          check: () => Effect.succeed("accept"),
+        }),
+      ),
+      Layer.provide(
         Layer.mergeAll(
           ThreadCommandExecutor.layer,
           NodeServices.layer,
@@ -268,6 +293,19 @@ it.effect.each([
           IdAllocator.layer,
           Layer.mock(ProjectionStore.ProjectionStoreV2)({
             getThread: () => Effect.succeed(projection.thread),
+            getOwnershipPath: () =>
+              Effect.succeed([
+                {
+                  ...projection.thread,
+                  lineage: {
+                    parentThreadId: null,
+                    rootThreadId: threadId,
+                    relationshipToParent: null,
+                  },
+                  archivedAt: null,
+                  deletedAt: null,
+                },
+              ]),
             getCheckpointRollbackContext: () => Effect.succeed(projection),
             getShellSnapshot: () =>
               Effect.succeed({

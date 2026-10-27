@@ -7,6 +7,8 @@ import { resolveAttachmentPath } from "../attachmentStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 
+import * as ThreadLifecycleGuard from "./ThreadLifecycleGuard.ts";
+
 import * as AttachmentClaims from "./AttachmentClaims.ts";
 import * as ThreadLaunch from "./ThreadLaunchService.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
@@ -53,11 +55,21 @@ const releaseUnusedClaims = Effect.fn("ThreadMessageIntake.releaseUnusedClaims")
   );
 });
 
+const captureLifecycle = Effect.fn("ThreadMessageIntake.captureLifecycle")(function* (
+  threadId: import("@t3tools/contracts").ThreadId,
+) {
+  const store = yield* ThreadManagement.ThreadManagementService;
+  const shell = yield* store.getThreadShell(threadId);
+  if (shell === null) return undefined;
+  return yield* store.resolveLifecycleSource(threadId);
+});
+
 export const dispatchCommand = Effect.fn("ThreadMessageIntake.dispatchCommand")(function* (
   command: OrchestrationV2Command,
 ) {
   const threads = yield* ThreadManagement.ThreadManagementService;
   if (command.type === "runtime-request.respond" && command.attachmentsByQuestionId) {
+    const lifecycleGuard = yield* captureLifecycle(command.threadId);
     const config = yield* ServerConfig.ServerConfig;
     const incomingByQuestionId = command.attachmentsByQuestionId;
     yield* AttachmentClaims.validateAttachmentLimits(Object.values(incomingByQuestionId).flat());
@@ -93,6 +105,7 @@ export const dispatchCommand = Effect.fn("ThreadMessageIntake.dispatchCommand")(
         attachmentsByQuestionId: prepared.attachmentsByQuestionId,
       })
       .pipe(
+        Effect.provideService(ThreadLifecycleGuard.DispatchLifecycleGuard, lifecycleGuard),
         Effect.tap((result) => {
           // A replayed receipt reports the first attempt's answer, so this
           // attempt's copies go unreferenced and are released. The resolved
@@ -130,6 +143,7 @@ export const dispatchCommand = Effect.fn("ThreadMessageIntake.dispatchCommand")(
     (command.type !== "queued-run.edit" || command.attachments === undefined)
   )
     return yield* threads.dispatch(command);
+  const lifecycleGuard = yield* captureLifecycle(command.threadId);
   const claimed = yield* AttachmentClaims.claimPendingAttachments({
     threadId: command.threadId,
     attachments: command.attachments ?? [],
@@ -149,6 +163,7 @@ export const dispatchCommand = Effect.fn("ThreadMessageIntake.dispatchCommand")(
         : {}),
     })
     .pipe(
+      Effect.provideService(ThreadLifecycleGuard.DispatchLifecycleGuard, lifecycleGuard),
       Effect.tap((result) =>
         releaseUnusedClaims(
           claimed.claimedPaths,
@@ -169,8 +184,10 @@ export const sendToThread = Effect.fn("ThreadMessageIntake.sendToThread")(functi
   input: ThreadManagement.ThreadManagementSendInput,
 ) {
   const threads = yield* ThreadManagement.ThreadManagementService;
+  const lifecycleGuard = yield* captureLifecycle(input.threadId);
   const claimed = yield* AttachmentClaims.claimPendingAttachments(input);
   return yield* threads.sendToThread({ ...input, attachments: claimed.attachments }).pipe(
+    Effect.provideService(ThreadLifecycleGuard.DispatchLifecycleGuard, lifecycleGuard),
     Effect.tap((result) => releaseUnusedClaims(claimed.claimedPaths, result.message.attachments)),
     Effect.tapError((error) =>
       dispatchWasNotAccepted(error)
@@ -193,6 +210,18 @@ export const launchThread = Effect.fn("ThreadMessageIntake.launchThread")(functi
       message: "Uploaded attachments need a thread id at launch.",
     });
   }
+  const lifecycleGuard = yield* captureLifecycle(input.threadId).pipe(
+    Effect.mapError(
+      (cause) =>
+        new ThreadLaunch.ThreadLaunchError({
+          operation: "update-thread",
+          commandId: input.commandId,
+          projectId: input.projectId,
+          threadId: input.threadId,
+          cause,
+        }),
+    ),
+  );
   const claimed = yield* AttachmentClaims.claimPendingAttachments({
     threadId: input.threadId,
     attachments: input.initialMessage.attachments,
@@ -215,6 +244,7 @@ export const launchThread = Effect.fn("ThreadMessageIntake.launchThread")(functi
       },
     })
     .pipe(
+      Effect.provideService(ThreadLifecycleGuard.DispatchLifecycleGuard, lifecycleGuard),
       Effect.tap((result) =>
         releaseUnusedClaims(
           claimed.claimedPaths,

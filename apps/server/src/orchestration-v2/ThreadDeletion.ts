@@ -61,6 +61,8 @@ export const planThreadDeletion = Effect.fn("ThreadDeletion.planThreadDeletion")
     payload: {
       ...projection.thread,
       deletedAt: projection.thread.deletedAt ?? now,
+      lifecycleRevision:
+        (projection.thread.lifecycleRevision ?? 0) + (projection.thread.deletedAt === null ? 1 : 0),
       titleRegeneration: null,
       updatedAt: now,
     },
@@ -205,6 +207,7 @@ export const planThreadDeletion = Effect.fn("ThreadDeletion.planThreadDeletion")
         providerSessionId: session.id,
         detail: "Thread deleted.",
         revokeMcpCredential: true,
+        retirementRevision: projection.thread.lifecycleRevision ?? 0,
       },
     });
   }

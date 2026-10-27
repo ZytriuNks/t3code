@@ -17,6 +17,7 @@ import {
 const at = "2026-10-26T00:00:00.000Z";
 const decodeStorage = Schema.decodeUnknownSync(NativeSessionStorage);
 const decodeRecord = Schema.decodeUnknownSync(ThreadDeletionRecord);
+const encodeRun = Schema.encodeSync(OrchestrationV2RunJson);
 const thread = {
   id: "R",
   projectId: "project",
@@ -82,6 +83,10 @@ describe("thread lifecycle contracts", () => {
     };
     expect(decodeRun(run).id).toBe("run");
     expect(decodeRun({ ...run, lifecycleRevision: 3 }).lifecycleRevision).toBe(3);
+    const token = "a".repeat(64);
+    expect(
+      encodeRun(decodeRun({ ...run, lifecycleRevision: 0, lifecycleSourceToken: token })),
+    ).toMatchObject({ lifecycleRevision: 0, lifecycleSourceToken: token });
     for (const lifecycleRevision of [-1, 1.5, "3"]) {
       expect(() => decodeThread({ ...thread, lifecycleRevision })).toThrow();
       expect(() => decodeRun({ ...run, lifecycleRevision })).toThrow();

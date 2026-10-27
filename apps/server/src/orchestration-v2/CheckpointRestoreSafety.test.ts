@@ -18,6 +18,7 @@ import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as CheckpointRollbackService from "./CheckpointRollbackService.ts";
+import * as ThreadLifecycleGuard from "./ThreadLifecycleGuard.ts";
 import { isCheckpointRestoreIsolated } from "./CheckpointRestoreSafety.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import { CheckpointServiceV2 } from "./CheckpointService.ts";
@@ -93,6 +94,18 @@ it.effect.each([
     } as unknown as ProjectionCheckpointRollbackContext;
     const layerTest = CheckpointRollbackService.layer.pipe(
       Layer.provide(
+        Layer.mock(ThreadLifecycleGuard.ThreadLifecycleGuard)({
+          resolveLifecycleSource: (threadId) =>
+            Effect.succeed({
+              threadId,
+              lifecycleRevision: 0,
+              sourceToken: "recovery-fixture",
+              isLegacy: true,
+            }),
+          check: () => Effect.succeed("accept"),
+        }),
+      ),
+      Layer.provide(
         Layer.mergeAll(
           NodeServices.layer,
           Layer.mock(ServerConfig.ServerConfig)({ worktreesDir: "/synthetic-worktrees" } as never),
@@ -104,6 +117,20 @@ it.effect.each([
             get: () => Effect.succeed(Option.some({ workspaceRoot: parent } as never)),
           }),
           Layer.mock(ProjectionStoreV2)({
+            getOwnershipPath: () =>
+              Effect.succeed([
+                {
+                  id: threadId,
+                  projectId,
+                  archivedAt: null,
+                  deletedAt: null,
+                  lineage: {
+                    parentThreadId: null,
+                    relationshipToParent: null,
+                    rootThreadId: threadId,
+                  },
+                },
+              ]),
             getThread: () => Effect.succeed(projection.thread),
             getCheckpointRollbackContext: () => Effect.succeed(projection),
             getShellSnapshot: () =>

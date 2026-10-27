@@ -28,6 +28,7 @@ import * as ThreadTitleRegenerationService from "./ThreadTitleRegenerationServic
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { continueRestartedRun } from "./RestartContinuation.ts";
+import * as ThreadLifecycleGuard from "./ThreadLifecycleGuard.ts";
 
 export class OrchestrationEffectExecutionError extends Schema.TaggedError<OrchestrationEffectExecutionError>()(
   "OrchestrationEffectExecutionError",
@@ -123,6 +124,14 @@ export const layerExecutor: Layer.Layer<
               .detach({
                 providerSessionId: effect.request.providerSessionId,
                 threadId: effect.threadId,
+                ...(effect.request.retirementRevision === undefined
+                  ? {}
+                  : {
+                      retirementRevision: effect.request.retirementRevision,
+                      ...(effect.request.retirementSourceToken === undefined
+                        ? {}
+                        : { retirementSourceToken: effect.request.retirementSourceToken }),
+                    }),
                 ...(effect.request.detail === undefined ? {} : { detail: effect.request.detail }),
                 ...(effect.request.revokeMcpCredential === undefined
                   ? {}
@@ -299,6 +308,10 @@ export const layerExecutor: Layer.Layer<
                           : { senderThreadId: message.senderThreadId }),
                       })
                       .pipe(
+                        Effect.provideService(
+                          ThreadLifecycleGuard.DispatchLifecycleGuard,
+                          ThreadLifecycleGuard.guardForRun(run),
+                        ),
                         // The turn that just completed leaves no further retry
                         // target once the instance is off: the completed turn
                         // stands as the thread's result instead of going
@@ -509,6 +522,11 @@ export const layerExecutor: Layer.Layer<
                 threadId: effect.threadId,
                 requestId: effect.commandId,
                 kind: effect.request.kind,
+                lifecycleGuard: {
+                  threadId: effect.threadId,
+                  lifecycleRevision: effect.request.lifecycleRevision ?? 0,
+                  sourceToken: effect.request.lifecycleSourceToken,
+                },
               })
               .pipe(
                 Effect.mapError(
