@@ -389,6 +389,10 @@ export interface ShellSnapshotOptions {
 }
 
 export interface ProjectionStoreV2Shape {
+  /** Native presence is independent of whether a session's retirement provenance is complete. */
+  readonly hasNativeAttachment: (
+    threadId: ThreadId,
+  ) => Effect.Effect<boolean, ProjectionStoreV2Error>;
   /** Native attachment provenance survives detach, row replacement and process loss. */
   readonly getProviderAttachmentSources: (threadId: ThreadId) => Effect.Effect<
     ReadonlyArray<{
@@ -6623,6 +6627,27 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
 
     return {
       apply,
+      hasNativeAttachment: Effect.fn("ProjectionStore.hasNativeAttachment")(
+        function* (threadId: ThreadId) {
+          const rows = yield* sql<{ readonly present: number }>`
+            SELECT EXISTS (
+              SELECT 1 FROM orchestration_events
+              WHERE stream_id = ${threadId} AND event_type = 'provider-thread.updated'
+                AND json_extract(payload_json, '$.nativeThreadRef') IS NOT NULL
+              UNION ALL
+              SELECT 1 FROM orchestration_v2_projection_provider_threads
+              WHERE thread_id = ${threadId}
+                AND json_extract(payload_json, '$.nativeThreadRef') IS NOT NULL
+              UNION ALL
+              SELECT 1 FROM orchestration_v2_native_session_bindings
+              WHERE thread_id = ${threadId} AND native_id IS NOT NULL
+            ) AS present
+          `;
+          return rows[0]?.present === 1;
+        },
+        (effect, threadId) =>
+          Effect.mapError(effect, (cause) => new ProjectionStoreReadError({ threadId, cause })),
+      ),
       getProviderAttachmentSources: Effect.fn("ProjectionStore.getProviderAttachmentSources")(
         function* (threadId: ThreadId) {
           const rows = yield* sql<{
@@ -6728,6 +6753,13 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
     });
 
     const service: ProjectionStoreV2Shape = {
+      hasNativeAttachment: Effect.fn("ProjectionStore.hasNativeAttachment")(function* (threadId) {
+        return (
+          (yield* Ref.get(replayState)).projections
+            .get(threadId)
+            ?.providerThreads.some((thread) => thread.nativeThreadRef !== null) ?? false
+        );
+      }),
       getProviderAttachmentSources: Effect.fn("ProjectionStore.getProviderAttachmentSources")(
         function* (threadId) {
           const projection = (yield* Ref.get(replayState)).projections.get(threadId);

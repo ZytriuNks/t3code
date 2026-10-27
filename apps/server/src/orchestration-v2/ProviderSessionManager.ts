@@ -2851,6 +2851,17 @@ export const layerWithOptions = (
                           )).filter(
                             (source) => source.providerSessionId === input.providerSessionId,
                           );
+                    if (
+                      input.retirementRevision === undefined &&
+                      input.retirementSourceToken === undefined &&
+                      sources.length === 0 &&
+                      !(yield* projectionStore.hasNativeAttachment(input.threadId))
+                    ) {
+                      // A session that never had a native attachment needs only ordinary detach.
+                      // Unknown native session/provenance remains behind the receipt check below.
+                      if (input.revokeMcpCredential) yield* clearMcpSession(input.threadId);
+                      return;
+                    }
                     const receipts = yield* outbox.attachmentRetirements(input.threadId);
                     if (
                       sources.length > 0 &&
