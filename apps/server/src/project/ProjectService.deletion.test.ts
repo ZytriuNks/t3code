@@ -377,6 +377,11 @@ it.effect(
         assert.deepEqual(request, {
           type: "attachment.cleanup",
           attachmentIds: ["legacy_screenshot"],
+          lifecycle: {
+            commandId: CommandId.make(`${commandId}:delete-thread:${threadId}`),
+            rootThreadId: threadId,
+            revision: 1,
+          },
         });
       }).pipe(Effect.provide(layerServices));
     }).pipe(Effect.provide(layerDatabase)),

@@ -2827,19 +2827,57 @@ export const layerWithOptions = (
             const currentEntry = (yield* Ref.get(sessions)).get(key);
             if (
               input.retirementRevision !== undefined ||
-              ((input.lifecycle !== undefined || input.requireConfirmedDetach === true) &&
-                currentEntry !== undefined)
+              input.requireConfirmedDetach === true ||
+              (input.lifecycle !== undefined && currentEntry !== undefined)
             )
               return yield* threadOperations.withLock(
                 threadAttachmentKey(input),
                 Effect.gen(function* () {
                   const currentEntry = (yield* Ref.get(sessions)).get(key);
-                  if (currentEntry === undefined)
+                  if (currentEntry === undefined) {
+                    // Process loss is not retirement. Legacy requests recover their immutable
+                    // attachment identity from history, never from the restored thread's revision.
+                    const sources =
+                      input.retirementRevision !== undefined &&
+                      input.retirementSourceToken !== undefined
+                        ? [
+                            {
+                              lifecycleRevision: input.retirementRevision,
+                              sourceToken: input.retirementSourceToken,
+                            },
+                          ]
+                        : (yield* projectionStore.getProviderAttachmentSources(
+                            input.threadId,
+                          )).filter(
+                            (source) => source.providerSessionId === input.providerSessionId,
+                          );
+                    const receipts = yield* outbox.attachmentRetirements(input.threadId);
+                    if (
+                      sources.length > 0 &&
+                      sources.every(
+                        (source) =>
+                          source.lifecycleRevision !== null &&
+                          source.sourceToken !== null &&
+                          (input.retirementRevision === undefined ||
+                            input.retirementRevision === source.lifecycleRevision) &&
+                          (input.retirementSourceToken === undefined ||
+                            input.retirementSourceToken === source.sourceToken) &&
+                          receipts.some(
+                            (receipt) =>
+                              receipt.status === "succeeded" &&
+                              receipt.providerSessionId === input.providerSessionId &&
+                              receipt.retirementRevision === source.lifecycleRevision &&
+                              receipt.retirementSourceToken === source.sourceToken,
+                          ),
+                      )
+                    )
+                      return;
                     return yield* new ProviderSessionStaleBindingError({
                       threadId: input.threadId,
                       providerSessionId: input.providerSessionId,
                       reason: "retirement_unconfirmed",
                     });
+                  }
                   const source = currentEntry.lifecycleByThread.get(input.threadId);
                   if (
                     input.retirementRevision !== undefined &&

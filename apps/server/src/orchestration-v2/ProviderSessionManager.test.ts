@@ -64,6 +64,7 @@ import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import * as ThreadOwnership from "./ThreadOwnership.ts";
+import * as ThreadLifecycleResources from "./ThreadLifecycleResources.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as CommandOutputHub from "./CommandOutputHub.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -3239,6 +3240,271 @@ it.effect.each(["released", "restart", "native-binding-only", "explicit-old-id"]
           }),
         ),
       );
+    }),
+);
+
+const prepareMissingEntryRetirement = Effect.fn("test.prepareMissingEntryRetirement")(function* (
+  name: string,
+) {
+  const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+  const sink = yield* EventSink.EventSinkV2;
+  const ids = yield* IdAllocator.IdAllocatorV2;
+  const guards = yield* ThreadLifecycleGuard.ThreadLifecycleGuard;
+  const now = yield* DateTime.now;
+  const threadId = ThreadId.make(`${name}:A`);
+  const otherId = ThreadId.make(`${name}:B`);
+  const created = yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now });
+  yield* sink.write({
+    events: [created, yield* makeThreadCreatedEvent({ idAllocator: ids, threadId: otherId, now })],
+  });
+  const providerSessionId = ids.derive.providerSession({
+    providerInstanceId: modelSelection.instanceId,
+  });
+  const runtime = yield* manager.open({
+    threadId,
+    providerSessionId,
+    modelSelection,
+    runtimePolicy,
+  });
+  const survivor = yield* manager.open({
+    threadId: otherId,
+    providerSessionId,
+    modelSelection,
+    runtimePolicy,
+  });
+  const source = yield* guards.resolveLifecycleSource(threadId);
+  const native = makeProviderThread({ idAllocator: ids, threadId, providerSessionId, now });
+  yield* sink.write({
+    lifecycleGuard: source,
+    events: [
+      {
+        id: yield* ids.allocate.event({ threadId }),
+        type: "provider-thread.updated",
+        threadId,
+        occurredAt: now,
+        payload: native,
+      },
+    ],
+  });
+  yield* runtime.resumeThread({ threadId, providerThread: native });
+  yield* sink.write({
+    events: [
+      {
+        ...created,
+        id: yield* ids.allocate.event({ threadId }),
+        type: "thread.unarchived",
+        payload: { ...created.payload, lifecycleRevision: 2 },
+      },
+    ],
+  });
+  return { threadId, otherId, providerSessionId, source, survivor, manager, ids, now };
+});
+
+it.effect.each([
+  "none",
+  "exact",
+  "ordinary",
+  "session",
+  "thread",
+  "revision",
+  "source",
+  "pending",
+  "failed",
+] as const)(
+  "lifecycle missing entry accepts only an exact durable retirement receipt (%s)",
+  (receipt) =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      yield* Effect.gen(function* () {
+        const fixture = yield* prepareMissingEntryRetirement(`task6:r1:missing:${receipt}`);
+        const { threadId, otherId, providerSessionId, source, survivor, manager, ids, now } =
+          fixture;
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        if (receipt !== "none") {
+          const effectId = `task6:r1:receipt:${receipt}`;
+          yield* outbox.enqueue([
+            {
+              id: effectId,
+              commandId: CommandId.make(effectId),
+              threadId: receipt === "thread" ? otherId : threadId,
+              request: {
+                type: "provider-session.detach",
+                providerSessionId:
+                  receipt === "session"
+                    ? ProviderSessionId.make("task6:r1:other-session")
+                    : providerSessionId,
+                ...(receipt === "ordinary"
+                  ? {}
+                  : {
+                      retirementRevision: receipt === "revision" ? 1 : source.lifecycleRevision,
+                      retirementSourceToken:
+                        receipt === "source" ? "wrong-source" : source.sourceToken,
+                    }),
+              },
+            },
+          ]);
+          if (receipt === "exact")
+            yield* Effect.gen(function* () {
+              assert.equal(yield* (yield* EffectWorker.OrchestrationEffectWorkerV2).drain(), 1);
+            }).pipe(Effect.provide(layerRetirementWorker));
+          else if (receipt !== "pending") {
+            yield* outbox.claimNext({ workerId: "task6:r1:receipt", leaseDurationMs: 1000 });
+            if (receipt === "failed")
+              yield* outbox.fail({
+                effectId,
+                workerId: "task6:r1:receipt",
+                error: "Fixture retirement failure.",
+              });
+            else yield* outbox.succeed({ effectId, workerId: "task6:r1:receipt" });
+          }
+        }
+        yield* Effect.gen(function* () {
+          const restarted = yield* ProviderSessionManager.ProviderSessionManagerV2;
+          assert.isFalse(yield* restarted.isLive(providerSessionId));
+          for (const strict of [false, true]) {
+            const result = yield* restarted
+              .detach({
+                threadId,
+                providerSessionId,
+                requireConfirmedDetach: true,
+                ...(strict
+                  ? {
+                      retirementRevision: source.lifecycleRevision,
+                      retirementSourceToken: source.sourceToken,
+                    }
+                  : {}),
+              })
+              .pipe(Effect.exit);
+            assert.equal(result._tag, receipt === "exact" ? "Success" : "Failure");
+            if (Exit.isFailure(result))
+              assert.include(Cause.pretty(result.cause), "retirement_unconfirmed");
+          }
+          yield* restarted.detach({ threadId, providerSessionId });
+        }).pipe(
+          Effect.provide(
+            Layer.fresh(ProviderSessionManager.layerWithOptions({ idleTimeoutMs: 60000 })),
+          ),
+        );
+        if (receipt === "ordinary") assert.isEmpty(yield* outbox.attachmentRetirements(threadId));
+        const before = (yield* Ref.get(state)).resumeCount;
+        yield* survivor.resumeThread({
+          threadId: otherId,
+          providerThread: makeProviderThread({
+            idAllocator: ids,
+            threadId: otherId,
+            providerSessionId,
+            now,
+            nativeThreadId: "native-B",
+          }),
+        });
+        assert.equal((yield* Ref.get(state)).resumeCount, before + 1);
+        assert.equal((yield* Ref.get(state)).closeCount, 0);
+        assert.isTrue(yield* manager.isLive(providerSessionId));
+      }).pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 60000 })));
+    }),
+);
+
+it.effect.each(["missing", "confirmed"] as const)(
+  "lifecycle legacy detach restart worker keeps %s retirement observable without stopping B",
+  (receipt) =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      yield* Effect.gen(function* () {
+        const { threadId, otherId, providerSessionId, source, survivor, manager, ids, now } =
+          yield* prepareMissingEntryRetirement(`task6:r1:worker:${receipt}`);
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const sql = yield* SqlClient.SqlClient;
+        if (receipt === "confirmed") {
+          const effectId = "task6:r1:confirmed-retirement";
+          yield* outbox.enqueue([
+            {
+              id: effectId,
+              commandId: CommandId.make(effectId),
+              threadId,
+              request: {
+                type: "provider-session.detach",
+                providerSessionId,
+                retirementRevision: source.lifecycleRevision,
+                retirementSourceToken: source.sourceToken,
+              },
+            },
+          ]);
+          yield* Effect.gen(function* () {
+            assert.equal(yield* (yield* EffectWorker.OrchestrationEffectWorkerV2).drain(), 1);
+          }).pipe(Effect.provide(layerRetirementWorker));
+        }
+        const commandId = CommandId.make(`task6:r1:legacy:${receipt}`);
+        const effectId = `${commandId}:detach`;
+        yield* sql`INSERT INTO orchestration_command_receipts
+          (command_id, aggregate_kind, aggregate_id, command_type, accepted_at, result_sequence, status, error)
+          VALUES (${commandId}, 'thread', ${threadId}, 'thread.archive', ${DateTime.formatIso(now)}, 0, 'accepted', NULL)`;
+        yield* outbox.enqueue([
+          {
+            id: effectId,
+            commandId,
+            threadId,
+            request: { type: "provider-session.detach", providerSessionId },
+          },
+        ]);
+        assert.isTrue(
+          Option.isSome(
+            yield* outbox.claimNext({ workerId: "task6:r1:lost-worker", leaseDurationMs: 1000 }),
+          ),
+        );
+        assert.deepEqual(yield* outbox.reconcileAfterProcessLoss, { requeued: 1, cancelled: 0 });
+        yield* Effect.gen(function* () {
+          const restarted = yield* ProviderSessionManager.ProviderSessionManagerV2;
+          const resources = yield* ThreadLifecycleResources.ThreadLifecycleResources;
+          assert.isFalse(yield* restarted.isLive(providerSessionId));
+          assert.equal(
+            (yield* resources.assertCanCreate(threadId).pipe(Effect.result))._tag,
+            "Failure",
+          );
+          yield* Effect.gen(function* () {
+            assert.equal(yield* (yield* EffectWorker.OrchestrationEffectWorkerV2).drain(), 1);
+          }).pipe(Effect.provide(layerRetirementWorker));
+          const settled = yield* outbox.get(effectId);
+          assert.isTrue(Option.isSome(settled));
+          if (Option.isSome(settled)) {
+            assert.equal(settled.value.status, receipt === "confirmed" ? "succeeded" : "failed");
+            assert.equal(settled.value.attemptCount, 2);
+            if (receipt === "missing")
+              assert.include(settled.value.lastError!, "retirement_unconfirmed");
+          }
+          yield* outbox.reconcileAfterProcessLoss;
+          assert.deepEqual(
+            yield* resources.getCleanupStatus(commandId),
+            receipt === "confirmed"
+              ? { pendingCount: 0, failedCount: 0 }
+              : { pendingCount: 0, failedCount: 1 },
+          );
+          assert.equal(
+            (yield* resources.assertCanCreate(threadId).pipe(Effect.result))._tag,
+            receipt === "confirmed" ? "Success" : "Failure",
+          );
+        }).pipe(
+          Effect.provide(
+            Layer.merge(
+              Layer.fresh(ProviderSessionManager.layerWithOptions({ idleTimeoutMs: 60000 })),
+              ThreadLifecycleResources.layer,
+            ),
+          ),
+        );
+        const before = (yield* Ref.get(state)).resumeCount;
+        yield* survivor.resumeThread({
+          threadId: otherId,
+          providerThread: makeProviderThread({
+            idAllocator: ids,
+            threadId: otherId,
+            providerSessionId,
+            now,
+            nativeThreadId: "native-B",
+          }),
+        });
+        assert.equal((yield* Ref.get(state)).resumeCount, before + 1);
+        assert.equal((yield* Ref.get(state)).closeCount, 0);
+        assert.isTrue(yield* manager.isLive(providerSessionId));
+      }).pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 60000 })));
     }),
 );
 

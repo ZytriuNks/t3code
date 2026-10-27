@@ -285,18 +285,27 @@ it.effect("queues provider and resource cleanup and preserves an earlier deletio
     );
     assert.deepEqual(
       plan.effects.map((effect) => effect.request),
-      [
-        {
-          type: "provider-session.detach",
-          providerSessionId: ProviderSessionId.make("session:delete-plan:running"),
-          detail: "Thread deleted.",
-          revokeMcpCredential: true,
+      (
+        [
+          {
+            type: "provider-session.detach",
+            providerSessionId: ProviderSessionId.make("session:delete-plan:running"),
+            detail: "Thread deleted.",
+            revokeMcpCredential: true,
+          },
+          { type: "scheduled-tasks.cleanup" },
+          { type: "terminal.cleanup" },
+          { type: "preview.cleanup" },
+          { type: "attachment.cleanup", attachmentIds: ["shared_file"] },
+        ] as const
+      ).map((request) => ({
+        ...request,
+        lifecycle: {
+          commandId: command.commandId,
+          rootThreadId: threadId,
+          revision: base.thread.lifecycleRevision ?? 0,
         },
-        { type: "scheduled-tasks.cleanup" },
-        { type: "terminal.cleanup" },
-        { type: "preview.cleanup" },
-        { type: "attachment.cleanup", attachmentIds: ["shared_file"] },
-      ],
+      })),
     );
   }).pipe(Effect.provide(IdAllocator.layer)),
 );

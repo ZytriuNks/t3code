@@ -6732,6 +6732,7 @@ it.effect.each([false, true])(
       assert.deepEqual(detaches[0]!.request, {
         type: "provider-session.detach",
         providerSessionId,
+        lifecycle: { commandId, rootThreadId: threadId, revision: source.lifecycleRevision + 1 },
         detail: "Thread deleted.",
         revokeMcpCredential: true,
         ...(native
@@ -7049,6 +7050,7 @@ it.effect.each(["stopped", "error", "detached"] as const)(
       assert.deepEqual(retirements[0]!.request, {
         type: "provider-session.detach",
         providerSessionId: session.id,
+        lifecycle: { commandId, rootThreadId: threadId, revision: source.lifecycleRevision + 1 },
         retirementRevision: source.lifecycleRevision,
         retirementSourceToken: source.sourceToken,
         detail: "Thread archived.",
@@ -7183,7 +7185,22 @@ it.effect.each(["old", "missing", "fresh"] as const)(
       const resumed = yield* orchestrator
         .dispatch({ type: "queue.resume", commandId: CommandId.make(`${c}:resume`), threadId: c })
         .pipe(Effect.exit);
-      assert.equal(resumed._tag, origin === "fresh" ? "Success" : "Failure");
+      assert.equal(resumed._tag, "Failure");
+      const blocked = (yield* store.getThreadRecords(c, ["runs"])).runs.find(
+        (run) => run.id === queued.id,
+      )!;
+      assert.equal(blocked.status, "queued");
+      assert.isTrue(blocked.queueHeld);
+      const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+      assert.isAbove(yield* worker.drain(), 0);
+      const afterDrain = yield* orchestrator
+        .dispatch({
+          type: "queue.resume",
+          commandId: CommandId.make(`${c}:resume-after-drain`),
+          threadId: c,
+        })
+        .pipe(Effect.exit);
+      assert.equal(afterDrain._tag, origin === "fresh" ? "Success" : "Failure");
       const after = (yield* store.getThreadRecords(c, ["runs"])).runs.find(
         (run) => run.id === queued.id,
       )!;
@@ -8015,6 +8032,11 @@ it.effect.each(["archive", "delete"] as const)(
         assert.deepEqual(detach.request, {
           type: "provider-session.detach",
           providerSessionId: sessionId,
+          lifecycle: {
+            commandId,
+            rootThreadId: ids[0]!,
+            revision: sources.get(threadId)!.lifecycleRevision + 1,
+          },
           retirementRevision: sources.get(threadId)!.lifecycleRevision,
           retirementSourceToken: sources.get(threadId)!.sourceToken,
           detail: operation === "archive" ? "Thread archived." : "Thread deleted.",
