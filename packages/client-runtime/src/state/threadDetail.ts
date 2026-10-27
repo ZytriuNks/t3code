@@ -306,7 +306,8 @@ export function createEnvironmentThreadDetailAtoms<E>(
   });
 
   const turnSubagentsAtomFamily = Atom.family((key: string) => {
-    let previous: Pick<OrchestrationV2ThreadProjection, "runs" | "subagents"> | null = null;
+    let previous: Pick<OrchestrationV2ThreadProjection, "thread" | "runs" | "subagents"> | null =
+      null;
     let value: ThreadTurnSubagents | null = null;
     return Atom.make((get) => {
       const projection = Option.getOrNull(get(threadStateValueAtomFamily(key)).data);
@@ -315,10 +316,11 @@ export function createEnvironmentThreadDetailAtoms<E>(
         value = null;
       } else if (
         projection.runs !== previous?.runs ||
-        projection.subagents !== previous?.subagents
+        projection.subagents !== previous?.subagents ||
+        projection.thread.id !== previous?.thread.id
       ) {
-        const { runs, subagents } = projection;
-        previous = { runs, subagents };
+        const { thread, runs, subagents } = projection;
+        previous = { thread, runs, subagents };
         value = deriveThreadTurnSubagents(previous);
       }
       return value;

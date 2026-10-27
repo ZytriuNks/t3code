@@ -26,7 +26,11 @@ export class ThreadSearchError extends Schema.TaggedError<ThreadSearchError>()(
   }
 }
 
-const SearchRequest = Schema.Struct({ pattern: Schema.String, limit: Schema.Int });
+const SearchRequest = Schema.Struct({
+  pattern: Schema.String,
+  limit: Schema.Int,
+  includeSubagents: Schema.Boolean,
+});
 const SearchRow = Schema.Struct({
   threadId: ThreadId,
   projectId: ProjectId,
@@ -75,7 +79,7 @@ export const make = Effect.gen(function* () {
   const searchRows = SqlSchema.findAll({
     Request: SearchRequest,
     Result: SearchRow,
-    execute: ({ pattern, limit }) => sql`
+    execute: ({ pattern, limit, includeSubagents }) => sql`
       WITH candidate AS (
         SELECT
           threads.thread_id,
@@ -91,6 +95,7 @@ export const make = Effect.gen(function* () {
         INNER JOIN projection_projects AS projects
           ON projects.project_id = threads.project_id
         WHERE threads.deleted_at IS NULL
+          AND (${includeSubagents ? 1 : 0} OR COALESCE(json_extract(threads.payload_json, '$.lineage.relationshipToParent'), '') != 'subagent')
           AND threads.archived_at IS NULL
           AND projects.deleted_at IS NULL
           AND messages.streaming = 0
@@ -110,13 +115,11 @@ export const make = Effect.gen(function* () {
         LEFT JOIN orchestration_v2_projection_threads AS threads ON threads.thread_id = legacy.thread_id
         INNER JOIN projection_projects AS projects ON projects.project_id = COALESCE(threads.project_id, legacy.project_id)
         WHERE CASE WHEN threads.thread_id IS NULL THEN legacy.deleted_at ELSE threads.deleted_at END IS NULL
+          AND (${includeSubagents ? 1 : 0} OR COALESCE(json_extract(threads.payload_json, '$.lineage.relationshipToParent'), '') != 'subagent')
           AND CASE WHEN threads.thread_id IS NULL THEN legacy.archived_at ELSE threads.archived_at END IS NULL
           AND projects.deleted_at IS NULL
           AND messages.is_streaming = 0
-          AND (messages.role = 'user' OR (messages.role = 'assistant' AND EXISTS (
-            SELECT 1 FROM projection_turns AS turns
-            WHERE turns.thread_id = messages.thread_id AND turns.assistant_message_id = messages.message_id
-          )))
+          AND (messages.role = 'user' OR (messages.role = 'assistant' AND messages.turn_id IS NOT NULL))
           AND NOT EXISTS (
             SELECT 1 FROM orchestration_v2_legacy_imports AS imports
             WHERE imports.thread_id = legacy.thread_id AND imports.transcript_imported_at IS NOT NULL
@@ -167,6 +170,7 @@ export const make = Effect.gen(function* () {
           searchRows({
             pattern: `%${escapeLikePattern(input.query)}%`,
             limit: input.limit ?? 50,
+            includeSubagents: input.includeSubagents ?? false,
           }),
         )
         .pipe(

@@ -6,6 +6,7 @@ import {
   ProviderInstanceId,
   ThreadId,
   type OrchestrationV2DomainEvent,
+  type OrchestrationV2AppThreadLineage,
 } from "@t3tools/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as DateTime from "effect/DateTime";
@@ -59,7 +60,11 @@ const createProject = (projectId: ProjectId) =>
 const thread = (
   threadId: ThreadId,
   projectId: ProjectId,
-  overrides: { readonly archivedAt?: DateTime.Utc; readonly deletedAt?: DateTime.Utc } = {},
+  overrides: {
+    readonly archivedAt?: DateTime.Utc;
+    readonly deletedAt?: DateTime.Utc;
+    readonly lineage?: OrchestrationV2AppThreadLineage;
+  } = {},
 ): OrchestrationV2DomainEvent => ({
   id: EventId.make(`created:${threadId}`),
   type: "thread.created",
@@ -79,7 +84,11 @@ const thread = (
     branch: null,
     worktreePath: null,
     activeProviderThreadId: null,
-    lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
+    lineage: overrides.lineage ?? {
+      parentThreadId: null,
+      relationshipToParent: null,
+      rootThreadId: threadId,
+    },
     forkedFrom: null,
     createdAt: at(0),
     updatedAt: at(0),
@@ -120,6 +129,42 @@ const message = (
 });
 
 it.layer(layerTest)("ThreadSearch", (it) => {
+  it.effect("excludes known subagents before LIMIT while retaining forks", () =>
+    Effect.gen(function* () {
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const search = yield* ThreadSearch.ThreadSearch;
+      const project = ProjectId.make("project:visibility");
+      yield* createProject(project);
+      const root = ThreadId.make("root");
+      const child = ThreadId.make("a:child");
+      const fork = ThreadId.make("z:fork");
+      for (const [id, relationshipToParent] of [
+        [child, "subagent"],
+        [fork, "fork"],
+      ] as const) {
+        yield* projections.apply(
+          thread(id, project, {
+            lineage: { rootThreadId: root, parentThreadId: root, relationshipToParent },
+          }),
+        );
+        yield* projections.apply(message(id, `visibility:${id}`, "user", "visibility-token"));
+      }
+      assert.deepEqual(
+        (yield* search.search({ query: "visibility-token", limit: 1 })).matches.map(
+          (match) => match.threadId,
+        ),
+        [fork],
+      );
+      assert.deepEqual(
+        (yield* search.search({
+          query: "visibility-token",
+          limit: 1,
+          includeSubagents: true,
+        })).matches.map((match) => match.threadId),
+        [child],
+      );
+    }),
+  );
   it.effect("returns one finished user or assistant match per active thread", () =>
     Effect.gen(function* () {
       const projections = yield* ProjectionStore.ProjectionStoreV2;

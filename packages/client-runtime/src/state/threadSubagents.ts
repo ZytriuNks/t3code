@@ -34,13 +34,17 @@ function orderKey(subagent: Subagent): number {
  * of rolled-back runs stay out, as they do from the strip.
  */
 export function deriveThreadTurnSubagents(
-  projection: Pick<Projection, "runs" | "subagents">,
+  projection: Pick<Projection, "runs" | "subagents"> & {
+    readonly thread: Pick<Projection["thread"], "id">;
+  },
 ): ThreadTurnSubagents | null {
   const rolledBackRunIds = new Set(
     projection.runs.filter((run) => run.status === "rolled_back").map((run) => run.id),
   );
   const eligible = projection.subagents.filter(
-    (subagent) => subagent.runId === null || !rolledBackRunIds.has(subagent.runId),
+    (subagent) =>
+      subagent.threadId === projection.thread.id &&
+      (subagent.runId === null || !rolledBackRunIds.has(subagent.runId)),
   );
   const [first] = eligible;
   if (first === undefined) return null;

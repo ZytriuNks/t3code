@@ -1,4 +1,5 @@
 import { buildProjectGroups } from "@t3tools/client-runtime/state/project-grouping";
+import { isIndependentThread } from "@t3tools/client-runtime/state/thread-visibility";
 import type {
   EnvironmentProject,
   EnvironmentThreadShell,
@@ -108,7 +109,7 @@ export function sortHomeProjectScopes(input: {
   };
 
   for (const thread of input.threads) {
-    if (thread.archivedAt !== null) continue;
+    if (thread.archivedAt !== null || !isIndependentThread(thread)) continue;
     recordActivity(
       scopeKeyByProjectRef.get(scopedProjectKey(thread.environmentId, thread.projectId)),
       getThreadSortTimestamp(thread, input.projectSortOrder),

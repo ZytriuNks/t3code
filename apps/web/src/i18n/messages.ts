@@ -1,6 +1,8 @@
+import { THREAD_LIFECYCLE_MESSAGES } from "@t3tools/client-runtime/state/thread-lifecycle-result";
 import type { AppLanguage } from "./locale";
 
 export const EN_MESSAGES = {
+  ...THREAD_LIFECYCLE_MESSAGES.en,
   "settings.general.projectOrder.updatedAt": "Last user message",
   "settings.general.projectOrder.createdAt": "Created at",
   "settings.general.projectOrder.manual": "Manual",
@@ -2893,6 +2895,7 @@ export type MessageKey = keyof typeof EN_MESSAGES;
 export type MessageValues = Readonly<Record<string, string | number>>;
 
 export const ZH_CN_MESSAGES = {
+  ...THREAD_LIFECYCLE_MESSAGES["zh-CN"],
   "settings.general.projectOrder.updatedAt": "最后用户消息时间",
   "settings.general.projectOrder.createdAt": "创建时间",
   "settings.general.projectOrder.manual": "手动",

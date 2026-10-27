@@ -3253,6 +3253,14 @@ export type OrchestrationV2ThreadLaunchResult = typeof OrchestrationV2ThreadLaun
 
 export const OrchestrationV2DispatchCommandResult = Schema.Struct({
   sequence: NonNegativeInt,
+  lifecycle: Schema.optionalKey(
+    Schema.Struct({
+      commandId: CommandId,
+      rootThreadId: ThreadId,
+      affectedThreadIds: Schema.Array(ThreadId),
+      cleanup: Schema.Struct({ pendingCount: NonNegativeInt, failedCount: NonNegativeInt }),
+    }),
+  ),
 });
 export type OrchestrationV2DispatchCommandResult = typeof OrchestrationV2DispatchCommandResult.Type;
 

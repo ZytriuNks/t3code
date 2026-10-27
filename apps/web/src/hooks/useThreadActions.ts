@@ -7,11 +7,14 @@ import {
 import { settlePromise, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { canSnooze, threadWokeAt } from "@t3tools/client-runtime/state/thread-settled";
 import { threadRuntimeCanArchive } from "@t3tools/client-runtime/state/models";
+import { resolveThreadLifecycleNotice } from "@t3tools/client-runtime/state/thread-lifecycle-result";
+import { useI18n } from "../i18n/I18nProvider";
 import {
   AuthOrchestrationOperateScope,
   AuthSourceControlWriteScope,
   EnvironmentAuthorizationError,
   EnvironmentId,
+  type OrchestrationV2DispatchCommandResult,
   type ScopedThreadRef,
   ThreadId,
   sessionGrantsScope,
@@ -246,6 +249,29 @@ function threadOperationFailure(target: ScopedThreadRef) {
 }
 
 export function useThreadActions() {
+  const { t } = useI18n();
+  const showLifecycleResult = (
+    operation: "archive" | "unarchive" | "delete",
+    target: ScopedThreadRef,
+    result: OrchestrationV2DispatchCommandResult,
+  ) => {
+    const notice = resolveThreadLifecycleNotice(
+      operation,
+      result,
+      appAtomRegistry.get(environmentServerConfigsAtom).get(target.environmentId)?.environment
+        .capabilities.threadLifecycleCascade,
+    );
+    if (notice === null) return;
+    toastManager.add(
+      stackedThreadToast({
+        type: notice.warning === null ? "success" : "warning",
+        title: t(notice.title),
+        ...(notice.warning === null
+          ? {}
+          : { description: t(notice.warning, { count: notice.count }) }),
+      }),
+    );
+  };
   const archiveThreadMutation = useOrchestrationCommand(threadEnvironment.archive, {
     reportFailure: false,
   });
@@ -330,6 +356,7 @@ export function useThreadActions() {
       return result;
     }
     refreshArchivedThreadsForEnvironment(target.environmentId);
+    showLifecycleResult("unarchive", target, result.value);
     if (opts.navigate) {
       return settlePromise(() =>
         router.navigate({
@@ -375,6 +402,7 @@ export function useThreadActions() {
     }
     refreshArchivedThreadsForEnvironment(threadRef.environmentId);
     opts.onArchived?.();
+    showLifecycleResult("archive", threadRef, archiveResult.value);
     showThreadUndoNotice({
       action: "Archived",
       claim: action,
@@ -510,6 +538,7 @@ export function useThreadActions() {
     }
     refreshArchivedThreadsForEnvironment(threadRef.environmentId);
     releaseComposerDraftUploads(threadRef);
+    showLifecycleResult("delete", threadRef, deleteResult.value);
     clearComposerDraftForThread(threadRef);
     clearProjectDraftThreadById(
       scopeProjectRef(threadRef.environmentId, thread.projectId),
@@ -882,7 +911,12 @@ export function useThreadActions() {
         localApi.dialogs.confirm(
           [
             `Delete thread "${title}"?`,
-            "This permanently clears conversation history for this thread.",
+            t(
+              appAtomRegistry.get(environmentServerConfigsAtom).get(target.environmentId)
+                ?.environment.capabilities.threadLifecycleCascade === true
+                ? "thread.lifecycle.deleteConfirm"
+                : "thread.lifecycle.deleteConfirmLegacy",
+            ),
           ].join("\n"),
           { variant: "destructive" },
         ),

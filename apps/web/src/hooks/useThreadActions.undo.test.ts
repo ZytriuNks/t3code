@@ -26,6 +26,7 @@ vi.mock("../state/session", async (original) => ({
   ...(await original<typeof import("../state/session")>()),
   readEnvironmentScope: () => true,
 }));
+vi.mock("../i18n/I18nProvider", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 vi.mock("react", async (original) => ({
   ...(await original<typeof import("react")>()),
   useCallback: (callback: unknown) => callback,
@@ -94,7 +95,7 @@ function currentUndo() {
 beforeEach(() => {
   vi.useFakeTimers();
   for (const command of Object.values(commands)) {
-    command.mockReset().mockResolvedValue({ _tag: "Success", value: undefined });
+    command.mockReset().mockResolvedValue({ _tag: "Success", value: { sequence: 1 } });
   }
   router.navigate.mockClear();
   router.state.matches[0]!.params = {};

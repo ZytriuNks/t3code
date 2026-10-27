@@ -1,4 +1,5 @@
 import { useAtomValue } from "@effect/atom-react";
+import { useI18n } from "../../i18n/I18nProvider";
 import { ScrollFrame } from "../ui/scroll-frame";
 import { ThreadDetailsControl } from "./ThreadDetailsControl";
 import { ThreadHoverCardPopup } from "../ThreadHoverCard";
@@ -215,6 +216,7 @@ export function ThreadRelationshipsPanel(props: {
   readonly threadId: ThreadId;
   readonly onOpenThread?: ((threadId: ThreadId) => void) | undefined;
 }) {
+  const { t } = useI18n();
   const ref = scopeThreadRef(props.environmentId, props.threadId);
   const projection = useThreadProjection(ref)?.projection ?? null;
   const providersByEnvironment = useEnvironmentProviders();
@@ -258,7 +260,8 @@ export function ThreadRelationshipsPanel(props: {
   const parentNativeStatus = parentProjection
     ? deriveProviderSubagentStatus(parentProjection)?.status
     : undefined;
-  const projected = projection?.subagents ?? [];
+  const projected =
+    projection?.subagents.filter((agent) => agent.threadId === props.threadId) ?? [];
   const runtimeSubagents = projectedSubagentsToRuntime(projected);
   const byId = new Map(runtimeSubagents.map((agent) => [agent.id, agent]));
   const subagentsByThreadId = new Map(
@@ -328,9 +331,8 @@ export function ThreadRelationshipsPanel(props: {
     { id: "previous", label: "Previous agents", rows: previous, expanded: false },
   ];
   const runningCount =
-    (projection?.subagents.filter(
-      (agent) => agent.childThreadId === null && agent.status === "running",
-    ).length ?? 0) + active.filter(({ edge }) => edge.status === "running").length;
+    projected.filter((agent) => agent.childThreadId === null && agent.status === "running").length +
+    active.filter(({ edge }) => edge.status === "running").length;
 
   if (relationshipRows.length === 0 && runningCount === 0) {
     return null;
@@ -456,7 +458,9 @@ export function ThreadRelationshipsPanel(props: {
                   : GitForkIcon;
               const relationship = relationshipLabel(edge, props.threadId);
               const projectedAgent =
-                isSubagent && !isParent ? subagentsByThreadId.get(threadId) : undefined;
+                isSubagent && !isParent && node?.missing !== true
+                  ? subagentsByThreadId.get(threadId)
+                  : undefined;
               const workflowGroup =
                 projectedAgent === undefined
                   ? undefined
@@ -481,6 +485,7 @@ export function ThreadRelationshipsPanel(props: {
                   workflowGroup?.workflow.workflowName ??
                   node?.thread?.title ??
                   agent?.title ??
+                  subagentsByThreadId.get(threadId)?.title ??
                   threadId,
                 isSubagent,
               });
@@ -500,7 +505,7 @@ export function ThreadRelationshipsPanel(props: {
                 : "";
               const project = projects.find((project) => project.id === node?.thread?.projectId);
               const relationshipHint = node?.missing
-                ? "This related thread is unavailable"
+                ? t("thread.relationship.unavailable")
                 : `Open ${relationship.toLowerCase()} in this chat`;
               const RelationshipPopup = agent ? ThreadHoverCardPopup : TooltipPopup;
               const relationshipTooltip = agent ? (

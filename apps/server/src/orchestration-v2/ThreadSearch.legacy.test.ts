@@ -30,10 +30,6 @@ const seed = Effect.gen(function* () {
       ('message:assistant', 'thread:assistant', 'turn:assistant', 'assistant', 'migration needle answer', '[]', 0, ${now}, ${now})
   `;
   yield* sql`
-    INSERT INTO projection_turns (turn_id, thread_id, state, requested_at, started_at, completed_at, assistant_message_id, checkpoint_files_json)
-    VALUES ('turn:assistant', 'thread:assistant', 'completed', ${now}, ${now}, ${now}, 'message:assistant', '[]')
-  `;
-  yield* sql`
     INSERT INTO orchestration_v2_projection_threads (thread_id, project_id, title, default_provider, provider_instance_id, runtime_mode, interaction_mode, active_provider_thread_id, created_at, updated_at, archived_at, deleted_at, payload_json)
     VALUES
       ('thread:active', 'project:search', 'Active', 'codex', 'codex', 'full-access', 'default', NULL, ${now}, ${now}, NULL, NULL, '{}'),
@@ -42,6 +38,36 @@ const seed = Effect.gen(function* () {
   `;
   return { sql, search };
 });
+
+it.effect(
+  "excludes known legacy subagents before LIMIT and preserves forks and unknown lineage",
+  () =>
+    Effect.gen(function* () {
+      const { sql, search } = yield* seed;
+      yield* sql`UPDATE orchestration_v2_projection_threads SET payload_json = '{"lineage":{"relationshipToParent":"subagent"}}' WHERE thread_id = 'thread:active'`;
+      assert.deepEqual(
+        (yield* search.search({ query: "migration needle", limit: 1 })).matches.map(
+          (match) => match.threadId,
+        ),
+        ["thread:assistant"],
+      );
+      assert.deepEqual(
+        (yield* search.search({
+          query: "migration needle",
+          limit: 1,
+          includeSubagents: true,
+        })).matches.map((match) => match.threadId),
+        ["thread:active"],
+      );
+      yield* sql`UPDATE orchestration_v2_projection_threads SET payload_json = '{"lineage":{"relationshipToParent":"fork"}}' WHERE thread_id = 'thread:active'`;
+      assert.deepEqual(
+        (yield* search.search({ query: "migration needle", limit: 1 })).matches.map(
+          (match) => match.threadId,
+        ),
+        ["thread:active"],
+      );
+    }).pipe(Effect.provide(layer)),
+);
 
 it.effect(
   "searches unopened legacy transcripts using V2 visibility without orphan assistant messages",

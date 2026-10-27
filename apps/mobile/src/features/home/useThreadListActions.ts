@@ -1,5 +1,10 @@
 import type { ThreadMoveDestination } from "../threads/threadOrder";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
+import { isIndependentThread } from "@t3tools/client-runtime/state/thread-visibility";
+import {
+  resolveThreadLifecycleNotice,
+  THREAD_LIFECYCLE_MESSAGES,
+} from "@t3tools/client-runtime/state/thread-lifecycle-result";
 import * as ThreadUndo from "@t3tools/client-runtime/state/thread-undo";
 import { showThreadUndoNotice } from "./thread-undo-notice";
 import { canSnooze, effectiveSnoozed } from "@t3tools/client-runtime/state/thread-settled";
@@ -133,6 +138,11 @@ function useThreadActionExecutor(
     onStarted?: () => void,
   ) => {
     if (!checkThreadOperationPermission(thread, actionFailureTitle(action))) return false;
+    if (
+      (action === "archive" || action === "unarchive" || action === "delete") &&
+      !isIndependentThread(thread)
+    )
+      return false;
     const key = scopedThreadKey(thread.environmentId, thread.id);
     if (inFlightThreadKeys.current.has(key)) {
       return false;
@@ -193,6 +203,24 @@ function useThreadActionExecutor(
       }
       if (action === "archive" || action === "unarchive" || action === "delete") {
         refreshArchivedThreadsForEnvironment(thread.environmentId);
+        const notice = resolveThreadLifecycleNotice(
+          action,
+          result.value,
+          appAtomRegistry.get(environmentServerConfigsAtom).get(thread.environmentId)?.environment
+            .capabilities.threadLifecycleCascade,
+        );
+        if (notice !== null) {
+          const copy =
+            THREAD_LIFECYCLE_MESSAGES[
+              Intl.DateTimeFormat().resolvedOptions().locale.startsWith("zh") ? "zh-CN" : "en"
+            ];
+          Dialog.alert(
+            copy[notice.title],
+            notice.warning === null
+              ? ""
+              : copy[notice.warning].replace("{count}", String(notice.count)),
+          );
+        }
       }
       onCompleted?.(action, thread);
       return true;
@@ -212,7 +240,14 @@ function confirmThreadDeletion(
 ) {
   if (!checkThreadOperationPermission(thread, actionFailureTitle("delete"))) return;
   const title = "Delete thread?";
-  const message = `“${thread.title}” will be permanently deleted, including its terminal history.`;
+  const copy =
+    THREAD_LIFECYCLE_MESSAGES[
+      Intl.DateTimeFormat().resolvedOptions().locale.startsWith("zh") ? "zh-CN" : "en"
+    ];
+  const supportsCascade =
+    appAtomRegistry.get(environmentServerConfigsAtom).get(thread.environmentId)?.environment
+      .capabilities.threadLifecycleCascade === true;
+  const message = `“${thread.title}”\n${copy[supportsCascade ? "thread.lifecycle.deleteConfirm" : "thread.lifecycle.deleteConfirmLegacy"]}`;
   Dialog.confirm({
     title,
     message,

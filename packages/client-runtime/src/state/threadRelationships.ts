@@ -61,7 +61,14 @@ export function deriveThreadRelationshipGraph(input: {
   }
   const threads = [...threadsById.values()];
   const nodes = new Map<ThreadId, ThreadRelationshipNode>(
-    threads.map((thread) => [thread.id, { threadId: thread.id, thread, missing: false }]),
+    threads.map((thread) => [
+      thread.id,
+      {
+        threadId: thread.id,
+        thread: thread.deletedAt != null ? null : thread,
+        missing: thread.deletedAt != null,
+      },
+    ]),
   );
   const edgesByKey = new Map<string, ThreadRelationshipEdge>();
   const ensureNode = (threadId: ThreadId) => {
@@ -97,6 +104,7 @@ export function deriveThreadRelationshipGraph(input: {
   if (input.projection !== null) {
     const ownerThreadId = input.projection.thread.id;
     for (const subagent of input.projection.subagents) {
+      if (subagent.threadId !== ownerThreadId) continue;
       if (subagent.childThreadId === null) continue;
       const child = threadsById.get(subagent.childThreadId);
       addEdge({

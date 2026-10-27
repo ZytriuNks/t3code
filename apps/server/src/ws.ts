@@ -1839,7 +1839,10 @@ export const layerWsRpc = (
                 )
                 .pipe(
                   Effect.tap(() => recordClientCommandAnalytics(command)),
-                  Effect.map((result) => ({ sequence: result.sequence })),
+                  Effect.map((result) => ({
+                    sequence: result.sequence,
+                    ...(result.lifecycle === undefined ? {} : { lifecycle: result.lifecycle }),
+                  })),
                   Effect.mapError((cause) => {
                     const detail = userFacingDispatchErrorMessage(cause);
                     return new OrchestrationV2DispatchCommandError({

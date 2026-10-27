@@ -9,6 +9,7 @@ import {
   OrchestrationV2ProviderThread,
   OrchestrationV2ProviderThreadJson,
   OrchestrationV2RpcSchemas,
+  OrchestrationV2DispatchCommandResult,
   OrchestrationV2Subagent,
   OrchestrationV2SubagentJson,
   OrchestrationV2ThreadHistoryPage,
@@ -34,6 +35,20 @@ const decodeOrchestrationV2ProviderCapabilities = Schema.decodeUnknownSync(
 );
 
 describe("orchestration V2 contracts", () => {
+  it("preserves optional lifecycle results and accepts old sequence-only servers", () => {
+    const decode = Schema.decodeUnknownSync(OrchestrationV2DispatchCommandResult);
+    expect(decode({ sequence: 7 })).toEqual({ sequence: 7 });
+    const result = {
+      sequence: 7,
+      lifecycle: {
+        commandId: "command",
+        rootThreadId: "root",
+        affectedThreadIds: ["root", "child"],
+        cleanup: { pendingCount: 2, failedCount: 1 },
+      },
+    };
+    expect(decode(result)).toEqual(result);
+  });
   it("decodes thread event types from a newer server as skippable items", () => {
     const decodeWireItems = Schema.decodeUnknownSync(
       Schema.toCodecJson(Schema.Array(OrchestrationV2RpcSchemas.subscribeThread.output)),

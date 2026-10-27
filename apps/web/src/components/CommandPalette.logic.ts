@@ -1,3 +1,4 @@
+import { isIndependentThread } from "@t3tools/client-runtime/state/thread-visibility";
 import { threadPullRequestSearchTerms } from "@t3tools/shared/threadPullRequests";
 import type { CommandPaletteLinkedThreads } from "../commandPaletteBus";
 import {
@@ -349,6 +350,7 @@ export function buildProjectActionItems(input: {
 export type BuildThreadActionItemsThread = Pick<
   SidebarThreadSummary,
   | "archivedAt"
+  | "lineage"
   | "branch"
   | "createdAt"
   | "environmentId"
@@ -378,7 +380,7 @@ export function buildThreadActionItems<TThread extends BuildThreadActionItemsThr
   limit?: number;
 }): CommandPaletteActionItem[] {
   const sortedThreads = sortThreads(
-    input.threads.filter((thread) => thread.archivedAt === null),
+    input.threads.filter((thread) => thread.archivedAt === null && isIndependentThread(thread)),
     input.sortOrder,
   );
   const visibleThreads =

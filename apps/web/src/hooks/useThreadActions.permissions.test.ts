@@ -1,6 +1,8 @@
 import {
   AuthOrchestrationOperateScope,
   AuthSourceControlWriteScope,
+  CommandId,
+  type OrchestrationV2DispatchCommandResult,
   EnvironmentId,
   ProjectId,
   ThreadId,
@@ -9,6 +11,7 @@ import {
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { appAtomRegistry } from "../rpc/atomRegistry";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -35,8 +38,10 @@ const state = vi.hoisted(() => ({
   toasts: [] as string[],
   afterRequest: undefined as ((action: string) => void) | undefined,
   sessionLookupFails: false,
+  dispatchResult: { sequence: 1 } as OrchestrationV2DispatchCommandResult,
 }));
 
+vi.mock("../i18n/I18nProvider", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 vi.mock("react", () => ({
   useCallback: (callback: unknown) => callback,
   useMemo: (factory: () => unknown) => factory(),
@@ -61,7 +66,7 @@ vi.mock("../state/use-atom-command", () => ({
         return AsyncResult.failure(Cause.fail(new Error("Server denied the request")));
       }
       state.afterRequest?.(action);
-      return AsyncResult.success(undefined);
+      return AsyncResult.success(state.dispatchResult);
     },
 }));
 vi.mock("../state/use-atom-query-runner", () => ({
@@ -229,9 +234,38 @@ beforeEach(() => {
   state.toasts = [];
   state.afterRequest = undefined;
   state.sessionLookupFails = false;
+  state.dispatchResult = { sequence: 1 };
 });
 
 describe("thread action permissions", () => {
+  it("reports real cleanup failure and sends only the selected root command", async () => {
+    state.scopes.get(secondary)!.add(AuthOrchestrationOperateScope);
+    using _configs = vi
+      .spyOn(appAtomRegistry, "get")
+      .mockReturnValue(
+        new Map([[secondary, { environment: { capabilities: { threadLifecycleCascade: true } } }]]),
+      );
+    state.dispatchResult = {
+      sequence: 17,
+      lifecycle: {
+        commandId: CommandId.make("archive"),
+        rootThreadId: target.threadId,
+        affectedThreadIds: [target.threadId, ThreadId.make("child")],
+        cleanup: { pendingCount: 2, failedCount: 1 },
+      },
+    };
+    expect((await useThreadActions().archiveThread(target))._tag).toBe("Success");
+    expect(state.requests).toEqual([
+      { action: "archive", environmentId: secondary, input: { threadId: target.threadId } },
+    ]);
+    expect(state.toasts).toContain("thread.lifecycle.archived");
+    _configs.mockReturnValue(new Map());
+    state.toasts = [];
+    await useThreadActions().unarchiveThread(target);
+    expect(state.toasts).toContain("thread.lifecycle.saved");
+    expect(state.toasts).not.toContain("thread.lifecycle.unarchived");
+  });
+
   it.each(operations)("$name requires the target environment's grant", async ({ run }) => {
     const result = await run(useThreadActions(), target);
     expect(result._tag).toBe("Failure");

@@ -29,6 +29,7 @@ import {
   type OrchestrationV2InternalCommand,
   type OrchestrationV2LimitRecoveryUpdate,
   type OrchestrationV2ServerCommand,
+  type OrchestrationV2DispatchCommandResult,
   type ThreadPullRequestLink,
   type OrchestrationV2AppThread,
   type OrchestrationV2ContextHandoff,
@@ -300,6 +301,7 @@ export type OrchestratorV2Error = typeof OrchestratorV2Error.Type;
 export interface OrchestratorV2DispatchResult {
   readonly sequence: number;
   readonly storedEvents: ReadonlyArray<OrchestrationV2StoredEvent>;
+  readonly lifecycle?: OrchestrationV2DispatchCommandResult["lifecycle"];
 }
 
 export interface OrchestratorV2Shape {
@@ -11879,7 +11881,54 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }
     }
     const dispatch = threadDispatch
-      .withLock(commandThreadId(command), dispatchWithReceiptEffect(command))
+      .withLock(
+        commandThreadId(command),
+        dispatchWithReceiptEffect(command).pipe(
+          Effect.flatMap((result) =>
+            Effect.gen(function* () {
+              if (
+                command.type !== "thread.archive" &&
+                command.type !== "thread.unarchive" &&
+                command.type !== "thread.delete"
+              )
+                return result;
+              const eventType =
+                command.type === "thread.archive"
+                  ? "thread.archived"
+                  : command.type === "thread.unarchive"
+                    ? "thread.unarchived"
+                    : "thread.deleted";
+              const affectedThreadIds = [
+                ...new Set(
+                  result.storedEvents
+                    .filter((stored) => stored.event.type === eventType)
+                    .map((stored) => stored.event.threadId),
+                ),
+              ];
+              if (affectedThreadIds.length === 0) return result;
+              const cleanup = yield* lifecycleResources.getCleanupStatus(command.commandId).pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new OrchestratorDispatchError({
+                      commandId: command.commandId,
+                      commandType: command.type,
+                      cause,
+                    }),
+                ),
+              );
+              return {
+                ...result,
+                lifecycle: {
+                  commandId: command.commandId,
+                  rootThreadId: command.threadId,
+                  affectedThreadIds,
+                  cleanup,
+                },
+              };
+            }),
+          ),
+        ),
+      )
       .pipe(
         Effect.provideService(backgroundProbes, probes),
         Effect.provideService(ThreadLifecycleGuard.DispatchLifecycleGuard, captured),

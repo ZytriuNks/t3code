@@ -2,6 +2,8 @@ import { makeThreadShellFixture } from "../../test-fixtures";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import {
   AuthOrchestrationOperateScope,
+  CommandId,
+  type OrchestrationV2DispatchCommandResult,
   EnvironmentId,
   ProjectId,
   ProviderInstanceId,
@@ -15,6 +17,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 const state = vi.hoisted(() => ({
   pendingOrder: null as object | null,
   dropBusy: false,
+  supportsCascade: false,
+  dispatchResult: { sequence: 1 } as OrchestrationV2DispatchCommandResult,
   failedAction: null as string | null,
   archivedRefreshes: [] as string[],
   scopes: new Map<string, Set<string>>(),
@@ -27,6 +31,7 @@ const state = vi.hoisted(() => ({
   dialogs: [] as { onConfirm: () => void }[],
   alerts: [] as {
     title: string;
+    message?: string;
     buttons?: { text: string; onPress?: () => void }[];
   }[],
   afterRequest: undefined as (() => void) | undefined,
@@ -39,7 +44,7 @@ vi.mock("react", () => ({
 vi.mock("react-native", () => ({
   Alert: {
     alert: (title: string, _message: string, buttons?: { text: string; onPress?: () => void }[]) =>
-      state.alerts.push({ title, buttons }),
+      state.alerts.push({ title, message: _message, buttons }),
   },
 }));
 vi.mock("expo-haptics", () => ({
@@ -48,7 +53,7 @@ vi.mock("expo-haptics", () => ({
 }));
 vi.mock("../../components/ui/Dialog", () => ({
   alert: (title: string, _message: string, buttons?: { text: string; onPress?: () => void }[]) =>
-    state.alerts.push({ title, buttons }),
+    state.alerts.push({ title, message: _message, buttons }),
   confirm: (dialog: { onConfirm: () => void }) => state.dialogs.push(dialog),
 }));
 vi.mock("../archive/useArchivedThreadSnapshots", () => ({
@@ -82,6 +87,7 @@ vi.mock("../../state/atom-registry", () => ({
                     environment: {
                       capabilities: {
                         threadSettlement: true,
+                        threadLifecycleCascade: state.supportsCascade || undefined,
                         threadSnooze: true,
                         threadPinning: true,
                         threadPinReorder: true,
@@ -141,7 +147,7 @@ vi.mock("../../state/threads", () => ({
         if (action === state.failedAction)
           return AsyncResult.failure(Cause.fail(new Error("Server rejected action")));
         state.afterRequest?.();
-        return AsyncResult.success(undefined);
+        return AsyncResult.success(state.dispatchResult);
       },
     ]),
   ),
@@ -180,6 +186,8 @@ beforeEach(() => {
   state.archivedRefreshes = [];
   state.pendingOrder = null;
   state.dropBusy = false;
+  state.supportsCascade = false;
+  state.dispatchResult = { sequence: 1 };
   state.scopes = new Map([
     [primaryEnvironmentId, new Set([AuthOrchestrationOperateScope])],
     [otherEnvironmentId, new Set<string>()],
@@ -461,6 +469,52 @@ describe("thread action undo", () => {
 });
 
 describe("thread archive guard", () => {
+  it("dispatches one root command, preserves forks and never independently archives a child", async () => {
+    const root = makeThread();
+    const child = makeThread({
+      id: ThreadId.make("child"),
+      lineage: { rootThreadId: root.id, parentThreadId: root.id, relationshipToParent: "subagent" },
+    });
+    const fork = makeThread({
+      id: ThreadId.make("fork"),
+      lineage: { ...child.lineage, relationshipToParent: "fork" },
+    });
+    state.shells = [root, child, fork];
+    const actions = useThreadListActions();
+    expect(await actions.archiveThread(child)).toBe(false);
+    expect(state.requests).toEqual([]);
+    expect(await actions.archiveThread(root)).toBe(true);
+    expect(state.requests).toEqual([
+      { action: "archive", environmentId: root.environmentId, input: { threadId: root.id } },
+    ]);
+    expect(state.alerts).toEqual([]);
+    expect(await actions.archiveThread(fork)).toBe(true);
+    expect(state.requests.at(-1)?.input.threadId).toBe(fork.id);
+  });
+
+  it("shows real cleanup warnings after saving an independent thread", async () => {
+    using _locale = vi
+      .spyOn(Intl.DateTimeFormat.prototype, "resolvedOptions")
+      .mockReturnValue({ ...new Intl.DateTimeFormat().resolvedOptions(), locale: "en-US" });
+    const root = makeThread();
+    state.supportsCascade = true;
+    state.dispatchResult = {
+      sequence: 7,
+      lifecycle: {
+        commandId: CommandId.make("archive"),
+        rootThreadId: root.id,
+        affectedThreadIds: [root.id, ThreadId.make("child")],
+        cleanup: { pendingCount: 2, failedCount: 1 },
+      },
+    };
+    expect(await useThreadListActions().archiveThread(root)).toBe(true);
+    expect(state.alerts.at(-1)).toMatchObject({
+      title: "Thread and its subagents archived",
+      message: "The thread state is saved. Resource cleanup needs attention (1 failed).",
+    });
+    expect(state.requests).toHaveLength(1);
+  });
+
   it("keeps active provider runs out of the archive", async () => {
     const thread = makeThread({
       runtime: {

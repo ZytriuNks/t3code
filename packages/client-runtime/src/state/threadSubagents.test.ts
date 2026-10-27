@@ -47,8 +47,17 @@ const activeRun = run("run-1", "running");
 const finishedRun = run("run-1", "completed");
 
 describe("deriveThreadTurnSubagents", () => {
+  it("excludes inherited source agents from a fork's live roster", () => {
+    const turn = deriveThreadTurnSubagents({
+      thread: { id: ThreadId.make("fork") },
+      runs: [activeRun],
+      subagents: [subagent({ id: "inherited" })],
+    });
+    expect(turn).toBeNull();
+  });
   it("scopes the roster to the active run and orders it by start time", () => {
     const turn = deriveThreadTurnSubagents({
+      thread: { id: ThreadId.make("thread-1") },
       runs: [run("run-0", "completed"), activeRun],
       subagents: [
         subagent({ id: "b", startedAt: at("2026-06-20T00:00:05.000Z") }),
@@ -64,6 +73,7 @@ describe("deriveThreadTurnSubagents", () => {
 
   it("falls back to the most recently updated agent's run once the turn settles", () => {
     const turn = deriveThreadTurnSubagents({
+      thread: { id: ThreadId.make("thread-1") },
       runs: [finishedRun, run("run-2", "completed")],
       subagents: [
         subagent({ id: "old", status: "completed", updatedAt: at("2026-06-20T00:00:01.000Z") }),
@@ -83,6 +93,7 @@ describe("deriveThreadTurnSubagents", () => {
 
   it("lists every live agent from earlier turns once no turn is running", () => {
     const turn = deriveThreadTurnSubagents({
+      thread: { id: ThreadId.make("thread-1") },
       runs: ["run-103", "run-105", "run-107", "run-109"].map((id) => run(id, "completed")),
       subagents: [
         subagent({
@@ -119,6 +130,7 @@ describe("deriveThreadTurnSubagents", () => {
 
   it("keeps the active turn's roster and adds a live agent from an earlier turn", () => {
     const turn = deriveThreadTurnSubagents({
+      thread: { id: ThreadId.make("thread-1") },
       runs: [run("run-0", "completed"), activeRun],
       subagents: [
         subagent({ id: "background", runId: RunId.make("run-0") }),
@@ -140,6 +152,7 @@ describe("deriveThreadTurnSubagents", () => {
 
   it("leaves out a live agent whose turn was rolled back", () => {
     const turn = deriveThreadTurnSubagents({
+      thread: { id: ThreadId.make("thread-1") },
       runs: [run("run-0", "rolled_back"), finishedRun],
       subagents: [
         subagent({ id: "rolled-back", runId: RunId.make("run-0") }),
@@ -152,6 +165,7 @@ describe("deriveThreadTurnSubagents", () => {
 
   it("lists a workflow coordinator's members, which carry no run", () => {
     const turn = deriveThreadTurnSubagents({
+      thread: { id: ThreadId.make("thread-1") },
       runs: [],
       subagents: [
         subagent({ id: "member-0", runId: null, startedAt: at("2026-06-20T00:00:01.000Z") }),
@@ -170,6 +184,7 @@ describe("deriveThreadTurnSubagents", () => {
 
   it("counts idle as neither working nor done", () => {
     const turn = deriveThreadTurnSubagents({
+      thread: { id: ThreadId.make("thread-1") },
       runs: [activeRun],
       subagents: [
         subagent({ id: "a", status: "running" }),
