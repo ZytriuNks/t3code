@@ -957,6 +957,46 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
 
   const deletions = yield* ThreadDeletionRecords.ThreadDeletionRecords;
 
+  const planLifecycleRetirements = Effect.fn("Orchestrator.planLifecycleRetirements")(
+    function* (
+      command: Extract<OrchestrationV2Command, { type: "thread.archive" | "thread.delete" }>,
+    ) {
+      const sources = yield* projectionStore.getProviderAttachmentSources(command.threadId);
+      const receipts = yield* effectOutbox.attachmentRetirements(command.threadId);
+      return sources.flatMap((source): Array<PendingOrchestrationEffectV2> => {
+        // Pending/failed intents remain durable and blocked; neither a detached
+        // projection nor a repeated archive replaces their captured provenance.
+        if (
+          receipts.some(
+            (receipt) =>
+              receipt.providerSessionId === source.providerSessionId &&
+              receipt.retirementRevision === (source.lifecycleRevision ?? 0) &&
+              receipt.retirementSourceToken === source.sourceToken,
+          )
+        )
+          return [];
+        return [
+          {
+            id: `effect:${command.commandId}:provider-session.detach:${source.providerSessionId}`,
+            commandId: command.commandId,
+            threadId: command.threadId,
+            request: {
+              type: "provider-session.detach",
+              providerSessionId: source.providerSessionId,
+              // Legacy payloads default revision to zero; missing provenance never
+              // becomes the current token and cannot prove retirement on activation.
+              retirementRevision: source.lifecycleRevision ?? 0,
+              ...(source.sourceToken === null ? {} : { retirementSourceToken: source.sourceToken }),
+              detail: command.type === "thread.archive" ? "Thread archived." : "Thread deleted.",
+              revokeMcpCredential: true,
+            },
+          },
+        ];
+      });
+    },
+    (effect, command) => effect.pipe(mapDispatchError(command)),
+  );
+
   const sourceForPlannedThread = Effect.fn("Orchestrator.sourceForPlannedThread")(
     function* (thread: OrchestrationV2AppThread) {
       if ((yield* projectionStore.getThreadShell(thread.id)) !== null)
@@ -3782,13 +3822,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       });
     }
 
-    // Settle joins archive here: both mean "done with this
-    // thread", so a live provider session must not keep running background
-    // work (PR monitors, dev servers, subagent fleets) after any of them
-    // lands. The settle guard above already rejects active or blocked runs,
-    // so for settle this only ever stops an idle session; commands are
-    // decided serially against the projection, so a turn start that
-    // re-engages the thread cannot race this detach.
+    // Ordinary detaches retain their existing live-session semantics. Archive
+    // below also retires historical bindings, regardless of projection status.
     const detachSessionIds = new Set(
       command.type === "thread.archive" || command.type === "thread.settle"
         ? (providerContext?.providerSessions ?? []).map((session) => session.id)
@@ -3804,7 +3839,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 .map((session) => session.id)
             : (providerSwitchPlan?.releaseProviderSessionIds ?? []),
     );
-    if (detachSessionIds.size > 0) {
+    if (detachSessionIds.size > 0 && command.type !== "thread.archive") {
       const liveSessions = (providerContext?.providerSessions ?? []).filter(
         (session) =>
           detachSessionIds.has(session.id) &&
@@ -3828,15 +3863,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 providerSessionId: session.id,
                 detachedAt: now,
                 reason:
-                  command.type === "thread.archive"
-                    ? "Thread archived."
-                    : command.type === "thread.settle"
-                      ? "Thread settled."
-                      : command.type === "thread.metadata.update"
-                        ? "Workspace changed."
-                        : command.type === "thread.runtime-mode.set"
-                          ? "Runtime mode changed."
-                          : "Provider or model selection changed.",
+                  command.type === "thread.settle"
+                    ? "Thread settled."
+                    : command.type === "thread.metadata.update"
+                      ? "Workspace changed."
+                      : command.type === "thread.runtime-mode.set"
+                        ? "Runtime mode changed."
+                        : "Provider or model selection changed.",
               },
             });
             const pendingEffect = {
@@ -3846,23 +3879,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               request: {
                 type: "provider-session.detach",
                 providerSessionId: session.id,
-                ...(command.type === "thread.archive"
-                  ? { retirementRevision: thread.lifecycleRevision ?? 0 }
-                  : {}),
                 detail:
-                  command.type === "thread.archive"
-                    ? "Thread archived."
-                    : command.type === "thread.settle"
-                      ? "Thread settled."
-                      : command.type === "thread.metadata.update"
-                        ? "Workspace changed."
-                        : command.type === "thread.runtime-mode.set"
-                          ? "Runtime mode changed."
-                          : "Provider or model selection changed.",
-                // Terminal detaches revoke the thread's MCP credentials; other
-                // detach reasons keep them so a re-attaching provider process
-                // stays authorized.
-                ...(command.type === "thread.archive" ? { revokeMcpCredential: true } : {}),
+                  command.type === "thread.settle"
+                    ? "Thread settled."
+                    : command.type === "thread.metadata.update"
+                      ? "Workspace changed."
+                      : command.type === "thread.runtime-mode.set"
+                        ? "Runtime mode changed."
+                        : "Provider or model selection changed.",
               },
             } satisfies PendingOrchestrationEffectV2;
             yield* Ref.update(effects, (existing) => [...existing, pendingEffect]);
@@ -3872,6 +3896,24 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     }
 
     if (command.type === "thread.archive") {
+      const retirements = yield* planLifecycleRetirements(command);
+      yield* Ref.update(effects, (existing) => [...existing, ...retirements]);
+      for (const effect of retirements) {
+        if (effect.request.type !== "provider-session.detach") continue;
+        yield* emit(
+          events,
+          command,
+        )({
+          type: "provider-session.detached",
+          threadId: command.threadId,
+          occurredAt: now,
+          payload: {
+            providerSessionId: effect.request.providerSessionId,
+            detachedAt: now,
+            reason: "Thread archived.",
+          },
+        });
+      }
       yield* Ref.update(effects, (existing) => [
         ...existing,
         {
@@ -11504,7 +11546,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
             ),
           );
-        return yield* mapDispatchError(command)(
+        const plan = yield* mapDispatchError(command)(
           planThreadDeletion({
             command,
             projection,
@@ -11515,6 +11557,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             idAllocator,
           }),
         );
+        return {
+          ...plan,
+          effects: [
+            ...plan.effects.filter((effect) => effect.request.type !== "provider-session.detach"),
+            ...(yield* planLifecycleRetirements(command)),
+          ],
+        };
       }
       case "thread.archive":
       case "thread.unarchive":
@@ -11973,14 +12022,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                   lifecycleSourceToken: lifecycleGuard.sourceToken,
                 },
               }
-            : effect.request.type === "provider-session.detach" &&
-                effect.request.retirementRevision !== undefined &&
-                lifecycleGuard?.sourceToken !== undefined
-              ? {
-                  ...effect,
-                  request: { ...effect.request, retirementSourceToken: lifecycleGuard.sourceToken },
-                }
-              : effect,
+            : effect,
         ),
         ...(plan.cancelUnsettledEffects === undefined
           ? {}

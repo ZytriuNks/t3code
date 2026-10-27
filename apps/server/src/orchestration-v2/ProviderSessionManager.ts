@@ -511,6 +511,31 @@ export const layerWithOptions = (
               ? "retirement_failed"
               : "retirement_pending",
           });
+        const persisted = yield* projectionStore.getProviderAttachmentSources(input.threadId);
+        for (const old of persisted) {
+          if (
+            old.sourceToken === source.sourceToken ||
+            (old.sourceToken === null && source.isLegacy)
+          )
+            continue;
+          if (old.providerSessionId === input.providerSessionId)
+            return yield* new ProviderSessionStaleBindingError({ ...input, reason: "stale" });
+          if (
+            old.sourceToken === null ||
+            old.lifecycleRevision === null ||
+            !retirements.some(
+              (receipt) =>
+                receipt.providerSessionId === old.providerSessionId &&
+                receipt.status === "succeeded" &&
+                receipt.retirementRevision === old.lifecycleRevision &&
+                receipt.retirementSourceToken === old.sourceToken,
+            )
+          )
+            return yield* new ProviderSessionStaleBindingError({
+              ...input,
+              reason: "retirement_unconfirmed",
+            });
+        }
         for (const entry of (yield* Ref.get(sessions)).values()) {
           const old = entry.lifecycleByThread.get(input.threadId);
           if (
@@ -522,8 +547,7 @@ export const layerWithOptions = (
                   receipt.providerSessionId === entry.runtime.providerSessionId &&
                   receipt.status === "succeeded" &&
                   receipt.retirementRevision === old.lifecycleRevision &&
-                  (receipt.retirementSourceToken === old.sourceToken ||
-                    (receipt.retirementSourceToken === null && old.isLegacy)),
+                  receipt.retirementSourceToken === old.sourceToken,
               ))
           )
             return yield* new ProviderSessionStaleBindingError({
@@ -1228,6 +1252,12 @@ export const layerWithOptions = (
                   if (Option.isSome(closeExit) && Exit.isFailure(closeExit.value)) {
                     return yield* Effect.failCause(closeExit.value.cause);
                   }
+                  if (Option.isNone(closeExit))
+                    return yield* new ProviderSessionReleaseError({
+                      providerSessionId: input.providerSessionId,
+                      reason: input.reason,
+                      cause: "scope_close_unconfirmed",
+                    });
                 }).pipe(
                   withMetrics({
                     counter: providerSessionsTotal,

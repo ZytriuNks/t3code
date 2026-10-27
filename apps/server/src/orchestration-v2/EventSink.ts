@@ -366,6 +366,21 @@ const layerBase: Layer.Layer<
     ) {
       const prepared = yield* Effect.forEach(offered, (event, index) =>
         Effect.gen(function* () {
+          const source = options.lifecycleGuard;
+          if (
+            options.lifecyclePurpose !== "terminal_cleanup" &&
+            source?.sourceToken !== undefined &&
+            event.threadId === source.threadId &&
+            (event.type === "provider-thread.updated" || event.type === "provider-session.attached")
+          )
+            return {
+              ...event,
+              // Persist the producer's captured source, never a source resolved on receipt.
+              lifecycleSource: {
+                lifecycleRevision: source.lifecycleRevision,
+                sourceToken: source.sourceToken,
+              },
+            };
           if (
             event.type === "thread.metadata-updated" ||
             event.type === "thread.model-selection-updated"

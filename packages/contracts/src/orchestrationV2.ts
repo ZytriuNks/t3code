@@ -1702,6 +1702,12 @@ export const OrchestrationV2DomainEvent = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2EventBase.fields,
     type: Schema.Literals(["provider-session.attached", "provider-session.updated"]),
+    lifecycleSource: Schema.optional(
+      Schema.Struct({
+        lifecycleRevision: NonNegativeInt,
+        sourceToken: TrimmedNonEmptyString,
+      }),
+    ),
     payload: OrchestrationV2ProviderSession,
   }),
   Schema.Struct({
@@ -1712,6 +1718,12 @@ export const OrchestrationV2DomainEvent = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2EventBase.fields,
     type: Schema.Literal("provider-thread.updated"),
+    lifecycleSource: Schema.optional(
+      Schema.Struct({
+        lifecycleRevision: NonNegativeInt,
+        sourceToken: TrimmedNonEmptyString,
+      }),
+    ),
     payload: OrchestrationV2ProviderThread,
   }),
   Schema.Struct({
@@ -2522,6 +2534,12 @@ export const OrchestrationV2DomainEventJson = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2JsonEventBaseFields,
     type: Schema.Literals(["provider-session.attached", "provider-session.updated"]),
+    lifecycleSource: Schema.optional(
+      Schema.Struct({
+        lifecycleRevision: NonNegativeInt,
+        sourceToken: TrimmedNonEmptyString,
+      }),
+    ),
     payload: OrchestrationV2ProviderSessionJson,
   }),
   Schema.Struct({
@@ -2532,6 +2550,12 @@ export const OrchestrationV2DomainEventJson = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2JsonEventBaseFields,
     type: Schema.Literal("provider-thread.updated"),
+    lifecycleSource: Schema.optional(
+      Schema.Struct({
+        lifecycleRevision: NonNegativeInt,
+        sourceToken: TrimmedNonEmptyString,
+      }),
+    ),
     payload: OrchestrationV2ProviderThreadJson,
   }),
   Schema.Struct({

@@ -35,6 +35,7 @@ import * as Effect from "effect/Effect";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Option from "effect/Option";
@@ -84,6 +85,7 @@ import * as TerminalManager from "../terminal/Manager.ts";
 import * as ResourceCleanupService from "./ResourceCleanupService.ts";
 import * as ThreadLaunchService from "./ThreadLaunchService.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 
 const layerPlatformTest = Layer.merge(
@@ -6327,6 +6329,294 @@ it.layer(layerQueueResumeDisabledInstanceTest)(
         }),
     );
   },
+);
+
+it.effect("lifecycle archive after a close timeout keeps the real retirement worker blocked", () =>
+  Effect.gen(function* () {
+    const closing = yield* Deferred.make<void>();
+    const finish = yield* Deferred.make<void>();
+    const closed = yield* Deferred.make<void>();
+    let opened = 0;
+    using _open = vi.spyOn(orchestrationAdapter, "openSession").mockImplementation((input) =>
+      Effect.gen(function* () {
+        opened++;
+        const now = yield* DateTime.now;
+        yield* Effect.addFinalizer(() =>
+          Deferred.succeed(closing, undefined).pipe(
+            Effect.andThen(Deferred.await(finish)),
+            Effect.andThen(Deferred.succeed(closed, undefined)),
+          ),
+        );
+        return {
+          instanceId: modelSelection.instanceId,
+          driver,
+          providerSessionId: input.providerSessionId,
+          providerSession: {
+            id: input.providerSessionId,
+            driver,
+            providerInstanceId: modelSelection.instanceId,
+            status: "ready",
+            cwd: process.cwd(),
+            model: modelSelection.model,
+            capabilities: CodexProviderCapabilitiesV2,
+            createdAt: now,
+            updatedAt: now,
+            lastError: null,
+          },
+          supportsConfirmedThreadRetirement: true,
+          backgroundTasksEndWithProcess: true,
+          events: Stream.never,
+          ensureThread: () => Effect.die("unused ensure"),
+          resumeThread: (request) => Effect.succeed(request.providerThread),
+          startTurn: () => Effect.void,
+          steerTurn: () => Effect.void,
+          interruptTurn: () => Effect.void,
+          unloadThread: () => Effect.void,
+          respondToRuntimeRequest: () => Effect.void,
+          readThreadSnapshot: () => Effect.die("unused snapshot"),
+          rollbackThread: () => Effect.die("unused rollback"),
+          forkThread: () => Effect.die("unused fork"),
+        } satisfies ProviderAdapter.ProviderAdapterV2SessionRuntime;
+      }),
+    );
+    yield* Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+      const sink = yield* EventSink.EventSinkV2;
+      const ids = yield* IdAllocator.IdAllocatorV2.pipe(Effect.provide(IdAllocator.layer));
+      const threadId = ThreadId.make("timeout-archive:A");
+      const projectId = ProjectId.make("timeout-archive:project");
+      const now = yield* DateTime.now;
+      yield* seedProject({
+        projectId,
+        title: "Timeout archive",
+        workspaceRoot: process.cwd(),
+        defaultModelSelection: null,
+        createdAt: DateTime.formatIso(now),
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make(`${threadId}:create`),
+        threadId,
+        projectId,
+        title: "Timeout archive",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdBy: "user",
+        creationSource: "web",
+      });
+      const source = yield* orchestrator.resolveLifecycleSource(threadId);
+      const providerSessionId = ids.derive.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+      });
+      const runtimePolicy = {
+        runtimeMode: "full-access" as const,
+        interactionMode: "default" as const,
+        cwd: process.cwd(),
+      };
+      yield* sessions.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+      yield* sink.write({
+        lifecycleGuard: source,
+        events: [
+          {
+            id: EventId.make(`${threadId}:native`),
+            type: "provider-thread.updated",
+            threadId,
+            occurredAt: now,
+            payload: {
+              id: ProviderThreadId.make(`${threadId}:native`),
+              driver,
+              providerInstanceId: modelSelection.instanceId,
+              appThreadId: threadId,
+              ownerNodeId: null,
+              providerSessionId,
+              nativeThreadRef: { driver, nativeId: "native-timeout", strength: "strong" },
+              nativeStorage: { type: "resolved", canonicalRoot: "/fixture/native" },
+              nativeConversationHeadRef: null,
+              status: "idle",
+              firstRunOrdinal: null,
+              lastRunOrdinal: null,
+              handoffIds: [],
+              forkedFrom: null,
+              createdAt: now,
+              updatedAt: now,
+            },
+          },
+        ],
+      });
+      const release = yield* sessions
+        .release({ providerSessionId, reason: "manual_shutdown" })
+        .pipe(Effect.exit, Effect.forkScoped);
+      yield* Deferred.await(closing);
+      yield* TestClock.adjust("30 seconds");
+      assert.isTrue(Exit.isFailure(yield* Fiber.join(release)));
+      assert.isFalse(yield* sessions.isLive(providerSessionId));
+      const archiveId = CommandId.make(`${threadId}:archive`);
+      yield* orchestrator.dispatch({ type: "thread.archive", commandId: archiveId, threadId });
+      const retirement = (yield* outbox.attachmentRetirements(threadId))[0]!;
+      assert.equal(retirement.status, "pending");
+      assert.equal(retirement.providerSessionId, providerSessionId);
+      assert.equal(retirement.retirementSourceToken, source.sourceToken);
+      yield* orchestrator.dispatch({
+        type: "thread.unarchive",
+        commandId: CommandId.make(`${threadId}:restore`),
+        threadId,
+      });
+      const fresh = yield* orchestrator.resolveLifecycleSource(threadId);
+      const activate = {
+        threadId,
+        providerSessionId: ids.derive.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          incarnation: { threadId, sourceToken: fresh.sourceToken },
+        }),
+        modelSelection,
+        runtimePolicy,
+      };
+      assert.equal(
+        (yield* sessions.open(activate).pipe(Effect.flip))._tag,
+        "ProviderSessionStaleBindingError",
+      );
+      assert.isAtLeast(yield* worker.drain(), 1);
+      const receipt = yield* outbox.get(retirement.effectId);
+      assert.isTrue(Option.isSome(receipt));
+      if (Option.isSome(receipt)) assert.notEqual(receipt.value.status, "succeeded");
+      assert.equal(
+        (yield* sessions.open(activate).pipe(Effect.flip))._tag,
+        "ProviderSessionStaleBindingError",
+      );
+      yield* Deferred.succeed(finish, undefined);
+      yield* Deferred.await(closed);
+      assert.equal(
+        (yield* sessions.open(activate).pipe(Effect.flip))._tag,
+        "ProviderSessionStaleBindingError",
+      );
+      assert.equal(opened, 1);
+      yield* orchestrator.dispatch({
+        type: "thread.archive",
+        commandId: CommandId.make(`${threadId}:archive-again`),
+        threadId,
+      });
+      const retained = yield* outbox.attachmentRetirements(threadId);
+      assert.lengthOf(retained, 1);
+      assert.equal(retained[0]?.effectId, retirement.effectId);
+      assert.equal(retained[0]?.retirementSourceToken, source.sourceToken);
+    }).pipe(Effect.ensuring(Deferred.succeed(finish, undefined)), Effect.provide(layerTest));
+  }),
+);
+
+it.effect.each(["stopped", "error", "detached"] as const)(
+  "lifecycle archive retains persistent retirement intent for a %s session",
+  (status) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const sink = yield* EventSink.EventSinkV2;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const projectId = ProjectId.make(`retirement-intent:${status}`);
+      const threadId = ThreadId.make(`retirement-intent:${status}`);
+      const now = yield* DateTime.now;
+      yield* seedProject({
+        projectId,
+        title: "Retirement",
+        workspaceRoot: "/retirement",
+        defaultModelSelection: null,
+        createdAt: DateTime.formatIso(now),
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make(`${threadId}:create`),
+        threadId,
+        projectId,
+        title: "Retirement",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdBy: "user",
+        creationSource: "web",
+      });
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make(`${threadId}:message`),
+        threadId,
+        messageId: MessageId.make(`${threadId}:message`),
+        text: "Prepare",
+        attachments: [],
+        dispatchMode: { type: "defer_start" },
+        createdBy: "user",
+        creationSource: "web",
+      });
+      const session = {
+        id: ProviderSessionId.make(`${threadId}:S0`),
+        driver,
+        providerInstanceId: modelSelection.instanceId,
+        status: "ready" as const,
+        cwd: "/retirement",
+        model: modelSelection.model,
+        capabilities: CodexProviderCapabilitiesV2,
+        createdAt: now,
+        updatedAt: now,
+        lastError: null,
+      };
+      const source = yield* orchestrator.resolveLifecycleSource(threadId);
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make(`${threadId}:captured`),
+            type: "provider-session.attached",
+            threadId,
+            occurredAt: now,
+            payload: session,
+            lifecycleSource: source,
+          },
+        ],
+      });
+      yield* sink.write({
+        events:
+          status === "detached"
+            ? [
+                {
+                  id: EventId.make(`${threadId}:detached`),
+                  type: "provider-session.detached",
+                  threadId,
+                  occurredAt: now,
+                  payload: {
+                    providerSessionId: session.id,
+                    detachedAt: now,
+                    reason: "Ordinary model switch.",
+                  },
+                },
+              ]
+            : [
+                {
+                  id: EventId.make(`${threadId}:stopped`),
+                  type: "provider-session.updated",
+                  threadId,
+                  occurredAt: now,
+                  payload: { ...session, status },
+                },
+              ],
+      });
+      const commandId = CommandId.make(`${threadId}:archive`);
+      yield* orchestrator.dispatch({ type: "thread.archive", commandId, threadId });
+      const retirements = (yield* outbox.listByCommandId(commandId)).filter(
+        (effect) => effect.request.type === "provider-session.detach",
+      );
+      assert.lengthOf(retirements, 1);
+      assert.deepEqual(retirements[0]!.request, {
+        type: "provider-session.detach",
+        providerSessionId: session.id,
+        retirementRevision: source.lifecycleRevision,
+        retirementSourceToken: source.sourceToken,
+        detail: "Thread archived.",
+        revokeMcpCredential: true,
+      });
+    }).pipe(Effect.provide(layerTest)),
 );
 
 it.effect.each(["old", "missing", "fresh"] as const)(

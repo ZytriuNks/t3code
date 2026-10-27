@@ -30,6 +30,7 @@ import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
+import * as SqlClient from "effect/sql/SqlClient";
 import { TestClock } from "effect/testing";
 import { HttpServer } from "effect/http";
 
@@ -44,6 +45,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as EventSink from "./EventSink.ts";
 import * as ThreadLifecycleGuard from "./ThreadLifecycleGuard.ts";
+import * as ProviderRuntimeRecoveryService from "./ProviderRuntimeRecoveryService.ts";
 import * as EventStore from "./EventStore.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
 import * as EffectWorker from "./EffectWorker.ts";
@@ -350,6 +352,8 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
     readonly confirmsRetirement?: boolean;
     readonly spawnBeforeOpen?: boolean;
     readonly scopeCloseReached?: Deferred.Deferred<void>;
+    readonly finishScopeClose?: Deferred.Deferred<void>;
+    readonly scopeClosed?: Deferred.Deferred<void>;
   } = {},
 ) {
   const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
@@ -357,7 +361,13 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
     Ref.update(state, (current) => ({
       ...current,
       closeCount: current.closeCount + 1,
-    })),
+    })).pipe(
+      Effect.andThen(
+        options.scopeClosed === undefined
+          ? Effect.void
+          : Deferred.succeed(options.scopeClosed, undefined),
+      ),
+    ),
   );
   // Registered after countClose so it runs first on scope close, wedging the
   // close before the closeCount finalizer, like a provider process that never
@@ -366,7 +376,13 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
     (options.scopeCloseReached === undefined
       ? Effect.void
       : Deferred.succeed(options.scopeCloseReached, undefined)
-    ).pipe(Effect.andThen(Effect.never)),
+    ).pipe(
+      Effect.andThen(
+        options.finishScopeClose === undefined
+          ? Effect.never
+          : Deferred.await(options.finishScopeClose),
+      ),
+    ),
   );
   return ProviderAdapter.ProviderAdapterV2.of({
     instanceId: ProviderInstanceId.make("codex"),
@@ -501,6 +517,8 @@ function layerTest(input: {
   readonly confirmsRetirement?: boolean;
   readonly spawnBeforeOpen?: boolean;
   readonly scopeCloseReached?: Deferred.Deferred<void>;
+  readonly finishScopeClose?: Deferred.Deferred<void>;
+  readonly scopeClosed?: Deferred.Deferred<void>;
   readonly serverSettingsLayer?: ReturnType<typeof ServerSettings.layerTest>;
   readonly projectServiceLayer?: Layer.Layer<ProjectService.ProjectService>;
 }) {
@@ -541,6 +559,8 @@ function layerTest(input: {
       ...(input.scopeCloseReached === undefined
         ? {}
         : { scopeCloseReached: input.scopeCloseReached }),
+      ...(input.finishScopeClose === undefined ? {} : { finishScopeClose: input.finishScopeClose }),
+      ...(input.scopeClosed === undefined ? {} : { scopeClosed: input.scopeClosed }),
     }).pipe(Effect.map(ProviderAdapterRegistry.layerSingle)),
   );
   const layerConfiguredMcpRegistry =
@@ -573,7 +593,7 @@ function layerTest(input: {
       idleTimeoutMs: input.idleTimeoutMs,
       ...(input.maxIdlePinMs === undefined ? {} : { maxIdlePinMs: input.maxIdlePinMs }),
     }).pipe(
-      Layer.provide(
+      Layer.provideMerge(
         Layer.mergeAll(
           layerRegistry.pipe(Layer.provideMerge(McpProviderSessions.layer)),
           CommandOutputHub.layer.pipe(
@@ -589,7 +609,7 @@ function layerTest(input: {
         ),
       ),
     ),
-  ).pipe(Layer.provide(NodeServices.layer));
+  ).pipe(Layer.provideMerge(NodeServices.layer));
 }
 
 const fakeHttpServer = HttpServer.HttpServer.of({
@@ -609,6 +629,28 @@ const layerTestMcpRegistry = Layer.effect(
   Layer.provide(Layer.succeed(HttpServer.HttpServer, fakeHttpServer)),
   Layer.provide(Layer.succeed(ServerEnvironment.ServerEnvironment, fakeEnvironment)),
   Layer.provide(NodeServices.layer),
+);
+
+const layerRetirementWorker = EffectWorker.layerWithOptions({
+  workerId: "retirement-worker",
+  maxAttempts: 1,
+}).pipe(
+  Layer.provide(
+    EffectWorker.layerExecutor.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          ServerSettings.layerTest(),
+          Layer.mock(RunFinalizationService.RunFinalizationService)({}),
+          Layer.mock(CheckpointRollbackService.CheckpointRollbackServiceV2)({}),
+          Layer.mock(ProviderTurnControlService.ProviderTurnControlServiceV2)({}),
+          Layer.mock(ProviderTurnStartService.ProviderTurnStartServiceV2)({}),
+          Layer.mock(RuntimeRequestService.RuntimeRequestServiceV2)({}),
+          Layer.mock(ThreadTitleRegenerationService.ThreadTitleRegenerationService)({}),
+          Layer.mock(ThreadManagementService.ThreadManagementService)({}),
+        ),
+      ),
+    ),
+  ),
 );
 
 const layerPausingMcpRegistry = (pause: {
@@ -2990,7 +3032,13 @@ it.effect.each(["old", "fresh"] as const)(
             id: retirementId,
             commandId: CommandId.make("command:lifecycle-retirement"),
             threadId,
-            request: { type: "provider-session.detach", providerSessionId, retirementRevision: 0 },
+            request: {
+              type: "provider-session.detach",
+              providerSessionId,
+              retirementRevision: 0,
+              retirementSourceToken: ThreadLifecycleGuard.lifecycleSourceForPath([created.payload])
+                .sourceToken,
+            },
           },
         ]);
         assert.equal(
@@ -3068,6 +3116,530 @@ it.effect.each(["old", "fresh"] as const)(
     }),
 );
 
+it.effect.each(["released", "restart", "native-binding-only", "explicit-old-id"] as const)(
+  "lifecycle persistent old native binding blocks reactivation after %s without a receipt",
+  (origin) =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      yield* Effect.gen(function* () {
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const sink = yield* EventSink.EventSinkV2;
+        const ids = yield* IdAllocator.IdAllocatorV2;
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const guards = yield* ThreadLifecycleGuard.ThreadLifecycleGuard;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make(`persistent-retirement:${origin}`);
+        const created = yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now });
+        const providerSessionId = ids.derive.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+        });
+        yield* sink.write({ events: [created] });
+        if (origin === "released")
+          yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+        yield* sink.write({
+          events: [
+            ...(origin === "native-binding-only" || origin === "explicit-old-id"
+              ? []
+              : [
+                  {
+                    id: yield* ids.allocate.event({ threadId }),
+                    type: "provider-session.attached" as const,
+                    threadId,
+                    occurredAt: now,
+                    payload: {
+                      ...makeProviderSession({ providerSessionId, now }),
+                      status: "stopped" as const,
+                    },
+                  },
+                ]),
+            {
+              id: yield* ids.allocate.event({ threadId }),
+              type: "provider-thread.updated",
+              threadId,
+              occurredAt: now,
+              payload: makeProviderThread({ idAllocator: ids, threadId, providerSessionId, now }),
+            },
+          ],
+        });
+        if (origin === "released")
+          yield* manager.release({ providerSessionId, reason: "manual_shutdown" });
+        assert.isFalse(yield* manager.isLive(providerSessionId));
+        assert.isEmpty(yield* outbox.attachmentRetirements(threadId));
+        assert.equal(
+          (yield* store.getThreadRecords(threadId, ["providerThreads"])).providerThreads[0]
+            ?.providerSessionId,
+          providerSessionId,
+        );
+        const activate = yield* Deferred.make<void>();
+        const pending = yield* Deferred.await(activate).pipe(
+          Effect.andThen(
+            Effect.gen(function* () {
+              const source = yield* guards.resolveLifecycleSource(threadId);
+              return yield* manager.open({
+                threadId,
+                providerSessionId:
+                  origin === "explicit-old-id"
+                    ? providerSessionId
+                    : ids.derive.providerSession({
+                        providerInstanceId: modelSelection.instanceId,
+                        incarnation: { threadId, sourceToken: source.sourceToken },
+                      }),
+                modelSelection,
+                runtimePolicy,
+              });
+            }),
+          ),
+          Effect.exit,
+          Effect.forkChild,
+        );
+        yield* sink.write({
+          events: [
+            {
+              ...created,
+              id: yield* ids.allocate.event({ threadId }),
+              type: "thread.unarchived",
+              payload: { ...created.payload, lifecycleRevision: 2 },
+            },
+          ],
+        });
+        if (origin === "explicit-old-id") {
+          const source = yield* guards.resolveLifecycleSource(threadId);
+          yield* sink.write({
+            lifecycleGuard: source,
+            events: [
+              {
+                id: yield* ids.allocate.event({ threadId }),
+                type: "provider-thread.updated",
+                threadId,
+                occurredAt: now,
+                payload: makeProviderThread({ idAllocator: ids, threadId, providerSessionId, now }),
+              },
+            ],
+          });
+          assert.equal((yield* store.getProviderAttachmentSources(threadId))[0]?.sourceToken, null);
+        }
+        const opened = (yield* Ref.get(state)).openCount;
+        yield* Deferred.succeed(activate, undefined);
+        const result = yield* Fiber.join(pending);
+        assert.equal(result._tag, "Failure");
+        if (Exit.isFailure(result))
+          assert.instanceOf(
+            Cause.squash(result.cause),
+            ProviderSessionManager.ProviderSessionStaleBindingError,
+          );
+        assert.equal((yield* Ref.get(state)).openCount, opened);
+        assert.equal((yield* Ref.get(state)).resumeCount, 0);
+      }).pipe(
+        Effect.provide(
+          layerTest({
+            state,
+            idleTimeoutMs: 60000,
+            ...(origin === "explicit-old-id" ? { capabilities: ExclusiveCapabilities } : {}),
+          }),
+        ),
+      );
+    }),
+);
+
+it.effect.each(["confirmed", "lost-running"] as const)(
+  "lifecycle restart requires a durable exact retirement (%s)",
+  (outcome) =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      yield* Effect.gen(function* () {
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const sink = yield* EventSink.EventSinkV2;
+        const ids = yield* IdAllocator.IdAllocatorV2;
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        const events = yield* EventStore.EventStoreV2;
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const guards = yield* ThreadLifecycleGuard.ThreadLifecycleGuard;
+        const sql = yield* SqlClient.SqlClient;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make(`restart-receipt:${outcome}:A`);
+        const otherId = ThreadId.make(`restart-receipt:${outcome}:B`);
+        const created = yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now });
+        yield* sink.write({
+          events: [
+            created,
+            yield* makeThreadCreatedEvent({ idAllocator: ids, threadId: otherId, now }),
+          ],
+        });
+        const oldId = ids.derive.providerSession({ providerInstanceId: modelSelection.instanceId });
+        const oldRuntime = yield* manager.open({
+          threadId,
+          providerSessionId: oldId,
+          modelSelection,
+          runtimePolicy,
+        });
+        const other = yield* manager.open({
+          threadId: otherId,
+          providerSessionId: oldId,
+          modelSelection,
+          runtimePolicy,
+        });
+        const old = yield* guards.resolveLifecycleSource(threadId);
+        const native = {
+          ...makeProviderThread({ idAllocator: ids, threadId, providerSessionId: oldId, now }),
+          nativeStorage: { type: "resolved" as const, canonicalRoot: "/fixture/native" },
+        };
+        yield* sink.write({
+          lifecycleGuard: old,
+          events: [
+            {
+              id: yield* ids.allocate.event({ threadId }),
+              type: "provider-thread.updated",
+              threadId,
+              occurredAt: now,
+              payload: native,
+            },
+          ],
+        });
+        yield* oldRuntime.resumeThread({ threadId, providerThread: native });
+        const captured = yield* events
+          .read({ threadId, eventType: "provider-session.attached" })
+          .pipe(Stream.runHead);
+        assert.isTrue(Option.isSome(captured));
+        if (Option.isSome(captured) && captured.value.event.type === "provider-session.attached")
+          assert.deepEqual(captured.value.event.lifecycleSource, {
+            lifecycleRevision: 0,
+            sourceToken: old.sourceToken,
+          });
+        yield* sink.write({
+          events: [
+            {
+              ...created,
+              id: yield* ids.allocate.event({ threadId }),
+              type: "thread.unarchived",
+              payload: { ...created.payload, lifecycleRevision: 2 },
+            },
+          ],
+        });
+        const source = yield* guards.resolveLifecycleSource(threadId);
+        const freshId = ids.derive.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          incarnation: { threadId, sourceToken: source.sourceToken },
+        });
+        // A command can replace the current binding before the new runtime opens.
+        yield* sink.write({
+          lifecycleGuard: source,
+          events: [
+            {
+              id: yield* ids.allocate.event({ threadId }),
+              type: "provider-thread.updated",
+              threadId,
+              occurredAt: now,
+              payload: { ...native, providerSessionId: freshId },
+            },
+          ],
+        });
+        assert.deepEqual(yield* store.getProviderAttachmentSources(threadId), [
+          { providerSessionId: oldId, lifecycleRevision: 0, sourceToken: old.sourceToken },
+          { providerSessionId: freshId, lifecycleRevision: 2, sourceToken: source.sourceToken },
+        ]);
+        const effectId = `restart-retirement:${outcome}`;
+        yield* outbox.enqueue([
+          {
+            id: effectId,
+            commandId: CommandId.make(effectId),
+            threadId,
+            request: {
+              type: "provider-session.detach",
+              providerSessionId: oldId,
+              retirementRevision: 0,
+              retirementSourceToken: old.sourceToken,
+            },
+          },
+        ]);
+        if (outcome === "confirmed") {
+          yield* Effect.gen(function* () {
+            assert.equal(yield* (yield* EffectWorker.OrchestrationEffectWorkerV2).drain(), 1);
+          }).pipe(Effect.provide(layerRetirementWorker));
+        } else {
+          assert.isTrue(
+            Option.isSome(
+              yield* outbox.claimNext({ workerId: "lost-worker", leaseDurationMs: 30000 }),
+            ),
+          );
+        }
+        // A fresh manager has no old entry, but shares the persisted DB with the lost process.
+        yield* Effect.gen(function* () {
+          const restarted = yield* ProviderSessionManager.ProviderSessionManagerV2;
+          assert.isFalse(yield* restarted.isLive(oldId));
+          const recovered = yield* Effect.gen(function* () {
+            return yield* (yield* ProviderRuntimeRecoveryService.ProviderRuntimeRecoveryService).reconcile(
+              "startup",
+            );
+          }).pipe(
+            Effect.provide(
+              ProviderRuntimeRecoveryService.layer.pipe(Layer.provide(ServerSettings.layerTest())),
+            ),
+          );
+          assert.equal(recovered.requeuedEffects, outcome === "lost-running" ? 1 : 0);
+          const activate = { threadId, providerSessionId: freshId, modelSelection, runtimePolicy };
+          assert.equal(
+            (yield* restarted.open({ ...activate, providerSessionId: oldId }).pipe(Effect.flip))
+              ._tag,
+            "ProviderSessionStaleBindingError",
+          );
+          if (outcome === "lost-running") {
+            assert.equal(
+              (yield* restarted.open(activate).pipe(Effect.flip))._tag,
+              "ProviderSessionStaleBindingError",
+            );
+            yield* Effect.gen(function* () {
+              assert.equal(yield* (yield* EffectWorker.OrchestrationEffectWorkerV2).drain(), 1);
+            }).pipe(Effect.provide(layerRetirementWorker));
+            assert.equal(
+              (yield* restarted.open(activate).pipe(Effect.flip))._tag,
+              "ProviderSessionStaleBindingError",
+            );
+            assert.equal((yield* Ref.get(state)).openCount, 1);
+          } else {
+            const fresh = yield* restarted.open(activate);
+            const resumed = yield* fresh.resumeThread({ threadId, providerThread: native });
+            assert.equal(resumed.id, native.id);
+            assert.deepEqual(resumed.nativeThreadRef, native.nativeThreadRef);
+            assert.deepEqual(resumed.nativeStorage, native.nativeStorage);
+            assert.strictEqual(yield* restarted.open(activate), fresh);
+            assert.equal((yield* Ref.get(state)).openCount, 2);
+          }
+          const receipt = yield* outbox.get(effectId);
+          assert.isTrue(Option.isSome(receipt));
+          if (Option.isSome(receipt)) {
+            assert.equal(receipt.value.status, outcome === "confirmed" ? "succeeded" : "failed");
+            assert.equal(receipt.value.attemptCount, outcome === "confirmed" ? 1 : 2);
+          }
+          yield* sql`UPDATE orchestration_v2_effect_outbox SET completed_at = '2000-01-01T00:00:00.000Z' WHERE effect_id = ${effectId}`;
+          assert.equal(yield* outbox.pruneSettled, 0);
+          assert.isTrue(Option.isSome(yield* outbox.get(effectId)));
+          // Retirement/recovery of A never closes the old shared runtime serving B.
+          yield* other.resumeThread({
+            threadId: otherId,
+            providerThread: makeProviderThread({
+              idAllocator: ids,
+              threadId: otherId,
+              providerSessionId: oldId,
+              now,
+              nativeThreadId: "native-B",
+            }),
+          });
+          assert.isTrue(yield* manager.isLive(oldId));
+          assert.equal((yield* Ref.get(state)).closeCount, 0);
+        }).pipe(
+          Effect.provide(
+            Layer.fresh(ProviderSessionManager.layerWithOptions({ idleTimeoutMs: 60000 })),
+          ),
+        );
+      }).pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 60000 })));
+    }),
+);
+
+it.effect("lifecycle scope close timeout stays unconfirmed after archive and restore", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const scopeCloseReached = yield* Deferred.make<void>();
+    const finishScopeClose = yield* Deferred.make<void>();
+    const scopeClosed = yield* Deferred.make<void>();
+    yield* Effect.gen(function* () {
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const sink = yield* EventSink.EventSinkV2;
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const guards = yield* ThreadLifecycleGuard.ThreadLifecycleGuard;
+      const threadId = ThreadId.make("close-timeout:A");
+      const now = yield* DateTime.now;
+      const created = yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now });
+      yield* sink.write({ events: [created] });
+      const oldId = ids.derive.providerSession({ providerInstanceId: modelSelection.instanceId });
+      yield* manager.open({ threadId, providerSessionId: oldId, modelSelection, runtimePolicy });
+      const old = yield* guards.resolveLifecycleSource(threadId);
+      yield* sink.write({
+        lifecycleGuard: old,
+        events: [
+          {
+            id: yield* ids.allocate.event({ threadId }),
+            type: "provider-thread.updated",
+            threadId,
+            occurredAt: now,
+            payload: makeProviderThread({
+              idAllocator: ids,
+              threadId,
+              providerSessionId: oldId,
+              now,
+            }),
+          },
+        ],
+      });
+      const release = yield* manager
+        .release({ providerSessionId: oldId, reason: "manual_shutdown" })
+        .pipe(Effect.exit, Effect.forkScoped);
+      yield* Deferred.await(scopeCloseReached);
+      // Trigger the existing production close deadline; completion is observed through Fiber.join.
+      yield* TestClock.adjust("30 seconds");
+      const result = yield* Fiber.join(release);
+      assert.isTrue(Exit.isFailure(result));
+      if (Exit.isFailure(result))
+        assert.instanceOf(
+          Cause.squash(result.cause),
+          ProviderSessionManager.ProviderSessionReleaseError,
+        );
+      assert.isFalse(yield* manager.isLive(oldId));
+      assert.equal((yield* Ref.get(state)).closeCount, 0);
+      assert.equal(
+        (yield* store.getThreadRecords(threadId, ["providerSessions"])).providerSessions[0]?.status,
+        "stopped",
+      );
+      assert.isEmpty(yield* outbox.attachmentRetirements(threadId));
+      for (const lifecycleRevision of [1, 2])
+        yield* sink.write({
+          events: [
+            {
+              ...created,
+              id: yield* ids.allocate.event({ threadId }),
+              type: lifecycleRevision === 1 ? "thread.archived" : "thread.unarchived",
+              payload: {
+                ...created.payload,
+                lifecycleRevision,
+                archivedAt: lifecycleRevision === 1 ? now : null,
+              },
+            },
+          ],
+        });
+      const source = yield* guards.resolveLifecycleSource(threadId);
+      const activate = {
+        threadId,
+        providerSessionId: ids.derive.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          incarnation: { threadId, sourceToken: source.sourceToken },
+        }),
+        modelSelection,
+        runtimePolicy,
+      };
+      assert.equal(
+        (yield* manager.open(activate).pipe(Effect.flip))._tag,
+        "ProviderSessionStaleBindingError",
+      );
+      const effectId = "close-timeout-retirement";
+      yield* outbox.enqueue([
+        {
+          id: effectId,
+          commandId: CommandId.make(effectId),
+          threadId,
+          request: {
+            type: "provider-session.detach",
+            providerSessionId: oldId,
+            retirementRevision: 0,
+            retirementSourceToken: old.sourceToken,
+          },
+        },
+      ]);
+      yield* Effect.gen(function* () {
+        assert.equal(yield* (yield* EffectWorker.OrchestrationEffectWorkerV2).drain(), 1);
+      }).pipe(Effect.provide(layerRetirementWorker));
+      assert.equal((yield* outbox.attachmentRetirements(threadId))[0]?.status, "failed");
+      assert.equal(
+        (yield* manager.open(activate).pipe(Effect.flip))._tag,
+        "ProviderSessionStaleBindingError",
+      );
+      yield* Deferred.succeed(finishScopeClose, undefined);
+      yield* Deferred.await(scopeClosed);
+      assert.equal((yield* Ref.get(state)).closeCount, 1);
+      // Even a late ordinary scope close is not an exact lifecycle retirement receipt.
+      assert.equal(
+        (yield* manager.open(activate).pipe(Effect.flip))._tag,
+        "ProviderSessionStaleBindingError",
+      );
+      assert.equal((yield* Ref.get(state)).openCount, 1);
+    }).pipe(
+      Effect.ensuring(Deferred.succeed(finishScopeClose, undefined)),
+      Effect.provide(
+        layerTest({
+          state,
+          idleTimeoutMs: 60000,
+          hangSessionScopeClose: true,
+          scopeCloseReached,
+          finishScopeClose,
+          scopeClosed,
+        }),
+      ),
+    );
+  }),
+);
+
+it.effect.each(["session", "thread", "revision", "source", "ordinary"] as const)(
+  "lifecycle rejects a persisted success receipt for the wrong %s",
+  (mismatch) =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      yield* Effect.gen(function* () {
+        const sink = yield* EventSink.EventSinkV2;
+        const ids = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const guards = yield* ThreadLifecycleGuard.ThreadLifecycleGuard;
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make(`mismatched-receipt:${mismatch}`);
+        const created = yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now });
+        yield* sink.write({ events: [created] });
+        const oldId = ids.derive.providerSession({ providerInstanceId: modelSelection.instanceId });
+        yield* manager.open({ threadId, providerSessionId: oldId, modelSelection, runtimePolicy });
+        const old = yield* guards.resolveLifecycleSource(threadId);
+        yield* manager.release({ providerSessionId: oldId, reason: "manual_shutdown" });
+        yield* sink.write({
+          events: [
+            {
+              ...created,
+              id: yield* ids.allocate.event({ threadId }),
+              type: "thread.unarchived",
+              payload: { ...created.payload, lifecycleRevision: 2 },
+            },
+          ],
+        });
+        const effectId = `mismatched-receipt:${mismatch}`;
+        // Seed a historical receipt to verify every durable identity component independently.
+        yield* outbox.enqueue([
+          {
+            id: effectId,
+            commandId: CommandId.make(effectId),
+            threadId: mismatch === "thread" ? ThreadId.make("wrong-thread") : threadId,
+            request: {
+              type: "provider-session.detach",
+              providerSessionId:
+                mismatch === "session" ? ProviderSessionId.make("wrong-session") : oldId,
+              ...(mismatch === "ordinary"
+                ? {}
+                : {
+                    retirementRevision: mismatch === "revision" ? 1 : 0,
+                    retirementSourceToken: mismatch === "source" ? "wrong-source" : old.sourceToken,
+                  }),
+            },
+          },
+        ]);
+        yield* outbox.claimNext({ workerId: "historical-worker", leaseDurationMs: 30000 });
+        assert.isTrue(yield* outbox.succeed({ effectId, workerId: "historical-worker" }));
+        const source = yield* guards.resolveLifecycleSource(threadId);
+        assert.equal(
+          (yield* manager
+            .open({
+              threadId,
+              providerSessionId: ids.derive.providerSession({
+                providerInstanceId: modelSelection.instanceId,
+                incarnation: { threadId, sourceToken: source.sourceToken },
+              }),
+              modelSelection,
+              runtimePolicy,
+            })
+            .pipe(Effect.flip))._tag,
+          "ProviderSessionStaleBindingError",
+        );
+        assert.equal((yield* Ref.get(state)).openCount, 1);
+      }).pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 60000 })));
+    }),
+);
+
 it.effect.each(["succeeded", "failed"] as const)(
   "lifecycle real effect executor and worker persist %s retirement before reactivation",
   (outcome) =>
@@ -3075,27 +3647,6 @@ it.effect.each(["succeeded", "failed"] as const)(
       const state = yield* Ref.make(emptyState);
       const beforeUnload =
         outcome === "failed" ? Effect.die("native retirement failed") : Effect.void;
-      const workerLayer = EffectWorker.layerWithOptions({
-        workerId: "retirement-worker",
-        maxAttempts: 1,
-      }).pipe(
-        Layer.provide(
-          EffectWorker.layerExecutor.pipe(
-            Layer.provide(
-              Layer.mergeAll(
-                ServerSettings.layerTest(),
-                Layer.mock(RunFinalizationService.RunFinalizationService)({}),
-                Layer.mock(CheckpointRollbackService.CheckpointRollbackServiceV2)({}),
-                Layer.mock(ProviderTurnControlService.ProviderTurnControlServiceV2)({}),
-                Layer.mock(ProviderTurnStartService.ProviderTurnStartServiceV2)({}),
-                Layer.mock(RuntimeRequestService.RuntimeRequestServiceV2)({}),
-                Layer.mock(ThreadTitleRegenerationService.ThreadTitleRegenerationService)({}),
-                Layer.mock(ThreadManagementService.ThreadManagementService)({}),
-              ),
-            ),
-          ),
-        ),
-      );
       yield* Effect.gen(function* () {
         const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
         const sink = yield* EventSink.EventSinkV2;
@@ -3132,7 +3683,13 @@ it.effect.each(["succeeded", "failed"] as const)(
             id: effectId,
             commandId: CommandId.make(effectId),
             threadId,
-            request: { type: "provider-session.detach", providerSessionId, retirementRevision: 0 },
+            request: {
+              type: "provider-session.detach",
+              providerSessionId,
+              retirementRevision: 0,
+              retirementSourceToken: ThreadLifecycleGuard.lifecycleSourceForPath([created.payload])
+                .sourceToken,
+            },
           },
         ]);
         const source =
@@ -3155,7 +3712,7 @@ it.effect.each(["succeeded", "failed"] as const)(
         yield* Effect.gen(function* () {
           const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
           assert.equal(yield* worker.drain(), 1);
-        }).pipe(Effect.provide(workerLayer));
+        }).pipe(Effect.provide(layerRetirementWorker));
         const receipt = yield* outbox.get(effectId);
         assert.isTrue(Option.isSome(receipt));
         if (Option.isSome(receipt)) assert.equal(receipt.value.status, outcome);
@@ -3285,6 +3842,8 @@ it.effect.each(["succeeded", "failed"] as const)(
               type: "provider-session.detach",
               providerSessionId: oldId,
               retirementRevision: 0,
+              retirementSourceToken: ThreadLifecycleGuard.lifecycleSourceForPath([created.payload])
+                .sourceToken,
             },
           },
         ]);
