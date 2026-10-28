@@ -11,7 +11,7 @@ it.effect(
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       yield* runMigrations({ toMigrationInclusive: 68 });
-      expect((yield* runMigrations()).map(([id]) => id)).toEqual([69]);
+      expect((yield* runMigrations({ toMigrationInclusive: 69 })).map(([id]) => id)).toEqual([69]);
       const invalidScope = yield* Effect.flip(
         sql`INSERT INTO orchestration_v2_thread_deletions (thread_id, project_id, operation_root_thread_id, deleted_at, command_id, scope, payload_json) VALUES ('R', 'project', 'R', '2026-10-26', 'delete', 'native', '{}')`,
       );

@@ -119,7 +119,12 @@ export const make = Effect.gen(function* () {
           AND CASE WHEN threads.thread_id IS NULL THEN legacy.archived_at ELSE threads.archived_at END IS NULL
           AND projects.deleted_at IS NULL
           AND messages.is_streaming = 0
-          AND (messages.role = 'user' OR (messages.role = 'assistant' AND messages.turn_id IS NOT NULL))
+          AND (messages.role = 'user' OR (messages.role = 'assistant' AND EXISTS (
+            SELECT 1 FROM legacy_canonical_assistant_messages AS canonical
+            WHERE canonical.thread_id = messages.thread_id
+              AND canonical.turn_id = messages.turn_id
+              AND canonical.message_id = messages.message_id
+          )))
           AND NOT EXISTS (
             SELECT 1 FROM orchestration_v2_legacy_imports AS imports
             WHERE imports.thread_id = legacy.thread_id AND imports.transcript_imported_at IS NOT NULL
