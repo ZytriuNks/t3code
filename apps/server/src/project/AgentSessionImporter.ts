@@ -297,7 +297,14 @@ const make = Effect.gen(function* () {
         }, sql.withTransaction);
         if (outcome._tag === "AlreadyImported" || outcome._tag === "Duplicate") {
           const finished = yield* finishExisting(Effect.void).pipe(
-            Effect.orElseSucceed(() => false),
+            Effect.mapError(
+              (cause) => new AgentSessionScanError({ operation: "read-projects", cause }),
+            ),
+            Effect.tapError(() =>
+              Effect.logWarning("Could not finish an existing agent session import", {
+                outcome: outcome._tag,
+              }),
+            ),
           );
           if (finished && outcome._tag === "AlreadyImported") {
             importedCount += 1;

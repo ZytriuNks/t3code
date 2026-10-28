@@ -641,3 +641,66 @@ it.effect("storage preserves already persisted import ids when the confirmed loc
     expect(Option.isSome(yield* runtimes.getByThreadId({ threadId: legacyId }))).toBe(true);
   }).pipe(Effect.scoped, Effect.provide(persistence)),
 );
+
+it.effect.each(
+  (["AlreadyImported", "Duplicate"] as const).flatMap((tag) =>
+    (["deletion-recheck", "binding-recheck", "metadata"] as const).map((failure) => ({
+      tag,
+      failure,
+    })),
+  ),
+)("storage $tag fast path reports $failure failure without recording success", ({ tag, failure }) =>
+  Effect.gen(function* () {
+    const source = candidate(CODEX_MODEL_SELECTION, `failure-${tag}-${failure}`);
+    yield* (yield* makeImporter([source])).run;
+    const sql = yield* SqlClient.SqlClient;
+    const runtimes = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
+    const before = yield* runtimes.list();
+    const importer = yield* makeImporter(
+      [
+        {
+          _tag: tag,
+          source: { ...source.source, filePath: "/extra.jsonl" },
+          nativeStorage: source.nativeStorage,
+        },
+      ],
+      failure === "metadata"
+        ? sql`CREATE TRIGGER reject_import_metadata BEFORE UPDATE ON provider_session_runtime BEGIN SELECT RAISE(ABORT, 'fixture metadata failure'); END`.pipe(
+            Effect.orDie,
+          )
+        : sql`DROP TABLE ${sql(failure === "deletion-recheck" ? "orchestration_v2_thread_deletions" : "orchestration_v2_native_session_bindings")}`.pipe(
+            Effect.orDie,
+          ),
+    );
+    const logs: Array<unknown> = [];
+    const result = yield* importer.run.pipe(
+      Effect.result,
+      Effect.provide(Logger.layer([Logger.make(({ message }) => logs.push(message))])),
+    );
+    expect(result).toMatchObject({ _tag: "Failure", failure: { _tag: "AgentSessionScanError" } });
+    expect(logs).toEqual([["Could not finish an existing agent session import", { outcome: tag }]]);
+    expect(yield* runtimes.list()).toEqual(before);
+    expect(importer.published).toEqual([]);
+  }).pipe(Effect.scoped, Effect.provide(persistence)),
+);
+
+it.effect.each(["AlreadyImported", "Duplicate"] as const)(
+  "storage %s fast path remains idempotent after successful metadata persistence",
+  (tag) =>
+    Effect.gen(function* () {
+      const source = candidate(CODEX_MODEL_SELECTION, `success-${tag}`);
+      yield* (yield* makeImporter([source])).run;
+      const importer = yield* makeImporter([
+        { _tag: tag, source: source.source, nativeStorage: source.nativeStorage },
+      ]);
+      const runtimes = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
+      const before = yield* runtimes.list();
+      for (let attempt = 0; attempt < 2; attempt++)
+        expect(yield* importer.run).toEqual({
+          importedCount: tag === "AlreadyImported" ? 1 : 0,
+          skippedCount: 0,
+        });
+      expect(yield* runtimes.list()).toEqual(before);
+      expect(importer.published).toEqual([]);
+    }).pipe(Effect.scoped, Effect.provide(persistence)),
+);
