@@ -323,7 +323,10 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
           command = { ...common, type: `thread.${input.action}` };
       }
       const result = yield* threads.dispatch(command).pipe(Effect.mapError(dispatchFailure));
-      return { sequence: result.sequence };
+      return {
+        sequence: result.sequence,
+        ...(result.lifecycle === undefined ? {} : { lifecycle: result.lifecycle }),
+      };
     }),
   ),
 });

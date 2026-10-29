@@ -1,3 +1,4 @@
+import { isIndependentThread } from "@t3tools/client-runtime/state/thread-visibility";
 import { uuidv4 } from "../../lib/uuid";
 import { useNavigation } from "@react-navigation/native";
 import type { EnvironmentThreadSearchMatch } from "@t3tools/client-runtime/state/thread-search";
@@ -324,7 +325,7 @@ export function CommandPalette(props: {
         }),
     }));
     const threadItems: CommandPaletteItem[] = threads
-      .filter((thread) => thread.archivedAt === null)
+      .filter((thread) => thread.archivedAt === null && isIndependentThread(thread))
       .sort((left, right) =>
         (right.latestUserMessageAt ?? right.updatedAt).localeCompare(
           left.latestUserMessageAt ?? left.updatedAt,

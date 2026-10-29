@@ -30,6 +30,7 @@ import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as Broker from "../mcp/PreviewAutomationBroker.ts";
 import * as DesktopChannel from "./DesktopBrowserChannel.ts";
 import * as Manager from "./Manager.ts";
+import * as ThreadLifecycleResources from "../orchestration-v2/ThreadLifecycleResources.ts";
 import * as ServerBrowser from "./ServerBrowser.ts";
 import * as PreviewBrowser from "./PreviewBrowser.ts";
 
@@ -251,7 +252,13 @@ const asSession = (providerSessionId: string) => ({
 });
 const dependencies = Layer.mergeAll(
   Broker.layer,
-  Manager.layer,
+  Manager.layer.pipe(
+    Layer.provide(
+      Layer.mock(ThreadLifecycleResources.ThreadLifecycleResources)({
+        withCreateCommit: (_threadId, commit) => commit,
+      }),
+    ),
+  ),
   Layer.succeed(ServerEnvironment.ServerEnvironment, {
     getEnvironmentId: Effect.succeed(scope.environmentId),
     getDescriptor: Effect.die("unused descriptor"),

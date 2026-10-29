@@ -8,6 +8,7 @@ import {
 import * as DateTime from "effect/DateTime";
 import { useNavigate } from "@tanstack/react-router";
 import { expect, it, vi } from "vite-plus/test";
+import { page } from "vite-plus/test/browser";
 import { act, render } from "../../../test/render";
 import { ThreadRelationshipsPanel } from "./ThreadRelationshipsControl";
 import { SubagentTooltipContent } from "./SubagentTooltipContent";
@@ -17,6 +18,7 @@ const state = vi.hoisted(() => ({
   projection: null as unknown,
   navigate: vi.fn(),
   shells: [] as unknown[],
+  archived: [] as unknown[],
   projects: [] as unknown[],
   configs: new Map<string, unknown>(),
   command: vi.fn(),
@@ -42,7 +44,7 @@ vi.mock("../../state/environments", () => ({
     ),
 }));
 vi.mock("../../lib/archivedThreadsState", () => ({
-  useArchivedThreadSnapshots: () => ({ snapshots: [] }),
+  useArchivedThreadSnapshots: () => ({ snapshots: state.archived }),
 }));
 vi.mock("../../state/use-atom-command", () => ({
   useAtomCommand: (command: { label: string }) =>
@@ -69,6 +71,7 @@ function setup() {
   vi.mocked(useNavigate).mockReturnValue(state.navigate);
   state.projection = null;
   state.shells = [];
+  state.archived = [];
   state.projects = [];
   state.configs.clear();
   state.navigate.mockReset();
@@ -146,10 +149,104 @@ it("opens child previews while retaining the parent conversation route", async (
   });
 });
 
+it("opens an archived child and disables a deleted child despite a stale archive snapshot", async () => {
+  setup();
+  const parent = {
+    id: "parent",
+    title: "Archived parent",
+    archivedAt: DateTime.makeUnsafe("2026-10-26"),
+    lineage: { parentThreadId: null, relationshipToParent: null },
+  };
+  const child = {
+    ...parent,
+    id: "child",
+    title: "Archived worker",
+    lineage: { parentThreadId: "parent", relationshipToParent: "subagent" },
+  };
+  state.archived = [{ environmentId: "remote", snapshot: { threads: [parent, child] } }];
+  state.projection = {
+    thread: parent,
+    runs: [],
+    providerThreads: [],
+    providerSessions: [],
+    contextTransfers: [],
+    subagents: [
+      {
+        id: "stale",
+        threadId: "parent",
+        childThreadId: "child",
+        title: "Archived worker",
+        status: "running",
+        origin: "app_owned",
+        driver: "codex",
+        startedAt: DateTime.makeUnsafe("2026-10-26"),
+        updatedAt: DateTime.makeUnsafe("2026-10-26"),
+        completedAt: null,
+      },
+    ],
+  };
+  const open = vi.fn();
+  await using screen = await render(panel("parent", "remote", open));
+  await screen.getByRole("button", { name: /Archived worker/ }).click();
+  expect(open).toHaveBeenCalledExactlyOnceWith("child");
+  state.shells = [
+    { environmentId: "remote", source: { ...child, deletedAt: DateTime.makeUnsafe("2026-10-27") } },
+  ];
+  await screen.rerender(panel("parent", "remote", open));
+  await expect.element(screen.getByRole("button", { name: /Archived worker/ })).toBeDisabled();
+  await screen.getByRole("button", { name: /Archived worker/ }).hover();
+  await expect
+    .element(page.getByText("This related thread is unavailable", { exact: true }))
+    .toBeVisible();
+  expect(
+    screen.getByRole("button", { name: /Stop|Archive|Unarchive|Delete/ }).elements(),
+  ).toHaveLength(0);
+  expect(open).toHaveBeenCalledTimes(1);
+});
+
+it("does not turn a fork's inherited subagent history into live child controls", async () => {
+  setup();
+  state.projection = {
+    thread: { id: "fork", lineage: { parentThreadId: "source", relationshipToParent: "fork" } },
+    runs: [],
+    providerThreads: [],
+    providerSessions: [],
+    contextTransfers: [],
+    subagents: [
+      {
+        id: "inherited",
+        threadId: "source",
+        childThreadId: "child",
+        title: "Inherited worker",
+        status: "running",
+        origin: "app_owned",
+        driver: "codex",
+        startedAt: DateTime.makeUnsafe("2026-10-26"),
+        updatedAt: DateTime.makeUnsafe("2026-10-26"),
+        completedAt: null,
+      },
+    ],
+  };
+  state.shells = [
+    {
+      environmentId: "remote",
+      source: {
+        id: "child",
+        title: "Inherited worker",
+        lineage: { parentThreadId: "source", relationshipToParent: "subagent" },
+      },
+    },
+  ];
+  await using screen = await render(panel("fork", "remote"));
+  expect(screen.getByRole("button", { name: /Inherited worker|Stop/ }).elements()).toHaveLength(0);
+  expect(state.command).not.toHaveBeenCalled();
+});
+
 it("waits for workflow stop acknowledgement and reports a rejected stop", async () => {
   setup();
   const coordinator = {
     id: "workflow",
+    threadId: "parent",
     origin: "provider_native",
     driver: "claudeAgent",
     providerInstanceId: "claude-work",
@@ -253,6 +350,7 @@ it.each([
     subagents: [
       {
         id: "workflow",
+        threadId: "parent",
         driver,
         origin,
         status,
@@ -267,6 +365,16 @@ it.each([
     ],
   };
 
+  state.shells = [
+    {
+      environmentId: "remote",
+      source: {
+        id: "workflow-chat",
+        title: "Coordinator chat",
+        lineage: { parentThreadId: "parent", relationshipToParent: "subagent" },
+      },
+    },
+  ];
   await using screen = await render(panel("parent", "remote"));
   const previous = screen.getByRole("button", { name: /Previous agents/ });
   if (previous.elements().length) await previous.click();
@@ -321,6 +429,7 @@ it("opens every workflow member in the correct environment and keeps manual phas
     subagents: [
       {
         id: "workflow",
+        threadId: "parent",
         driver: "claudeAgent",
         providerInstanceId: "claude-work",
         childThreadId: "workflow-chat",
@@ -342,7 +451,18 @@ it("opens every workflow member in the correct environment and keeps manual phas
     status: "completed",
     activityRunStatus: null,
   }));
-  state.shells = memberShells.map((source) => ({ environmentId: "other", source }));
+  const coordinatorShell = {
+    environmentId: "remote",
+    source: {
+      id: "workflow-chat",
+      title: "Coordinator chat",
+      lineage: { parentThreadId: "parent", relationshipToParent: "subagent" },
+    },
+  };
+  state.shells = [
+    coordinatorShell,
+    ...memberShells.map((source) => ({ environmentId: "other", source })),
+  ];
   const panel = (
     <ThreadRelationshipsPanel
       environmentId={EnvironmentId.make("remote")}
@@ -359,7 +479,10 @@ it("opens every workflow member in the correct environment and keeps manual phas
   expect(members.elements()).toHaveLength(7);
   for (const member of members.elements())
     expect((member as HTMLButtonElement).disabled).toBe(true);
-  state.shells = memberShells.map((source) => ({ environmentId: "remote", source }));
+  state.shells = [
+    coordinatorShell,
+    ...memberShells.map((source) => ({ environmentId: "remote", source })),
+  ];
   await screen.rerender(
     <ThreadRelationshipsPanel
       environmentId={EnvironmentId.make("remote")}
@@ -405,6 +528,7 @@ it("groups and counts workflows by the workflow status rather than coordinator a
   setup();
   const coordinator = {
     id: "workflow",
+    threadId: "parent",
     driver: "claudeAgent",
     providerInstanceId: "claudeAgent",
     childThreadId: "workflow-chat",
@@ -577,6 +701,7 @@ it("refreshes settled child details and pages previous agents without losing the
   setup();
   const agent = {
     id: "agent-1",
+    threadId: "parent",
     driver: "codex",
     providerInstanceId: "codex",
     childThreadId: "child-1",
@@ -721,6 +846,7 @@ it("shows model, effort, speed and workspace details without inventing missing n
     subagents: [
       {
         id: "agent",
+        threadId: "parent",
         childThreadId: "child",
         origin: "app_owned",
         driver: "codex",

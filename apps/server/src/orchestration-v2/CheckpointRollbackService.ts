@@ -35,6 +35,8 @@ import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAda
 import { ProviderSessionManagerV2 } from "./ProviderSessionManager.ts";
 import { RuntimePolicyV2 } from "./RuntimePolicy.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
+import * as ThreadOwnership from "./ThreadOwnership.ts";
+import * as ThreadLifecycleGuard from "./ThreadLifecycleGuard.ts";
 
 export const ROLLBACK_FAILED_MESSAGE =
   "The provider could not roll back this conversation. Try again; if it keeps failing, check the provider and server logs.";
@@ -118,6 +120,7 @@ export const layer: Layer.Layer<
   | ServerConfig.ServerConfig
   | ServerSettings.ServerSettingsService
   | ThreadCommandExecutor.ThreadCommandExecutor
+  | ThreadLifecycleGuard.ThreadLifecycleGuard
 > = Layer.effect(
   CheckpointRollbackServiceV2,
   Effect.gen(function* () {
@@ -132,6 +135,8 @@ export const layer: Layer.Layer<
     const projects = yield* ProjectStore.ProjectStoreV2;
     const path = yield* Path.Path;
     const threadCommands = yield* ThreadCommandExecutor.ThreadCommandExecutor;
+    const ownership = yield* ThreadOwnership.ThreadOwnership;
+    const lifecycle = yield* ThreadLifecycleGuard.ThreadLifecycleGuard;
     const isManagedWorktreePath = yield* makeIsManagedWorktreePath;
 
     const execute = Effect.fn("orchestrationV2.checkpointRollback.execute")(function* (input: {
@@ -171,6 +176,12 @@ export const layer: Layer.Layer<
         });
       }
 
+      const lifecycleGuard = yield* lifecycle.resolveLifecycleSource(input.threadId);
+      if ((yield* lifecycle.check({ guard: lifecycleGuard, purpose: "activity" })) === "stale")
+        return yield* new CheckpointRollbackExecutionError({
+          reason: "active-provider-changed",
+          ...input,
+        });
       const targetOrdinal = checkpoint.appRunOrdinal ?? 0;
       const rollbackTarget: ProviderAdapter.ProviderAdapterV2RollbackTarget =
         targetOrdinal === 0
@@ -242,6 +253,7 @@ export const layer: Layer.Layer<
       });
       const existingSession = context.providerSession;
       const session = yield* sessions.open({
+        lifecycleGuard,
         threadId: input.threadId,
         providerSessionId: providerThread.providerSessionId,
         modelSelection,
@@ -281,76 +293,86 @@ export const layer: Layer.Layer<
       // Thread commands write full provider thread rows under this lock. Without
       // it, a message sent during the rollback can plan against the old native
       // session and commit after this, undoing the provider's fork.
-      yield* threadCommands.withLock(
-        input.threadId,
-        Effect.gen(function* () {
-          const now = yield* DateTime.now;
-          const makeEvent = <Event extends OrchestrationV2DomainEvent>(event: Omit<Event, "id">) =>
-            Effect.map(
-              ids.allocate.event({ threadId: event.threadId }),
-              (id) =>
-                ({
-                  ...event,
-                  id,
-                }) as Event,
-            );
-          const events: Array<OrchestrationV2DomainEvent> = [];
-          events.push(
-            yield* makeEvent({
-              type: "provider-thread.updated",
-              threadId: input.threadId,
-              driver: providerThread.driver,
-              providerInstanceId: providerThread.providerInstanceId,
-              occurredAt: now,
-              payload: {
-                ...snapshot.providerThread,
-                lastRunOrdinal: targetOrdinal === 0 ? null : targetOrdinal,
-                updatedAt: now,
-              },
-            }),
-          );
-          for (const staleCheckpoint of staleCheckpoints) {
+      yield* ownership.withRoots(
+        [yield* ownership.resolveRoot(input.threadId)],
+        threadCommands.withLock(
+          input.threadId,
+          Effect.gen(function* () {
+            const now = yield* DateTime.now;
+            const makeEvent = <Event extends OrchestrationV2DomainEvent>(
+              event: Omit<Event, "id">,
+            ) =>
+              Effect.map(
+                ids.allocate.event({ threadId: event.threadId }),
+                (id) =>
+                  ({
+                    ...event,
+                    id,
+                  }) as Event,
+              );
+            const events: Array<OrchestrationV2DomainEvent> = [];
             events.push(
               yield* makeEvent({
-                type: "checkpoint.captured",
+                type: "provider-thread.updated",
                 threadId: input.threadId,
-                ...(staleCheckpoint.runId === null ? {} : { runId: staleCheckpoint.runId }),
-                nodeId: staleCheckpoint.nodeId,
+                driver: providerThread.driver,
                 providerInstanceId: providerThread.providerInstanceId,
                 occurredAt: now,
-                payload: { ...staleCheckpoint, status: "stale" },
+                payload: {
+                  ...snapshot.providerThread,
+                  lastRunOrdinal: targetOrdinal === 0 ? null : targetOrdinal,
+                  updatedAt: now,
+                },
               }),
             );
-          }
-          for (const run of runsToRollback) {
-            const rootNode = context.rootNodes.find((candidate) => candidate.id === run.rootNodeId);
-            events.push(
-              yield* makeEvent({
-                type: "run.updated",
-                threadId: input.threadId,
-                runId: run.id,
-                ...(rootNode === undefined ? {} : { nodeId: rootNode.id }),
-                providerInstanceId: run.providerInstanceId,
-                occurredAt: now,
-                payload: { ...run, status: "rolled_back", completedAt: now },
-              }),
-            );
-            if (rootNode !== undefined) {
+            for (const staleCheckpoint of staleCheckpoints) {
               events.push(
                 yield* makeEvent({
-                  type: "node.updated",
+                  type: "checkpoint.captured",
                   threadId: input.threadId,
-                  runId: run.id,
-                  nodeId: rootNode.id,
-                  providerInstanceId: run.providerInstanceId,
+                  ...(staleCheckpoint.runId === null ? {} : { runId: staleCheckpoint.runId }),
+                  nodeId: staleCheckpoint.nodeId,
+                  providerInstanceId: providerThread.providerInstanceId,
                   occurredAt: now,
-                  payload: { ...rootNode, status: "rolled_back", completedAt: now },
+                  payload: { ...staleCheckpoint, status: "stale" },
                 }),
               );
             }
-          }
-          yield* eventSink.write({ events });
-        }),
+            for (const run of runsToRollback) {
+              const rootNode = context.rootNodes.find(
+                (candidate) => candidate.id === run.rootNodeId,
+              );
+              events.push(
+                yield* makeEvent({
+                  type: "run.updated",
+                  threadId: input.threadId,
+                  runId: run.id,
+                  ...(rootNode === undefined ? {} : { nodeId: rootNode.id }),
+                  providerInstanceId: run.providerInstanceId,
+                  occurredAt: now,
+                  payload: { ...run, status: "rolled_back", completedAt: now },
+                }),
+              );
+              if (rootNode !== undefined) {
+                events.push(
+                  yield* makeEvent({
+                    type: "node.updated",
+                    threadId: input.threadId,
+                    runId: run.id,
+                    nodeId: rootNode.id,
+                    providerInstanceId: run.providerInstanceId,
+                    occurredAt: now,
+                    payload: { ...rootNode, status: "rolled_back", completedAt: now },
+                  }),
+                );
+              }
+            }
+            yield* eventSink.write({
+              events,
+              lifecycleGuard,
+            });
+          }),
+        ),
       );
     });
 
@@ -381,4 +403,4 @@ export const layer: Layer.Layer<
       ),
     });
   }),
-);
+).pipe(Layer.provide(ThreadOwnership.layer));

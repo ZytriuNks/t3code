@@ -1,5 +1,7 @@
 import { expect, it } from "@effect/vitest";
 import {
+  CommandId,
+  ProviderThreadId,
   EventId,
   ProjectId,
   ProviderDriverKind,
@@ -8,6 +10,7 @@ import {
   type ApplicationStoredEvent,
   type OrchestrationV2AppThread,
   type OrchestrationV2ProviderThread,
+  type NativeSessionStorage,
 } from "@t3tools/contracts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as Context from "effect/Context";
@@ -16,10 +19,13 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
 
+import * as NativeSessionBindings from "../orchestration-v2/NativeSessionBindings.ts";
+import * as ThreadDeletionRecords from "../orchestration-v2/ThreadDeletionRecords.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as EventStore from "../orchestration-v2/EventStore.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
@@ -42,6 +48,8 @@ const stores = Layer.mergeAll(EventStore.layer, ProjectionStore.layer).pipe(
 );
 const persistence = Layer.mergeAll(
   stores,
+  NativeSessionBindings.layer.pipe(Layer.provide(SqlitePersistence.layerMemory)),
+  ThreadDeletionRecords.layer.pipe(Layer.provide(SqlitePersistence.layerMemory)),
   EventSink.layer.pipe(Layer.provide(stores)),
   ProviderSessionRuntime.layer.pipe(Layer.provide(SqlitePersistence.layerMemory)),
   IdAllocator.layer,
@@ -51,10 +59,15 @@ function candidate(
   modelSelection: typeof CODEX_MODEL_SELECTION,
   providerSessionId: string,
   provider: "codex" | "claudeAgent" = "codex",
+  nativeStorage: NativeSessionStorage = {
+    type: "resolved",
+    canonicalRoot: `/stores/${modelSelection.instanceId}`,
+  },
 ) {
   const providerInstanceId = modelSelection.instanceId;
   return {
     _tag: "Importable" as const,
+    nativeStorage,
     source: {
       provider,
       providerInstanceId,
@@ -83,9 +96,16 @@ function candidate(
 }
 
 function importId(source: ReturnType<typeof candidate>) {
-  return ThreadId.make(
-    `import:${source.source.providerInstanceId}:${source.source.providerSessionId}`,
-  );
+  return IdAllocator.derive.threadFromProviderThread({
+    driver: ProviderDriverKind.make(source.source.provider),
+    providerInstanceId: source.source.providerInstanceId,
+    nativeThreadId: source.source.providerSessionId,
+    storageScope: IdAllocator.nativeStorageScope({
+      driver: ProviderDriverKind.make(source.source.provider),
+      nativeId: source.source.providerSessionId,
+      storage: source.nativeStorage,
+    })!,
+  });
 }
 
 const seedOwner = Effect.fn(function* (
@@ -108,6 +128,7 @@ const seedOwner = Effect.fn(function* (
     appThreadId: threadId,
     ownerNodeId: null,
     nativeThreadRef: { driver, nativeId: providerSessionId, strength: "strong" },
+    nativeStorage: source.nativeStorage,
     nativeConversationHeadRef: null,
     status: "idle",
     firstRunOrdinal: 1,
@@ -162,7 +183,7 @@ const seedOwner = Effect.fn(function* (
 });
 
 const makeImporter = Effect.fn(function* (
-  candidates: ReadonlyArray<ReturnType<typeof candidate>>,
+  candidates: ReadonlyArray<AgentSessionScanner.AgentSessionRecentThread>,
   beforeTransaction: Effect.Effect<void> = Effect.void,
 ) {
   const sql = yield* SqlClient.SqlClient;
@@ -199,6 +220,10 @@ const makeImporter = Effect.fn(function* (
       Layer.provide(
         Layer.mergeAll(
           sinkLayer,
+          NativeSessionBindings.layer.pipe(
+            Layer.provide(Layer.succeed(SqlClient.SqlClient, importSql)),
+          ),
+          Layer.succeed(SqlClient.SqlClient, importSql),
           Layer.succeed(IdAllocator.IdAllocatorV2, yield* IdAllocator.IdAllocatorV2),
           Layer.succeed(
             ProviderSessionRuntime.ProviderSessionRuntimeRepository,
@@ -345,6 +370,42 @@ it.effect("rechecks ownership after the import reaches the commit transaction", 
   }).pipe(Effect.scoped, Effect.provide(persistence)),
 );
 
+it.effect("storage aliases cannot reimport a deleted owner's native session", () =>
+  Effect.gen(function* () {
+    const original = candidate(CODEX_MODEL_SELECTION, "alias-deleted");
+    yield* seedOwner(original, "deleted");
+    const alias = candidate(
+      { ...CODEX_MODEL_SELECTION, instanceId: ProviderInstanceId.make("codex-alias") },
+      original.source.providerSessionId,
+      "codex",
+      original.nativeStorage,
+    );
+    const importer = yield* makeImporter([alias]);
+    expect(yield* importer.run).toEqual({ importedCount: 0, skippedCount: 0 });
+    expect(importer.published).toEqual([]);
+  }).pipe(Effect.scoped, Effect.provide(persistence)),
+);
+
+it.effect("storage roots distinguish the same instance's same native session id", () =>
+  Effect.gen(function* () {
+    const first = candidate(CODEX_MODEL_SELECTION, "same-native", "codex", {
+      type: "resolved",
+      canonicalRoot: "/stores/X",
+    });
+    const second = candidate(CODEX_MODEL_SELECTION, "same-native", "codex", {
+      type: "resolved",
+      canonicalRoot: "/stores/Y",
+    });
+    const importer = yield* makeImporter([first, second]);
+    expect(yield* importer.run).toEqual({ importedCount: 2, skippedCount: 0 });
+    expect(
+      new Set(
+        importer.published.flatMap((stored) => ("event" in stored ? [stored.event.threadId] : [])),
+      ).size,
+    ).toBe(2);
+  }).pipe(Effect.scoped, Effect.provide(persistence)),
+);
+
 it.effect(
   "retries failed commits and runtime persistence without replaying committed history",
   () =>
@@ -386,5 +447,260 @@ it.effect(
         resumeCursor: { threadId: source.source.providerSessionId },
         runtimePayload: { importedTranscripts: [source.source] },
       });
+    }).pipe(Effect.scoped, Effect.provide(persistence)),
+);
+
+const recordDeletion = Effect.fn("AgentSessionImporter.test.recordDeletion")(function* (
+  source: ReturnType<typeof candidate>,
+  threadId = ThreadId.make("deleted-native-owner"),
+) {
+  const records = yield* ThreadDeletionRecords.ThreadDeletionRecords;
+  const bindings = yield* NativeSessionBindings.NativeSessionBindings;
+  const sessions = yield* bindings.listForThreads([threadId]);
+  yield* records.apply({
+    threadId,
+    projectId,
+    parentThreadId: null,
+    operationRootThreadId: threadId,
+    deletedAt: timestamp,
+    commandId: CommandId.make(`delete:${threadId}`),
+    scope: "t3_only",
+    sessions:
+      sessions.length > 0
+        ? sessions
+        : [
+            {
+              threadId,
+              providerThreadId: ProviderThreadId.make(`deleted:${source.source.providerSessionId}`),
+              providerInstanceId: source.source.providerInstanceId,
+              driver: ProviderDriverKind.make(source.source.provider),
+              nativeId: source.source.providerSessionId,
+              storage: source.nativeStorage,
+              boundAt: timestamp,
+            },
+          ],
+  });
+});
+
+it.effect(
+  "storage checks use independent deletion evidence and retain X when an instance moves to Y",
+  () =>
+    Effect.gen(function* () {
+      const bindings = yield* NativeSessionBindings.NativeSessionBindings;
+      const records = yield* ThreadDeletionRecords.ThreadDeletionRecords;
+      const x = candidate(CODEX_MODEL_SELECTION, "moved", "codex", {
+        type: "resolved",
+        canonicalRoot: "/stores/X",
+      });
+      const owner = yield* seedOwner(x);
+      yield* recordDeletion(x, owner);
+      const before = yield* records.get(owner);
+      const identity = {
+        driver: ProviderDriverKind.make("codex"),
+        nativeId: "moved",
+        providerInstanceId: ProviderInstanceId.make("alias"),
+        storage: x.nativeStorage,
+      };
+      expect(yield* bindings.checkImport(identity)).toBe("deleted");
+      expect(
+        yield* bindings.checkImport({
+          ...identity,
+          storage: { type: "resolved", canonicalRoot: "/stores/Y" },
+        }),
+      ).toBe("unowned");
+      const y = candidate(CODEX_MODEL_SELECTION, "moved", "codex", {
+        type: "resolved",
+        canonicalRoot: "/stores/Y",
+      });
+      expect(yield* (yield* makeImporter([y])).run).toEqual({ importedCount: 1, skippedCount: 0 });
+      expect(yield* records.get(owner)).toEqual(before);
+      expect((yield* bindings.listForThreads([owner]))[0]?.storage).toEqual(x.nativeStorage);
+      // The deletion index continues to guard imports after the live projections disappear.
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`DELETE FROM orchestration_v2_native_session_bindings WHERE thread_id = ${owner}`;
+      yield* sql`DELETE FROM orchestration_v2_projection_provider_threads WHERE thread_id = ${owner}`;
+      expect(yield* bindings.checkImport(identity)).toBe("deleted");
+    }).pipe(Effect.scoped, Effect.provide(persistence)),
+);
+
+it.effect(
+  "storage conflicts with unknown legacy locations but null native ids do not block candidates",
+  () =>
+    Effect.gen(function* () {
+      const bindings = yield* NativeSessionBindings.NativeSessionBindings;
+      const source = candidate(CODEX_MODEL_SELECTION, "legacy", "codex", {
+        type: "unresolved",
+        reason: "legacy_missing_locator",
+      });
+      yield* seedOwner(source);
+      const identity = {
+        driver: ProviderDriverKind.make("codex"),
+        nativeId: "legacy",
+        providerInstanceId: ProviderInstanceId.make("alias"),
+        storage: { type: "resolved" as const, canonicalRoot: "/stores/Y" },
+      };
+      expect(yield* bindings.checkImport(identity)).toBe("unresolved_conflict");
+      const logs: Array<unknown> = [];
+      const resolved = candidate(CODEX_MODEL_SELECTION, "legacy", "codex", identity.storage);
+      const importer = yield* makeImporter([resolved]);
+      expect(
+        yield* importer.run.pipe(
+          Effect.provide(Logger.layer([Logger.make(({ message }) => logs.push(message))])),
+        ),
+      ).toEqual({ importedCount: 0, skippedCount: 0 });
+      expect(logs).toEqual([["Native session import skipped", { reason: "unresolved_conflict" }]]);
+      expect(importer.published).toEqual([]);
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`UPDATE orchestration_v2_native_session_bindings SET native_id = NULL`;
+      yield* sql`UPDATE orchestration_v2_projection_provider_threads SET payload_json = json_set(payload_json, '$.nativeThreadRef', NULL)`;
+      expect(yield* bindings.checkImport(identity)).toBe("unowned");
+      expect(
+        yield* bindings.checkImport({ ...identity, nativeId: "" }).pipe(Effect.flip),
+      ).toMatchObject({ _tag: "NativeSessionBindingError" });
+    }).pipe(Effect.scoped, Effect.provide(persistence)),
+);
+
+it.effect("storage deletion between scan and commit prevents alias reimport", () =>
+  Effect.gen(function* () {
+    const entering = yield* Deferred.make<void>();
+    const proceed = yield* Deferred.make<void>();
+    const source = candidate(CODEX_MODEL_SELECTION, "deleted-after-scan");
+    const importer = yield* makeImporter(
+      [source],
+      Deferred.succeed(entering, undefined).pipe(Effect.andThen(Deferred.await(proceed))),
+    );
+    const pending = yield* Effect.forkScoped(importer.run);
+    yield* Deferred.await(entering);
+    yield* recordDeletion({
+      ...source,
+      source: { ...source.source, providerInstanceId: ProviderInstanceId.make("old-alias") },
+    });
+    yield* Deferred.succeed(proceed, undefined);
+    expect(yield* Fiber.join(pending)).toEqual({ importedCount: 0, skippedCount: 0 });
+    expect(importer.published).toEqual([]);
+    const runtimes = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
+    expect(yield* runtimes.list()).toEqual([]);
+  }).pipe(Effect.scoped, Effect.provide(persistence)),
+);
+
+it.effect.each(["AlreadyImported", "Duplicate"] as const)(
+  "storage deletion guards the %s fast path at its transaction",
+  (tag) =>
+    Effect.gen(function* () {
+      const source = candidate(CODEX_MODEL_SELECTION, `fast-${tag}`);
+      expect(yield* (yield* makeImporter([source])).run).toEqual({
+        importedCount: 1,
+        skippedCount: 0,
+      });
+      const entering = yield* Deferred.make<void>();
+      const proceed = yield* Deferred.make<void>();
+      const runtimes = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
+      const before = yield* runtimes.list();
+      const importer = yield* makeImporter(
+        [
+          {
+            _tag: tag,
+            source: { ...source.source, filePath: "/extra-transcript.jsonl" },
+            nativeStorage: source.nativeStorage,
+          },
+        ],
+        Deferred.succeed(entering, undefined).pipe(Effect.andThen(Deferred.await(proceed))),
+      );
+      const pending = yield* Effect.forkScoped(importer.run);
+      yield* Deferred.await(entering);
+      yield* recordDeletion(source, importId(source));
+      yield* Deferred.succeed(proceed, undefined);
+      expect(yield* Fiber.join(pending)).toEqual({ importedCount: 0, skippedCount: 0 });
+      expect(yield* runtimes.list()).toEqual(before);
+      expect(importer.published).toEqual([]);
+    }).pipe(Effect.scoped, Effect.provide(persistence)),
+);
+
+it.effect("storage preserves already persisted import ids when the confirmed locator matches", () =>
+  Effect.gen(function* () {
+    const source = candidate(CODEX_MODEL_SELECTION, "legacy-id");
+    const sql = yield* SqlClient.SqlClient;
+    const first = yield* makeImporter([source]);
+    yield* first.run;
+    const scopedId = importId(source);
+    const legacyId = ThreadId.make(
+      `import:${source.source.providerInstanceId}:${source.source.providerSessionId}`,
+    );
+    // Simulate a persisted pre-scope import without replaying or renaming it in production.
+    for (const table of [
+      "orchestration_v2_projection_threads",
+      "orchestration_v2_projection_provider_threads",
+      "orchestration_v2_native_session_bindings",
+    ] as const) {
+      yield* sql`UPDATE ${sql(table)} SET thread_id = ${legacyId}, payload_json = replace(payload_json, ${scopedId}, ${legacyId}) WHERE thread_id = ${scopedId}`;
+    }
+    const importer = yield* makeImporter([source]);
+    expect(yield* importer.run).toEqual({ importedCount: 1, skippedCount: 0 });
+    expect(importer.published).toEqual([]);
+    const runtimes = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
+    expect(Option.isSome(yield* runtimes.getByThreadId({ threadId: legacyId }))).toBe(true);
+  }).pipe(Effect.scoped, Effect.provide(persistence)),
+);
+
+it.effect.each(
+  (["AlreadyImported", "Duplicate"] as const).flatMap((tag) =>
+    (["deletion-recheck", "binding-recheck", "metadata"] as const).map((failure) => ({
+      tag,
+      failure,
+    })),
+  ),
+)("storage $tag fast path reports $failure failure without recording success", ({ tag, failure }) =>
+  Effect.gen(function* () {
+    const source = candidate(CODEX_MODEL_SELECTION, `failure-${tag}-${failure}`);
+    yield* (yield* makeImporter([source])).run;
+    const sql = yield* SqlClient.SqlClient;
+    const runtimes = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
+    const before = yield* runtimes.list();
+    const importer = yield* makeImporter(
+      [
+        {
+          _tag: tag,
+          source: { ...source.source, filePath: "/extra.jsonl" },
+          nativeStorage: source.nativeStorage,
+        },
+      ],
+      failure === "metadata"
+        ? sql`CREATE TRIGGER reject_import_metadata BEFORE UPDATE ON provider_session_runtime BEGIN SELECT RAISE(ABORT, 'fixture metadata failure'); END`.pipe(
+            Effect.orDie,
+          )
+        : sql`DROP TABLE ${sql(failure === "deletion-recheck" ? "orchestration_v2_thread_deletions" : "orchestration_v2_native_session_bindings")}`.pipe(
+            Effect.orDie,
+          ),
+    );
+    const logs: Array<unknown> = [];
+    const result = yield* importer.run.pipe(
+      Effect.result,
+      Effect.provide(Logger.layer([Logger.make(({ message }) => logs.push(message))])),
+    );
+    expect(result).toMatchObject({ _tag: "Failure", failure: { _tag: "AgentSessionScanError" } });
+    expect(logs).toEqual([["Could not finish an existing agent session import", { outcome: tag }]]);
+    expect(yield* runtimes.list()).toEqual(before);
+    expect(importer.published).toEqual([]);
+  }).pipe(Effect.scoped, Effect.provide(persistence)),
+);
+
+it.effect.each(["AlreadyImported", "Duplicate"] as const)(
+  "storage %s fast path remains idempotent after successful metadata persistence",
+  (tag) =>
+    Effect.gen(function* () {
+      const source = candidate(CODEX_MODEL_SELECTION, `success-${tag}`);
+      yield* (yield* makeImporter([source])).run;
+      const importer = yield* makeImporter([
+        { _tag: tag, source: source.source, nativeStorage: source.nativeStorage },
+      ]);
+      const runtimes = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
+      const before = yield* runtimes.list();
+      for (let attempt = 0; attempt < 2; attempt++)
+        expect(yield* importer.run).toEqual({
+          importedCount: tag === "AlreadyImported" ? 1 : 0,
+          skippedCount: 0,
+        });
+      expect(yield* runtimes.list()).toEqual(before);
+      expect(importer.published).toEqual([]);
     }).pipe(Effect.scoped, Effect.provide(persistence)),
 );

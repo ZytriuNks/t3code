@@ -79,6 +79,10 @@
       "types": "./src/server/ModelCatalog.ts",
       "import": "./src/server/ModelCatalog.ts"
     },
+    "./server/NativeSessionStorage": {
+      "types": "./src/server/NativeSessionStorage.ts",
+      "import": "./src/server/NativeSessionStorage.ts"
+    },
     "./server/nativeProtocolLogging": {
       "types": "./src/server/nativeProtocolLogging.ts",
       "import": "./src/server/nativeProtocolLogging.ts"

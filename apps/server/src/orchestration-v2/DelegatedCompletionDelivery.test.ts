@@ -1140,6 +1140,108 @@ const seedRestartCancelledChild = (input: {
 it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
   "subagent follow-ups",
   (it) => {
+    it.effect(
+      "lifecycle rejects recovered child result wakes after the owner archives and restores",
+      () =>
+        Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const now = yield* DateTime.now;
+          const threadId = ThreadId.make("lifecycle:result-owner"),
+            projectId = ProjectId.make("lifecycle:result-project");
+          const runId = RunId.make("lifecycle:result-run"),
+            rootNodeId = NodeId.make("lifecycle:result-root");
+          yield* seedParentWithTerminalTask({
+            threadId,
+            projectId,
+            runId,
+            rootNodeId,
+            taskId: NodeId.make("lifecycle:result-seed"),
+            deliveryState: "acknowledged",
+            now,
+          });
+          const child = yield* seedRestartCancelledChild({
+            parentThreadId: threadId,
+            projectId,
+            parentRunId: runId,
+            rootNodeId,
+            name: "lifecycle:old-result",
+            completionWake: "always",
+            continuationPending: false,
+            runStatus: "completed",
+            now,
+          });
+          yield* orchestrator.dispatch({
+            type: "thread.archive",
+            commandId: CommandId.make("lifecycle:result-archive"),
+            threadId,
+          });
+          yield* orchestrator.dispatch({
+            type: "thread.unarchive",
+            commandId: CommandId.make("lifecycle:result-restore"),
+            threadId,
+          });
+          const before = yield* orchestrator.getThreadProjection(threadId);
+          yield* orchestrator.recoverDelegatedTasks;
+          yield* orchestrator.recoverDelegatedTasks;
+          const after = yield* orchestrator.getThreadProjection(threadId);
+          assert.deepEqual(after.runs, before.runs);
+          assert.deepEqual(after.messages, before.messages);
+          assert.deepEqual(after.subagents, before.subagents);
+          assert.deepEqual(after.contextTransfers, before.contextTransfers);
+          const childProjection = yield* orchestrator.getThreadProjection(child.childThreadId);
+          assert.equal(childProjection.thread.lifecycleRevision, 0);
+          assert.notEqual(
+            (yield* orchestrator.resolveLifecycleSource(child.childThreadId)).sourceToken,
+            childProjection.runs[0]?.lifecycleSourceToken,
+          );
+          yield* orchestrator.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make("lifecycle:result-fresh"),
+            threadId,
+            messageId: MessageId.make("lifecycle:result-fresh"),
+            text: "Fresh work",
+            attachments: [],
+            dispatchMode: { type: "start_immediately" },
+            createdBy: "user",
+            creationSource: "web",
+          });
+          const freshParent = (yield* orchestrator.getThreadProjection(threadId)).runs.at(-1)!;
+          yield* (yield* EventSink.EventSinkV2).write({
+            events: [
+              {
+                id: EventId.make("lifecycle:result-fresh-running"),
+                type: "run.updated",
+                threadId,
+                occurredAt: now,
+                payload: { ...freshParent, status: "running", startedAt: now },
+              },
+            ],
+          });
+          yield* orchestrator.dispatch({
+            type: "delegated_task.request",
+            commandId: CommandId.make("lifecycle:result-fresh-child"),
+            parentThreadId: threadId,
+            parentRunId: freshParent.id,
+            parentNodeId: freshParent.rootNodeId!,
+            task: "Fresh child",
+            modelSelection,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            completionWake: "always",
+            createdBy: "agent",
+            creationSource: "mcp",
+          });
+          const freshTask = (yield* orchestrator.getThreadProjection(threadId)).subagents.find(
+            (task) => task.runId === freshParent.id,
+          )!;
+          const freshChild = yield* orchestrator.getThreadProjection(freshTask.childThreadId!);
+          const freshSource = yield* orchestrator.resolveLifecycleSource(freshChild.thread.id);
+          assert.isFalse(freshSource.isLegacy);
+          assert.equal(freshChild.thread.lifecycleRevision, 0);
+          assert.equal(freshChild.runs[0]?.lifecycleSourceToken, freshSource.sourceToken);
+        }),
+    );
+
     it.effect("keeps a checkpoint completion committed between finalize's read and write", () =>
       Effect.gen(function* () {
         const orchestrator = yield* Orchestrator.OrchestratorV2;

@@ -141,7 +141,7 @@ describe("threadRoutes", () => {
     ).toBe("ready");
   });
 
-  it.each(["missing", "deleted", "archived"] as const)(
+  it.each(["missing", "deleted"] as const)(
     "redirects an unlisted thread only after detail confirms it is %s",
     (outcome) => {
       const route = {
@@ -173,17 +173,56 @@ describe("threadRoutes", () => {
                   status: "live",
                   data: Option.some({
                     ...projection,
-                    thread: {
-                      ...projection.thread,
-                      deletedAt: outcome === "deleted" ? removedAt : null,
-                      archivedAt: outcome === "archived" ? removedAt : null,
-                    },
+                    thread: { ...projection.thread, deletedAt: removedAt },
                   }),
                 },
         }),
       ).toBe("missing");
     },
   );
+
+  it("keeps an archived unlisted related thread available for conversation rendering", () => {
+    const projection = makeThreadProjectionFixture();
+    const archivedAt = DateTime.makeUnsafe("2026-01-02T00:00:00Z");
+    expect(
+      resolveThreadRouteRenderState({
+        bootstrapComplete: true,
+        serverThreadExists: false,
+        serverThreadDeleted: false,
+        draftThreadExists: false,
+        allowArchivedThread: true,
+        unlistedThreadDetail: {
+          ...EMPTY_ENVIRONMENT_THREAD_STATE,
+          status: "live",
+          data: Option.some({
+            ...projection,
+            thread: { ...projection.thread, archivedAt },
+          }),
+        },
+      }),
+    ).toBe("ready");
+  });
+
+  it("keeps an archived unlisted thread missing without a related-entry grant", () => {
+    const projection = makeThreadProjectionFixture();
+    const archivedAt = DateTime.makeUnsafe("2026-01-02T00:00:00Z");
+    expect(
+      resolveThreadRouteRenderState({
+        bootstrapComplete: true,
+        serverThreadExists: false,
+        serverThreadDeleted: false,
+        draftThreadExists: false,
+        unlistedThreadDetail: {
+          ...EMPTY_ENVIRONMENT_THREAD_STATE,
+          status: "live",
+          data: Option.some({
+            ...projection,
+            thread: { ...projection.thread, archivedAt },
+          }),
+        },
+      }),
+    ).toBe("missing");
+  });
 
   it("waits for the live shell before redirecting a deleted thread", () => {
     expect(

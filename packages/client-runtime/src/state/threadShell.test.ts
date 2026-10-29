@@ -53,6 +53,41 @@ function makeHarness(environmentIds: ReadonlyArray<EnvironmentId> = [environment
 }
 
 describe("v2 thread shell lists", () => {
+  it("keeps visibility environment-local during shell updates and snapshot restoration", () => {
+    const { registry, threads, snapshotAtom } = makeHarness([environmentId, remoteEnvironmentId]);
+    const child = {
+      ...v2ThreadShell,
+      lineage: { ...v2ThreadShell.lineage, relationshipToParent: "subagent" as const },
+    };
+    registry.set(snapshotAtom(environmentId), { ...v2ShellSnapshot, threads: [child] });
+    registry.set(snapshotAtom(remoteEnvironmentId), {
+      ...v2ShellSnapshot,
+      threads: [v2ThreadShell],
+    });
+    const dispose = registry.mount(threads.navigationThreadShellsAtom);
+    const visible = () =>
+      registry.get(threads.navigationThreadShellsAtom).map((thread) => thread.environmentId);
+    expect(visible()).toEqual([remoteEnvironmentId]);
+    registry.set(
+      snapshotAtom(environmentId),
+      applyShellStreamEvent(
+        { ...v2ShellSnapshot, threads: [child] },
+        {
+          kind: "thread.updated",
+          location: "active",
+          sequence: 2,
+          thread: { ...child, title: "Updated child" },
+        },
+      ),
+    );
+    expect(visible()).toEqual([remoteEnvironmentId]);
+    registry.set(snapshotAtom(environmentId), { ...v2ShellSnapshot, threads: [child] });
+    expect(visible()).toEqual([remoteEnvironmentId]);
+    expect(registry.get(threads.threadShellsAtom)).toHaveLength(2);
+    dispose();
+    registry.dispose();
+  });
+
   it("preserves ordered reference arrays when a middle thread changes", () => {
     const { registry, threads, snapshotAtom } = makeHarness();
     const snapshot = {

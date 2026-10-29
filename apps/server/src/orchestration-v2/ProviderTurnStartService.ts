@@ -53,6 +53,7 @@ import {
 } from "@t3tools/provider-core/server/failure";
 import * as RunExecutionService from "./RunExecutionService.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
+import * as ThreadLifecycleGuard from "./ThreadLifecycleGuard.ts";
 import {
   isRestartNoteContinuation,
   pendingRestartCancelledBackgroundWork,
@@ -113,6 +114,7 @@ export const layer: Layer.Layer<
   | ProviderSessionManager.ProviderSessionManagerV2
   | RunExecutionService.RunExecutionServiceV2
   | RuntimePolicy.RuntimePolicyV2
+  | ThreadLifecycleGuard.ThreadLifecycleGuard
 > = Layer.effect(
   ProviderTurnStartServiceV2,
   Effect.gen(function* () {
@@ -130,6 +132,7 @@ export const layer: Layer.Layer<
     const providerSessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
     const runExecution = yield* RunExecutionService.RunExecutionServiceV2;
     const runtimePolicy = yield* RuntimePolicy.RuntimePolicyV2;
+    const lifecycle = yield* ThreadLifecycleGuard.ThreadLifecycleGuard;
     const isManagedWorktreePath = yield* makeIsManagedWorktreePath;
 
     // These callbacks outlive startup while a run drains background work. Build
@@ -143,13 +146,25 @@ export const layer: Layer.Layer<
       readonly inheritedBackgroundTurnItems: ReturnType<
         typeof RunExecutionService.selectInheritedBackgroundTurnItems
       >;
+      readonly lifecycleGuard: ThreadLifecycleGuard.LifecycleWriteGuard;
     }) => {
       const isCurrentAttemptInStatus = (expectedStatus: OrchestrationV2Run["status"]) =>
         projectionStore.getRuntimeRecoveryProjection(input.threadId).pipe(
-          Effect.map((current) => {
-            const run = current.runs.find((candidate) => candidate.id === input.runId);
-            return run?.activeAttemptId === input.attemptId && run.status === expectedStatus;
-          }),
+          Effect.flatMap((current) =>
+            Effect.gen(function* () {
+              const run = current.runs.find((candidate) => candidate.id === input.runId);
+              return (
+                (yield* lifecycle.check({ guard: input.lifecycleGuard, purpose: "activity" })) ===
+                  "accept" &&
+                current.thread.deletedAt === null &&
+                current.thread.archivedAt === null &&
+                (current.thread.lifecycleRevision ?? 0) ===
+                  input.lifecycleGuard.lifecycleRevision &&
+                run?.activeAttemptId === input.attemptId &&
+                run.status === expectedStatus
+              );
+            }),
+          ),
         );
       return {
         isCurrentAttemptInStatus,
@@ -169,13 +184,21 @@ export const layer: Layer.Layer<
         shouldStartProviderTurn: () => isCurrentAttemptInStatus("running"),
         shouldFinalizeRun: () =>
           projectionStore.getRuntimeRecoveryProjection(input.threadId).pipe(
-            Effect.map((current) => {
-              const run = current.runs.find((candidate) => candidate.id === input.runId);
-              return (
-                run?.activeAttemptId === input.attemptId &&
-                (run.status === "starting" || run.status === "running")
-              );
-            }),
+            Effect.flatMap((current) =>
+              Effect.gen(function* () {
+                const run = current.runs.find((candidate) => candidate.id === input.runId);
+                return (
+                  (yield* lifecycle.check({ guard: input.lifecycleGuard, purpose: "activity" })) ===
+                    "accept" &&
+                  current.thread.deletedAt === null &&
+                  current.thread.archivedAt === null &&
+                  (current.thread.lifecycleRevision ?? 0) ===
+                    input.lifecycleGuard.lifecycleRevision &&
+                  run?.activeAttemptId === input.attemptId &&
+                  (run.status === "starting" || run.status === "running")
+                );
+              }),
+            ),
           ),
         hasUnpairedRunInterruptRequest: () =>
           projectionStore
@@ -243,6 +266,23 @@ export const layer: Layer.Layer<
       if (run.status !== "starting") {
         return;
       }
+      const lifecycleGuard: ThreadLifecycleGuard.LifecycleWriteGuard = {
+        threadId: input.threadId,
+        lifecycleRevision: run.lifecycleRevision ?? 0,
+        sourceToken: run.lifecycleSourceToken,
+        runId: run.id,
+        ...(run.activeAttemptId === null ? {} : { attemptId: run.activeAttemptId }),
+      };
+      if (
+        (yield* lifecycle
+          .check({ guard: lifecycleGuard, purpose: "activity" })
+          .pipe(Effect.mapError((cause) => new ProviderTurnStartError({ runId, cause })))) ===
+          "stale" ||
+        projection.thread.deletedAt != null ||
+        projection.thread.archivedAt != null ||
+        (projection.thread.lifecycleRevision ?? 0) !== lifecycleGuard.lifecycleRevision
+      )
+        return yield* new ProviderTurnStartError({ runId });
       const rootNode = projection.nodes.find((candidate) => candidate.id === run.rootNodeId);
       const attempt = projection.attempts.find((candidate) => candidate.id === run.activeAttemptId);
       const providerThread = projection.providerThreads.find(
@@ -378,6 +418,7 @@ export const layer: Layer.Layer<
             }),
           );
           yield* eventSink.writeIfRunCurrent({
+            lifecycleGuard,
             threadId: projection.thread.id,
             runId,
             activeAttemptId: attempt.id,
@@ -524,6 +565,7 @@ export const layer: Layer.Layer<
         .pipe(Effect.map(selectInheritedBackgroundItems));
       const providerSessionId = providerThread.providerSessionId;
       const runControls = makeRunControls({
+        lifecycleGuard,
         threadId: projection.thread.id,
         runId: run.id,
         attemptId: attempt.id,
@@ -616,6 +658,7 @@ export const layer: Layer.Layer<
         }
         const completedAt = yield* DateTime.now;
         const repaired = yield* eventSink.writeIfRunCurrent({
+          lifecycleGuard,
           threadId: projection.thread.id,
           runId: run.id,
           activeAttemptId: attempt.id,
@@ -639,6 +682,7 @@ export const layer: Layer.Layer<
       }
       const sessionResult = yield* Effect.result(
         providerSessions.open({
+          lifecycleGuard,
           threadId: projection.thread.id,
           providerSessionId,
           modelSelection: run.modelSelection,
@@ -814,6 +858,7 @@ export const layer: Layer.Layer<
         });
         effectiveHandoffs = [handoff, ...effectiveHandoffs];
         yield* eventSink.write({
+          lifecycleGuard,
           events: [
             {
               id: yield* idAllocator.allocate.event({ threadId: projection.thread.id }),
@@ -872,7 +917,24 @@ export const layer: Layer.Layer<
         previousSelection === undefined ||
         modelSelectionsEqual(previousSelection, run.modelSelection);
       const sameNativeThread =
-        loadedProviderThread.nativeThreadRef?.nativeId === providerThread.nativeThreadRef?.nativeId;
+        loadedProviderThread.nativeThreadRef?.nativeId ===
+          providerThread.nativeThreadRef?.nativeId &&
+        IdAllocator.nativeStorageScope({
+          driver: loadedProviderThread.driver,
+          nativeId: loadedProviderThread.nativeThreadRef?.nativeId ?? "",
+          storage: loadedProviderThread.nativeStorage ?? {
+            type: "unresolved",
+            reason: "legacy_missing_locator",
+          },
+        }) ===
+          IdAllocator.nativeStorageScope({
+            driver: providerThread.driver,
+            nativeId: providerThread.nativeThreadRef?.nativeId ?? "",
+            storage: providerThread.nativeStorage ?? {
+              type: "unresolved",
+              reason: "legacy_missing_locator",
+            },
+          });
       const threadUsage = loadedProviderThread.contextUsage ?? providerThread.contextUsage;
       const previousUsage = measuredContext
         ? { ...threadUsage, ...measuredContext.usage }
@@ -1007,6 +1069,7 @@ export const layer: Layer.Layer<
         },
       ];
       const runningWrite = yield* eventSink.writeIfRunCurrent({
+        lifecycleGuard,
         threadId: projection.thread.id,
         runId: run.id,
         activeAttemptId: attempt.id,
@@ -1213,6 +1276,7 @@ export const layer: Layer.Layer<
             persist: Effect.fn("ProviderTurnStartService.persist")(function* (handoff) {
               const updatedAt = yield* DateTime.now;
               yield* eventSink.write({
+                lifecycleGuard,
                 events: [
                   {
                     id: yield* idAllocator.allocate.event({

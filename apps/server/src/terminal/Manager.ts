@@ -35,6 +35,7 @@ import {
   ClaudeSettings,
   CodexSettings,
   ProviderInstanceId,
+  ThreadId,
 } from "@t3tools/contracts";
 import { makeKeyedCoalescingWorker } from "@t3tools/shared/KeyedCoalescingWorker";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
@@ -61,6 +62,7 @@ import * as Scope from "effect/Scope";
 import * as SynchronizedRef from "effect/SynchronizedRef";
 
 import * as ServerConfig from "../config.ts";
+import * as ThreadLifecycleResources from "../orchestration-v2/ThreadLifecycleResources.ts";
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
 import { makeClaudeEnvironment } from "../provider/Drivers/ClaudeHome.ts";
@@ -1505,6 +1507,7 @@ export const make = Effect.fn("TerminalManager.make")(function* () {
 export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(function* (
   options: TerminalManagerOptions,
 ) {
+  const lifecycleResources = yield* ThreadLifecycleResources.ThreadLifecycleResources;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const context = yield* Effect.context<never>();
@@ -2285,6 +2288,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     input: TerminalStartInput,
     eventType: "started" | "restarted",
   ) {
+    yield* lifecycleResources.assertCanCreate(ThreadId.make(input.threadId));
     yield* stopProcess(session);
     yield* Effect.annotateCurrentSpan({
       "terminal.thread_id": session.threadId,
@@ -2370,34 +2374,39 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
               updatedAt: session.updatedAt,
               sequence: session.eventSequence,
             };
-            yield* modifyManagerState((state) => {
-              session.process = ptyProcess;
-              session.pid = processPid;
-              session.status = "running";
-              // onExit may replay an exit immediately; accept it before subscribing.
-              session.unsubscribeData = spawnResult.process.onData((data) => {
-                if (!enqueueProcessEvent(session, processPid, { type: "output", data })) {
-                  return;
-                }
-                if (eventsActivated) runFork(drainProcessEvents(session, processPid));
-              });
-              session.unsubscribeExit = spawnResult.process.onExit((event) => {
-                if (!enqueueProcessEvent(session, processPid, { type: "exit", event })) {
-                  return;
-                }
-                if (eventsActivated) runFork(drainProcessEvents(session, processPid));
-              });
-              eventStamp = advanceEventSequence(session);
-              return [undefined, state] as const;
-            });
+            yield* lifecycleResources.withCreateCommit(
+              ThreadId.make(input.threadId),
+              Effect.gen(function* () {
+                yield* modifyManagerState((state) => {
+                  session.process = ptyProcess;
+                  session.pid = processPid;
+                  session.status = "running";
+                  // onExit may replay an exit immediately; accept it before subscribing.
+                  session.unsubscribeData = spawnResult.process.onData((data) => {
+                    if (!enqueueProcessEvent(session, processPid, { type: "output", data })) {
+                      return;
+                    }
+                    if (eventsActivated) runFork(drainProcessEvents(session, processPid));
+                  });
+                  session.unsubscribeExit = spawnResult.process.onExit((event) => {
+                    if (!enqueueProcessEvent(session, processPid, { type: "exit", event })) {
+                      return;
+                    }
+                    if (eventsActivated) runFork(drainProcessEvents(session, processPid));
+                  });
+                  eventStamp = advanceEventSequence(session);
+                  return [undefined, state] as const;
+                });
 
-            yield* publishEvent({
-              type: eventType,
-              threadId: session.threadId,
-              terminalId: session.terminalId,
-              sequence: eventStamp.sequence,
-              snapshot: snapshot(session),
-            });
+                yield* publishEvent({
+                  type: eventType,
+                  threadId: session.threadId,
+                  terminalId: session.terminalId,
+                  sequence: eventStamp.sequence,
+                  snapshot: snapshot(session),
+                });
+              }),
+            );
             // Publish startup before draining any events replayed during subscription.
             eventsActivated = true;
             if (session.processEventDrainRunning) runFork(drainProcessEvents(session, processPid));
@@ -2433,6 +2442,8 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         threadId: session.threadId,
         terminalId: session.terminalId,
       });
+
+      if (error._tag === "ThreadLifecycleResourceBlockedError") return yield* error;
 
       yield* evictInactiveSessionsIfNeeded();
 
@@ -2717,6 +2728,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   const openWithWorkspaceLease = Effect.fn("terminal.openLocked")(function* (
     input: TerminalOpenInput,
   ) {
+    yield* lifecycleResources.assertCanCreate(ThreadId.make(input.threadId));
     const terminalId = input.terminalId;
     yield* assertValidCwd(input.cwd);
 
@@ -3211,6 +3223,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   const restartResolved = Effect.fn("Manager.restartResolved")(function* (
     input: TerminalRestartInput,
   ) {
+    yield* lifecycleResources.assertCanCreate(ThreadId.make(input.threadId));
     yield* increment(terminalRestartsTotal, { scope: "thread" });
     const terminalId = input.terminalId;
     yield* assertValidCwd(input.cwd);

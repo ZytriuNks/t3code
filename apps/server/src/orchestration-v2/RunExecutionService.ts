@@ -1,3 +1,4 @@
+import * as ThreadOwnership from "./ThreadOwnership.ts";
 import { makeAssistantStreamingFilter } from "./assistantStreaming.ts";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import {
@@ -46,6 +47,7 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
 import type { ProjectionStoreV2Error } from "./ProjectionStore.ts";
+import type * as ThreadLifecycleGuard from "./ThreadLifecycleGuard.ts";
 import {
   makeProviderFailure,
   makeProviderFailureTurnItem,
@@ -570,8 +572,14 @@ export interface RunExecutionServiceV2StartRootRunInput {
   >;
   readonly relatedThreadIds?: ReadonlyArray<ThreadId>;
   readonly relatedProviderThreadIds?: ReadonlyArray<ProviderThreadId>;
-  readonly shouldStartProviderTurn?: () => Effect.Effect<boolean, ProjectionStoreV2Error>;
-  readonly shouldFinalizeRun?: () => Effect.Effect<boolean, ProjectionStoreV2Error>;
+  readonly shouldStartProviderTurn?: () => Effect.Effect<
+    boolean,
+    ProjectionStoreV2Error | ThreadLifecycleGuard.ThreadLifecycleGuardError
+  >;
+  readonly shouldFinalizeRun?: () => Effect.Effect<
+    boolean,
+    ProjectionStoreV2Error | ThreadLifecycleGuard.ThreadLifecycleGuardError
+  >;
   readonly hasUnpairedRunInterruptRequest?: () => Effect.Effect<boolean, never>;
   readonly message: ProviderAdapter.ProviderAdapterV2TurnMessage;
   readonly modelSelection: ModelSelection;
@@ -592,6 +600,7 @@ export class RunExecutionServiceV2 extends Context.Service<
 export const layer: Layer.Layer<
   RunExecutionServiceV2,
   never,
+  | ThreadOwnership.ThreadOwnership
   | CheckpointService.CheckpointServiceV2
   | EventSink.EventSinkV2
   | IdAllocator.IdAllocatorV2
@@ -602,6 +611,7 @@ export const layer: Layer.Layer<
 > = Layer.effect(
   RunExecutionServiceV2,
   Effect.gen(function* () {
+    const ownership = yield* ThreadOwnership.ThreadOwnership;
     const scope = yield* Effect.scope;
     const checkpointService = yield* CheckpointService.CheckpointServiceV2;
     const eventSink = yield* EventSink.EventSinkV2;
@@ -619,7 +629,10 @@ export const layer: Layer.Layer<
         readonly checkpointScope: OrchestrationV2CheckpointScope;
         readonly providerThread: OrchestrationV2ProviderThread;
         readonly attempt: OrchestrationV2RunAttempt;
-        readonly shouldFinalizeRun?: () => Effect.Effect<boolean, ProjectionStoreV2Error>;
+        readonly shouldFinalizeRun?: () => Effect.Effect<
+          boolean,
+          ProjectionStoreV2Error | ThreadLifecycleGuard.ThreadLifecycleGuardError
+        >;
         readonly hasUnpairedRunInterruptRequest?: () => Effect.Effect<boolean, never>;
         readonly openRunOwnedSubagents?: OpenRunOwnedSubagentProjection;
         readonly interruptedProviderTurn?: OrchestrationV2ProviderTurn;
@@ -632,6 +645,13 @@ export const layer: Layer.Layer<
           readonly expectedStatus: OrchestrationV2Run["status"];
         };
       }) {
+        const lifecycleGuard = {
+          threadId: input.run.threadId,
+          lifecycleRevision: input.run.lifecycleRevision ?? 0,
+          sourceToken: input.run.lifecycleSourceToken,
+          runId: input.run.id,
+          attemptId: input.attempt.id,
+        };
         const completedAt = input.completedAt ?? (yield* DateTime.now);
         const finalizedAttempt: OrchestrationV2RunAttempt | null = {
           ...input.attempt,
@@ -647,27 +667,31 @@ export const layer: Layer.Layer<
                 ? false
                 : yield* input.hasUnpairedRunInterruptRequest();
             if (hasUnpairedRequest) {
-              yield* eventSink.writeWithEffects({
-                effects: [],
-                events: [
-                  {
-                    id: yield* idAllocator.allocate.event({ threadId: input.run.threadId }),
-                    type: "turn-item.updated" as const,
-                    threadId: input.run.threadId,
-                    runId: input.run.id,
-                    nodeId: input.rootNode.id,
-                    providerInstanceId: input.run.providerInstanceId,
-                    occurredAt: completedAt,
-                    payload: makeInterruptResultTurnItem({
-                      idAllocator,
-                      run: input.run,
-                      rootNode: input.rootNode,
-                      providerThread: input.providerThread,
-                      completedAt,
-                    }),
-                  },
-                ],
-              });
+              yield* ownership.withRoots(
+                [yield* ownership.resolveRoot(input.run.threadId)],
+                eventSink.writeWithEffects({
+                  lifecycleGuard,
+                  effects: [],
+                  events: [
+                    {
+                      id: yield* idAllocator.allocate.event({ threadId: input.run.threadId }),
+                      type: "turn-item.updated" as const,
+                      threadId: input.run.threadId,
+                      runId: input.run.id,
+                      nodeId: input.rootNode.id,
+                      providerInstanceId: input.run.providerInstanceId,
+                      occurredAt: completedAt,
+                      payload: makeInterruptResultTurnItem({
+                        idAllocator,
+                        run: input.run,
+                        rootNode: input.rootNode,
+                        providerThread: input.providerThread,
+                        completedAt,
+                      }),
+                    },
+                  ],
+                }),
+              );
               yield* input.refreshAfterTurn;
             }
           }
@@ -849,21 +873,29 @@ export const layer: Layer.Layer<
               payload: finalizedProviderThread,
             },
           ],
+          lifecycleGuard,
         } satisfies Parameters<typeof eventSink.writeWithEffects>[0];
         if (input.writeIfRunCurrent !== undefined) {
-          const result = yield* eventSink.writeIfRunCurrent({
-            threadId: input.run.threadId,
-            runId: input.run.id,
-            activeAttemptId: input.writeIfRunCurrent.activeAttemptId,
-            expectedStatus: input.writeIfRunCurrent.expectedStatus,
-            events: finalization.events,
-            effects: finalization.effects,
-          });
+          const result = yield* ownership.withRoots(
+            [yield* ownership.resolveRoot(input.run.threadId)],
+            eventSink.writeIfRunCurrent({
+              lifecycleGuard,
+              threadId: input.run.threadId,
+              runId: input.run.id,
+              activeAttemptId: input.writeIfRunCurrent.activeAttemptId,
+              expectedStatus: input.writeIfRunCurrent.expectedStatus,
+              events: finalization.events,
+              effects: finalization.effects,
+            }),
+          );
           if (!result.committed) {
             return;
           }
         } else {
-          yield* eventSink.writeWithEffects(finalization);
+          yield* ownership.withRoots(
+            [yield* ownership.resolveRoot(input.run.threadId)],
+            eventSink.writeWithEffects(finalization),
+          );
         }
         yield* input.refreshAfterTurn;
       },
@@ -1356,6 +1388,13 @@ export const layer: Layer.Layer<
                   event.type === "provider_thread.updated" &&
                   event.providerThread.id === input.providerThread.id;
                 const storedEvents = yield* providerEventIngestor.ingestNormalized({
+                  lifecycleGuard: {
+                    threadId: input.run.threadId,
+                    lifecycleRevision: input.run.lifecycleRevision ?? 0,
+                    sourceToken: input.run.lifecycleSourceToken,
+                    runId: input.run.id,
+                    attemptId: input.attempt.id,
+                  },
                   analyticsContext: {
                     modelSelection: input.modelSelection,
                     runtimeMode: input.runtimePolicy.runtimeMode,

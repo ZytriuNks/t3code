@@ -25,6 +25,9 @@ import * as LegacyV1ThreadImporter from "../orchestration-v2/legacy/LegacyV1Thre
 import * as ProjectionMaintenance from "../orchestration-v2/ProjectionMaintenance.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
+import * as ThreadLifecyclePlan from "../orchestration-v2/ThreadLifecyclePlan.ts";
+import * as ThreadOwnership from "../orchestration-v2/ThreadOwnership.ts";
+import * as EffectOutbox from "../orchestration-v2/EffectOutbox.ts";
 import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecutor.ts";
 import { planThreadDeletion } from "../orchestration-v2/ThreadDeletion.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -39,10 +42,10 @@ const layerEventPersistence = EventSink.layer.pipe(
   Layer.provideMerge(Layer.merge(EventStore.layer, ProjectionStore.layer)),
 );
 const layerServices = Layer.mergeAll(
-  LegacyV1ThreadImporter.layer.pipe(Layer.provideMerge(layerEventPersistence)),
+  ThreadLifecyclePlan.layer,
+  LegacyV1ThreadImporter.layer.pipe(Layer.provide(layerEventPersistence)),
   ProjectionMaintenance.layer.pipe(Layer.provide(layerEventPersistence)),
   ProjectStore.layer,
-  IdAllocator.layer,
   ThreadCommandExecutor.layer,
   Layer.succeed(WorkspacePaths.WorkspacePaths, {
     normalizeWorkspaceRoot: (workspaceRoot) => Effect.succeed(workspaceRoot),
@@ -50,6 +53,9 @@ const layerServices = Layer.mergeAll(
       Effect.succeed({ absolutePath: `${workspaceRoot}/${relativePath}`, relativePath }),
   }),
 ).pipe(
+  Layer.provideMerge(layerEventPersistence),
+  Layer.provideMerge(ThreadOwnership.layer.pipe(Layer.provide(ProjectionStore.layer))),
+  Layer.provideMerge(Layer.mergeAll(ProjectionStore.layer, EffectOutbox.layer, IdAllocator.layer)),
   Layer.provideMerge(
     ProjectEnrichmentService.layer.pipe(
       Layer.provide(
@@ -239,19 +245,19 @@ it.effect("retries a partial project deletion without repeating child events or 
           finalCleanup.filter((effect) => effect.thread_id === threadId),
           [
             {
-              effect_id: `effect:${expectedCommandId}:preview.cleanup`,
+              effect_id: `effect:${expectedCommandId}:${threadId}:preview.cleanup`,
               thread_id: threadId,
               command_id: expectedCommandId,
               effect_type: "preview.cleanup",
             },
             {
-              effect_id: `effect:${expectedCommandId}:scheduled-tasks.cleanup`,
+              effect_id: `effect:${expectedCommandId}:${threadId}:scheduled-tasks.cleanup`,
               thread_id: threadId,
               command_id: expectedCommandId,
               effect_type: "scheduled-tasks.cleanup",
             },
             {
-              effect_id: `effect:${expectedCommandId}:terminal.cleanup`,
+              effect_id: `effect:${expectedCommandId}:${threadId}:terminal.cleanup`,
               thread_id: threadId,
               command_id: expectedCommandId,
               effect_type: "terminal.cleanup",
@@ -371,6 +377,11 @@ it.effect(
         assert.deepEqual(request, {
           type: "attachment.cleanup",
           attachmentIds: ["legacy_screenshot"],
+          lifecycle: {
+            commandId: CommandId.make(`${commandId}:delete-thread:${threadId}`),
+            rootThreadId: threadId,
+            revision: 1,
+          },
         });
       }).pipe(Effect.provide(layerServices));
     }).pipe(Effect.provide(layerDatabase)),
@@ -527,4 +538,111 @@ it.effect(
         assert.isUndefined(settingsAfterDelete.projectSettingsOverrides[projectId]);
       }).pipe(Effect.provide(layerServices));
     }).pipe(Effect.provide(layerDatabase)),
+);
+
+it.effect(
+  "deletes overlapping subagent roots once while treating a fork as an independent project root",
+  () =>
+    Effect.gen(function* () {
+      const projectId = ProjectId.make("task5:project-overlap");
+      yield* seedProject(projectId);
+      yield* Effect.gen(function* () {
+        const sink = yield* EventSink.EventSinkV2;
+        const service = yield* ProjectService.make;
+        const ids = ["R", "A", "B", "F"].map((id) => ThreadId.make(`task5:overlap:${id}`));
+        yield* sink.write({
+          events: ids.map((id, i) => {
+            const event = nativeThreadCreated(projectId, id);
+            return {
+              ...event,
+              payload: {
+                ...event.payload,
+                lineage:
+                  i === 0
+                    ? event.payload.lineage
+                    : {
+                        parentThreadId: ids[i === 3 ? 0 : i - 1]!,
+                        relationshipToParent: i === 3 ? ("fork" as const) : ("subagent" as const),
+                        rootThreadId: ids[0]!,
+                      },
+              },
+            };
+          }),
+        });
+        assert.instanceOf(
+          yield* service
+            .delete({ commandId: CommandId.make("task5:nonforce"), projectId })
+            .pipe(Effect.flip),
+          ProjectService.ProjectNotEmptyError,
+        );
+        const attempts: ThreadId[] = [];
+        const recording = yield* ProjectService.make.pipe(
+          Effect.provideService(EventSink.EventSinkV2, {
+            ...sink,
+            commitCommand: (input) => {
+              attempts.push(input.threadId);
+              return sink.commitCommand(input);
+            },
+          }),
+        );
+        yield* recording.delete({
+          commandId: CommandId.make("task5:overlap-delete"),
+          projectId,
+          force: true,
+        });
+        assert.deepEqual([...attempts].sort(), [ids[0], ids[3]].sort());
+        const sql = yield* SqlClient.SqlClient;
+        const records = yield* sql<{
+          thread_id: string;
+          operation_root_thread_id: string;
+        }>`SELECT thread_id, operation_root_thread_id FROM orchestration_v2_thread_deletions ORDER BY thread_id`;
+        assert.equal(records.length, 4);
+        for (const id of ids)
+          assert.equal(
+            records.find((r) => r.thread_id === id)?.operation_root_thread_id,
+            id === ids[3] ? ids[3] : ids[0],
+          );
+      }).pipe(Effect.provide(layerServices));
+    }).pipe(Effect.provide(layerDatabase)),
+);
+
+it.effect("rejects project deletion for an orphan without guessing its ownership", () =>
+  Effect.gen(function* () {
+    const projectId = ProjectId.make("task5:orphan-project");
+    const threadId = ThreadId.make("task5:orphan");
+    yield* seedProject(projectId);
+    yield* Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const event = nativeThreadCreated(projectId, threadId);
+      yield* sink.write({
+        events: [
+          {
+            ...event,
+            payload: {
+              ...event.payload,
+              lineage: {
+                parentThreadId: ThreadId.make("task5:missing-parent"),
+                relationshipToParent: "subagent",
+                rootThreadId: threadId,
+              },
+            },
+          },
+        ],
+      });
+      const service = yield* ProjectService.make;
+      const error = yield* service
+        .delete({ commandId: CommandId.make("task5:orphan-delete"), projectId, force: true })
+        .pipe(Effect.flip);
+      assert.instanceOf(error, ProjectService.ProjectOperationError);
+      if (error._tag === "ProjectOperationError")
+        assert.instanceOf(error.cause, ThreadOwnership.ThreadOwnershipError);
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      assert.isNull((yield* store.getThread(threadId)).deletedAt);
+      const sql = yield* SqlClient.SqlClient;
+      assert.deepEqual(yield* sql`SELECT thread_id FROM orchestration_v2_thread_deletions`, []);
+      assert.deepEqual(yield* sql`SELECT effect_id FROM orchestration_v2_effect_outbox`, []);
+      const project = yield* (yield* ProjectStore.ProjectStoreV2).get(projectId);
+      assert.isNull(Option.getOrThrow(project).deletedAt);
+    }).pipe(Effect.provide(layerServices));
+  }).pipe(Effect.provide(layerDatabase)),
 );

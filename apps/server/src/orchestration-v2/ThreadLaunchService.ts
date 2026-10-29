@@ -50,6 +50,7 @@ import type * as Orchestrator from "./Orchestrator.ts";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import { randomUuidV4 } from "@t3tools/provider-core/server/randomUuid";
 import * as ThreadManagement from "./ThreadManagementService.ts";
+import * as ThreadLifecycleGuard from "./ThreadLifecycleGuard.ts";
 
 export type ThreadLaunchWorkspaceStrategy =
   | { readonly type: "root"; readonly branch?: string | undefined }
@@ -208,6 +209,7 @@ const make = Effect.gen(function* () {
   const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
   const ids = yield* IdAllocator.IdAllocatorV2;
   const threads = yield* ThreadManagement.ThreadManagementService;
+  const lifecycle = yield* ThreadLifecycleGuard.ThreadLifecycleGuard;
   const managedFolders = yield* ManagedProjectFolders.ManagedProjectFolders;
   const preparationScope = yield* Scope.make("sequential");
   const scheduledLaunches = yield* Ref.make<ReadonlySet<CommandId>>(new Set());
@@ -469,6 +471,12 @@ const make = Effect.gen(function* () {
           .pipe(Effect.mapError(mapError(input, "update-thread", threadId)));
       }
       workspaceRecorded = true;
+      const preparationGuard = yield* ThreadLifecycleGuard.DispatchLifecycleGuard;
+      if (
+        preparationGuard === undefined ||
+        (yield* lifecycle.check({ guard: preparationGuard, purpose: "activity" })) === "stale"
+      )
+        return yield* mapError(input, "update-thread", threadId)("Preparation source is stale.");
 
       if (
         reused === undefined &&
@@ -479,13 +487,40 @@ const make = Effect.gen(function* () {
       ) {
         const oldBranch = branch;
         const worktreeCwd = worktreePath;
+        const snapshot = yield* threads.getShellSnapshot();
+        const sharing = yield* Effect.forEach(
+          [...snapshot.threads, ...snapshot.archivedThreads].filter(
+            (thread) =>
+              thread.id !== threadId &&
+              thread.worktreePath === worktreeCwd &&
+              thread.branch === oldBranch &&
+              thread.archivedAt === null,
+          ),
+          Effect.fn("ThreadLaunchService.captureBranchSource")(function* (thread) {
+            return { thread, guard: yield* lifecycle.resolveLifecycleSource(thread.id) };
+          }),
+        );
         branchRename = yield* generateBranchNameFor(worktreeCwd, initialMessage).pipe(
-          Effect.flatMap(({ branch: newBranch, exactName }) =>
-            git.renameBranch({
-              cwd: worktreeCwd,
-              oldBranch,
-              newBranch,
-              ...(exactName ? { exactName: true } : {}),
+          Effect.flatMap(
+            Effect.fn("ThreadLaunchService.renamePreparedBranch")(function* ({
+              branch: newBranch,
+              exactName,
+            }) {
+              if (
+                (yield* lifecycle.check({ guard: preparationGuard, purpose: "activity" })) ===
+                "stale"
+              )
+                return yield* mapError(
+                  input,
+                  "update-thread",
+                  threadId,
+                )("Preparation source is stale.");
+              return yield* git.renameBranch({
+                cwd: worktreeCwd,
+                oldBranch,
+                newBranch,
+                ...(exactName ? { exactName: true } : {}),
+              });
             }),
           ),
           Effect.flatMap((renamed) =>
@@ -508,38 +543,34 @@ const make = Effect.gen(function* () {
                     }),
                   ),
                 );
-              // Updating the parent first makes later subagents inherit the new name.
-              // Re-read after each pass for children of subagents updated in that pass.
-              const visited = new Set([threadId]);
-              while (true) {
-                const snapshot = yield* threads.getShellSnapshot();
-                const sharing = [...snapshot.threads, ...snapshot.archivedThreads].filter(
-                  (thread) =>
-                    !visited.has(thread.id) &&
-                    thread.worktreePath === worktreeCwd &&
-                    thread.branch === oldBranch,
-                );
-                if (sharing.length === 0) break;
-                for (const thread of sharing) {
-                  visited.add(thread.id);
-                  yield* threads
-                    .dispatch({
-                      type: "thread.metadata.update",
-                      commandId: CommandId.make(`${input.commandId}:branch-rename:${thread.id}`),
-                      threadId: thread.id,
-                      branch: renamed.branch,
-                      expectedBranch: oldBranch,
-                      expectedWorktreePath: worktreeCwd,
-                    })
-                    .pipe(
-                      Effect.catchCause((cause) =>
-                        Effect.logWarning("Shared thread worktree branch update failed", {
-                          threadId: thread.id,
-                          cause,
-                        }),
-                      ),
-                    );
-                }
+              for (const { thread, guard } of sharing) {
+                const owner = yield* ThreadLifecycleGuard.DispatchLifecycleGuard;
+                if (
+                  owner === undefined ||
+                  (yield* lifecycle.check({ guard: owner, purpose: "activity" })) === "stale"
+                )
+                  return;
+                yield* threads
+                  .dispatch({
+                    type: "thread.metadata.update",
+                    commandId: CommandId.make(`${input.commandId}:branch-rename:${thread.id}`),
+                    threadId: thread.id,
+                    branch: renamed.branch,
+                    expectedBranch: oldBranch,
+                    expectedWorktreePath: worktreeCwd,
+                  })
+                  .pipe(
+                    Effect.provideService(ThreadLifecycleGuard.DispatchLifecycleGuard, {
+                      ...guard,
+                      prerequisites: [...(owner.prerequisites ?? []), owner],
+                    }),
+                    Effect.catchCause((cause) =>
+                      Effect.logWarning("Shared thread worktree branch update failed", {
+                        threadId: thread.id,
+                        cause,
+                      }),
+                    ),
+                  );
               }
             }),
           ),
@@ -766,6 +797,23 @@ const make = Effect.gen(function* () {
     threadId: ThreadId,
     runId: RunId | null,
   ) {
+    const records = yield* threads
+      .getThreadRecords(threadId, ["runs"], runId === null ? {} : { runIds: [runId] })
+      .pipe(Effect.mapError(mapError(input, "update-thread", threadId)));
+    const run = records.runs.find((candidate) => candidate.id === runId);
+    if (runId !== null && run === undefined) return;
+    const guard =
+      run === undefined
+        ? yield* lifecycle
+            .resolveLifecycleSource(threadId)
+            .pipe(Effect.mapError(mapError(input, "update-thread", threadId)))
+        : ThreadLifecycleGuard.guardForRun(run);
+    if (
+      (yield* lifecycle
+        .check({ guard, purpose: "activity" })
+        .pipe(Effect.mapError(mapError(input, "update-thread", threadId)))) === "stale"
+    )
+      return;
     const preparation = Effect.gen(function* () {
       const prepare = prepareInBackground(input, threadId, runId);
       if (
@@ -802,6 +850,7 @@ const make = Effect.gen(function* () {
         ),
       ),
       Effect.ignoreCause,
+      Effect.provideService(ThreadLifecycleGuard.DispatchLifecycleGuard, guard),
       Effect.ensuring(releasePreparation(input.commandId)),
       Effect.forkIn(preparationScope),
     );
@@ -1115,4 +1164,6 @@ const make = Effect.gen(function* () {
   return ThreadLaunchService.of({ launch, checkWorktreeBase, retryPreparation, prepareRun });
 });
 
-export const layer = Layer.effect(ThreadLaunchService, make);
+export const layer = Layer.effect(ThreadLaunchService, make).pipe(
+  Layer.provide(ThreadLifecycleGuard.layer),
+);

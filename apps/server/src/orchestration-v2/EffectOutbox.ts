@@ -28,6 +28,12 @@ import * as SqlClient from "effect/sql/SqlClient";
 
 import { forkParked } from "../serverActivation.ts";
 
+const LifecycleCleanup = Schema.Struct({
+  commandId: CommandId,
+  rootThreadId: ThreadId,
+  revision: Schema.Number,
+});
+
 export const OrchestrationEffectRequestV2 = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("provider-runtime.continue"),
@@ -38,6 +44,9 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
     providerSessionId: ProviderSessionId,
     detail: Schema.optional(Schema.String),
     revokeMcpCredential: Schema.optional(Schema.Boolean),
+    retirementRevision: Schema.optional(Schema.Number),
+    retirementSourceToken: Schema.optional(Schema.String),
+    lifecycle: Schema.optional(LifecycleCleanup),
   }),
   Schema.Struct({
     type: Schema.Literal("provider-turn.start"),
@@ -95,19 +104,29 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("scheduled-tasks.cleanup"),
+    lifecycle: Schema.optional(LifecycleCleanup),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("scheduled-tasks.suspend"),
+    lifecycle: Schema.optional(LifecycleCleanup),
   }),
   Schema.Struct({
     type: Schema.Literal("terminal.cleanup"),
+    lifecycle: Schema.optional(LifecycleCleanup),
   }),
   Schema.Struct({
     type: Schema.Literal("preview.cleanup"),
+    lifecycle: Schema.optional(LifecycleCleanup),
   }),
   Schema.Struct({
     type: Schema.Literal("attachment.cleanup"),
     attachmentIds: Schema.Array(Schema.String),
+    lifecycle: Schema.optional(LifecycleCleanup),
   }),
   Schema.Struct({
     type: Schema.Literal("thread-title.generate"),
+    lifecycleRevision: Schema.optional(Schema.Number),
+    lifecycleSourceToken: Schema.optional(Schema.String),
     kind: Schema.Union([
       Schema.Struct({ type: Schema.Literal("initial"), messageId: MessageId }),
       Schema.Struct({ type: Schema.Literal("regenerate") }),
@@ -126,6 +145,7 @@ export const REPLAY_SAFE_EFFECT_TYPES_AFTER_PROCESS_LOSS = [
   "provider-thread.rollback",
   "checkpoint.capture",
   "scheduled-tasks.cleanup",
+  "scheduled-tasks.suspend",
   "terminal.cleanup",
   "preview.cleanup",
   "attachment.cleanup",
@@ -199,6 +219,19 @@ export class EffectOutboxError extends Schema.TaggedError<EffectOutboxError>()(
 const isEffectOutboxError = Schema.is(EffectOutboxError);
 
 export interface EffectOutboxV2Shape {
+  readonly listLifecycleCleanup: (
+    threadIds: ReadonlyArray<ThreadId>,
+  ) => Effect.Effect<ReadonlyArray<OrchestrationEffectV2>, EffectOutboxError>;
+  readonly attachmentRetirements: (threadId: ThreadId) => Effect.Effect<
+    ReadonlyArray<{
+      readonly effectId: string;
+      readonly status: string;
+      readonly providerSessionId: string;
+      readonly retirementRevision: number;
+      readonly retirementSourceToken: string | null;
+    }>,
+    EffectOutboxError
+  >;
   readonly awaitAvailable: Effect.Effect<void>;
   readonly notifyAvailable: (count?: number) => Effect.Effect<void>;
   /** Persist rows only. Notify workers after the surrounding transaction commits. */
@@ -374,6 +407,22 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
       );
 
     const service: EffectOutboxV2Shape = {
+      attachmentRetirements: (threadId) =>
+        sql<{
+          readonly effectId: string;
+          readonly status: string;
+          readonly providerSessionId: string;
+          readonly retirementRevision: number;
+          readonly retirementSourceToken: string | null;
+        }>`
+        SELECT effect_id AS effectId, status,
+          json_extract(payload_json, '$.providerSessionId') AS providerSessionId,
+          json_extract(payload_json, '$.retirementRevision') AS retirementRevision,
+          json_extract(payload_json, '$.retirementSourceToken') AS retirementSourceToken
+        FROM orchestration_v2_effect_outbox
+        WHERE thread_id = ${threadId} AND effect_type = 'provider-session.detach'
+          AND json_type(payload_json, '$.retirementRevision') IS NOT NULL
+      `.pipe(Effect.mapError((cause) => new EffectOutboxError({ operation: "retirement", cause }))),
       enqueue: Effect.fn("EffectOutbox.enqueue")(
         function* (effects) {
           const now = yield* DateTime.now;
@@ -444,6 +493,31 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
               : new EffectOutboxError({ operation: "list", cause }),
           ),
         ),
+      listLifecycleCleanup: Effect.fn("EffectOutbox.listLifecycleCleanup")(
+        function* (threadIds) {
+          if (threadIds.length === 0) return [];
+          const rows = yield* sql<EffectRow>`
+            SELECT cleanup.* FROM orchestration_v2_effect_outbox cleanup
+            WHERE ${sql.in("cleanup.thread_id", threadIds)}
+              AND cleanup.status <> 'succeeded'
+              AND cleanup.effect_type IN ('provider-session.detach', 'terminal.cleanup',
+                'preview.cleanup', 'scheduled-tasks.cleanup', 'scheduled-tasks.suspend', 'attachment.cleanup')
+              AND (json_type(cleanup.payload_json, '$.lifecycle') = 'object'
+                OR EXISTS (
+                  SELECT 1 FROM orchestration_command_receipts receipt
+                  WHERE receipt.command_id = cleanup.command_id AND receipt.status = 'accepted'
+                    AND receipt.command_type IN ('thread.archive', 'thread.delete', 'project.delete')
+                ))
+            ORDER BY cleanup.created_at, cleanup.effect_id
+          `;
+          return yield* decodeRows("list-lifecycle-cleanup", rows);
+        },
+        Effect.mapError((cause) =>
+          isEffectOutboxError(cause)
+            ? cause
+            : new EffectOutboxError({ operation: "list-lifecycle-cleanup", cause }),
+        ),
+      ),
       cancelUnsettled: Effect.fn("EffectOutbox.cancelUnsettled")(
         function* ({ threadId, effectTypes, reason }) {
           if (effectTypes.length === 0) return [];
@@ -697,6 +771,15 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
             SELECT rowid
             FROM orchestration_v2_effect_outbox
             WHERE status IN ('succeeded', 'cancelled')
+              AND NOT (effect_type = 'provider-session.detach'
+                AND (json_type(payload_json, '$.retirementRevision') IS NOT NULL
+                  OR json_type(payload_json, '$.lifecycle') IS 'object'))
+              AND NOT (status = 'cancelled' AND json_type(payload_json, '$.lifecycle') IS 'object')
+              AND NOT ((status = 'cancelled' OR effect_type = 'provider-session.detach')
+                AND EXISTS (SELECT 1 FROM orchestration_command_receipts receipt
+                  WHERE receipt.command_id = orchestration_v2_effect_outbox.command_id
+                    AND receipt.status = 'accepted'
+                    AND receipt.command_type IN ('thread.archive', 'thread.delete', 'project.delete')))
               AND completed_at < ${cutoff}
             LIMIT ${PRUNE_BATCH_SIZE}
           )

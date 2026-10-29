@@ -30,6 +30,7 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as SynchronizedRef from "effect/SynchronizedRef";
 import { PreviewControlRequiredError } from "@t3tools/contracts";
+import * as ThreadLifecycleResources from "../orchestration-v2/ThreadLifecycleResources.ts";
 
 export class PreviewManager extends Context.Service<
   PreviewManager,
@@ -122,6 +123,7 @@ const currentIsoTimestamp = DateTime.now.pipe(Effect.map(DateTime.formatIso));
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* PreviewManagerMake() {
   const crypto = yield* Crypto.Crypto;
+  const lifecycleResources = yield* ThreadLifecycleResources.ThreadLifecycleResources;
   const serverEpoch = yield* crypto.randomUUIDv4().pipe(Effect.orDie);
   const stateRef = yield* SynchronizedRef.make<ManagerState>(initialState);
   const eventsPubSub = yield* PubSub.unbounded<PreviewEvent>();
@@ -200,27 +202,30 @@ export const make = Effect.gen(function* PreviewManagerMake() {
         ...(input.reveal === undefined ? {} : { reveal: input.reveal }),
         updatedAt,
       };
-      yield* SynchronizedRef.modifyEffect(stateRef, (state) =>
-        Effect.gen(function* () {
-          const revision = state.revision + 1;
-          const sessions = new Map(state.sessions);
-          sessions.set(compositeKey(input.threadId, tabId), {
-            threadId: input.threadId,
-            tabId,
-            snapshot,
-          });
-          input.beforePublish?.(snapshot);
-          yield* PubSub.publish(eventsPubSub, {
-            type: "opened",
-            threadId: input.threadId,
-            tabId,
-            createdAt: snapshot.updatedAt,
-            serverEpoch,
-            revision,
-            snapshot,
-          });
-          return [snapshot, { sessions, revision }] as const;
-        }),
+      yield* lifecycleResources.withCreateCommit(
+        input.threadId,
+        SynchronizedRef.modifyEffect(stateRef, (state) =>
+          Effect.gen(function* () {
+            const revision = state.revision + 1;
+            const sessions = new Map(state.sessions);
+            sessions.set(compositeKey(input.threadId, tabId), {
+              threadId: input.threadId,
+              tabId,
+              snapshot,
+            });
+            input.beforePublish?.(snapshot);
+            yield* PubSub.publish(eventsPubSub, {
+              type: "opened",
+              threadId: input.threadId,
+              tabId,
+              createdAt: snapshot.updatedAt,
+              serverEpoch,
+              revision,
+              snapshot,
+            });
+            return [snapshot, { sessions, revision }] as const;
+          }),
+        ),
       );
       return snapshot;
     },

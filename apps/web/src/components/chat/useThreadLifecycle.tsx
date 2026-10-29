@@ -65,7 +65,7 @@ type PendingThreadRequests = ReturnType<typeof usePendingThreadRequests>;
 type LocalDispatchState = ReturnType<typeof useLocalDispatchState>;
 
 interface ThreadLifecycleInput {
-  readonly openRelatedThread: (threadId: ThreadId) => void;
+  readonly openRelatedThread: (threadId: ThreadId, allowArchived?: boolean) => void;
   readonly environmentId: EnvironmentId;
   readonly routeThreadKey: string;
   readonly currentRouteThreadKeyRef: { readonly current: string | null };
@@ -387,7 +387,7 @@ export function useThreadLifecycle(input: ThreadLifecycleInput) {
   };
   const handleStopBackgroundWorkStable = useStableCallback(handleStopBackgroundWork);
   const openRelatedThreadGenerationRef = useRef(0);
-  const onOpenRelatedThread = async (threadId: ThreadId) => {
+  const onOpenRelatedThread = async (threadId: ThreadId, allowArchived = false) => {
     const generation = ++openRelatedThreadGenerationRef.current;
     const threadRef = scopeThreadRef(environmentId, threadId);
     const isEnvironmentLive = () =>
@@ -409,7 +409,8 @@ export function useThreadLifecycle(input: ThreadLifecycleInput) {
       toastManager.add({ type: "info", title: "This thread is no longer available" });
       return;
     }
-    input.openRelatedThread(threadId);
+    if (allowArchived) input.openRelatedThread(threadId, true);
+    else input.openRelatedThread(threadId);
   };
   const onOpenRelatedThreadStable = useStableCallback(onOpenRelatedThread);
   const childThreadInputs = useChildThreadInputs(activeThreadRef);

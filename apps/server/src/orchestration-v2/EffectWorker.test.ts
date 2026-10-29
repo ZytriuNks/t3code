@@ -33,6 +33,7 @@ import * as RuntimeRequestService from "./RuntimeRequestService.ts";
 import * as ThreadTitleRegenerationService from "./ThreadTitleRegenerationService.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as ResourceCleanupService from "./ResourceCleanupService.ts";
 
 const threadId = ThreadId.make("thread:effect-worker-restart");
 const oldSessionId = ProviderSessionId.make("provider-session:effect-worker-restart:old");
@@ -198,6 +199,37 @@ it.effect("settles a stopped run when its adapter has already lost the native tu
     }).pipe(Effect.provide(layer));
     assert.deepEqual(yield* Ref.get(events), ["thread.background-work.settle"]);
   }),
+);
+
+it.effect(
+  "lifecycle archive executor suspends schedules while deletion uses permanent cleanup",
+  () =>
+    Effect.gen(function* () {
+      const events = yield* Ref.make<ReadonlyArray<string>>([]);
+      const record = (value: string) => Ref.update(events, (current) => [...current, value]);
+      yield* Effect.gen(function* () {
+        const executor = yield* EffectWorker.OrchestrationEffectExecutorV2;
+        const base = restartEffect(yield* DateTime.now, { type: "detach" });
+        for (const type of ["scheduled-tasks.suspend", "scheduled-tasks.cleanup"] as const)
+          yield* executor.execute({
+            ...base,
+            request: {
+              type,
+              lifecycle: { commandId: base.commandId, rootThreadId: threadId, revision: 1 },
+            },
+          });
+      }).pipe(
+        Effect.provide(layerExecutorFor({ events })),
+        Effect.provideService(ResourceCleanupService.ResourceCleanupService, {
+          suspendScheduledTasks: () => record("suspend"),
+          cleanupScheduledTasks: () => record("delete"),
+          cleanupTerminals: () => Effect.void,
+          cleanupPreviews: () => Effect.void,
+          cleanupAttachments: () => Effect.void,
+        }),
+      );
+      assert.deepEqual(yield* Ref.get(events), ["suspend", "delete"]);
+    }),
 );
 
 const lockedIndexMessage =

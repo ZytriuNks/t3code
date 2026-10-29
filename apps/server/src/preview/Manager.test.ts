@@ -9,6 +9,7 @@ import { expect } from "vite-plus/test";
 
 import * as ServerConfig from "../config.ts";
 import * as PreviewManager from "./Manager.ts";
+import * as ThreadLifecycleResources from "../orchestration-v2/ThreadLifecycleResources.ts";
 
 const DRAIN_LIMIT = 100;
 
@@ -39,6 +40,11 @@ const collectEvents = Effect.gen(function* () {
 }).pipe(Effect.withSpan("preview.test.collectEvents"));
 
 const layer = PreviewManager.layer.pipe(
+  Layer.provide(
+    Layer.mock(ThreadLifecycleResources.ThreadLifecycleResources)({
+      withCreateCommit: (_threadId, commit) => commit,
+    }),
+  ),
   Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-preview-manager-" })),
   Layer.provide(NodeCrypto.layer),
   Layer.provide(NodeServices.layer),

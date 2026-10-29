@@ -208,7 +208,11 @@ it.effect(
       const layerProjection = Layer.succeed(
         ProjectionStore.ProjectionStoreV2,
         ProjectionStore.ProjectionStoreV2.of({
+          hasNativeAttachment: () => Effect.die("unused hasNativeAttachment"),
+          getProviderAttachmentSources: () => Effect.die("unused getProviderAttachmentSources"),
           apply: () => Effect.void,
+          getOwnershipPath: () => Effect.die("unused getOwnershipPath"),
+          getSubagentDescendants: () => Effect.die("unused getSubagentDescendants"),
           getLimitRecoveryCandidates: () => Effect.die("unused getLimitRecoveryCandidates"),
           getShellSnapshot: () => Effect.die("unused getShellSnapshot"),
           readShellSnapshot: () => Effect.die("unused readShellSnapshot"),

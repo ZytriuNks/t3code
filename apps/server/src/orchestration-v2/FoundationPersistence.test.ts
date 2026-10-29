@@ -60,6 +60,8 @@ import * as ProviderRuntimeRecovery from "./ProviderRuntimeRecoveryService.ts";
 import { buildBoundedThreadProjection } from "./threadHistoryPaging.ts";
 import { applyOrchestrationV2ProjectionEvent } from "../../../../packages/client-runtime/src/state/orchestrationV2Projection.ts";
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
+import * as ThreadOwnership from "./ThreadOwnership.ts";
+import * as ThreadLifecycleGuard from "./ThreadLifecycleGuard.ts";
 
 const isLiveStreamBufferError = Schema.is(LiveStreamBufferError);
 const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
@@ -82,6 +84,8 @@ const layerProjectionMaintenanceProvided = ProjectionMaintenance.layer.pipe(
   Layer.provide(layerStoresProvided),
 );
 const layerTest = Layer.mergeAll(
+  ThreadLifecycleGuard.layer.pipe(Layer.provide(layerDatabase)),
+  ThreadOwnership.layer.pipe(Layer.provide(layerStoresProvided)),
   layerStoresProvided,
   layerEventSinkProvided,
   layerEffectOutboxProvided,
@@ -2644,6 +2648,32 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
           runtimeRequests: [],
           turnItems: [],
         } as unknown as OrchestrationV2ThreadProjection;
+        // The real commit fence validates persisted identity, independently of the recovery read fixture.
+        const sink = yield* EventSink.EventSinkV2;
+        yield* sink.write({
+          events: [
+            threadCreatedEvent({ id: "shutdown:thread", thread: projection.thread, now }),
+            {
+              id: EventId.make("shutdown:run"),
+              type: "run.created",
+              threadId,
+              runId,
+              occurredAt: now,
+              payload: {
+                ...projection.runs[0]!,
+                threadId,
+                modelSelection,
+                userMessageId: MessageId.make("shutdown:message"),
+                rootNodeId: null,
+                requestedAt: now,
+                startedAt: now,
+                completedAt: null,
+                checkpointId: null,
+                contextHandoffId: null,
+              },
+            },
+          ],
+        });
         const recovery = yield* ProviderRuntimeRecovery.make.pipe(
           Effect.provide(
             Layer.mergeAll(
@@ -2666,6 +2696,15 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
         assert.deepEqual(effects[0]?.request, {
           type: "provider-runtime.continue",
           sourceRunId: runId,
+        });
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        const persisted = (yield* store.getThreadRecords(threadId, ["runs"])).runs[0]!;
+        yield* store.apply({
+          id: EventId.make("shutdown:finish"),
+          type: "run.updated",
+          threadId,
+          occurredAt: now,
+          payload: { ...persisted, status: "cancelled", completedAt: now },
         });
         yield* outbox.cancelUnsettled({
           threadId,
@@ -2886,6 +2925,7 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
       const parent = makeThread(parentId, now);
       const child: OrchestrationV2AppThread = {
         ...makeThread(childId, now),
+        projectId: parent.projectId,
         createdBy: "agent",
         creationSource: "provider",
         lineage: {

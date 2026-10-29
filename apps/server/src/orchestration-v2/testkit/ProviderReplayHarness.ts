@@ -54,6 +54,8 @@ import * as ThreadTitleRegenerationService from "../ThreadTitleRegenerationServi
 import * as RuntimePolicy from "../RuntimePolicy.ts";
 import * as TurnItemPositionStore from "../TurnItemPositionStore.ts";
 import * as RuntimeRequestService from "../RuntimeRequestService.ts";
+import * as ThreadOwnership from "../ThreadOwnership.ts";
+import * as ThreadLifecycleGuard from "../ThreadLifecycleGuard.ts";
 import * as ThreadCommandExecutor from "../ThreadCommandExecutor.ts";
 import * as ThreadForkService from "../ThreadForkService.ts";
 import {
@@ -377,6 +379,7 @@ export function layerWithRegistry<Error>(
     Layer.provide(layerProvidedRegistry),
   );
   const layerRunExecutionServiceProvided = RunExecutionService.layer.pipe(
+    Layer.provide(ThreadOwnership.layer.pipe(Layer.provide(ProjectionStore.layer))),
     Layer.provide(
       Layer.mergeAll(
         McpAppModelContext.layerEmpty,
@@ -390,6 +393,7 @@ export function layerWithRegistry<Error>(
     ),
   );
   const layerProviderTurnStartServiceProvided = ProviderTurnStartService.layer.pipe(
+    Layer.provide(ThreadLifecycleGuard.layer),
     Layer.provide(
       Layer.mergeAll(
         layerContextHandoffServiceProvided,
@@ -414,6 +418,7 @@ export function layerWithRegistry<Error>(
     Layer.provide(Layer.merge(layerStores, layerProviderSessionManagerProvided)),
   );
   const layerCheckpointRollbackServiceProvided = CheckpointRollbackService.layer.pipe(
+    Layer.provide(ThreadLifecycleGuard.layer),
     Layer.provide(
       Layer.mergeAll(
         layerCheckpointServiceProvided,
@@ -514,7 +519,11 @@ export function layerWithRegistry<Error>(
     layerEventSinkProvided,
     layerContinuationWorkerProvided,
     layerCommandOutputHubProvided,
-  ).pipe(Layer.provide(ProviderTurnStartServiceTestkit.layer), Layer.provide(NodeServices.layer));
+  ).pipe(
+    Layer.provide(layerDatabase),
+    Layer.provide(ProviderTurnStartServiceTestkit.layer),
+    Layer.provide(NodeServices.layer),
+  );
 
   if (options.runEffectWorker === false) {
     return layerReplayRuntime;
@@ -532,6 +541,8 @@ export function layerWithRegistry<Error>(
           ).pipe(Effect.orDie),
         ).pipe(
           Layer.provide(ProviderRuntimeRecoveryService.layer),
+          Layer.provide(ThreadLifecycleGuard.layer.pipe(Layer.provide(layerDatabase))),
+          Layer.provide(ThreadOwnership.layer),
           Layer.provide(
             Layer.mergeAll(
               layerStores,

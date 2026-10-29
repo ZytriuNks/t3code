@@ -9,3 +9,11 @@ export class ThreadCommandExecutor extends Context.Service<
 >()("t3/orchestration-v2/ThreadCommandExecutor") {}
 
 export const layer = Layer.effect(ThreadCommandExecutor, KeyedLock.make<ThreadId>());
+
+// Keep root coordination separate: existing thread locks can nest parent and child calls.
+export class ThreadRootCommandExecutor extends Context.Service<
+  ThreadRootCommandExecutor,
+  KeyedLock.KeyedLock<ThreadId>
+>()("t3/orchestration-v2/ThreadCommandExecutor/ThreadRootCommandExecutor") {}
+
+export const layerRoots = Layer.effect(ThreadRootCommandExecutor, KeyedLock.make<ThreadId>());

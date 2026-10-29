@@ -5,7 +5,11 @@ import type {
 import { EnvironmentId, ProjectId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { buildHomeProjectScopes, findHomeProjectScope } from "./homeThreadList";
+import {
+  buildHomeProjectScopes,
+  findHomeProjectScope,
+  sortHomeProjectScopes,
+} from "./homeThreadList";
 import { makeThreadShellFixture } from "../../test-fixtures";
 import { buildThreadListV2Items } from "../threads/threadListV2";
 
@@ -45,6 +49,46 @@ function makeThread(
 }
 
 describe("home project scopes", () => {
+  it("does not let hidden subagent activity reorder independent projects", () => {
+    const environmentId = EnvironmentId.make("local");
+    const projects = ["a", "b"].map((id) =>
+      makeProject({ environmentId, id: ProjectId.make(id), title: id }),
+    );
+    const scopes = buildHomeProjectScopes({
+      projects,
+      environmentId: null,
+      projectGroupingMode: "separate",
+    });
+    const threads = [
+      makeThread({
+        environmentId,
+        id: ThreadId.make("root"),
+        projectId: projects[0]!.id,
+        title: "Root",
+        latestUserMessageAt: "2026-10-25T00:00:00.000Z",
+      }),
+      makeThread({
+        environmentId,
+        id: ThreadId.make("child"),
+        projectId: projects[1]!.id,
+        title: "Child",
+        latestUserMessageAt: "2026-10-27T00:00:00.000Z",
+        lineage: {
+          rootThreadId: ThreadId.make("other-root"),
+          parentThreadId: ThreadId.make("other-root"),
+          relationshipToParent: "subagent",
+        },
+      }),
+    ];
+    expect(
+      sortHomeProjectScopes({
+        scopes,
+        threads,
+        pendingTasks: [],
+        projectSortOrder: "updated_at",
+      }).map((scope) => scope.title),
+    ).toEqual(["a", "b"]);
+  });
   it("filters threads across both scratch hosts while retaining the selected environment boundary", () => {
     const localEnvironmentId = EnvironmentId.make("local");
     const remoteEnvironmentId = EnvironmentId.make("remote");

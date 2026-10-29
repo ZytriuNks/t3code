@@ -21,6 +21,8 @@ import * as EffectOutbox from "./EffectOutbox.ts";
 import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import * as ThreadOwnership from "./ThreadOwnership.ts";
+import * as ThreadLifecycleGuard from "./ThreadLifecycleGuard.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { restartContinuationRun } from "./RestartContinuation.ts";
 import { isBufferedProviderNotification } from "./NotificationMailbox.ts";
@@ -174,6 +176,8 @@ export const make = Effect.gen(function* () {
   const eventSink = yield* EventSink.EventSinkV2;
   const ids = yield* IdAllocator.IdAllocatorV2;
   const outbox = yield* EffectOutbox.EffectOutboxV2;
+  const ownership = yield* ThreadOwnership.ThreadOwnership;
+  const lifecycle = yield* ThreadLifecycleGuard.ThreadLifecycleGuard;
   type RecoverySession = ProjectionStore.ProjectionRuntimeRecoveryState["providerSessions"][number];
   /**
    * A session shared by several threads (one Codex app server) is stopped by the
@@ -202,6 +206,16 @@ export const make = Effect.gen(function* () {
       continueAfterRestart: boolean,
       stoppedThisPass: ReadonlyMap<string, RecoverySession> = new Map(),
     ) {
+      const source = yield* lifecycle.resolveLifecycleSource(projection.thread.id).pipe(
+        Effect.mapError(
+          (cause) =>
+            new ProviderRuntimeRecoveryError({
+              operation: "reconcile",
+              threadId: projection.thread.id,
+              cause,
+            }),
+        ),
+      );
       const now = yield* DateTime.now;
       const runs = [] as Array<OrchestrationV2ThreadProjection["runs"][number]>;
       for (const run of nonterminalRuns(projection)) {
@@ -628,16 +642,29 @@ export const make = Effect.gen(function* () {
               now,
             )
           : undefined;
-      const effects: Array<EffectOutbox.PendingOrchestrationEffectV2> = continuationRun
-        ? [
-            {
-              id: `effect:restart-continuation:${continuationRun.id}`,
-              commandId,
-              threadId: projection.thread.id,
-              request: { type: "provider-runtime.continue", sourceRunId: continuationRun.id },
-            },
-          ]
-        : [];
+      const effects: Array<EffectOutbox.PendingOrchestrationEffectV2> =
+        continuationRun &&
+        (yield* lifecycle
+          .check({ guard: ThreadLifecycleGuard.guardForRun(continuationRun), purpose: "activity" })
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new ProviderRuntimeRecoveryError({
+                  operation: "reconcile",
+                  threadId: projection.thread.id,
+                  cause,
+                }),
+            ),
+          )) === "accept"
+          ? [
+              {
+                id: `effect:restart-continuation:${continuationRun.id}`,
+                commandId,
+                threadId: projection.thread.id,
+                request: { type: "provider-runtime.continue", sourceRunId: continuationRun.id },
+              },
+            ]
+          : [];
       const stoppedSessions = projection.providerSessions.filter(
         (candidate) => candidate.status !== "stopped" && candidate.status !== "error",
       ).length;
@@ -664,6 +691,7 @@ export const make = Effect.gen(function* () {
       } else {
         const result = yield* eventSink
           .commitCommand({
+            lifecycleGuard: source,
             commandId,
             threadId: projection.thread.id,
             commandType: "provider-runtime.reconcile",
@@ -713,26 +741,45 @@ export const make = Effect.gen(function* () {
     let retiredEffects = 0;
     const stoppedThisPass = new Map<string, RecoverySession>();
     for (const threadId of threadIds) {
-      const projection = yield* projections.getRuntimeRecoveryProjection(threadId).pipe(
-        Effect.mapError(
-          (cause) =>
-            new ProviderRuntimeRecoveryError({
-              operation: "read-projections",
-              threadId,
-              cause,
-            }),
-        ),
+      const root = yield* ownership
+        .resolveRoot(threadId)
+        .pipe(
+          Effect.mapError(
+            (cause) =>
+              new ProviderRuntimeRecoveryError({ operation: "read-projections", threadId, cause }),
+          ),
+        );
+      const result = yield* ownership.withRoots(
+        [root],
+        Effect.gen(function* () {
+          const projection = yield* projections.getRuntimeRecoveryProjection(threadId).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ProviderRuntimeRecoveryError({
+                  operation: "read-projections",
+                  threadId,
+                  cause,
+                }),
+            ),
+          );
+          const enabled =
+            continueAfterRestart !== null &&
+            resolveProjectSettings(continueAfterRestart, projection.thread.projectId).settings
+              .continueThreadsAfterServerUpdate;
+          const reconciled = yield* reconcileProjection(
+            projection,
+            trigger,
+            enabled,
+            stoppedThisPass,
+          );
+          for (const session of projection.providerSessions) {
+            if (session.status !== "stopped" && session.status !== "error") {
+              stoppedThisPass.set(session.id, session);
+            }
+          }
+          return reconciled;
+        }),
       );
-      const enabled =
-        continueAfterRestart !== null &&
-        resolveProjectSettings(continueAfterRestart, projection.thread.projectId).settings
-          .continueThreadsAfterServerUpdate;
-      const result = yield* reconcileProjection(projection, trigger, enabled, stoppedThisPass);
-      for (const session of projection.providerSessions) {
-        if (session.status !== "stopped" && session.status !== "error") {
-          stoppedThisPass.set(session.id, session);
-        }
-      }
       terminalizedRuns += result.terminalizedRuns;
       stoppedSessions += result.stoppedSessions;
       closedRequests += result.closedRequests;
@@ -757,29 +804,41 @@ export const make = Effect.gen(function* () {
     if (!enabled) return;
     const threadIds = yield* projections.getRecoveryThreadIds("runtime");
     for (const threadId of threadIds) {
-      yield* Effect.gen(function* () {
-        const projection = yield* projections.getRuntimeRecoveryProjection(threadId);
-        if (
-          !resolveProjectSettings(enabled, projection.thread.projectId).settings
-            .continueThreadsAfterServerUpdate
-        )
-          return;
-        const run = restartContinuationRun(projection, yield* DateTime.now);
-        if (!run) return;
-        const commandId = CommandId.make(`command:restart-prepare:${run.id}`);
-        yield* eventSink.writeWithEffects({
-          commandId,
-          events: [],
-          effects: [
-            {
-              id: `effect:restart-continuation:${run.id}`,
-              commandId,
-              threadId,
-              request: { type: "provider-runtime.continue", sourceRunId: run.id },
-            },
-          ],
-        });
-      }).pipe(
+      yield* ownership.resolveRoot(threadId).pipe(
+        Effect.flatMap((root) =>
+          ownership.withRoots(
+            [root],
+            Effect.gen(function* () {
+              const projection = yield* projections.getRuntimeRecoveryProjection(threadId);
+              if (
+                !resolveProjectSettings(enabled, projection.thread.projectId).settings
+                  .continueThreadsAfterServerUpdate
+              )
+                return;
+              const run = restartContinuationRun(projection, yield* DateTime.now);
+              if (!run) return;
+              const commandId = CommandId.make(`command:restart-prepare:${run.id}`);
+              yield* eventSink.writeWithEffects({
+                lifecycleGuard: {
+                  threadId,
+                  lifecycleRevision: run.lifecycleRevision ?? 0,
+                  sourceToken: run.lifecycleSourceToken,
+                  runId: run.id,
+                },
+                commandId,
+                events: [],
+                effects: [
+                  {
+                    id: `effect:restart-continuation:${run.id}`,
+                    commandId,
+                    threadId,
+                    request: { type: "provider-runtime.continue", sourceRunId: run.id },
+                  },
+                ],
+              });
+            }),
+          ),
+        ),
         Effect.catchCauseIf(
           (cause) => !Cause.hasInterruptsOnly(cause),
           (cause) =>

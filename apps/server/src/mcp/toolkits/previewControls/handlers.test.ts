@@ -15,6 +15,7 @@ import * as Stream from "effect/Stream";
 
 import * as ServerConfig from "../../../config.ts";
 import * as Preview from "../../../preview/Manager.ts";
+import * as ThreadLifecycleResources from "../../../orchestration-v2/ThreadLifecycleResources.ts";
 import * as ServerSettings from "../../../serverSettings.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
@@ -53,7 +54,10 @@ it.effect.each([
       };
       const manager = yield* Preview.make.pipe(
         Effect.provide(
-          Layer.merge(
+          Layer.mergeAll(
+            Layer.mock(ThreadLifecycleResources.ThreadLifecycleResources)({
+              withCreateCommit: (_threadId, commit) => commit,
+            }),
             ServerConfig.layerTest(process.cwd(), { prefix: "t3-preview-controls-" }).pipe(
               Layer.provide(NodeServices.layer),
             ),

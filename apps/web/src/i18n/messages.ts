@@ -1,6 +1,8 @@
+import { THREAD_LIFECYCLE_MESSAGES } from "@t3tools/client-runtime/state/thread-lifecycle-result";
 import type { AppLanguage } from "./locale";
 
 export const EN_MESSAGES = {
+  ...THREAD_LIFECYCLE_MESSAGES.en,
   "settings.general.projectOrder.updatedAt": "Last user message",
   "settings.general.projectOrder.createdAt": "Created at",
   "settings.general.projectOrder.manual": "Manual",
@@ -2159,9 +2161,8 @@ export const EN_MESSAGES = {
   "settings.project.environmentDetail": "Environment: {environment}",
   "settings.project.groupedEntries": "This removes {count} grouped project entries.",
   "settings.project.clearHistory":
-    "This permanently clears conversation history for those threads and any archived threads.",
-  "settings.project.clearArchivedHistory":
-    "This permanently clears any archived conversation history.",
+    "This deletes these threads, including archived threads, from T3.",
+  "settings.project.clearArchivedHistory": "This deletes any archived threads from T3.",
   "settings.project.filesUnaffected":
     "This removes only the project entries, not the files on disk.",
   "settings.project.otherEntriesUnaffected":
@@ -2893,6 +2894,7 @@ export type MessageKey = keyof typeof EN_MESSAGES;
 export type MessageValues = Readonly<Record<string, string | number>>;
 
 export const ZH_CN_MESSAGES = {
+  ...THREAD_LIFECYCLE_MESSAGES["zh-CN"],
   "settings.general.projectOrder.updatedAt": "最后用户消息时间",
   "settings.general.projectOrder.createdAt": "创建时间",
   "settings.general.projectOrder.manual": "手动",
@@ -4889,8 +4891,8 @@ export const ZH_CN_MESSAGES = {
   "settings.project.path": "路径：{path}",
   "settings.project.environmentDetail": "环境：{environment}",
   "settings.project.groupedEntries": "这会移除 {count} 个归组项目条目。",
-  "settings.project.clearHistory": "这会永久清除这些线程及其归档线程的会话历史。",
-  "settings.project.clearArchivedHistory": "这会永久清除所有归档会话历史。",
+  "settings.project.clearHistory": "这会从 T3 删除这些线程（包括归档线程）。",
+  "settings.project.clearArchivedHistory": "这会从 T3 删除所有归档线程。",
   "settings.project.filesUnaffected": "这只会移除项目条目，不会删除磁盘上的文件。",
   "settings.project.otherEntriesUnaffected": "此归组项目中的其他条目不受影响。",
   "settings.project.cannotUndo": "此操作无法撤销。",

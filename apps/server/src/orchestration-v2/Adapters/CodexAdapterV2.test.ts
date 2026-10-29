@@ -32,6 +32,8 @@ import { assert, describe, it } from "@effect/vitest";
 import * as CodexClient from "effect-codex-app-server/client";
 import * as CodexReplay from "effect-codex-app-server/replay";
 import type * as CodexSchema from "effect-codex-app-server/schema";
+import * as Path from "effect/Path";
+import { normalizeProjectPathForComparison } from "@t3tools/shared/path";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Crypto from "effect/Crypto";
@@ -671,6 +673,7 @@ describe("CodexAdapterV2 session initialize", () => {
   const openReplaySession = (
     transcript: CodexReplay.CodexAppServerReplayTranscript,
     beforeEmitInbound?: CodexReplay.CodexAppServerReplayDriver["beforeEmitInbound"],
+    settings = DEFAULT_CODEX_SETTINGS,
   ) =>
     Effect.gen(function* () {
       const driver = yield* CodexReplay.makeReplayDriver(
@@ -680,7 +683,7 @@ describe("CodexAdapterV2 session initialize", () => {
       let initializeRequests = 0;
       const adapter = yield* CodexAdapterV2.makeCodexAdapterV2({
         instanceId: CodexAdapterV2.CODEX_DEFAULT_INSTANCE_ID,
-        settings: DEFAULT_CODEX_SETTINGS,
+        settings,
         environment: {},
         clientFactory: {
           open: (openInput) =>
@@ -720,6 +723,7 @@ describe("CodexAdapterV2 session initialize", () => {
         runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
       });
       return {
+        runtime,
         ensureThread: (threadId: string) =>
           runtime.ensureThread({
             threadId: ThreadId.make(threadId),
@@ -732,6 +736,51 @@ describe("CodexAdapterV2 session initialize", () => {
 
   const replayPreamble = (nativeThreadId: string) =>
     codexReplayPreamble({ nativeThreadId, nativeTurnId: "unused", prompt: "unused" });
+
+  it.effect("storage uses the Codex shared home and scopes new provider threads across homes", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-codex-storage-" });
+      const shared = path.join(root, "shared");
+      const shadow = path.join(root, "shadow");
+      const other = path.join(root, "other");
+      for (const directory of [shared, shadow, other]) yield* fs.makeDirectory(directory);
+      const open = (homePath: string, shadowHomePath = "") =>
+        openReplaySession(
+          makeCodexReplayTranscript({
+            scenario: "storage",
+            entries: replayPreamble("same-native").slice(0, 5),
+          }),
+          undefined,
+          { ...DEFAULT_CODEX_SETTINGS, homePath, shadowHomePath },
+        );
+      const first = yield* (yield* open(shared, shadow)).ensureThread("storage-first");
+      const second = yield* (yield* open(other)).ensureThread("storage-second");
+      assert.deepEqual(first.nativeStorage, {
+        type: "resolved",
+        canonicalRoot: normalizeProjectPathForComparison(yield* fs.realPath(shared)),
+      });
+      assert.notEqual(first.id, second.id);
+      assert.isFalse(first.id.includes(shared));
+      const legacyId = ProviderThreadId.make("persisted-provider-thread");
+      const existing = { ...first, id: legacyId };
+      const session = yield* open(other);
+      const attached = yield* session.runtime.ensureThread({
+        threadId: ThreadId.make("storage-existing"),
+        modelSelection: CODEX_TEST_MODEL_SELECTION,
+        runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+        existingProviderThread: existing,
+      });
+      assert.equal(attached.id, legacyId);
+      assert.deepEqual(existing.nativeStorage, first.nativeStorage);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+      ),
+    ),
+  );
 
   it.effect("sends one initialize when two threads start on a fresh session at once", () =>
     Effect.gen(function* () {
@@ -2858,6 +2907,79 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
         ),
       ),
+  );
+
+  it.effect("lifecycle retirement waits for the exact native thread closed acknowledgement", () =>
+    Effect.gen(function* () {
+      const request = (id: number, closedThread?: string) => [
+        {
+          type: "expect_outbound" as const,
+          label: `unsubscribe-${id}`,
+          frame: { id, method: "thread/unsubscribe", params: { threadId: BG_NATIVE_THREAD } },
+        },
+        ...(closedThread === undefined
+          ? []
+          : [
+              {
+                type: "emit_inbound" as const,
+                label: "closed",
+                frame: { method: "thread/closed", params: { threadId: closedThread } },
+              },
+            ]),
+        {
+          type: "emit_inbound" as const,
+          label: `reply-${id}`,
+          frame: { id, result: { status: "unsubscribed" } },
+        },
+      ];
+      const entered = yield* Deferred.make<void>();
+      const completed = yield* Deferred.make<void>();
+      const harness = yield* makeCodexReplayHarness(
+        makeCodexReplayTranscript({
+          scenario: "lifecycle-retirement-close",
+          entries: [
+            ...backgroundExecTranscript.entries.slice(0, -1),
+            ...request(4),
+            ...request(5, "unrelated-thread"),
+            ...request(6, BG_NATIVE_THREAD),
+          ],
+        }),
+        () => Effect.void,
+        (method) =>
+          method === "thread/unsubscribe"
+            ? Deferred.succeed(entered, undefined).pipe(Effect.asVoid)
+            : Effect.void,
+      );
+      yield* harness.runtime.startTurn(
+        makeCodexTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now: yield* DateTime.now,
+          attemptId: RunAttemptId.make("attempt-lifecycle-retirement"),
+          text: BG_PROMPT,
+        }),
+      );
+      yield* harness.firstTerminal;
+      const retiring = yield* harness.runtime.unloadThread!({
+        providerThread: harness.providerThread,
+        awaitRetirement: true,
+      }).pipe(
+        Effect.andThen(Deferred.succeed(completed, undefined)),
+        Effect.forkChild({ startImmediately: true }),
+      );
+      yield* Deferred.await(entered);
+      // The second response fences the first response and the unrelated close notification.
+      yield* harness.runtime.unloadThread!({ providerThread: harness.providerThread });
+      assert.isFalse(yield* Deferred.isDone(completed));
+      yield* harness.runtime.unloadThread!({ providerThread: harness.providerThread });
+      yield* Fiber.join(retiring);
+      assert.isTrue(yield* Deferred.isDone(completed));
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+      ),
+    ),
   );
 
   const backgroundStopCases = [true, false, "still_running", "thread_unloaded"] as const;

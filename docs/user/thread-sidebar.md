@@ -232,6 +232,30 @@ Expand a tool call in the conversation to see its full command and output.
 Summaries shorten shell wrappers and can still describe the latest call after it
 finishes; the call's own result shows its status.
 
+## Archive or delete a thread
+
+Use the thread menu to archive or delete a conversation. On an updated server,
+the operation also covers its subagents, including nested subagents. Forks are
+independent conversations and keep their own subagents. Subagents stay attached
+to their parent instead of appearing as separate sidebar, search, or archive
+entries. You can still inspect an archived parent's subagents through its
+conversation and relationships.
+
+Restoring an archived conversation restores access to its subagents. It does not
+restart cancelled runs, queued messages, approvals, sessions, or scheduled work.
+Resource cleanup can remain pending or fail after the archive or deletion is
+saved. Pending or failed cleanup can block new work after restoration until
+cleanup succeeds.
+
+Deletion applies only to T3 Code. It does not delete provider transcripts or
+physically reclaim database history. Archiving keeps history and attachments.
+Existing forks retain their inherited history and referenced attachments, and
+can continue after the source is deleted. Historical subagent cards do not
+become the fork's live agents; links to deleted source subagents may be
+unavailable. You cannot create a new fork from, or merge back into, a deleted
+source. Upgrade older servers before relying on lifecycle changes to cover a
+whole subagent tree.
+
 ## Snooze until later
 
 Choose **Snooze → Custom…** from a thread's menu to pick a date and time in your

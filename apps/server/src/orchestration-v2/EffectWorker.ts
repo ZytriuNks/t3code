@@ -28,6 +28,7 @@ import * as ThreadTitleRegenerationService from "./ThreadTitleRegenerationServic
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { continueRestartedRun } from "./RestartContinuation.ts";
+import * as ThreadLifecycleGuard from "./ThreadLifecycleGuard.ts";
 
 export class OrchestrationEffectExecutionError extends Schema.TaggedError<OrchestrationEffectExecutionError>()(
   "OrchestrationEffectExecutionError",
@@ -59,7 +60,7 @@ function isNonRetryableProviderTurnControlFailure(effectType: string, errorText:
 export interface OrchestrationEffectExecutorV2Shape {
   readonly execute: (
     effect: EffectOutbox.OrchestrationEffectV2,
-    options?: { readonly willRetry: boolean },
+    options?: { readonly willRetry: boolean; readonly lifecycleCleanup?: boolean },
   ) => Effect.Effect<void, OrchestrationEffectExecutionError>;
 }
 
@@ -123,6 +124,18 @@ export const layerExecutor: Layer.Layer<
               .detach({
                 providerSessionId: effect.request.providerSessionId,
                 threadId: effect.threadId,
+                ...(effect.request.lifecycle === undefined
+                  ? {}
+                  : { lifecycle: effect.request.lifecycle }),
+                ...(options?.lifecycleCleanup === true ? { requireConfirmedDetach: true } : {}),
+                ...(effect.request.retirementRevision === undefined
+                  ? {}
+                  : {
+                      retirementRevision: effect.request.retirementRevision,
+                      ...(effect.request.retirementSourceToken === undefined
+                        ? {}
+                        : { retirementSourceToken: effect.request.retirementSourceToken }),
+                    }),
                 ...(effect.request.detail === undefined ? {} : { detail: effect.request.detail }),
                 ...(effect.request.revokeMcpCredential === undefined
                   ? {}
@@ -299,6 +312,10 @@ export const layerExecutor: Layer.Layer<
                           : { senderThreadId: message.senderThreadId }),
                       })
                       .pipe(
+                        Effect.provideService(
+                          ThreadLifecycleGuard.DispatchLifecycleGuard,
+                          ThreadLifecycleGuard.guardForRun(run),
+                        ),
                         // The turn that just completed leaves no further retry
                         // target once the instance is off: the completed turn
                         // stands as the thread's result instead of going
@@ -460,7 +477,12 @@ export const layerExecutor: Layer.Layer<
                 ),
               );
           case "scheduled-tasks.cleanup":
-            return resourceCleanup.cleanupScheduledTasks(effect.threadId).pipe(
+          case "scheduled-tasks.suspend":
+            return (
+              effect.request.type === "scheduled-tasks.suspend"
+                ? resourceCleanup.suspendScheduledTasks(effect.threadId)
+                : resourceCleanup.cleanupScheduledTasks(effect.threadId)
+            ).pipe(
               Effect.mapError(
                 (cause) =>
                   new OrchestrationEffectExecutionError({
@@ -493,22 +515,29 @@ export const layerExecutor: Layer.Layer<
               ),
             );
           case "attachment.cleanup":
-            return resourceCleanup.cleanupAttachments(effect.request.attachmentIds).pipe(
-              Effect.mapError(
-                (cause) =>
-                  new OrchestrationEffectExecutionError({
-                    effectId: effect.id,
-                    effectType: effect.request.type,
-                    cause,
-                  }),
-              ),
-            );
+            return resourceCleanup
+              .cleanupAttachments(effect.request.attachmentIds, effect.threadId)
+              .pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new OrchestrationEffectExecutionError({
+                      effectId: effect.id,
+                      effectType: effect.request.type,
+                      cause,
+                    }),
+                ),
+              );
           case "thread-title.generate":
             return threadTitleRegeneration
               .execute({
                 threadId: effect.threadId,
                 requestId: effect.commandId,
                 kind: effect.request.kind,
+                lifecycleGuard: {
+                  threadId: effect.threadId,
+                  lifecycleRevision: effect.request.lifecycleRevision ?? 0,
+                  sourceToken: effect.request.lifecycleSourceToken,
+                },
               })
               .pipe(
                 Effect.mapError(
@@ -732,8 +761,22 @@ export const layerWithOptions = (
           }).pipe(Effect.onError((cause) => requeueClaim(effect, cause)));
           if (cancelledBeforeExecution) return true;
 
+          // Pre-marker archive/delete receipts are also lifecycle cleanup; ordinary switches stay ordinary.
+          const legacyLifecycleDetach =
+            effect.request.type === "provider-session.detach" &&
+            effect.request.lifecycle === undefined &&
+            effect.request.retirementRevision === undefined
+              ? (yield* outbox
+                  .listLifecycleCleanup([effect.threadId])
+                  .pipe(Effect.onError((cause) => requeueClaim(effect, cause)))).some(
+                  (cleanup) => cleanup.id === effect.id,
+                )
+              : false;
           const execution = executor
-            .execute(effect, { willRetry: effect.attemptCount < maxAttempts })
+            .execute(effect, {
+              willRetry: effect.attemptCount < maxAttempts,
+              ...(legacyLifecycleDetach ? { lifecycleCleanup: true } : {}),
+            })
             .pipe(Effect.as("executed" as const));
           const exit = yield* Effect.exit(Effect.raceFirst(execution, cancellation)).pipe(
             Effect.ensuring(outbox.clearCancellation(effect.id)),

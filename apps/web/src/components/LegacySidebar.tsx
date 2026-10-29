@@ -144,6 +144,7 @@ import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { useDesktopUpdateState } from "../state/desktopUpdate";
 
 import { useThreadActions } from "../hooks/useThreadActions";
+import { useThreadDeleteConfirmation } from "../hooks/useThreadDeleteConfirmation";
 import { projectEnvironment } from "../state/projects";
 import { threadEnvironment, useEnvironmentThread } from "../state/threads";
 import { useEnvironment, useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
@@ -1373,9 +1374,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     : project.allRemoteMembersAreDesktopLocal
       ? "laptop"
       : "cloud";
-  const appSettingsConfirmThreadDelete = useClientSettings<boolean>(
-    (settings) => settings.confirmThreadDelete,
-  );
+  const confirmThreadDeletion = useThreadDeleteConfirmation();
   const appSettingsConfirmThreadArchive = useClientSettings<boolean>(
     (settings) => settings.confirmThreadArchive,
   );
@@ -1653,7 +1652,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
                         ...(member.environmentLabel
                           ? [`Environment: ${member.environmentLabel}`]
                           : []),
-                        "This permanently clears conversation history for those threads and any archived threads.",
+                        t("settings.project.clearHistory"),
                         "This removes only this project entry.",
                         "This action cannot be undone.",
                       ].join("\n")
@@ -1663,7 +1662,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
                         ...(member.environmentLabel
                           ? [`Environment: ${member.environmentLabel}`]
                           : []),
-                        "This permanently clears any archived conversation history.",
+                        t("settings.project.clearArchivedHistory"),
                         "This removes only this project entry.",
                       ].join("\n"),
                   { variant: "destructive" },
@@ -1711,7 +1710,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       `Remove project "${member.title}"?`,
       `Path: ${member.workspaceRoot}`,
       ...(member.environmentLabel ? [`Environment: ${member.environmentLabel}`] : []),
-      "This permanently clears any archived conversation history.",
+      t("settings.project.clearArchivedHistory"),
       "This removes only this project entry.",
     ].join("\n");
     const confirmed = await api.dialogs.confirm(message, { variant: "destructive" });
@@ -2108,16 +2107,10 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
 
     if (clicked !== "delete") return;
 
-    if (appSettingsConfirmThreadDelete) {
-      const confirmed = await api.dialogs.confirm(
-        [
-          `Delete ${count} thread${count === 1 ? "" : "s"}?`,
-          "This permanently clears conversation history for these threads.",
-        ].join("\n"),
-        { variant: "destructive" },
-      );
-      if (!confirmed) return;
-    }
+    const confirmed = await confirmThreadDeletion(
+      selectedThreadEntries.map(({ threadRef }) => threadRef),
+    );
+    if (confirmed._tag === "Failure" || !confirmed.value) return;
     if (
       !selectedThreadEntries.every(({ threadRef }) => checkTaskPermission(threadRef.environmentId))
     ) {
@@ -2565,18 +2558,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       }
 
       if (clicked !== "delete") return;
-      if (appSettingsConfirmThreadDelete) {
-        const confirmed = await api.dialogs.confirm(
-          [
-            `Delete thread "${thread.title}"?`,
-            "This permanently clears conversation history for this thread.",
-          ].join("\n"),
-          { variant: "destructive" },
-        );
-        if (!confirmed) {
-          return;
-        }
-      }
+      const confirmed = await confirmThreadDeletion([threadRef]);
+      if (confirmed._tag === "Failure" || !confirmed.value) return;
       if (!checkTaskPermission(threadRef.environmentId)) return;
       const result = await deleteThread(threadRef);
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {

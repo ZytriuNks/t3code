@@ -34,6 +34,7 @@ const layerIntakeTest = ServerConfig.layerTest(process.cwd(), {
 
 const layerFailingDispatch = (captured: OrchestrationV2ServerCommand[]) =>
   Layer.mock(ThreadManagementService.ThreadManagementService)({
+    getThreadShell: () => Effect.succeed(null),
     dispatch: (command) => {
       captured.push(command);
       return Effect.fail(
@@ -192,6 +193,7 @@ it.effect("releases claimed copies when the command was already rejected", () =>
     }).pipe(
       Effect.provide(
         Layer.mock(ThreadManagementService.ThreadManagementService)({
+          getThreadShell: () => Effect.succeed(null),
           dispatch: (command) =>
             Effect.fail(
               new OrchestratorCommandPreviouslyRejectedError({
@@ -259,6 +261,7 @@ it.effect("releases claimed copies when dispatch replays an earlier accepted res
     }).pipe(
       Effect.provide(
         Layer.mock(ThreadManagementService.ThreadManagementService)({
+          getThreadShell: () => Effect.succeed(null),
           dispatch: () => Effect.succeed({ sequence: 1, storedEvents }),
         }),
       ),
@@ -329,6 +332,7 @@ it.effect("a retried response re-claims the preserved pending uploads", () =>
     const retry = yield* dispatchCommand(command).pipe(
       Effect.provide(
         Layer.mock(ThreadManagementService.ThreadManagementService)({
+          getThreadShell: () => Effect.succeed(null),
           dispatch: (dispatched) => {
             captured.push(dispatched);
             return Effect.succeed({ sequence: 1, storedEvents: [] });

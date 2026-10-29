@@ -41,6 +41,7 @@ import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import * as ThreadLifecycleGuard from "./ThreadLifecycleGuard.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ProviderTurnStart from "./ProviderTurnStartService.ts";
@@ -90,6 +91,9 @@ function startWithMissingWorktree(
   );
   const projection = {
     thread: {
+      lifecycleRevision: 0,
+      archivedAt: null,
+      deletedAt: null,
       id: threadId,
       projectId: ProjectId.make("project_provider_turn_start_projection_failure"),
       branch: "feature/restore",
@@ -123,6 +127,11 @@ function startWithMissingWorktree(
   const pruneWorktrees = vi.fn(() => Effect.void);
   const createWorktree = vi.fn(() => Effect.succeed({} as never));
   const layer = ProviderTurnStart.layer.pipe(
+    Layer.provide(
+      Layer.mock(ThreadLifecycleGuard.ThreadLifecycleGuard)({
+        check: () => Effect.succeed("accept" as const),
+      }),
+    ),
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(ContextHandoffService.ContextHandoffServiceV2)({}),
@@ -343,6 +352,9 @@ function makeLocalCommandHarness(input: {
   };
   let projection: OrchestrationV2ThreadProjection = {
     thread: {
+      lifecycleRevision: 0,
+      archivedAt: null,
+      deletedAt: null,
       id: threadId,
       activeProviderThreadId: providerThreadId,
       projectId: ProjectId.make("project-native-account-command"),
@@ -683,6 +695,11 @@ function makeLocalCommandHarness(input: {
     }),
   );
   const layer = ProviderTurnStart.layer.pipe(
+    Layer.provide(
+      Layer.mock(ThreadLifecycleGuard.ThreadLifecycleGuard)({
+        check: () => Effect.succeed("accept" as const),
+      }),
+    ),
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(ContextHandoffService.ContextHandoffServiceV2)({

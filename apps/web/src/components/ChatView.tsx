@@ -2523,8 +2523,12 @@ export default function ChatView(props: ChatViewProps) {
   const subagentConversation = useSubagentConversation({
     owner: routeThreadRef,
     projection: serverProjection,
-    onNavigate: (target) => {
-      void navigate({ to: "/$environmentId/$threadId", params: buildThreadRouteParams(target) });
+    onNavigate: (target, allowArchived = false) => {
+      void navigate({
+        to: "/$environmentId/$threadId",
+        params: buildThreadRouteParams(target),
+        ...(allowArchived ? { state: { allowArchivedThread: true } } : {}),
+      });
     },
   });
   const onOpenThreadRefStable = useStableCallback(subagentConversation.openThread);

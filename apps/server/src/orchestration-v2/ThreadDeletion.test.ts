@@ -190,6 +190,7 @@ it.effect("cancels active work without reviving a run while disposing delegated 
     });
     const deleted = plan.events.reduce(applyToProjection, projection);
     assert.deepEqual(deleted.thread.deletedAt, deletedAt);
+    assert.equal(deleted.thread.lifecycleRevision, 1);
     assert.equal(deleted.thread.worktreePath, "/workspace/feature");
     assert.isNull(projection.thread.deletedAt);
     for (const run of deleted.runs) {
@@ -277,24 +278,34 @@ it.effect("queues provider and resource cleanup and preserves an earlier deletio
     });
     const deleted = plan.events.reduce(applyToProjection, projection);
     assert.deepEqual(deleted.thread.deletedAt, createdAt);
+    assert.equal(deleted.thread.lifecycleRevision, base.thread.lifecycleRevision ?? 0);
     assert.deepEqual(
       deleted.providerSessions.map((session) => session.status),
       ["stopped", "error"],
     );
     assert.deepEqual(
       plan.effects.map((effect) => effect.request),
-      [
-        {
-          type: "provider-session.detach",
-          providerSessionId: ProviderSessionId.make("session:delete-plan:running"),
-          detail: "Thread deleted.",
-          revokeMcpCredential: true,
+      (
+        [
+          {
+            type: "provider-session.detach",
+            providerSessionId: ProviderSessionId.make("session:delete-plan:running"),
+            detail: "Thread deleted.",
+            revokeMcpCredential: true,
+          },
+          { type: "scheduled-tasks.cleanup" },
+          { type: "terminal.cleanup" },
+          { type: "preview.cleanup" },
+          { type: "attachment.cleanup", attachmentIds: ["shared_file"] },
+        ] as const
+      ).map((request) => ({
+        ...request,
+        lifecycle: {
+          commandId: command.commandId,
+          rootThreadId: threadId,
+          revision: base.thread.lifecycleRevision ?? 0,
         },
-        { type: "scheduled-tasks.cleanup" },
-        { type: "terminal.cleanup" },
-        { type: "preview.cleanup" },
-        { type: "attachment.cleanup", attachmentIds: ["shared_file"] },
-      ],
+      })),
     );
   }).pipe(Effect.provide(IdAllocator.layer)),
 );

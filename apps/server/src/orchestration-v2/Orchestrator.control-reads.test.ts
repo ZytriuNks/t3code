@@ -57,6 +57,90 @@ const layerTest = Layer.mergeAll(
   ),
 );
 
+it.effect.each(["archive", "unarchive", "delete"] as const)(
+  "returns real %s lifecycle events and replays the original affected ids",
+  (operation) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const root = ThreadId.make(`result:${operation}:root`);
+      const commandId = CommandId.make(`result:${operation}:command`);
+      const created = yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make(`result:${operation}:create`),
+        threadId: root,
+        projectId: ProjectId.make("result:project"),
+        title: "Result",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdBy: "user",
+        creationSource: "web",
+      });
+      assert.isUndefined(Reflect.get(created, "lifecycle"));
+      const base = yield* projections.getThread(root);
+      const child = ThreadId.make(`result:${operation}:child`);
+      const fork = ThreadId.make(`result:${operation}:fork`);
+      for (const [id, relationshipToParent] of [
+        [child, "subagent"],
+        [fork, "fork"],
+      ] as const) {
+        yield* projections.apply({
+          id: EventId.make(`result:${operation}:${id}`),
+          type: "thread.created",
+          threadId: id,
+          occurredAt: base.createdAt,
+          payload: {
+            ...base,
+            id,
+            lineage: { rootThreadId: root, parentThreadId: root, relationshipToParent },
+          },
+        });
+      }
+      if (operation === "unarchive")
+        yield* orchestrator.dispatch({
+          type: "thread.archive",
+          threadId: root,
+          commandId: CommandId.make(`result:${operation}:prepare`),
+        });
+      const command = { type: `thread.${operation}` as const, commandId, threadId: root };
+      const result = yield* orchestrator.dispatch(command);
+      const effects = yield* outbox.listByCommandId(commandId);
+      assert.deepEqual(Reflect.get(result, "lifecycle"), {
+        commandId,
+        rootThreadId: root,
+        affectedThreadIds: [root, child],
+        cleanup: {
+          pendingCount: effects.filter(
+            (effect) => effect.status === "pending" || effect.status === "running",
+          ).length,
+          failedCount: 0,
+        },
+      });
+      const replay = yield* orchestrator.dispatch(command);
+      assert.equal(replay.sequence, result.sequence);
+      assert.deepEqual(Reflect.get(replay, "lifecycle"), Reflect.get(result, "lifecycle"));
+      assert.deepEqual(
+        (yield* outbox.listByCommandId(commandId)).map((effect) => effect.id),
+        effects.map((effect) => effect.id),
+      );
+      if (effects.length > 0) {
+        const sql = yield* SqlClient.SqlClient;
+        yield* sql`UPDATE orchestration_v2_effect_outbox SET status = 'failed' WHERE effect_id = ${effects[0]!.id}`;
+        const failedReplay = yield* orchestrator.dispatch(command);
+        assert.equal(failedReplay.sequence, result.sequence);
+        assert.deepEqual(failedReplay.lifecycle, {
+          ...result.lifecycle!,
+          cleanup: { pendingCount: effects.length - 1, failedCount: 1 },
+        });
+        assert.lengthOf(yield* outbox.listByCommandId(commandId), effects.length);
+      }
+    }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect("marks a never-visited thread's first completion unread", () =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;

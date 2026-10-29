@@ -1,3 +1,4 @@
+import { isIndependentThread } from "@t3tools/client-runtime/state/thread-visibility";
 import { resolveThreadWorkingStartedAt } from "@t3tools/client-runtime/state/models";
 import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { threadPullRequestSearchTerms } from "@t3tools/shared/threadPullRequests";
@@ -518,10 +519,6 @@ export function buildMultiSelectThreadContextMenuItems(input: {
   ];
 }
 
-function isSidebarSubagentThread(thread: Pick<SidebarThreadSummary, "lineage">): boolean {
-  return thread.lineage.relationshipToParent === "subagent";
-}
-
 // Subagent threads have no sidebar row, so an open subagent is represented by
 // its nearest non-subagent ancestor. A broken chain (missing parent, cycle,
 // other environment) resolves to the thread itself, which then matches no row.
@@ -534,7 +531,7 @@ export function resolveSidebarRowThreadId(
     threads.find((thread) => thread.id === id && thread.environmentId === environmentId);
   const visited = new Set<ThreadId>();
   let thread = findThread(threadId);
-  while (thread !== undefined && isSidebarSubagentThread(thread)) {
+  while (thread !== undefined && !isIndependentThread(thread)) {
     if (thread.lineage.parentThreadId === null || visited.has(thread.id)) return threadId;
     visited.add(thread.id);
     thread = findThread(thread.lineage.parentThreadId);
@@ -551,7 +548,7 @@ export function filterSidebarV2VisibleThreads<
   return threads.filter(
     (thread) =>
       thread.archivedAt === null &&
-      !isSidebarSubagentThread(thread) &&
+      isIndependentThread(thread) &&
       (scopedProjectKeys === null ||
         scopedProjectKeys.has(`${thread.environmentId}:${thread.projectId}`)),
   );

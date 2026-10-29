@@ -13,6 +13,36 @@ import {
 } from "./threadRelationships.ts";
 
 describe("thread relationships", () => {
+  it("marks a deleted child unavailable while preserving its relationship", () => {
+    const root = ThreadId.make("root");
+    const child = ThreadId.make("child");
+    const graph = deriveThreadRelationshipGraph({
+      threads: [
+        {
+          id: child,
+          deletedAt: "2026-10-27T00:00:00.000Z",
+          lineage: { parentThreadId: root, relationshipToParent: "subagent" },
+        },
+      ] as never,
+      projection: null,
+    });
+    expect(graph.nodes.get(child)).toMatchObject({ thread: null, missing: true });
+    expect(immediateThreadRelationships(graph, root).map((row) => row.threadId)).toEqual([child]);
+  });
+  it("does not turn inherited subagent history into a fork-owned relationship", () => {
+    const source = ThreadId.make("source");
+    const fork = ThreadId.make("fork");
+    const child = ThreadId.make("child");
+    const graph = deriveThreadRelationshipGraph({
+      threads: [],
+      projection: {
+        thread: { id: fork },
+        subagents: [{ threadId: source, childThreadId: child, status: "running" }],
+        contextTransfers: [],
+      } as never,
+    });
+    expect(immediateThreadRelationships(graph, fork)).toEqual([]);
+  });
   it.each([
     ["running", "completed"],
     ["completed", "running"],
@@ -154,7 +184,7 @@ describe("thread relationships", () => {
       ] as never,
       projection: {
         thread: { id: parent },
-        subagents: [{ childThreadId: child, status: "completed" }],
+        subagents: [{ threadId: parent, childThreadId: child, status: "completed" }],
         contextTransfers: [
           {
             sourceThreadId: child,

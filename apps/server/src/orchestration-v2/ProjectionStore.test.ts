@@ -73,6 +73,70 @@ const traceSqlStatements = () => {
   return { statements, tracer };
 };
 
+it.effect(
+  "ownership paths and descendants use narrow indexed queries without conversation history",
+  () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      // Only the lifecycle fields are valid: decoding full thread payloads would fail.
+      for (const [id, parent, relationship, deleted] of [
+        ["R", null, null, false],
+        ["A", "R", "subagent", true],
+        ["B", "A", "subagent", false],
+        ["F", "R", "fork", false],
+        ["FC", "F", "subagent", false],
+      ] as const) {
+        yield* sql`
+        INSERT INTO orchestration_v2_projection_threads (
+          thread_id, project_id, title, default_provider, runtime_mode, interaction_mode,
+          created_at, updated_at, archived_at, deleted_at, payload_json
+        ) VALUES (
+          ${id}, 'ownership', 'unused', 'codex', 'full-access', 'default',
+          '2026-10-26', '2026-10-26', NULL, ${deleted ? "2026-10-26T00:00:00.000Z" : null},
+          ${JSON.stringify({ lineage: { parentThreadId: parent, relationshipToParent: relationship, rootThreadId: "R" } })}
+        )
+      `;
+      }
+      const { statements, tracer } = traceSqlStatements();
+      const path = yield* store
+        .getOwnershipPath(ThreadId.make("B"))
+        .pipe(Effect.withTracer(tracer));
+      assert.deepEqual(new Set(path.map((row) => row.id)), new Set(["B", "A", "R"]));
+      assert.isNotNull(path.find((row) => row.id === "A")?.deletedAt);
+      assert.deepEqual(Object.keys(path[0]!).sort(), [
+        "archivedAt",
+        "deletedAt",
+        "id",
+        "lineage",
+        "projectId",
+      ]);
+      const descendants = yield* store
+        .getSubagentDescendants(ThreadId.make("R"))
+        .pipe(Effect.withTracer(tracer));
+      assert.deepEqual(new Set(descendants.map((row) => row.id)), new Set(["A", "B"]));
+      assert.deepEqual(
+        new Set((yield* store.getOwnershipPath(ThreadId.make("FC"))).map((row) => row.id)),
+        new Set(["FC", "F"]),
+      );
+      assert.isAbove(statements.length, 0);
+      assert.isFalse(statements.some((query) => /turn_items|messages|SELECT\s+\*/i.test(query)));
+      const query = statements.find((statement) => statement.includes("subagent_parent_idx"));
+      assert.isDefined(query);
+      const plan = yield* sql.unsafe<{ readonly detail: string }>(`EXPLAIN QUERY PLAN ${query}`);
+      assert.isTrue(
+        plan.some(
+          (row) => row.detail.includes("SEARCH") && row.detail.includes("subagent_parent_idx"),
+        ),
+        JSON.stringify(plan),
+      );
+      assert.isFalse(
+        plan.some((row) => /^SCAN (child|thread)\b/.test(row.detail)),
+        JSON.stringify(plan),
+      );
+    }).pipe(Effect.provide(layerTest)),
+);
+
 const addRolledBackRecoveryCandidate = Effect.fn("addRolledBackRecoveryCandidate")(function* (
   suffix: string,
 ) {
@@ -183,6 +247,37 @@ const addRolledBackRecoveryCandidate = Effect.fn("addRolledBackRecoveryCandidate
 
   return threadId;
 });
+
+it.effect.each([
+  ["memory", ProjectionStore.layerMemory],
+  ["SQL", layerTest],
+] as const)("%s preserves lifecycle revisions in thread/run payloads and shells", ([, layer]) =>
+  Effect.gen(function* () {
+    const store = yield* ProjectionStore.ProjectionStoreV2;
+    const threadId = yield* addRolledBackRecoveryCandidate("lifecycle-revision");
+    const initial = yield* store.getThreadProjection(threadId);
+    assert.equal((yield* store.getThreadShell(threadId))?.lifecycleRevision, 0);
+    yield* store.apply({
+      id: EventId.make("revision:thread"),
+      type: "thread.metadata-updated",
+      threadId,
+      occurredAt: initial.updatedAt,
+      payload: { ...initial.thread, lifecycleRevision: 4 },
+    });
+    yield* store.apply({
+      id: EventId.make("revision:run"),
+      type: "run.updated",
+      threadId,
+      occurredAt: initial.updatedAt,
+      payload: { ...initial.runs[0]!, lifecycleRevision: 4 },
+    });
+    const projection = yield* store.getThreadProjection(threadId);
+    assert.equal(projection.thread.lifecycleRevision, 4);
+    assert.equal(projection.runs[0]?.lifecycleRevision, 4);
+    assert.equal((yield* store.getThreadShell(threadId))?.lifecycleRevision, 4);
+    assert.equal((yield* store.getShellSnapshot()).threads[0]?.lifecycleRevision, 4);
+  }).pipe(Effect.provide(layer)),
+);
 
 it.effect.each([
   ["memory", ProjectionStore.layerMemory],

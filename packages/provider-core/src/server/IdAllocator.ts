@@ -1,4 +1,7 @@
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- Pure synchronous hashing keeps persisted identity independent of runtime services.
+import * as NodeCrypto from "node:crypto";
 import {
+  type NativeSessionStorage,
   CheckpointId,
   CheckpointScopeId,
   CommandId,
@@ -129,6 +132,10 @@ export interface IdAllocatorV2Allocate {
 export interface IdAllocatorV2Derive {
   readonly providerSession: (input: {
     readonly providerInstanceId: ProviderInstanceId;
+    readonly incarnation?: { readonly threadId: ThreadId } & (
+      | { readonly sourceToken: string }
+      | { readonly lifecycleRevision: number }
+    );
   }) => ProviderSessionId;
   readonly delegatedTaskNode: (input: { readonly commandId: CommandId }) => NodeId;
   readonly delegatedTaskThread: (input: { readonly commandId: CommandId }) => ThreadId;
@@ -138,6 +145,7 @@ export interface IdAllocatorV2Derive {
   readonly threadFromProviderThread: (input: {
     readonly driver: ProviderDriverKind;
     readonly nativeThreadId: string;
+    readonly storageScope?: string | undefined;
     readonly providerInstanceId?: ProviderInstanceId;
   }) => ThreadId;
   readonly run: (input: { readonly threadId: ThreadId; readonly ordinal: number }) => RunId;
@@ -158,6 +166,7 @@ export interface IdAllocatorV2Derive {
   readonly providerThread: (input: {
     readonly driver: ProviderDriverKind;
     readonly nativeThreadId: string;
+    readonly storageScope?: string | undefined;
     readonly providerInstanceId?: ProviderInstanceId;
   }) => ProviderThreadId;
   readonly providerTurn: (input: {
@@ -197,6 +206,7 @@ export function deriveThreadFromProviderThread(input: {
   readonly driver: ProviderDriverKind;
   readonly providerInstanceId?: ProviderInstanceId;
   readonly nativeThreadId: string;
+  readonly storageScope?: string | undefined;
 }): ThreadId {
   return ThreadId.make(
     joinId(
@@ -206,6 +216,7 @@ export function deriveThreadFromProviderThread(input: {
       ...(input.providerInstanceId === undefined
         ? []
         : ["provider-instance", input.providerInstanceId]),
+      ...(input.storageScope === undefined ? [] : ["storage", input.storageScope]),
       "native-thread",
       input.nativeThreadId,
     ),
@@ -216,6 +227,7 @@ export function deriveProviderThread(input: {
   readonly driver: ProviderDriverKind;
   readonly providerInstanceId?: ProviderInstanceId;
   readonly nativeThreadId: string;
+  readonly storageScope?: string | undefined;
 }): ProviderThreadId {
   return ProviderThreadId.make(
     joinId(
@@ -225,10 +237,28 @@ export function deriveProviderThread(input: {
       ...(input.providerInstanceId === undefined
         ? []
         : ["provider-instance", input.providerInstanceId]),
+      ...(input.storageScope === undefined ? [] : ["storage", input.storageScope]),
       "native-thread",
       input.nativeThreadId,
     ),
   );
+}
+
+export function nativeStorageScope(input: {
+  readonly driver: ProviderDriverKind;
+  readonly nativeId: string;
+  readonly storage: NativeSessionStorage;
+}): string | undefined {
+  if (input.storage.type !== "resolved") return undefined;
+  return NodeCrypto.createHash("sha256")
+    .update(
+      JSON.stringify([
+        input.driver,
+        input.storage.canonicalRoot,
+        input.driver === "pi" ? input.storage.canonicalFile : input.nativeId,
+      ]),
+    )
+    .digest("hex");
 }
 
 const randomId =
@@ -254,7 +284,19 @@ const randomId =
 export const derive: IdAllocatorV2Derive = {
   providerSession: (input) =>
     ProviderSessionId.make(
-      joinId("provider-session", "provider-instance", input.providerInstanceId, "shared"),
+      input.incarnation === undefined
+        ? joinId("provider-session", "provider-instance", input.providerInstanceId, "shared")
+        : joinId(
+            "provider-session",
+            "provider-instance",
+            input.providerInstanceId,
+            "incarnation",
+            input.incarnation.threadId,
+            "sourceToken" in input.incarnation ? "source" : "revision",
+            "sourceToken" in input.incarnation
+              ? input.incarnation.sourceToken
+              : String(input.incarnation.lifecycleRevision),
+          ),
     ),
   delegatedTaskNode: (input) => NodeId.make(joinId("node", "delegated-task", input.commandId)),
   delegatedTaskThread: (input) =>

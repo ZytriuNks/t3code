@@ -27,6 +27,14 @@ import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as EffectWorker from "./EffectWorker.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
+import * as ThreadOwnership from "./ThreadOwnership.ts";
+import * as ThreadLifecycleGuard from "./ThreadLifecycleGuard.ts";
+
+const ownership = ThreadOwnership.ThreadOwnership.of({
+  resolveRoot: (id) => Effect.succeed(id),
+  resolveScope: () => Effect.die("Scope planning is not used by restart recovery fixtures."),
+  withRoots: (_ids, effect) => effect,
+});
 
 const threadId = ThreadId.make("thread:restart");
 const runId = RunId.make("run:restart");
@@ -244,6 +252,19 @@ it.effect.each([
       let committed: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0] | undefined;
       const recovery = yield* ProviderRuntimeRecovery.make.pipe(
         Effect.provide(
+          Layer.mock(ThreadLifecycleGuard.ThreadLifecycleGuard)({
+            resolveLifecycleSource: (threadId) =>
+              Effect.succeed({
+                threadId,
+                lifecycleRevision: 0,
+                sourceToken: "recovery-fixture",
+                isLegacy: true,
+              }),
+            check: () => Effect.succeed("accept"),
+          }),
+        ),
+        Effect.provideService(ThreadOwnership.ThreadOwnership, ownership),
+        Effect.provide(
           Layer.mergeAll(
             ServerSettings.layerTest({
               continueThreadsAfterServerUpdate: enabled,
@@ -317,6 +338,19 @@ it.effect("lets a cut blocking delegate_task wake its parent like an async task"
     let committed: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0] | undefined;
     const recovery = yield* ProviderRuntimeRecovery.make.pipe(
       Effect.provide(
+        Layer.mock(ThreadLifecycleGuard.ThreadLifecycleGuard)({
+          resolveLifecycleSource: (threadId) =>
+            Effect.succeed({
+              threadId,
+              lifecycleRevision: 0,
+              sourceToken: "recovery-fixture",
+              isLegacy: true,
+            }),
+          check: () => Effect.succeed("accept"),
+        }),
+      ),
+      Effect.provideService(ThreadOwnership.ThreadOwnership, ownership),
+      Effect.provide(
         Layer.mergeAll(
           ServerSettings.layerTest({ continueThreadsAfterServerUpdate: true }),
           Layer.mock(ProjectionStore.ProjectionStoreV2)({
@@ -382,6 +416,19 @@ it.effect.each(["running", "waiting"])(
       } as unknown as OrchestrationV2ThreadProjection;
       let committed: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0] | undefined;
       const recovery = yield* ProviderRuntimeRecovery.make.pipe(
+        Effect.provide(
+          Layer.mock(ThreadLifecycleGuard.ThreadLifecycleGuard)({
+            resolveLifecycleSource: (threadId) =>
+              Effect.succeed({
+                threadId,
+                lifecycleRevision: 0,
+                sourceToken: "recovery-fixture",
+                isLegacy: true,
+              }),
+            check: () => Effect.succeed("accept"),
+          }),
+        ),
+        Effect.provideService(ThreadOwnership.ThreadOwnership, ownership),
         Effect.provide(
           Layer.mergeAll(
             ServerSettings.layerTest({ continueThreadsAfterServerUpdate: true }),
@@ -510,6 +557,19 @@ it.effect("prepares no continuation for background work another provider thread 
     const writes: Parameters<EventSink.EventSinkV2["Service"]["writeWithEffects"]>[0][] = [];
     const recovery = yield* ProviderRuntimeRecovery.make.pipe(
       Effect.provide(
+        Layer.mock(ThreadLifecycleGuard.ThreadLifecycleGuard)({
+          resolveLifecycleSource: (threadId) =>
+            Effect.succeed({
+              threadId,
+              lifecycleRevision: 0,
+              sourceToken: "recovery-fixture",
+              isLegacy: true,
+            }),
+          check: () => Effect.succeed("accept"),
+        }),
+      ),
+      Effect.provideService(ThreadOwnership.ThreadOwnership, ownership),
+      Effect.provide(
         Layer.mergeAll(
           ServerSettings.layerTest({ continueThreadsAfterServerUpdate: true }),
           Layer.mock(ProjectionStore.ProjectionStoreV2)({
@@ -536,6 +596,19 @@ it.effect("prepares no continuation for background work another provider thread 
       turnItems: [{ ...projection.turnItems[0]!, providerThreadId }],
     } as OrchestrationV2ThreadProjection;
     const ownRecovery = yield* ProviderRuntimeRecovery.make.pipe(
+      Effect.provide(
+        Layer.mock(ThreadLifecycleGuard.ThreadLifecycleGuard)({
+          resolveLifecycleSource: (threadId) =>
+            Effect.succeed({
+              threadId,
+              lifecycleRevision: 0,
+              sourceToken: "recovery-fixture",
+              isLegacy: true,
+            }),
+          check: () => Effect.succeed("accept"),
+        }),
+      ),
+      Effect.provideService(ThreadOwnership.ThreadOwnership, ownership),
       Effect.provide(
         Layer.mergeAll(
           ServerSettings.layerTest({ continueThreadsAfterServerUpdate: true }),
@@ -631,6 +704,19 @@ it.effect.each([
         const commits: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0][] = [];
         const writes: Parameters<EventSink.EventSinkV2["Service"]["writeWithEffects"]>[0][] = [];
         const recovery = yield* ProviderRuntimeRecovery.make.pipe(
+          Effect.provide(
+            Layer.mock(ThreadLifecycleGuard.ThreadLifecycleGuard)({
+              resolveLifecycleSource: (threadId) =>
+                Effect.succeed({
+                  threadId,
+                  lifecycleRevision: 0,
+                  sourceToken: "recovery-fixture",
+                  isLegacy: true,
+                }),
+              check: () => Effect.succeed("accept"),
+            }),
+          ),
+          Effect.provideService(ThreadOwnership.ThreadOwnership, ownership),
           Effect.provide(
             Layer.mergeAll(
               ServerSettings.layerTest({ continueThreadsAfterServerUpdate: true }),
@@ -784,6 +870,19 @@ it.effect("does not cancel or resume a run that completes while shutdown intent 
     let projection = makeProjection();
     const commits: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0][] = [];
     const recovery = yield* ProviderRuntimeRecovery.make.pipe(
+      Effect.provide(
+        Layer.mock(ThreadLifecycleGuard.ThreadLifecycleGuard)({
+          resolveLifecycleSource: (threadId) =>
+            Effect.succeed({
+              threadId,
+              lifecycleRevision: 0,
+              sourceToken: "recovery-fixture",
+              isLegacy: true,
+            }),
+          check: () => Effect.succeed("accept"),
+        }),
+      ),
+      Effect.provideService(ThreadOwnership.ThreadOwnership, ownership),
       Effect.provide(
         Layer.mergeAll(
           ServerSettings.layerTest({ continueThreadsAfterServerUpdate: true }),
@@ -1018,6 +1117,19 @@ it.effect("prepares later threads' continuations when one thread fails", () =>
     const brokenThreadId = ThreadId.make("thread:broken");
     const writes: Parameters<EventSink.EventSinkV2["Service"]["writeWithEffects"]>[0][] = [];
     const recovery = yield* ProviderRuntimeRecovery.make.pipe(
+      Effect.provide(
+        Layer.mock(ThreadLifecycleGuard.ThreadLifecycleGuard)({
+          resolveLifecycleSource: (threadId) =>
+            Effect.succeed({
+              threadId,
+              lifecycleRevision: 0,
+              sourceToken: "recovery-fixture",
+              isLegacy: true,
+            }),
+          check: () => Effect.succeed("accept"),
+        }),
+      ),
+      Effect.provideService(ThreadOwnership.ThreadOwnership, ownership),
       Effect.provide(
         Layer.mergeAll(
           ServerSettings.layerTest({ continueThreadsAfterServerUpdate: true }),

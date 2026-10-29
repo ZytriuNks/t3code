@@ -7,11 +7,14 @@ import {
 import { settlePromise, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { canSnooze, threadWokeAt } from "@t3tools/client-runtime/state/thread-settled";
 import { threadRuntimeCanArchive } from "@t3tools/client-runtime/state/models";
+import { resolveThreadLifecycleNotice } from "@t3tools/client-runtime/state/thread-lifecycle-result";
+import { useI18n } from "../i18n/I18nProvider";
 import {
   AuthOrchestrationOperateScope,
   AuthSourceControlWriteScope,
   EnvironmentAuthorizationError,
   EnvironmentId,
+  type OrchestrationV2DispatchCommandResult,
   type ScopedThreadRef,
   ThreadId,
   sessionGrantsScope,
@@ -54,6 +57,7 @@ import { buildThreadRouteParams, resolveThreadRouteRef } from "../threadRoutes";
 import { formatWorktreePathForDisplay, getOrphanedWorktreePathForThread } from "../worktreeCleanup";
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
 import { useClientSettings } from "./useSettings";
+import { useThreadDeleteConfirmation } from "./useThreadDeleteConfirmation";
 import * as ThreadUndo from "./threadUndo";
 import { showThreadUndoNotice } from "./showThreadUndoNotice";
 import { useAtomCommand } from "../state/use-atom-command";
@@ -246,6 +250,29 @@ function threadOperationFailure(target: ScopedThreadRef) {
 }
 
 export function useThreadActions() {
+  const { t } = useI18n();
+  const showLifecycleResult = (
+    operation: "archive" | "unarchive" | "delete",
+    target: ScopedThreadRef,
+    result: OrchestrationV2DispatchCommandResult,
+  ) => {
+    const notice = resolveThreadLifecycleNotice(
+      operation,
+      result,
+      appAtomRegistry.get(environmentServerConfigsAtom).get(target.environmentId)?.environment
+        .capabilities.threadLifecycleCascade,
+    );
+    if (notice === null) return;
+    toastManager.add(
+      stackedThreadToast({
+        type: notice.warning === null ? "success" : "warning",
+        title: t(notice.title),
+        ...(notice.warning === null
+          ? {}
+          : { description: t(notice.warning, { count: notice.count }) }),
+      }),
+    );
+  };
   const archiveThreadMutation = useOrchestrationCommand(threadEnvironment.archive, {
     reportFailure: false,
   });
@@ -294,7 +321,7 @@ export function useThreadActions() {
     reportFailure: false,
   });
   const sidebarThreadSortOrder = useClientSettings((settings) => settings.sidebarThreadSortOrder);
-  const confirmThreadDelete = useClientSettings((settings) => settings.confirmThreadDelete);
+  const confirmThreadDeletion = useThreadDeleteConfirmation();
   const confirmThreadUnpin = useClientSettings((settings) => settings.confirmThreadUnpin);
   const clearComposerDraftForThread = useComposerDraftStore((store) => store.clearDraftThread);
   const clearProjectDraftThreadById = useComposerDraftStore(
@@ -330,6 +357,7 @@ export function useThreadActions() {
       return result;
     }
     refreshArchivedThreadsForEnvironment(target.environmentId);
+    showLifecycleResult("unarchive", target, result.value);
     if (opts.navigate) {
       return settlePromise(() =>
         router.navigate({
@@ -375,6 +403,7 @@ export function useThreadActions() {
     }
     refreshArchivedThreadsForEnvironment(threadRef.environmentId);
     opts.onArchived?.();
+    showLifecycleResult("archive", threadRef, archiveResult.value);
     showThreadUndoNotice({
       action: "Archived",
       claim: action,
@@ -510,6 +539,7 @@ export function useThreadActions() {
     }
     refreshArchivedThreadsForEnvironment(threadRef.environmentId);
     releaseComposerDraftUploads(threadRef);
+    showLifecycleResult("delete", threadRef, deleteResult.value);
     clearComposerDraftForThread(threadRef);
     clearProjectDraftThreadById(
       scopeProjectRef(threadRef.environmentId, thread.projectId),
@@ -873,27 +903,9 @@ export function useThreadActions() {
   const confirmAndDeleteThread = async (target: ScopedThreadRef) => {
     const permissionFailure = threadOperationFailure(target);
     if (permissionFailure) return permissionFailure;
-    const localApi = readLocalApi();
-    const resolved = resolveThreadTarget(target);
-
-    if (confirmThreadDelete && localApi) {
-      const title = resolved?.thread.title ?? "this thread";
-      const confirmationResult = await settlePromise(() =>
-        localApi.dialogs.confirm(
-          [
-            `Delete thread "${title}"?`,
-            "This permanently clears conversation history for this thread.",
-          ].join("\n"),
-          { variant: "destructive" },
-        ),
-      );
-      if (confirmationResult._tag === "Failure") {
-        return confirmationResult;
-      }
-      if (!confirmationResult.value) {
-        return AsyncResult.success(undefined);
-      }
-    }
+    const confirmed = await confirmThreadDeletion([target]);
+    if (confirmed._tag === "Failure") return confirmed;
+    if (!confirmed.value) return AsyncResult.success(undefined);
 
     return deleteThread(target);
   };

@@ -2,10 +2,14 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
   AuthSessionId,
+  AuthOrchestrationOperateScope,
+  CommandId,
   EnvironmentId,
   ProjectId,
   ThreadId,
   WS_METHODS,
+  OrchestrationV2RpcSchemas,
+  ORCHESTRATION_V2_WS_METHODS,
   WsSubscribeServerConfigRpc,
   type OrchestrationV2StoredEvent,
   type OrchestrationProjectShell,
@@ -14,12 +18,13 @@ import {
 } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import { Headers } from "effect/http";
-import { RpcGroup, RpcMessage, RpcServer } from "effect/rpc";
+import { Rpc, RpcGroup, RpcMessage, RpcServer } from "effect/rpc";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
@@ -368,6 +373,94 @@ const layerConfigSources = Layer.mergeAll(
     ),
   ),
   Layer.provideMerge(NodeServices.layer),
+);
+
+it.effect("dispatch RPC preserves lifecycle metadata and legacy sequence-only results", () =>
+  Effect.gen(function* () {
+    const root = ThreadId.make("root");
+    const commandId = CommandId.make("archive");
+    const lifecycle = {
+      commandId,
+      rootThreadId: root,
+      affectedThreadIds: [root, ThreadId.make("child")],
+      cleanup: { pendingCount: 2, failedCount: 1 },
+    };
+    for (const result of [{ sequence: 17, lifecycle }, { sequence: 18 }]) {
+      const completed = yield* Deferred.make<unknown>();
+      const commands: unknown[] = [];
+      const dependencies = Layer.mergeAll(
+        layerUnusedConfigRpcServices,
+        Layer.mock(ExternalLauncher.ExternalLauncher)({}),
+        Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+        Layer.mock(UsageLimitSources.UsageLimitSources)({}),
+        Layer.mock(RemoteOpenTargets.RemoteOpenTargets)({}),
+        Layer.mock(DirectEndpoints.DirectEndpoints)({}),
+        Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+          namedProjectsRoot: process.cwd(),
+        }),
+        Layer.mock(ServerEnvironment.ServerEnvironment)({}),
+        Layer.mock(EnvironmentAuth.EnvironmentAuth)({}),
+        Layer.mock(ServerRuntimeStartup.ServerRuntimeStartup)({
+          enqueueCommand: (effect) => effect,
+        }),
+        Layer.mock(ThreadManagement.ThreadManagementService)({
+          dispatch: (command) => {
+            commands.push(command);
+            return Effect.succeed({ ...result, storedEvents: [] });
+          },
+        }),
+      );
+      const server = yield* RpcServer.makeNoSerialization(
+        RpcGroup.make(
+          Rpc.make(ORCHESTRATION_V2_WS_METHODS.dispatchCommand, {
+            payload: OrchestrationV2RpcSchemas.dispatchCommand.input,
+            success: OrchestrationV2RpcSchemas.dispatchCommand.output,
+          }),
+        ),
+        {
+          ...WS_RPC_SERVER_OPTIONS,
+          onFromServer: (response) =>
+            response._tag === "Exit"
+              ? Deferred.succeed(completed, response.exit).pipe(Effect.asVoid)
+              : Effect.void,
+        },
+      ).pipe(
+        Effect.provide(
+          layerWsRpc(
+            {
+              sessionId: AuthSessionId.make("test"),
+              subject: "test",
+              method: "browser-session-cookie",
+              scopes: [AuthOrchestrationOperateScope],
+            },
+            {},
+            {},
+            yield* PreviewAutomationBroker.PreviewAutomationBroker,
+            yield* ServerBrowser.ServerBrowser,
+          ).pipe(Layer.provide(dependencies)),
+        ),
+      );
+      const command = { type: "thread.archive", commandId, threadId: root } as const;
+      yield* server.write(0, {
+        _tag: "Request",
+        id: RpcMessage.RequestId("archive"),
+        tag: ORCHESTRATION_V2_WS_METHODS.dispatchCommand,
+        payload: command,
+        headers: Headers.empty,
+      });
+      assert.deepEqual(yield* Deferred.await(completed), Exit.succeed(result));
+      assert.deepEqual(commands, [command]);
+    }
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        Layer.fresh(layerConfigSources),
+        Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({}),
+        Layer.mock(ServerBrowser.ServerBrowser)({}),
+      ),
+    ),
+    Effect.scoped,
+  ),
 );
 
 it.effect(

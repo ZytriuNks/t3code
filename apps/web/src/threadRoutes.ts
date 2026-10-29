@@ -5,6 +5,12 @@ import type { EnvironmentId, ScopedThreadRef, ThreadId } from "@t3tools/contract
 import * as Option from "effect/Option";
 import type { DraftId } from "./composerDraftStore";
 
+declare module "@tanstack/react-router" {
+  interface HistoryState {
+    allowArchivedThread?: boolean;
+  }
+}
+
 export type ThreadRouteTarget =
   | {
       kind: "server";
@@ -35,6 +41,7 @@ export function resolveThreadRouteRenderState(input: {
   serverThreadDeleted: boolean;
   unlistedThreadDetail: EnvironmentThreadState;
   draftThreadExists: boolean;
+  allowArchivedThread?: boolean;
 }): ThreadRouteRenderState {
   if (input.draftThreadExists || (input.serverThreadExists && !input.serverThreadDeleted)) {
     return "ready";
@@ -50,7 +57,8 @@ export function resolveThreadRouteRenderState(input: {
   if (projection === null) {
     return "loading";
   }
-  return projection.thread.deletedAt !== null || projection.thread.archivedAt !== null
+  return projection.thread.deletedAt !== null ||
+    (projection.thread.archivedAt !== null && input.allowArchivedThread !== true)
     ? "missing"
     : "ready";
 }

@@ -242,3 +242,16 @@ it.effect("rejects in-progress and rolled-back fork sources", () =>
     }
   }),
 );
+
+it.effect("lifecycle fork starts at revision zero independently of its source generation", () =>
+  Effect.gen(function* () {
+    const run = makeSourceRun("completed");
+    const projection = makeSourceProjection(run);
+    const result = yield* planFork(run, {
+      ...projection,
+      thread: { ...projection.thread, lifecycleRevision: 4 },
+    });
+    assert.equal(result.targetThread.lifecycleRevision, 0);
+    assert.equal(result.targetThread.lineage.relationshipToParent, "fork");
+  }),
+);

@@ -14,6 +14,21 @@ const descriptor = {
 } as const;
 
 describe("ExecutionEnvironmentDescriptor", () => {
+  it("keeps lifecycle capability optional for older servers", () => {
+    expect(decodeDescriptor(descriptor).capabilities.threadLifecycleCascade).toBeUndefined();
+    expect(
+      decodeDescriptor({
+        ...descriptor,
+        capabilities: { ...descriptor.capabilities, threadLifecycleCascade: false },
+      }).capabilities.threadLifecycleCascade,
+    ).toBe(false);
+    expect(
+      decodeDescriptor({
+        ...descriptor,
+        capabilities: { ...descriptor.capabilities, threadLifecycleCascade: true },
+      }).capabilities.threadLifecycleCascade,
+    ).toBe(true);
+  });
   it("decodes old, recognized and future manual installation descriptors", () => {
     expect(decodeDescriptor(descriptor).capabilities.serverInstallation).toBeUndefined();
     for (const installation of [{ kind: "npx" }, { kind: "npm-global", prefix: "/opt/node" }]) {

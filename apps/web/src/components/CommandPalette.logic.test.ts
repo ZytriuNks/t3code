@@ -112,6 +112,33 @@ function makeThread(overrides: Partial<Thread> = {}): Thread {
 }
 
 describe("buildThreadActionItems", () => {
+  it("excludes children before applying the recent-thread limit and keeps forks", () => {
+    const root = ThreadId.make("root");
+    const lineage = {
+      rootThreadId: root,
+      parentThreadId: root,
+      relationshipToParent: "subagent" as const,
+    };
+    const items = buildThreadActionItems({
+      threads: [
+        makeThread({
+          id: ThreadId.make("child"),
+          lineage,
+          latestUserMessageAt: "2026-10-27T00:00:00.000Z",
+        }),
+        makeThread({
+          id: ThreadId.make("fork"),
+          lineage: { ...lineage, relationshipToParent: "fork" },
+        }),
+      ],
+      projectTitleById: new Map(),
+      sortOrder: "updated_at",
+      icon: null,
+      limit: 1,
+      runThread: async () => {},
+    });
+    expect(items.map((item) => item.value)).toEqual(["thread:fork"]);
+  });
   it("ranks thread title matches ahead of contextual project-name matches", () => {
     const threadItems = buildThreadActionItems({
       threads: [
