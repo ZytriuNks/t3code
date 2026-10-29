@@ -1514,8 +1514,17 @@ describe("pre-commit reservation for visible word reflow", () => {
       await using fixture = await setup();
       const { frames, measuredBodies, render, liveBody, drain } = fixture;
       const text = "H $review tail";
-      const short = [{ name: "review", displayName: "R" }];
-      const long = [{ name: "review", displayName: "Review the whole workspace" }];
+      const short = [
+        { name: "review", displayName: "R", path: "/skills/review/SKILL.md", enabled: true },
+      ];
+      const long = [
+        {
+          name: "review",
+          displayName: "Review the whole workspace",
+          path: "/skills/review/SKILL.md",
+          enabled: true,
+        },
+      ];
       fixture.presentationWrap = (body) =>
         body.querySelector("[data-slot='context-chip-label']")?.textContent ===
         long[0]!.displayName;
@@ -1554,9 +1563,17 @@ describe("pre-commit reservation for visible word reflow", () => {
     const text = "H **$foo** and *$bar* tail";
     fixture.presentationWrap = (body) =>
       body.querySelector("em [data-slot='context-chip']") !== null;
-    await render(text, { skills: [{ name: "foo", displayName: "Shared label" }] });
+    await render(text, {
+      skills: [
+        { name: "foo", displayName: "Shared label", path: "/skills/foo/SKILL.md", enabled: true },
+      ],
+    });
     const old = liveBody().innerHTML;
-    await render(text, { skills: [{ name: "bar", displayName: "Shared label" }] });
+    await render(text, {
+      skills: [
+        { name: "bar", displayName: "Shared label", path: "/skills/bar/SKILL.md", enabled: true },
+      ],
+    });
     expect(liveBody().innerHTML).toBe(old);
     await drain();
     expect(liveBody().querySelector("em [data-slot='context-chip-label']")?.textContent).toBe(
@@ -1634,7 +1651,11 @@ describe("pre-commit reservation for visible word reflow", () => {
           : kind === "citation"
             ? citation
             : "[**Terminal** output](t3-context://v1/terminal/term-1)";
-      const options = { skills: [{ name: "review", displayName: "Review" }] };
+      const options = {
+        skills: [
+          { name: "review", displayName: "Review", path: "/skills/review/SKILL.md", enabled: true },
+        ],
+      };
       fixture.presentationWrap = (body) => {
         const shape =
           kind === "skill"

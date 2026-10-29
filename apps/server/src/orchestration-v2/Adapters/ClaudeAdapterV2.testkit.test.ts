@@ -130,12 +130,10 @@ function makeGatedReplaySession() {
   return { label, replayGate, runner, session };
 }
 
-const yieldToReplayStream = Effect.promise(
-  () =>
-    new Promise<void>((resolve) => {
-      setImmediate(resolve);
-    }),
-);
+// Lets the forked replay stream run until it blocks, for steps with no event to await.
+const yieldToReplayStream = Effect.gen(function* () {
+  for (let tick = 0; tick < 20; tick++) yield* Effect.yieldNow;
+});
 
 describe("ClaudeAdapterV2 replay testkit", () => {
   it.effect("holds a labeled inbound frame until its replay gate is released", () =>
@@ -143,7 +141,7 @@ describe("ClaudeAdapterV2 replay testkit", () => {
       const { label, replayGate, runner, session } = makeGatedReplaySession();
       const streamFiber = yield* Stream.runDrain(session.messages).pipe(Effect.forkChild);
 
-      yield* yieldToReplayStream;
+      yield* Effect.promise(() => replayGate.waitForReached(label));
       assert.isTrue(replayGate.hasReached(label));
       assert.isUndefined(streamFiber.pollUnsafe());
 
@@ -158,7 +156,7 @@ describe("ClaudeAdapterV2 replay testkit", () => {
       const { label, replayGate, session } = makeGatedReplaySession();
       const streamFiber = yield* Stream.runDrain(session.messages).pipe(Effect.forkChild);
 
-      yield* yieldToReplayStream;
+      yield* Effect.promise(() => replayGate.waitForReached(label));
       assert.isTrue(replayGate.hasReached(label));
 
       yield* Fiber.interrupt(streamFiber);
@@ -222,7 +220,7 @@ describe("ClaudeAdapterV2 replay testkit", () => {
         Effect.forkChild,
       );
 
-      yield* yieldToReplayStream;
+      yield* Effect.promise(() => replayGate.waitForReached(label));
       assert.isTrue(replayGate.hasReached(label));
       assert.isTrue(replayGate.release(label));
       yield* yieldToReplayStream;
@@ -250,7 +248,7 @@ describe("ClaudeAdapterV2 replay testkit", () => {
         Effect.forkChild,
       );
 
-      yield* yieldToReplayStream;
+      yield* Effect.promise(() => replayGate.waitForReached(label));
       assert.isTrue(replayGate.hasReached(label));
 
       const offerExit = yield* Effect.exit(
@@ -334,7 +332,7 @@ describe("ClaudeAdapterV2 replay testkit", () => {
         Effect.forkChild,
       );
 
-      yield* yieldToReplayStream;
+      yield* Effect.promise(() => replayGate.waitForReached(label));
       assert.isTrue(replayGate.hasReached(label));
       assert.isTrue(replayGate.release(label));
       yield* yieldToReplayStream;

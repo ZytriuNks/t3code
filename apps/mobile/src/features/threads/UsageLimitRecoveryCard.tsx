@@ -5,14 +5,14 @@ import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell
 import type { EnvironmentId } from "@t3tools/contracts";
 import { CHATGPT_USAGE_URL, isChatGptUsageLimitFailure } from "@t3tools/shared/usageLimits";
 import * as DateTime from "effect/DateTime";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Linking, Pressable, View } from "react-native";
 import { AppText as Text } from "../../components/ui/AppText";
-import * as Option from "effect/Option";
 import { ProviderIcon } from "../../components/ProviderIcon";
+import { useDeadlinePassed } from "../../lib/clock";
 import { threadEnvironment } from "../../state/threads";
 import { useAtomCommand } from "../../state/use-atom-command";
-import { useThreadDetail } from "../../state/use-thread-detail";
+import { useQuietThreadStructure } from "../../state/use-thread-detail";
 
 export function UsageLimitRecoveryCard({
   thread,
@@ -27,7 +27,7 @@ export function UsageLimitRecoveryCard({
   // ChatGPT's own usage limit is a subscription state, not a provider quota, so
   // it gets its own wording and a link to the account's usage settings. The
   // scheduled recovery below still applies when the reset time is known.
-  const detail = Option.getOrNull(useThreadDetail({ environmentId, threadId: thread.id }).data);
+  const detail = useQuietThreadStructure({ environmentId, threadId: thread.id })?.projection;
   const chatGptUsageLimit = isChatGptUsageLimitFailure(
     detail?.visibleTurnItems.map((entry) => entry.item) ?? [],
     detail?.runs.find((run) => run.id === thread.latestRun?.runId),
@@ -36,25 +36,7 @@ export function UsageLimitRecoveryCard({
   const canSchedule =
     resetAt !== null &&
     Date.parse(resetAt) > Date.parse(thread.latestRun?.completedAt ?? thread.updatedAt);
-  // Whether the reset already passed is state a timer flips at resetAt: the
-  // compiler caches render output on its inputs, so reading the clock during
-  // render would leave the snooze button enabled after the reset.
-  const resetAtMs = resetAt === null ? null : Date.parse(resetAt);
-  const [resetPassedFor, setResetPassedFor] = useState<number | null>(null);
-  const resetPassed = resetAtMs !== null && resetPassedFor === resetAtMs;
-  useEffect(() => {
-    if (resetAtMs === null || Number.isNaN(resetAtMs)) return;
-    const flip = () => setResetPassedFor(resetAtMs);
-    const delay = resetAtMs - Date.now();
-    if (delay <= 0) {
-      flip();
-      return;
-    }
-    // Beyond setTimeout's 32-bit range the card re-renders long before then.
-    if (delay > 2_147_483_647) return;
-    const timer = setTimeout(flip, delay);
-    return () => clearTimeout(timer);
-  }, [resetAtMs]);
+  const resetPassed = useDeadlinePassed(resetAt === null ? null : Date.parse(resetAt));
   const runId = thread.latestRun?.runId;
   const recovery = thread.limitRecovery;
   const scheduled =

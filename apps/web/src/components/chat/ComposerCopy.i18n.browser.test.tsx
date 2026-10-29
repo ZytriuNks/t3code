@@ -96,7 +96,6 @@ it("switches send/queue/disconnected copy in the mounted action and keeps permis
     promptHasText: true,
     isSendBusy: false,
     sendDisabledReason: null,
-    isConnecting: false,
     isEnvironmentUnavailable: false,
     isPreparingWorktree: false,
     hasSendableContent: true,

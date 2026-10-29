@@ -1,8 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off - the Windows launch and reveal smoke tests use Node process and filesystem APIs.
 import * as NodeChildProcess from "node:child_process";
-import * as NodeFS from "node:fs";
-import * as NodeOS from "node:os";
-import * as NodePath from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as ConfigProvider from "effect/ConfigProvider";
@@ -23,10 +20,7 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import { SpawnExecutableResolution } from "@t3tools/shared/shell";
 import * as ExternalLauncher from "./externalLauncher.ts";
 
-// Tests below write `#!/bin/sh` stubs into a real temp dir and hand that
-// directory to a posix-mocked resolver as PATH. On a Windows host the temp
-// path carries a drive letter, so the posix `:` split shatters it; there is
-// no posix executable to find there anyway.
+// Windows drive letters break mocked POSIX PATH splitting; these tests also require /bin/sh stubs.
 const windowsHost = HostProcess.Platform.defaultValue() === "win32";
 
 interface MockSpawnResult {
@@ -925,9 +919,6 @@ for (const wsl of [false, true]) {
   );
 }
 
-for (const {} of ["rejected", "spawn-error", "stalled"] as const) {
-}
-
 // When interop PowerShell is missing the capability advertises the Linux
 // "files" kind (or nothing), so the reveal must open the Linux file manager
 // the label promised even though plain open still prefers File Explorer.
@@ -1332,88 +1323,6 @@ it.effect("discovers editors through the service API", () =>
     assert.equal(editors.includes("file-manager"), true);
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
-
-for (const { platform, installPath, editor, args } of [
-  {
-    platform: "darwin",
-    installPath: "Applications/Antigravity IDE.app/Contents/Resources/app/bin/antigravity-ide",
-    editor: "antigravity",
-    args: ["--goto", "/workspace with spaces/file.ts:12:4"],
-  },
-  {
-    platform: "linux",
-    installPath: ".local/bin/antigravity-ide",
-    editor: "antigravity",
-    args: ["--goto", "/workspace with spaces/file.ts:12:4"],
-  },
-  {
-    platform: "darwin",
-    installPath: "Applications/Cursor.app/Contents/Resources/app/bin/code",
-    editor: "cursor",
-    args: ["--classic", "--goto", "/workspace with spaces/file.ts:12:4"],
-  },
-  {
-    platform: "darwin",
-    installPath: "Applications/Kiro.app/Contents/Resources/app/bin/code",
-    editor: "kiro",
-    args: ["--goto", "/workspace with spaces/file.ts:12:4"],
-  },
-  {
-    platform: "darwin",
-    installPath: "Applications/WebStorm.app/Contents/MacOS/webstorm",
-    editor: "webstorm",
-    args: ["--line", "12", "--column", "3", "/workspace with spaces/file.ts"],
-  },
-  {
-    platform: "darwin",
-    installPath: "Applications/Zed.app/Contents/MacOS/cli",
-    editor: "zed",
-    args: ["/workspace with spaces/file.ts:12:4"],
-  },
-  {
-    platform: "win32",
-    installPath: "Programs/Cursor/resources/app/bin/cursor.cmd",
-    editor: "cursor",
-    args: ['^"--classic^"', '^"--goto^"', '^"/workspace^ with^ spaces/file.ts:12:4^"'],
-  },
-  {
-    platform: "win32",
-    installPath: "Programs/Microsoft VS Code/bin/code.cmd",
-    editor: "vscode",
-    args: ['^"--goto^"', '^"/workspace^ with^ spaces/file.ts:12:4^"'],
-  },
-  {
-    platform: "win32",
-    installPath: "Programs/JetBrains/WebStorm 2026.2/bin/webstorm64.exe",
-    editor: "webstorm",
-    args: ["--line", "12", "--column", "3", "/workspace with spaces/file.ts"],
-  },
-  {
-    platform: "win32",
-    installPath: "Programs/WebStorm/bin/webstorm64.exe",
-    editor: "webstorm",
-    args: ["--line", "12", "--column", "3", "/workspace with spaces/file.ts"],
-  },
-  {
-    platform: "win32",
-    installPath: "Programs/Zed/bin/zed.exe",
-    editor: "zed",
-    args: ["/workspace with spaces/file.ts:12:4"],
-  },
-  {
-    platform: "linux",
-    installPath: ".local/share/JetBrains/Toolbox/scripts/idea",
-    editor: "idea",
-    args: ["--line", "12", "--column", "3", "/workspace with spaces/file.ts"],
-  },
-  {
-    platform: "linux",
-    installPath: ".local/bin/zed",
-    editor: "zed",
-    args: ["/workspace with spaces/file.ts:12:4"],
-  },
-] as const) {
-}
 
 for (const cwd of ["/workspace with spaces/", "/workspace with spaces/file.ts:12:4"]) {
   it.effect.skipIf(windowsHost)(

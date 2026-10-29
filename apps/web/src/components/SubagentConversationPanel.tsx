@@ -63,7 +63,6 @@ const EMPTY_SKILLS = [] as const;
 const NOOP = () => {};
 const NOOP_RUN = (_runId: RunId, _filePath?: string) => {};
 const NOOP_REVERT = (_turnCount: number, _messageId: MessageId) => {};
-const NOOP_ROLLBACK = (_input: { checkpointId: string; scopeId: string }) => {};
 const NOOP_IMAGE = (_preview: TimelineImagePreview) => {};
 
 function isActiveRun(status: string | undefined): boolean {
@@ -211,6 +210,7 @@ export function SubagentConversationPanel({
     setDetachedFollowKey(null);
   });
   const detached = detachedFollowKey === routeKey;
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- tracks scroll direction on the timeline scroller while follow is detached
   useLayoutEffect(() => {
     const scroller = listRef.current?.getScrollableNode();
     if (!detached || !scroller) return;
@@ -230,6 +230,7 @@ export function SubagentConversationPanel({
     loadError ??
     (threadState.status === "deleted" ? "This conversation is no longer available." : null);
   const ready = readyThreadKey === routeKey || unavailableMessage !== null;
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- keeps the pane hidden until the timeline viewport has painted its rows, observing DOM mutations and size
   useLayoutEffect(() => {
     if (ready || layoutThreadKey !== routeKey) return;
     const viewport = timelineViewportRef.current;
@@ -312,6 +313,7 @@ export function SubagentConversationPanel({
       stopObservingResize();
     };
   }, [layoutThreadKey, ready, routeKey, threadState.status]);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reports pane readiness to the parent shell after layout
   useLayoutEffect(() => {
     onReadyChange?.(ready);
   }, [onReadyChange, ready]);
@@ -365,7 +367,6 @@ export function SubagentConversationPanel({
               textPlayback={textPlayback}
               onInitialLayout={onTimelineInitialLayout}
               isWorking={isWorking}
-              activeTurnInProgress={isWorking}
               activeTurnStartedAt={activeTurnStartedAt}
               conversationStructure={settings.conversationStructure}
               smoothStreaming={
@@ -392,7 +393,6 @@ export function SubagentConversationPanel({
               onOpenThread={onOpenNestedThread}
               parentThreadLink={parentThreadLink}
               onForkFromRun={async () => {}}
-              onRollbackCheckpoint={NOOP_ROLLBACK}
               supportsConversationRollback={false}
               onRevertToTurnCount={NOOP_REVERT}
               isRevertingCheckpoint={false}

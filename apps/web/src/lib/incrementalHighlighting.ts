@@ -1,21 +1,74 @@
-import type { DiffsHighlighter } from "@pierre/diffs";
+import {
+  renderTokenLines,
+  type DiffsHighlighter,
+  type DiffsThemeNames,
+  type ThemedToken,
+  type TokensResult,
+} from "@pierre/diffs";
 
-import type { DiffThemeName } from "./diffRendering";
+function highlightedDocument(
+  result: TokensResult,
+  lines = renderTokenLines(result.tokens, {}),
+): { type: "root"; children: ReturnType<typeof renderTokenLines> } {
+  return {
+    type: "root" as const,
+    children: [
+      {
+        type: "element" as const,
+        tagName: "pre",
+        properties: {
+          class: "diffs",
+          style:
+            result.rootStyle === false
+              ? undefined
+              : (result.rootStyle ??
+                [
+                  result.fg != null ? `color:${result.fg}` : "",
+                  result.bg != null ? `background-color:${result.bg}` : "",
+                ]
+                  .filter(Boolean)
+                  .join(";")),
+          tabIndex: 0,
+        },
+        children: [
+          {
+            type: "element" as const,
+            tagName: "code",
+            properties: {},
+            children: lines.flatMap((line, index) =>
+              index === 0 ? [line] : [{ type: "text" as const, value: "\n" }, line],
+            ),
+          },
+        ],
+      },
+    ],
+  };
+}
 
-function codeChildren(root: ReturnType<DiffsHighlighter["codeToHast"]>) {
+export function highlightCodeToHast(
+  highlighter: DiffsHighlighter,
+  code: string,
+  language: string,
+  theme: DiffsThemeNames,
+) {
+  return highlightedDocument(highlighter.codeToTokens(code, { lang: language, theme }));
+}
+
+export type HighlightedRoot = ReturnType<typeof highlightCodeToHast>;
+
+function codeChildren(root: HighlightedRoot) {
   const pre = root.children.find((node) => node.type === "element" && node.tagName === "pre");
-  if (pre?.type !== "element") throw new Error("Missing highlighted pre element");
+  if (pre?.type !== "element") return [];
   const code = pre.children.find((node) => node.type === "element" && node.tagName === "code");
-  if (code?.type !== "element") throw new Error("Missing highlighted code element");
-  return code.children;
+  return code?.type === "element" ? code.children : [];
 }
 
 /** Worker messages clone the tree. Reuse completed line objects so React keeps
  * their DOM (and an active selection) mounted across code and theme updates.
  */
 export function reuseCompletedHighlightedLines(
-  previous: ReturnType<DiffsHighlighter["codeToHast"]>,
-  next: ReturnType<DiffsHighlighter["codeToHast"]>,
+  previous: HighlightedRoot,
+  next: HighlightedRoot,
   previousCode: string,
   nextCode: string,
 ) {
@@ -36,10 +89,10 @@ export function reuseCompletedHighlightedLines(
  * request is pending. Completed highlighted lines retain their object identity.
  */
 export function appendPlainCodeTail(
-  root: ReturnType<DiffsHighlighter["codeToHast"]>,
+  root: HighlightedRoot,
   previousCode: string,
   code: string,
-): ReturnType<DiffsHighlighter["codeToHast"]> | undefined {
+): HighlightedRoot | undefined {
   if (!code.startsWith(previousCode)) return undefined;
   if (code === previousCode) return root;
   const pre = root.children[0];
@@ -73,58 +126,52 @@ export function appendPlainCodeTail(
 export function createIncrementalHighlightedDocument(
   highlighter: DiffsHighlighter,
   language: string,
-  theme: DiffThemeName,
-): (code: string) => ReturnType<DiffsHighlighter["codeToHast"]> {
+  theme: DiffsThemeNames,
+) {
   const options = { lang: language, theme };
-  const newline = { type: "text" as const, value: "\n" };
-  let cached:
-    | {
-        prefix: string;
-        state: ReturnType<DiffsHighlighter["getLastGrammarState"]>;
-        children: ReturnType<typeof codeChildren>;
-      }
-    | undefined;
+  let shell: TokensResult | undefined;
+  let tokenizer: ReturnType<DiffsHighlighter["createStreamTokenizer"]> | undefined;
+  let previous = "";
+  const completedLines: ReturnType<typeof renderTokenLines> = [];
 
-  return (code: string) => {
-    // Plain text and ANSI do not have a TextMate grammar state. A CR at the end
-    // of a chunk can still become a CRLF, so keep that input on the full path.
-    if (
-      !language ||
-      ["text", "plaintext", "plain", "txt", "ansi"].includes(language) ||
-      code.includes("\r")
-    ) {
-      return highlighter.codeToHast(code, options);
-    }
-    if (cached && !code.startsWith(cached.prefix)) cached = undefined;
-    const end = code.lastIndexOf("\n") + 1;
-    if (end > (cached?.prefix.length ?? 0)) {
-      // Omit the final newline: Shiki would tokenize an extra empty line and
-      // advance the grammar state twice before we process the following line.
-      const root = highlighter.codeToHast(code.slice(cached?.prefix.length ?? 0, end - 1), {
-        ...options,
-        ...(cached ? { grammarState: cached.state } : {}),
-      });
-      const state = highlighter.getLastGrammarState(root);
-      if (!state) {
-        cached = undefined;
-        return highlighter.codeToHast(code, options);
+  function dispose() {
+    tokenizer?.dispose();
+    tokenizer = undefined;
+    previous = "";
+    completedLines.length = 0;
+  }
+
+  return Object.assign(
+    (code: string) => {
+      // ANSI and partial CRLF sequences need the full-source normalization path.
+      if (language === "ansi" || code.includes("\r")) {
+        dispose();
+        return highlightCodeToHast(highlighter, code, language, theme);
       }
-      cached = {
-        prefix: code.slice(0, end),
-        state,
-        children: [...(cached ? [...cached.children, newline] : []), ...codeChildren(root)],
-      };
-    }
-    const prefix = cached;
-    if (!prefix) return highlighter.codeToHast(code, options);
-    return highlighter.codeToHast(code.slice(prefix.prefix.length), {
-      ...options,
-      grammarState: prefix.state,
-      transformers: [
-        {
-          code: (node) => ({ ...node, children: [...prefix.children, newline, ...node.children] }),
-        },
-      ],
-    });
-  };
+      if (!code.startsWith(previous)) dispose();
+      // Created on first use so an unknown language throws inside the caller's fallback.
+      shell ??= highlighter.codeToTokens("", options);
+      tokenizer ??= highlighter.createStreamTokenizer(options);
+      const update = tokenizer.enqueue(code.slice(previous.length));
+      if (update instanceof Promise) {
+        dispose();
+        void update.catch(() => {});
+        return highlightCodeToHast(highlighter, code, language, theme);
+      }
+      previous = code;
+      let line: ThemedToken[] = [];
+      for (const token of update.stable) {
+        if (token.content === "\n") {
+          completedLines.push(...renderTokenLines([line], {}));
+          line = [];
+        } else line.push(token);
+      }
+      // Completed line nodes retain their identity while the final line changes.
+      return highlightedDocument(shell, [
+        ...completedLines,
+        ...renderTokenLines([update.unstable], {}),
+      ]);
+    },
+    { dispose },
+  );
 }

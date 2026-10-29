@@ -11,17 +11,20 @@ import type { SidebarProjectSnapshot } from "../sidebarProjectGrouping";
 import type { SidebarThreadSummary } from "../types";
 import type { SidebarThreadSortOrder } from "@t3tools/contracts/settings";
 import { filterSidebarV2VisibleThreads, sortPinnedThreadsForSidebar } from "./Sidebar.logic";
-import { sortThreads } from "../lib/threadSort";
+import { sortThreads } from "@t3tools/client-runtime/state/thread-sort";
 
 export type LegacySidebarSection = "pinned" | "projects" | "unassigned";
+
+const NO_DELEGATED_THREADS: ReadonlySet<string> = new Set();
 
 export function legacySidebarThreads(
   threads: readonly SidebarThreadSummary[],
   section: LegacySidebarSection,
   order: SidebarThreadSortOrder,
+  delegatedUnderParent: ReadonlySet<string> = NO_DELEGATED_THREADS,
 ) {
-  const visible = filterSidebarV2VisibleThreads(threads, null).filter((thread) =>
-    section === "pinned" ? thread.pinnedAt != null : thread.pinnedAt == null,
+  const visible = filterSidebarV2VisibleThreads(threads, null, delegatedUnderParent).filter(
+    (thread) => (section === "pinned" ? thread.pinnedAt != null : thread.pinnedAt == null),
   );
   return section === "pinned" ? sortPinnedThreadsForSidebar(visible) : sortThreads(visible, order);
 }
@@ -30,8 +33,9 @@ export function shouldRenderLegacySidebarFlatSection(
   threads: readonly SidebarThreadSummary[],
   section: "pinned" | "unassigned",
   order: SidebarThreadSortOrder,
+  delegatedUnderParent: ReadonlySet<string> = NO_DELEGATED_THREADS,
 ): boolean {
-  return legacySidebarThreads(threads, section, order).length > 0;
+  return legacySidebarThreads(threads, section, order, delegatedUnderParent).length > 0;
 }
 
 export function splitLegacySidebarProjects(

@@ -87,11 +87,10 @@ async function setup() {
         height = nextHeight;
       },
       /**
-       * Report the same way the text frame does: the edge movement carried on
-       * the event, then one settling pass. The frame only compensates on the
-       * first write it sees, so a test that writes twice before a paint must let
-       * the settling pass run before asserting the second one — exactly as a real
-       * frame boundary does.
+       * Report the way the text frame does: edge movement on the event, then one settling pass.
+       * The frame only compensates on the first write it sees, so a test that writes twice
+       * before a paint must let the settling pass run before asserting the second, like a real
+       * frame boundary.
        */
       notifyGrowth(target: HTMLElement = element, delta?: number) {
         const amount = delta ?? growthDeltas.get(element) ?? 0;

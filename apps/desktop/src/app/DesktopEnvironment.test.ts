@@ -39,7 +39,7 @@ const makeEnvironment = (
 ) => DesktopEnvironment.DesktopEnvironment.pipe(Effect.provide(layerEnvironment(overrides, env)));
 
 describe("DesktopEnvironment", () => {
-  for (const stage of [
+  it.effect.each([
     {
       appName: "T3 Code (Dev)",
       stageLabel: "Dev",
@@ -64,30 +64,28 @@ describe("DesktopEnvironment", () => {
       linuxDesktopEntryName: "com.t3tools.T3Code.Experimental.desktop",
       stateDir: "/Users/alice/.t3-experimental/userdata",
     },
-  ]) {
-    it.effect(`keeps the packaged ${stage.stageLabel} identity without a development server`, () =>
-      Effect.gen(function* () {
-        const environment = yield* makeEnvironment({
-          platform: "win32",
-          isPackaged: true,
-          appName: stage.appName,
-        });
+  ])("keeps the packaged $stageLabel identity without a development server", (stage) =>
+    Effect.gen(function* () {
+      const environment = yield* makeEnvironment({
+        platform: "win32",
+        isPackaged: true,
+        appName: stage.appName,
+      });
 
-        assert.equal(environment.displayName, stage.appName);
-        assert.deepEqual(environment.branding, {
-          baseName: "T3 Code",
-          stageLabel: stage.stageLabel,
-          displayName: stage.appName,
-        });
-        assert.equal(environment.appUserModelId, stage.appUserModelId);
-        assert.equal(environment.linuxWmClass, stage.linuxWmClass);
-        assert.equal(environment.linuxDesktopEntryName, stage.linuxDesktopEntryName);
-        assert.equal(environment.isDevelopment, false);
-        assert.deepEqual(environment.devServerUrl, Option.none());
-        assert.equal(environment.stateDir, stage.stateDir);
-      }),
-    );
-  }
+      assert.equal(environment.displayName, stage.appName);
+      assert.deepEqual(environment.branding, {
+        baseName: "T3 Code",
+        stageLabel: stage.stageLabel,
+        displayName: stage.appName,
+      });
+      assert.equal(environment.appUserModelId, stage.appUserModelId);
+      assert.equal(environment.linuxWmClass, stage.linuxWmClass);
+      assert.equal(environment.linuxDesktopEntryName, stage.linuxDesktopEntryName);
+      assert.equal(environment.isDevelopment, false);
+      assert.deepEqual(environment.devServerUrl, Option.none());
+      assert.equal(environment.stateDir, stage.stateDir);
+    }),
+  );
 
   it.effect("derives state paths and development identity inside Effect", () =>
     Effect.gen(function* () {

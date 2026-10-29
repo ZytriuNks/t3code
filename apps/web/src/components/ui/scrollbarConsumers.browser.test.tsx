@@ -94,6 +94,7 @@ describe("shared scrollbar consumers", () => {
         modelOptionsByInstance={new Map([[instanceId, models]])}
         terminalOpen={false}
         onInstanceModelChange={select}
+        searchInputRef={createRef<HTMLInputElement>()}
       />,
     );
     await expect.element(screen.getByPlaceholder("Search models...")).toBeVisible();
@@ -123,7 +124,6 @@ describe("shared scrollbar consumers", () => {
         filteredItems={branches}
         value={null}
         query=""
-        resultsQuery=""
         onQueryChange={() => undefined}
         open
         onOpenChange={() => undefined}

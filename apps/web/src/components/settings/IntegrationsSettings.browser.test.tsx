@@ -70,7 +70,7 @@ vi.mock("../../state/device", async (importOriginal) => ({
   }),
 }));
 vi.mock("../device/DeviceHostUpdates", () => ({ DeviceHostUpdates: () => null }));
-vi.mock("./DeviceHostsSettings", () => ({ DeviceHostsSettings: () => null }));
+vi.mock("./DeviceSourcesSettings", () => ({ DeviceSourcesSettings: () => null }));
 vi.mock("../../hooks/useSettings", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../hooks/useSettings")>()),
   PRIMARY_SETTINGS_UNAVAILABLE_MESSAGE: "Connect to an environment",
@@ -117,7 +117,7 @@ vi.mock("./SettingsScopeContext", () => ({
 }));
 
 import { I18nProvider } from "../../i18n/I18nProvider";
-import { IntegrationsSettingsPanel } from "./IntegrationsSettings";
+import { BrowserSettingsPanel, DevicesSettingsPanel } from "./IntegrationsSettings";
 
 vi.mock("../../state/session", async (original) => ({
   ...(await original<typeof import("../../state/session")>()),
@@ -142,7 +142,8 @@ function setup() {
 const panel = () => (
   <StrictMode>
     <I18nProvider>
-      <IntegrationsSettingsPanel />
+      <BrowserSettingsPanel />
+      <DevicesSettingsPanel />
     </I18nProvider>
   </StrictMode>
 );

@@ -3,8 +3,10 @@ import { describe, expect, it } from "vite-plus/test";
 
 import { DesktopAppStageLabelSchema, DesktopEnvironmentBootstrapSchema } from "./ipc.ts";
 
+const decodeDesktopAppStageLabel = Schema.decodeSync(DesktopAppStageLabelSchema);
+
 it("accepts the installed Experimental desktop stage label", () => {
-  expect(Schema.decodeUnknownSync(DesktopAppStageLabelSchema)("Experimental")).toBe("Experimental");
+  expect(decodeDesktopAppStageLabel("Experimental")).toBe("Experimental");
 });
 
 describe("DesktopEnvironmentBootstrapSchema", () => {

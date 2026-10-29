@@ -253,9 +253,7 @@ const makeRuntime = (
     Layer.provide(
       Layer.mock(GitWorkflow.GitWorkflowService)({ pruneWorktrees: () => Effect.void }),
     ),
-    Layer.provide(
-      Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeed(Option.none()) }),
-    ),
+    Layer.provide(Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone })),
     Layer.provide(
       Layer.mock(SourceControlProviderRegistry.SourceControlProviderRegistry)({
         resolveLink: () => Effect.die("unused link"),

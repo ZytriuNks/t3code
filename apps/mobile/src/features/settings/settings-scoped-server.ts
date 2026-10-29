@@ -70,11 +70,7 @@ export function planMobileScopedSettingsPatch(
     return [];
   const writes = new Map<EnvironmentId, Record<string, unknown>>();
   for (const target of targets) {
-    if (
-      target.projectId === null ||
-      target.environment.serverConfig.environment.capabilities.projectSettingsOverrides !== true
-    )
-      continue;
+    if (target.projectId === null) continue;
     const current =
       target.environment.serverConfig.settings.projectSettingsOverrides[target.projectId] ?? {};
     const next: Record<string, unknown> = { ...current };
@@ -118,11 +114,7 @@ export function planMobileScopedSettingsClear(
 ) {
   const writes = new Map<EnvironmentId, Record<string, unknown>>();
   for (const target of targets) {
-    if (
-      target.projectId === null ||
-      target.environment.serverConfig.environment.capabilities.projectSettingsOverrides !== true
-    )
-      continue;
+    if (target.projectId === null) continue;
     const overrides = writes.get(target.environment.environmentId) ?? {};
     const settings = target.environment.serverConfig.settings;
     overrides[target.projectId] = clearProjectSettingsOverrides(

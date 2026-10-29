@@ -29,7 +29,7 @@ import {
   useSubagentConversation,
 } from "./SubagentConversationOverlay";
 import { ThreadAgentsPanel } from "./ThreadAgentsPanel";
-import { ThreadDetailsPanel, type ThreadDetailsPanelProps } from "./chat/ThreadDetailsPanel";
+import { ThreadDetailsPanel } from "./chat/ThreadDetailsPanel";
 import { PopoverCreateHandle as createPopoverHandle } from "./ui/popover";
 import { RightPanelTabs } from "./RightPanelTabs";
 import { DEFAULT_RESOLVED_KEYBINDINGS } from "@t3tools/shared/keybindings";
@@ -267,6 +267,7 @@ function threadRef(id: string): ScopedThreadRef {
 }
 
 type Props = ComponentProps<typeof SubagentConversationPanel>;
+type ThreadDetailsPanelProps = ComponentProps<typeof ThreadDetailsPanel>;
 async function renderPanel(mode: "overlay" | "sidebar", props: Partial<Props> = {}) {
   await using stack = new AsyncDisposableStack();
   const node = (next: Partial<Props> = {}) => (
@@ -989,7 +990,6 @@ async function renderOverlayEntry(onNavigate = vi.fn()) {
         <ThreadDetailsPanel
           anchor={{ current: null }}
           handle={createPopoverHandle()}
-          onPresentationChange={() => {}}
           environmentId={environmentId}
           threadId={threadRef(ownerId).threadId}
           projectId={v2Projection.thread.projectId}

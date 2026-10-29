@@ -2,14 +2,13 @@ import { EnvironmentId, MessageId } from "@t3tools/contracts";
 import type { LegendListRef } from "@legendapp/list/react";
 import { cloneElement, createRef, type ComponentProps, type ReactElement } from "react";
 import { expect, vi } from "vite-plus/test";
-import { act, render } from "../../../test/render";
+import { act, render, type Screen } from "../../../test/render";
 import { MessagesTimeline } from "./MessagesTimeline";
 export const ACTIVE_THREAD_ENVIRONMENT_ID = EnvironmentId.make("environment-local");
 export const MESSAGE_CREATED_AT = "2026-03-17T19:12:28.000Z";
 export function buildProps() {
   return {
     isWorking: false,
-    activeTurnInProgress: false,
     listRef: createRef<LegendListRef | null>(),
     latestRun: null,
     turnDiffSummaries: [],
@@ -18,11 +17,9 @@ export function buildProps() {
     onOpenTurnDiff: () => {},
     onOpenThread: () => {},
     onForkFromRun: async () => {},
-    onRollbackCheckpoint: () => {},
     supportsConversationRollback: false,
     onRevertToTurnCount: () => {},
     isRevertingCheckpoint: false,
-    openingVideoAttachmentId: null,
     onImageExpand: () => {},
     activeThreadEnvironmentId: ACTIVE_THREAD_ENVIRONMENT_ID,
     markdownCwd: undefined,
@@ -92,7 +89,7 @@ export function buildSnapShotTimelineEntry(previewUrl?: string) {
             kind: "snap-shot" as const,
             capturedAt: "2026-03-17T19:12:28.000Z",
             appName: "Terminal",
-            windowTitle: "t3code — Tests",
+            windowTitle: "t3code: Tests",
             appIconDataUrl: "data:image/png;base64,aWNvbg==",
           },
         },
@@ -104,7 +101,7 @@ export function buildSnapShotTimelineEntry(previewUrl?: string) {
 export async function renderContent(
   element: ReactElement<ComponentProps<typeof MessagesTimeline>>,
   expanded = false,
-) {
+): Promise<Screen> {
   await using stack = new AsyncDisposableStack();
   const initialLayout = vi.fn();
   const container = document.createElement("div");

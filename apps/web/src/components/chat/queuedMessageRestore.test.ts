@@ -3,7 +3,7 @@ import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { beforeEach, describe, expect, it } from "vite-plus/test";
 
 import { useComposerDraftStore } from "../../composerDraftStore";
-import { threadContextRecord } from "../../lib/composerContextRecords";
+import { threadContextRecord } from "@t3tools/shared/composerContextReferences";
 import { restoreQueuedThreadContexts } from "./queuedMessageRestore";
 
 const target = scopeThreadRef(EnvironmentId.make("env-a"), ThreadId.make("thread-a"));

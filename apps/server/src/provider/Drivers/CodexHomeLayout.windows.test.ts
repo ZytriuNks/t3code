@@ -13,13 +13,15 @@ import {
   resolveCodexHomeLayout,
 } from "./CodexHomeLayout.ts";
 
+const decodeCodexSettings = Schema.decodeEffect(CodexSettings);
+
 const setup = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const shared = yield* fs.makeTempDirectoryScoped({ prefix: "codex-cross-volume-shared-" });
   const shadow = yield* fs.makeTempDirectoryScoped({ prefix: "codex-cross-volume-shadow-" });
   const layout = yield* resolveCodexHomeLayout(
-    yield* Schema.decodeEffect(CodexSettings)({ homePath: shared, shadowHomePath: shadow }),
+    yield* decodeCodexSettings({ homePath: shared, shadowHomePath: shadow }),
   );
   const source = path.join(shared, "config.toml");
   const linked = path.join(shadow, "config.toml");

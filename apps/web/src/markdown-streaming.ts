@@ -905,13 +905,10 @@ export const remarkHoldIncompleteInline: Plugin<[InlineBufferOptions?], Root> = 
           } else if ("children" in entry) entry.children.forEach(collectDefinitions);
         };
         collectDefinitions(tree);
-        // Parse only the stable part of the final inline block. This preserves
-        // escapes/entities without reparsing completed code-heavy history.
-        // A sentinel keeps the separating space inside the paragraph instead
-        // of letting the parser trim it as end-of-document whitespace.
-        // Stream an open emphasis body in its final style. Buffering the entire
-        // body until the closing marker arrives creates a multi-row DOM burst.
-        // Only the synthetic closing delimiter is omitted from source positions.
+        // Parse only the stable part of the final inline block, keeping escapes/entities without
+        // reparsing completed code-heavy history. A sentinel keeps the separating space from being
+        // trimmed as end-of-document whitespace. An open emphasis body streams in its final style
+        // (buffering it causes a multi-row DOM burst); only the closing delimiter is synthetic.
         const codeDelimiter = /^(`+)(?=[^`])/u.exec(raw.slice(pending))?.[1];
         const delimiter =
           codeDelimiter ?? /^(\*{1,3}|_{1,3}|~{1,2})(?=\S)/u.exec(raw.slice(pending))?.[1];

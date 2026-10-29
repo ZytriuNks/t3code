@@ -515,9 +515,7 @@ function createIncrementalMarkdownParser(parse: Parser) {
   };
 }
 
-/** One cache per streaming renderer. Extra syntax plugins must use the normal
- * parser because their document-wide dependencies are not known here.
- */
+/** Use one cache per streaming renderer; extra syntax plugins require the normal parser. */
 export function createIncrementalMarkdownPlugin(): Plugin<[], Root> {
   let parser: ReturnType<typeof createIncrementalMarkdownParser> | undefined;
   return function () {

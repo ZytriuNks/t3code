@@ -5,6 +5,7 @@ export function useElementWidth<T extends HTMLElement>() {
   const [element, setElement] = useState<T | null>(null);
   const [width, setWidth] = useState<number | null>(null);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- measures the element and observes its size through the shared resize observer
   useLayoutEffect(() => {
     if (!element) return;
 

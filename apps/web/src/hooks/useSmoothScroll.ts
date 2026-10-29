@@ -16,11 +16,9 @@ export interface SmoothScrollHandle {
   cancel(): void;
   isFollowing(): boolean;
   /**
-   * Whether the viewport sits on the content's bottom edge, including its
-   * fractional compositor compensation. This is a pure geometry read: it says
-   * nothing about who last moved the
-   * viewport, so a reader who scrolled back down to the end reports `true`
-   * even after follow was cancelled.
+   * Whether the viewport sits on the content's bottom edge, including fractional compositor
+   * compensation. A pure geometry read: it says nothing about who last moved the viewport, so
+   * a reader who scrolled back to the end reports `true` even after follow was cancelled.
    */
   isAtEdge(): boolean;
   beginLayout(): ((follow?: boolean) => void) | null;
@@ -77,6 +75,7 @@ export function useSmoothScroll({
   const handledEndRequestRef = useRef({ identity, value: endRequest });
   const request = useStableCallback(() => controllerRef.current?.request() ?? false);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- pins the scroll element to the content edge, following layout events and resize, cancelled on cleanup
   useLayoutEffect(() => {
     if (!enabled || !element) return;
     let cancelled = false;
@@ -207,11 +206,10 @@ export function useSmoothScroll({
      */
     const layoutResized = () => viewportResized;
     /**
-     * A collapsing disclosure shrinks the end under a viewport that was pinned
-     * to the old edge. The virtualizer's correction and the browser's clamp can
-     * leave the owned offset short of the new edge, which looks like a reader
-     * walking up the page. Shrinking content never moves the reader down, so
-     * adopt the new edge instead of detaching.
+     * A collapsing disclosure shrinks the end under a viewport pinned to the old edge. The
+     * virtualizer's correction and the browser's clamp can leave the owned offset short of the
+     * new edge, which looks like a reader walking up. Shrinking content never moves the reader
+     * down, so adopt the new edge instead of detaching.
      */
     const layoutShrank = (end: number) =>
       lastPinnedEnd !== null &&
@@ -230,14 +228,10 @@ export function useSmoothScroll({
       reportFollowing(true);
     };
     /**
-     * The frame reports how far its content edge moved, so following it needs
-     * one clamped write instead of a `scrollHeight` read on both sides of every
-     * height write. Those reads forced layout right after the height write, on
-     * every animation frame.
-     *
-     * The first write of a frame settles immediately, so the viewport moves in
-     * the same frame the content did. Further writes inside that frame only
-     * accumulate, and the frame's settling pass reads the layout once more.
+     * The frame reports how far its content edge moved, so following needs one clamped write
+     * instead of `scrollHeight` reads around every height write (forced layout each frame).
+     * The first write of a frame settles immediately; later writes only accumulate and the
+     * frame's settling pass reads the layout once more.
      */
     const followGrowth = (event: Event) => {
       if (cancelled) return;
@@ -314,12 +308,10 @@ export function useSmoothScroll({
       chaseIdleFrames = 0;
       scheduleChase();
     };
-    // Growth that arrives between layout events leaves the viewport short of
-    // the edge until the next event, and catching up a frame later shows the
-    // content moving and then snapping back. Chase the edge for a few frames
-    // after each pin so the compensation lands in the same frame as the growth
-    // no matter which pass produced it. The chase stops once the edge holds
-    // still, so an idle timeline runs no loop at all.
+    // Growth between layout events leaves the viewport short of the edge until the next
+    // event, and catching up a frame later shows the content moving then snapping back. Chase
+    // the edge for a few frames after each pin so compensation lands in the growth's frame;
+    // the chase stops once the edge holds still, so an idle timeline runs no loop.
     const CHASE_IDLE_FRAMES = 3;
     let chaseIdleFrames = 0;
     const scheduleChase = () => {
@@ -474,6 +466,7 @@ export function useSmoothScroll({
     onLayoutRequest,
   ]);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- jumps the scroll controller to the end when a new explicit end request arrives
   useLayoutEffect(() => {
     const handled = handledEndRequestRef.current;
     if (handled.identity !== identity) {

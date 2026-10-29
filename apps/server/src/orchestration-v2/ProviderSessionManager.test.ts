@@ -242,6 +242,7 @@ function makeThreadCreatedEvent(input: {
   readonly threadId: ThreadId;
   readonly now: DateTime.Utc;
   readonly projectId?: ProjectId;
+  readonly delegatedBy?: ThreadId;
 }) {
   return Effect.gen(function* () {
     const projectId =
@@ -266,11 +267,14 @@ function makeThreadCreatedEvent(input: {
       branch: null,
       worktreePath: null,
       activeProviderThreadId: providerThreadId,
-      lineage: {
-        parentThreadId: null,
-        relationshipToParent: null,
-        rootThreadId: input.threadId,
-      },
+      lineage:
+        input.delegatedBy === undefined
+          ? { parentThreadId: null, relationshipToParent: null, rootThreadId: input.threadId }
+          : {
+              parentThreadId: input.delegatedBy,
+              relationshipToParent: "subagent",
+              rootThreadId: input.delegatedBy,
+            },
       forkedFrom: null,
       createdAt: input.now,
       updatedAt: input.now,
@@ -371,9 +375,7 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
       ),
     ),
   );
-  // Registered after countClose so it runs first on scope close, wedging the
-  // close before the closeCount finalizer, like a provider process that never
-  // yields its message stream.
+  // Register after countClose to wedge teardown before its finalizer, matching a provider stream that never yields.
   const hangClose = Effect.addFinalizer(() =>
     (options.scopeCloseReached === undefined
       ? Effect.void
@@ -701,6 +703,7 @@ function runBrowserAccessScenario(input: {
   readonly deviceOverride?: boolean;
   readonly createThread?: boolean;
   readonly projectExists?: boolean;
+  readonly delegatedBy?: ThreadId;
 }) {
   return Effect.gen(function* () {
     const state = yield* Ref.make(emptyState);
@@ -729,7 +732,26 @@ function runBrowserAccessScenario(input: {
       });
       if (input.createThread !== false) {
         yield* eventSink.write({
-          events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now, projectId })],
+          events: [
+            // A delegated child's parent must exist for the lifecycle ownership check.
+            ...(input.delegatedBy === undefined
+              ? []
+              : [
+                  yield* makeThreadCreatedEvent({
+                    idAllocator,
+                    threadId: input.delegatedBy,
+                    now,
+                    projectId,
+                  }),
+                ]),
+            yield* makeThreadCreatedEvent({
+              idAllocator,
+              threadId,
+              now,
+              projectId,
+              ...(input.delegatedBy === undefined ? {} : { delegatedBy: input.delegatedBy }),
+            }),
+          ],
         });
       }
       yield* manager
@@ -1218,7 +1240,7 @@ it.effect(
             Effect.flatMap((hold) =>
               hold
                 ? Deferred.succeed(projectReadHeld, undefined).pipe(Effect.andThen(Effect.never))
-                : Effect.succeed(Option.some(makeBrowserAccessProject(requestedProjectId))),
+                : Effect.succeedSome(makeBrowserAccessProject(requestedProjectId)),
             ),
           ),
       });
@@ -1308,8 +1330,7 @@ it.effect(
   () =>
     Effect.gen(function* () {
       const state = yield* Ref.make(emptyState);
-      // A's adapter start installs its turn, then is stopped mid-request; like
-      // OpenCode2, the adapter still ends that turn with turn.terminal later.
+      // Like OpenCode2, a stopped start can still emit turn.terminal later.
       const holdStart = yield* Ref.make(false);
       const startHeld = yield* Deferred.make<void>();
       yield* Effect.gen(function* () {
@@ -1626,6 +1647,70 @@ it.effect(
           }),
         ),
       );
+    }),
+);
+
+it.effect.each([
+  { relationshipToParent: null, subagent: false },
+  { relationshipToParent: "subagent", subagent: true },
+] as const)(
+  "ProviderSessionManagerV2 marks MCP credentials of delegated children ($relationshipToParent)",
+  ({ relationshipToParent, subagent }) =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const mcpConfigs = yield* Ref.make<
+        ReadonlyArray<McpProviderSession.McpProviderSessionConfig | undefined>
+      >([]);
+      const effect = Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const registry = yield* McpSessionRegistry.McpSessionRegistry;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("thread-provider-session-manager-mcp-lineage");
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        const created = yield* makeThreadCreatedEvent({ idAllocator, threadId, now });
+        const parentThreadId = ThreadId.make("thread-provider-session-manager-mcp-parent");
+        yield* eventSink.write({
+          events: [
+            // The lifecycle ownership check requires the parent of a subagent to exist.
+            ...(relationshipToParent === null
+              ? []
+              : [
+                  yield* makeThreadCreatedEvent({
+                    idAllocator,
+                    threadId: parentThreadId,
+                    now,
+                    projectId: created.payload.projectId,
+                  }),
+                ]),
+            {
+              ...created,
+              payload: {
+                ...created.payload,
+                lineage:
+                  relationshipToParent === null
+                    ? created.payload.lineage
+                    : { parentThreadId, relationshipToParent, rootThreadId: parentThreadId },
+              },
+            },
+          ],
+        });
+        yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+
+        const token = (yield* Ref.get(mcpConfigs))[0]?.authorizationHeader.replace(
+          /^Bearer\s+/,
+          "",
+        );
+        assert.isDefined(token);
+        assert.equal((yield* registry.resolve(token!))?.thread.subagent, subagent);
+        yield* manager.close(providerSessionId);
+      });
+
+      yield* effect.pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 1_000, mcpConfigs })));
     }),
 );
 
@@ -2087,9 +2172,6 @@ it.effect(
         const originalToken = original?.authorizationHeader.replace(/^Bearer\s+/, "");
         assert.isDefined(originalToken);
 
-        // Workspace-change handoff on a shared multi-thread session (codex):
-        // the thread detaches while the provider process keeps running, and the
-        // process's MCP client keeps using the credential it was started with.
         yield* manager.detach({ providerSessionId, threadId, detail: "Workspace changed." });
         assert.equal(
           (yield* registry.resolve(originalToken!))?.thread.threadId,
@@ -2097,9 +2179,6 @@ it.effect(
           "detach must not revoke the credential the live provider process still holds",
         );
 
-        // The continuation run re-attaches the same thread to the same session;
-        // the credential must be reused, not rotated, so the provider process's
-        // long-lived MCP client stays authorized.
         yield* manager.open({
           threadId,
           providerSessionId,
@@ -2164,11 +2243,7 @@ it.effect(
         assert.isDefined(originalToken);
         yield* manager.detach({ providerSessionId: s1, threadId });
 
-        // While S2's provider process is spawning (after prepare reused the
-        // credential, before the entry is visible), the predecessor session
-        // releases. Eager adapters (ACP, OpenCode) bake the credential into
-        // the process during openSession, so the release must not revoke it;
-        // rotating afterwards cannot repair those adapters.
+        // ACP and OpenCode consume credentials during openSession; predecessor release must not revoke them before entry publication.
         yield* Ref.set(duringOpen, manager.close(s1).pipe(Effect.orDie));
         yield* manager.open({ threadId, providerSessionId: s2, modelSelection, runtimePolicy });
 
@@ -3048,7 +3123,7 @@ it.effect.each(["old", "fresh"] as const)(
             ._tag,
           "ProviderSessionStaleBindingError",
         );
-        yield* outbox.claimNext({ workerId: "retirement-worker", leaseDurationMs: 1000 });
+        yield* outbox.claimNext({ workerId: "retirement-worker" });
         assert.equal(
           (yield* manager.open({ ...open, providerSessionId: nextSessionId }).pipe(Effect.flip))
             ._tag,
@@ -3349,7 +3424,7 @@ it.effect.each([
               assert.equal(yield* (yield* EffectWorker.OrchestrationEffectWorkerV2).drain(), 1);
             }).pipe(Effect.provide(layerRetirementWorker));
           else if (receipt !== "pending") {
-            yield* outbox.claimNext({ workerId: "task6:r1:receipt", leaseDurationMs: 1000 });
+            yield* outbox.claimNext({ workerId: "task6:r1:receipt" });
             if (receipt === "failed")
               yield* outbox.fail({
                 effectId,
@@ -3447,11 +3522,7 @@ it.effect.each(["missing", "confirmed"] as const)(
             request: { type: "provider-session.detach", providerSessionId },
           },
         ]);
-        assert.isTrue(
-          Option.isSome(
-            yield* outbox.claimNext({ workerId: "task6:r1:lost-worker", leaseDurationMs: 1000 }),
-          ),
-        );
+        assert.isTrue(Option.isSome(yield* outbox.claimNext({ workerId: "task6:r1:lost-worker" })));
         assert.deepEqual(yield* outbox.reconcileAfterProcessLoss, { requeued: 1, cancelled: 0 });
         yield* Effect.gen(function* () {
           const restarted = yield* ProviderSessionManager.ProviderSessionManagerV2;
@@ -3618,9 +3689,7 @@ it.effect.each(
           });
         if (entry === "restart") {
           assert.isTrue(
-            Option.isSome(
-              yield* outbox.claimNext({ workerId: "task6:r2:lost-worker", leaseDurationMs: 1000 }),
-            ),
+            Option.isSome(yield* outbox.claimNext({ workerId: "task6:r2:lost-worker" })),
           );
           assert.deepEqual(yield* outbox.reconcileAfterProcessLoss, { requeued: 1, cancelled: 0 });
         }
@@ -3791,7 +3860,7 @@ it.effect.each([
           request: { type: "provider-session.detach", providerSessionId },
         },
       ]);
-      yield* outbox.claimNext({ workerId: "task6:r2:lost-worker", leaseDurationMs: 1000 });
+      yield* outbox.claimNext({ workerId: "task6:r2:lost-worker" });
       assert.deepEqual(yield* outbox.reconcileAfterProcessLoss, { requeued: 1, cancelled: 0 });
       yield* Effect.gen(function* () {
         const restarted = yield* ProviderSessionManager.ProviderSessionManagerV2;
@@ -3960,11 +4029,7 @@ it.effect.each(["confirmed", "lost-running"] as const)(
             assert.equal(yield* (yield* EffectWorker.OrchestrationEffectWorkerV2).drain(), 1);
           }).pipe(Effect.provide(layerRetirementWorker));
         } else {
-          assert.isTrue(
-            Option.isSome(
-              yield* outbox.claimNext({ workerId: "lost-worker", leaseDurationMs: 30000 }),
-            ),
-          );
+          assert.isTrue(Option.isSome(yield* outbox.claimNext({ workerId: "lost-worker" })));
         }
         // A fresh manager has no old entry, but shares the persisted DB with the lost process.
         yield* Effect.gen(function* () {
@@ -4238,7 +4303,7 @@ it.effect.each(["session", "thread", "revision", "source", "ordinary"] as const)
             },
           },
         ]);
-        yield* outbox.claimNext({ workerId: "historical-worker", leaseDurationMs: 30000 });
+        yield* outbox.claimNext({ workerId: "historical-worker" });
         assert.isTrue(yield* outbox.succeed({ effectId, workerId: "historical-worker" }));
         const source = yield* guards.resolveLifecycleSource(threadId);
         assert.equal(
@@ -4480,7 +4545,7 @@ it.effect.each(["succeeded", "failed"] as const)(
         const activate = { ...open, providerSessionId: newId };
         const pending = yield* manager.open(activate).pipe(Effect.flip);
         assert.equal(pending._tag, "ProviderSessionStaleBindingError");
-        yield* outbox.claimNext({ workerId: "worker", leaseDurationMs: 1000 });
+        yield* outbox.claimNext({ workerId: "worker" });
         const retirement = yield* manager
           .detach({ providerSessionId: oldId, threadId, retirementRevision: 0 })
           .pipe(Effect.exit, Effect.forkScoped);
@@ -4787,7 +4852,7 @@ it.effect(
             },
           },
         ]);
-        yield* outbox.claimNext({ workerId: "owner-worker", leaseDurationMs: 1000 });
+        yield* outbox.claimNext({ workerId: "owner-worker" });
         yield* outbox.succeed({ effectId, workerId: "owner-worker" });
         const fresh = yield* manager.open({ ...open, providerSessionId: freshId });
         assert.strictEqual(yield* manager.open({ ...open, providerSessionId: freshId }), fresh);
@@ -4856,6 +4921,92 @@ it.effect(
         );
         assert.isTrue(yield* manager.isLive(providerSessionId));
       }).pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 60000 })));
+    }),
+);
+
+it.effect.each(["manual_shutdown", "server_shutdown"] as const)(
+  "ProviderSessionManagerV2 preserves questions only for server shutdown (%s)",
+  (reason) =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const effect = Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+        const now = yield* DateTime.now;
+        const projectId = yield* idAllocator.allocate.project({
+          fixtureName: "provider-session-manager-request-expire",
+        });
+        const threadId = yield* idAllocator.allocate.thread({
+          fixtureName: "provider-session-manager-request-expire",
+          projectId,
+        });
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        const providerThread = makeProviderThread({
+          idAllocator,
+          threadId,
+          providerSessionId,
+          now,
+        });
+
+        yield* eventSink.write({
+          events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+        });
+        const pendingRequest = yield* makePendingRuntimeRequestEvents({
+          idAllocator,
+          threadId,
+          providerSessionId,
+          providerThread,
+          now,
+        });
+        yield* eventSink.write({
+          events: pendingRequest.events.map((event) =>
+            event.type === "turn-item.updated"
+              ? {
+                  ...event,
+                  payload: {
+                    ...event.payload,
+                    type: "user_input_request",
+                    questions: [
+                      { id: "color", header: "Color", question: "Which color?", options: [] },
+                    ],
+                  },
+                }
+              : event.type === "runtime-request.updated"
+                ? { ...event, payload: { ...event.payload, kind: "user_input" } }
+                : event,
+          ),
+        });
+        yield* manager.open({
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        yield* manager.release({
+          providerSessionId,
+          reason,
+        });
+
+        const projection = yield* projectionStore.getThreadProjection(threadId);
+        const request = projection.runtimeRequests.at(-1);
+        const requestNode = projection.nodes.find((node) => node.id === request?.nodeId);
+        const requestTurnItem = projection.turnItems.find(
+          (item) => item.type === "user_input_request" && item.requestId === request?.id,
+        );
+
+        const preserved = reason === "server_shutdown";
+        assert.equal(request?.status, preserved ? "pending" : "cancelled");
+        assert.equal(request?.responseCapability.type, preserved ? "live" : "not_resumable");
+        assert.equal(requestNode?.status, preserved ? "waiting" : "cancelled");
+        assert.equal(requestTurnItem?.status, preserved ? "waiting" : "cancelled");
+      });
+
+      yield* effect.pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 1000 })));
     }),
 );
 
@@ -5779,5 +5930,18 @@ it.effect("lifecycle deletes a thread during startup and closes only that exact 
         }),
       ),
     );
+  }),
+);
+
+// Device instructions reach delegated children only because their own sessions hold `device`.
+it.effect("ProviderSessionManagerV2 gives a delegated child its project's device access", () =>
+  Effect.gen(function* () {
+    const child = yield* runBrowserAccessScenario({
+      enableAgentBrowserAccess: false,
+      projectOverride: false,
+      deviceOverride: true,
+      delegatedBy: ThreadId.make("thread-provider-session-manager-parent"),
+    });
+    assert.isTrue(child?.capabilities?.has("device"));
   }),
 );

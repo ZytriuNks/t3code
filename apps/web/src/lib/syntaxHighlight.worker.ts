@@ -24,7 +24,8 @@ function getHighlighter() {
   return (highlighterPromise ??= getSharedHighlighter({
     langs: ["text"],
     themes: [],
-    preferredHighlighter: "shiki-wasm",
+    // Keep in sync with PREFERRED_HIGHLIGHTER (syntaxHighlighting.ts).
+    preferredHighlighter: "highlights",
   }));
 }
 
@@ -32,6 +33,7 @@ self.addEventListener("message", (event: MessageEvent<CodeHighlightMessage>) => 
   const request = event.data;
   if (request.type === "release") {
     active.delete(request.documentId);
+    documents.get(request.documentId)?.highlight.dispose();
     documents.delete(request.documentId);
     return;
   }
@@ -45,6 +47,7 @@ self.addEventListener("message", (event: MessageEvent<CodeHighlightMessage>) => 
         attachResolvedLanguages(request.resolvedLanguages, highlighter);
       let document = documents.get(request.documentId);
       if (!document || document.language !== request.language || document.theme !== request.theme) {
+        document?.highlight.dispose();
         document = {
           language: request.language,
           theme: request.theme,

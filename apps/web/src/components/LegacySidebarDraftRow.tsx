@@ -6,9 +6,9 @@ import { releaseComposerDraftUploads } from "../lib/composerDraftUploads";
 import { useI18n } from "../i18n/I18nProvider";
 import { SidebarMenuSubItem, useSidebar } from "./ui/sidebar";
 import { cn } from "../lib/utils";
-import { readThreadShells } from "../state/entities";
+import { readThreadShells, useDelegatedUnderParent } from "../state/entities";
 import { filterSidebarV2VisibleThreads } from "./Sidebar.logic";
-import { sortThreads } from "../lib/threadSort";
+import { sortThreads } from "@t3tools/client-runtime/state/thread-sort";
 import { buildThreadRouteParams } from "../threadRoutes";
 import { toastManager } from "./ui/toast";
 import { Tooltip, TooltipTrigger, TooltipPopup } from "./ui/tooltip";
@@ -17,6 +17,7 @@ export function LegacySidebarDraftRow(props: { draftId: DraftId; isActive: boole
   const { t } = useI18n();
   const navigate = useNavigate();
   const { isMobile, setOpenMobile } = useSidebar();
+  const delegatedUnderParent = useDelegatedUnderParent();
   return (
     <SidebarMenuSubItem className="w-full" data-thread-selection-safe>
       <button
@@ -53,7 +54,11 @@ export function LegacySidebarDraftRow(props: { draftId: DraftId; isActive: boole
                   void (async () => {
                     if (props.isActive) {
                       const nextThread = sortThreads(
-                        filterSidebarV2VisibleThreads(readThreadShells(), null),
+                        filterSidebarV2VisibleThreads(
+                          readThreadShells(),
+                          null,
+                          delegatedUnderParent,
+                        ),
                         "updated_at",
                       )[0];
                       if (nextThread) {

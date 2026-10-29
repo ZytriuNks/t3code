@@ -41,6 +41,7 @@ export function I18nProvider({ children }: { readonly children: ReactNode }) {
   const t = (key: MessageKey, values?: MessageValues) => translate(language, key, values);
   const value = (() => ({ language, preference, t }))();
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- sets the document element's lang attribute to the active language
   useEffect(() => {
     document.documentElement.lang = language;
   }, [language]);

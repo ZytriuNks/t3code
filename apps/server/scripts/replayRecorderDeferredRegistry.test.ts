@@ -18,7 +18,7 @@ it.effect("atomically shares one deferred across concurrent get-or-create calls"
 
     yield* registry.succeed("turn-1");
     assert.isTrue(yield* Deferred.isDone(deferreds[0]!));
-    yield* Effect.all(deferreds.map(Deferred.await), {
+    yield* Effect.forEach(deferreds, Deferred.await, {
       concurrency: "unbounded",
       discard: true,
     });

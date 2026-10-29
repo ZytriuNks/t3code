@@ -36,6 +36,7 @@ export function TimelineListLayoutCommit({
     observer.getSnapshot,
   );
   const complete = snapshot?.owner.captureList(snapshot.revision);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- completes the list layout capture for its owner after React commits the DOM it measures
   useLayoutEffect(() => {
     if (snapshot?.owner === layoutRef.current) complete?.();
   }, [snapshot, layoutRef, complete]);

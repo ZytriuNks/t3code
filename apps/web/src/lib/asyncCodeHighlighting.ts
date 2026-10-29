@@ -1,13 +1,7 @@
-import {
-  resolveLanguages,
-  resolveThemes,
-  type DiffsHighlighter,
-  type SupportedLanguages,
-} from "@pierre/diffs";
+import { resolveLanguages, resolveThemes, type SupportedLanguages } from "@pierre/diffs";
 
 import type { DiffThemeName } from "./diffRendering";
-
-type HighlightedRoot = ReturnType<DiffsHighlighter["codeToHast"]>;
+import type { HighlightedRoot } from "./incrementalHighlighting";
 
 export type CodeHighlightMessage =
   | {

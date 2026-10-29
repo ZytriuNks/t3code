@@ -15,9 +15,12 @@ export default function ReadOnlySourcePreview(props: {
   readonly text: string;
   readonly cacheKey?: string;
   readonly onPostRender?: FileOptions<unknown, undefined>["onPostRender"];
+  /** A preview's own wrap toggle; omitted follows the word wrap setting. */
+  readonly wordWrap?: boolean;
 }) {
   const resolvedTheme = useRenderedAppearance();
-  const wordWrap = useClientSettings((settings) => settings.wordWrap);
+  const defaultWordWrap = useClientSettings((settings) => settings.wordWrap);
+  const wordWrap = props.wordWrap ?? defaultWordWrap;
   return (
     <DiffWorkerPoolProvider>
       <div className="file-preview-scroll-frame relative flex min-h-0 min-w-0 flex-1 flex-col">

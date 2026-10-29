@@ -27,6 +27,7 @@ import {
   resolveTerminalFontSizePreference,
   TYPOGRAPHY_ADVANCED_STORAGE_KEY,
 } from "../../appearanceFonts";
+import { AdvancedSettings } from "./AdvancedSettings";
 import { CodeFontPreview, PromptFontPreview, TerminalFontPreview } from "./SettingsFontPreviews";
 import { discoverInstalledFonts, FontFamilyPicker, useFontEnumeration } from "./FontFamilyPicker";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
@@ -37,7 +38,11 @@ import {
   SettingsSection,
   useSettingsSearchTargetId,
 } from "./settingsLayout";
-import { searchableSetting } from "./settingsSearch";
+import {
+  isAdvancedTypographyTarget,
+  revealSettingsSearchTarget,
+  searchableSetting,
+} from "./settingsSearch";
 
 function useFontDefaultFamilies() {
   const settings = useScopedSettings();
@@ -264,8 +269,30 @@ function FontSettingsGroup() {
       <PromptFontRow />
       <CodeFontRow />
       <TerminalFontRow />
-      <FontSmoothingRow />
     </>
+  );
+}
+
+function SeparateFontsRow({
+  checked,
+  onCheckedChange,
+}: {
+  readonly checked: boolean;
+  readonly onCheckedChange: (checked: boolean) => void;
+}) {
+  const { t } = useI18n();
+  return (
+    <SettingsRow
+      {...searchableSetting("separate-fonts", t)}
+      description="Set the prompt, code, and terminal fonts separately instead of one monospace font."
+      control={
+        <Switch
+          checked={checked}
+          onCheckedChange={(next) => onCheckedChange(Boolean(next))}
+          aria-label="Separate fonts"
+        />
+      }
+    />
   );
 }
 
@@ -300,16 +327,6 @@ function SimpleFontRows() {
   );
 }
 
-// Font smoothing only renders on macOS, so a search jump to it elsewhere
-// must not flip the section - the target would never mount to be scrolled to.
-const ADVANCED_TYPOGRAPHY_TARGET_IDS: ReadonlySet<string> = new Set([
-  "prompt-font",
-  "terminal-font",
-  ...(typeof navigator !== "undefined" && isMacPlatform(navigator.platform)
-    ? ["font-smoothing"]
-    : []),
-]);
-
 export function TypographySection() {
   const { t } = useI18n();
   const [advanced, setAdvanced] = useLocalStorage(
@@ -317,31 +334,26 @@ export function TypographySection() {
     false,
     Schema.Boolean,
   );
+  // A deep link or history step must persist the flag too: the terminal reads it, so advanced
+  // rows without it would make terminal font edits do nothing. The rows follow the target
+  // directly so its row mounts in the first commit; the target clears once handled.
   const searchTargetId = useSettingsSearchTargetId();
-  const lastExpandedTargetRef = useRef<string | null>(null);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- writes the advanced typography flag to localStorage when a search target needs it
   useEffect(() => {
-    if (searchTargetId === null || !ADVANCED_TYPOGRAPHY_TARGET_IDS.has(searchTargetId)) return;
-    if (lastExpandedTargetRef.current === searchTargetId) return;
-    lastExpandedTargetRef.current = searchTargetId;
-    setAdvanced(true);
-  }, [searchTargetId, setAdvanced]);
+    if (searchTargetId !== null) revealSettingsSearchTarget(searchTargetId);
+  }, [searchTargetId]);
+  const showAdvanced =
+    advanced || (searchTargetId !== null && isAdvancedTypographyTarget(searchTargetId));
   return (
-    <SettingsSection
-      id="typography"
-      title={t("settings.appearance.typography.title")}
-      headerAction={
-        <label className="flex cursor-pointer items-center gap-2 text-xs font-medium text-muted-foreground">
-          Advanced
-          <Switch
-            checked={advanced}
-            onCheckedChange={(checked) => setAdvanced(Boolean(checked))}
-            aria-label={t("settings.appearance.typography.advancedAriaLabel")}
-          />
-        </label>
-      }
-    >
-      {advanced ? <FontSettingsGroup /> : <SimpleFontRows />}
+    <SettingsSection id="typography" title={t("settings.appearance.typography.title")}>
+      {showAdvanced ? <FontSettingsGroup /> : <SimpleFontRows />}
       <WordWrapRow />
+      <AdvancedSettings
+        targetIds={[searchableSetting("separate-fonts").id, searchableSetting("font-smoothing").id]}
+      >
+        <SeparateFontsRow checked={showAdvanced} onCheckedChange={setAdvanced} />
+        <FontSmoothingRow />
+      </AdvancedSettings>
     </SettingsSection>
   );
 }
@@ -398,6 +410,7 @@ function FontFamilySettingsRow({
     setDraftSettled(true);
   }
   const readAdoptedGeneration = useEffectEvent(() => adopted.generation);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- clears the pending commit timer on unmount
   useEffect(
     () => () => {
       if (commitTimerRef.current !== null) window.clearTimeout(commitTimerRef.current.id);

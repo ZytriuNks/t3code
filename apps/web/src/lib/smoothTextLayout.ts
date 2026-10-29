@@ -22,11 +22,10 @@ export function publishSmoothTextLayoutCommit(root: HTMLElement) {
 }
 
 /**
- * How far the frame's bottom edge moved down, in CSS pixels. The scroll
- * controller only needs this to keep the viewport on the content's edge: it
- * used to read `scrollHeight` before and after every height write to
- * rediscover the same number, which forced layout twice per animation frame.
- * A viewport follows growth by moving down by exactly this much.
+ * How far the frame's bottom edge moved down, in CSS pixels. The scroll controller uses it
+ * to keep the viewport on the content's edge instead of reading `scrollHeight` before and
+ * after every height write, which forced layout twice per animation frame. A viewport follows
+ * growth by moving down by exactly this much.
  */
 export interface SmoothTextLayoutDetail {
   readonly delta: number;

@@ -1,6 +1,6 @@
 import type { ScopedProjectRef, ScopedThreadRef, ThreadId } from "@t3tools/contracts";
 import { useComposerDraftStore, type DraftId } from "../composerDraftStore";
-import { threadContextRecord } from "./composerContextRecords";
+import { threadContextRecord } from "@t3tools/shared/composerContextReferences";
 
 export interface ThreadContinuationDraftInput {
   readonly sourceThread: ScopedThreadRef;

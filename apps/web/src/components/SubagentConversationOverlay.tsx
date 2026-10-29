@@ -65,6 +65,7 @@ export function SubagentConversationOverlay({
 }) {
   const shell = useThreadShell(conversation.threadRef);
   const [bottom, setBottom] = useState(0);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- measures the composer element and observes its size to position the overlay
   useLayoutEffect(() => {
     if (conversation.threadRef === null || composerElement === null) return;
     const measure = () => {
@@ -86,6 +87,7 @@ export function SubagentConversationOverlay({
     measure();
     return observeResize(composerElement, measure);
   }, [composerElement, conversation.threadRef]);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- window keydown listener that closes the overlay on Escape
   useEffect(() => {
     if (conversation.threadRef === null || conversation.closing) return;
     const onKeyDown = (event: KeyboardEvent) => {

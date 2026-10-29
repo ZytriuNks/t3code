@@ -90,7 +90,7 @@ describe("DesktopEarlyElectronStartup", () => {
     });
   });
 
-  for (const stage of [
+  it.each([
     {
       appName: "T3 Code (Dev)",
       linuxWmClass: "t3code-dev",
@@ -109,28 +109,26 @@ describe("DesktopEarlyElectronStartup", () => {
       linuxDesktopEntryName: "com.t3tools.T3Code.Experimental.desktop",
       settingsPath: "/home/user/.t3-experimental/userdata/desktop-settings.json",
     },
-  ]) {
-    it(`keeps the packaged ${stage.appName} identity before Electron is ready`, () => {
-      const options = resolveEarlyLinuxElectronOptions({
-        env: {},
-        appName: stage.appName,
-        homeDirectory: "/home/user",
-        joinPath,
-        readFileString: (path) => {
-          assert.equal(path, stage.settingsPath);
-          return JSON.stringify({ linuxPasswordStore: "kwallet6" });
-        },
-      });
-
-      assert.deepEqual(options, {
-        isDevelopment: false,
-        appName: stage.appName,
-        linuxWmClass: stage.linuxWmClass,
-        linuxDesktopEntryName: stage.linuxDesktopEntryName,
-        passwordStore: "kwallet6",
-      });
+  ])("keeps the packaged $appName identity before Electron is ready", (stage) => {
+    const options = resolveEarlyLinuxElectronOptions({
+      env: {},
+      appName: stage.appName,
+      homeDirectory: "/home/user",
+      joinPath,
+      readFileString: (path) => {
+        assert.equal(path, stage.settingsPath);
+        return JSON.stringify({ linuxPasswordStore: "kwallet6" });
+      },
     });
-  }
+
+    assert.deepEqual(options, {
+      isDevelopment: false,
+      appName: stage.appName,
+      linuxWmClass: stage.linuxWmClass,
+      linuxDesktopEntryName: stage.linuxDesktopEntryName,
+      passwordStore: "kwallet6",
+    });
+  });
 
   it("keeps implicit development state under the default Beta home when T3CODE_HOME is unset", () => {
     const preference = resolveEarlyLinuxPasswordStorePreference({

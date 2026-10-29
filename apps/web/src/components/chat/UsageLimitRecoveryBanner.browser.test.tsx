@@ -21,6 +21,7 @@ it("offers ChatGPT usage management without losing scheduled recovery", async ()
     snoozedUntil: null,
     recovery: null,
     chatGptUsageLimit: true,
+    timestampFormat: "locale",
     onChange,
   });
   await using screen = await render(item.actions);
@@ -46,6 +47,7 @@ it("keeps usage management available when ChatGPT cannot report a reset time", a
     stoppedAt: "2026-10-25T00:00:00.000Z",
     snoozedUntil: null,
     recovery: null,
+    timestampFormat: "locale" as const,
     onChange: vi.fn(),
   };
   const ordinary = usageLimitRecoveryBannerItem(props);

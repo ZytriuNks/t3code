@@ -4,6 +4,9 @@ import * as NodeWorkerThreads from "node:worker_threads";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 
 import { createCodeHighlightCoordinator, type CodeHighlightResult } from "./asyncCodeHighlighting";
+import { DIFF_THEME_NAMES } from "./diffRendering";
+import type { HighlightedRoot } from "./incrementalHighlighting";
+import { PREFERRED_HIGHLIGHTER } from "./syntaxHighlighting";
 
 const workerUrl = new URL("./syntaxHighlight.worker.ts", import.meta.url).href;
 const workers: NodeWorkerThreads.Worker[] = [];
@@ -39,9 +42,9 @@ describe("asynchronous code highlighting", () => {
     const highlighter = await getSharedHighlighter({
       langs: ["javascript"],
       themes: ["pierre-dark"],
-      preferredHighlighter: "shiki-wasm",
+      preferredHighlighter: PREFERRED_HIGHLIGHTER,
     });
-    const results: Array<{ code: string; root: ReturnType<typeof highlighter.codeToHast> }> = [];
+    const results: Array<{ code: string; root: HighlightedRoot }> = [];
     const completed = new Promise<void>((resolve, reject) => {
       const session = coordinator.open("javascript", "pierre-dark", (result) => {
         if (result.error) return reject(new Error(result.error));
@@ -75,18 +78,18 @@ describe("asynchronous code highlighting", () => {
 
     const code = "/* unfinished\ncomment */\nconst current = true;";
     const result = await new Promise<CodeHighlightResult>((resolve) => {
-      const session = coordinator.open("javascript", "pierre-light", resolve);
+      const session = coordinator.open("javascript", DIFF_THEME_NAMES.light, resolve);
       session.update(code);
     });
     expect(discarded).toEqual([]);
     expect(result.error).toBeUndefined();
     const highlighter = await getSharedHighlighter({
       langs: ["javascript"],
-      themes: ["pierre-light"],
-      preferredHighlighter: "shiki-wasm",
+      themes: [DIFF_THEME_NAMES.light],
+      preferredHighlighter: PREFERRED_HIGHLIGHTER,
     });
     expect(toHtml(result.root!)).toBe(
-      highlighter.codeToHtml(code, { lang: "javascript", theme: "pierre-light" }),
+      highlighter.codeToHtml(code, { lang: "javascript", theme: DIFF_THEME_NAMES.light }),
     );
     coordinator.close();
   });
@@ -104,7 +107,7 @@ describe("asynchronous code highlighting", () => {
       const highlighter = await getSharedHighlighter({
         langs: [language as SupportedLanguages],
         themes: ["pierre-dark"],
-        preferredHighlighter: "shiki-wasm",
+        preferredHighlighter: PREFERRED_HIGHLIGHTER,
       });
       expect(toHtml(result.root!)).toBe(
         highlighter.codeToHtml(code, { lang: language, theme: "pierre-dark" }),

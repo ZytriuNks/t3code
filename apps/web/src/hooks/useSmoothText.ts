@@ -54,10 +54,9 @@ const FADE_BUCKET_COUNT = SMOOTH_TEXT_FADE_BUCKETS;
 const COMPLETED_SNAPSHOT_DRAIN_MS = 80;
 const FADE_COLOR_PROPERTY = "--t3-smooth-foreground";
 /**
- * Backlog thresholds for the adaptive reveal mode, and the cooldown that keeps
- * a stream sitting near one of them from trading modes every frame. The gap
- * between the two thresholds is what provides the hysteresis; neither is tuned
- * for a particular provider. Multiple glyph clocks can share a paint; the
+ * Backlog thresholds for the adaptive reveal mode, and the cooldown that stops a stream near
+ * one of them from trading modes every frame. The gap between the thresholds provides the
+ * hysteresis; neither is tuned for a provider. Several glyph clocks can share a paint, and
  * first-window catch-up speed is not evidence that incoming text needs tokens.
  */
 const REVEAL_MODE_FALLBACK_BACKLOG = 120;
@@ -429,11 +428,10 @@ function readText(element: HTMLElement, cache: ReturnType<typeof createTextReadC
     chunks.push(value);
     length += nodeLength;
   }
-  // Markdown renderers separate blocks with whitespace-only text nodes, so a
-  // streaming message ends in one. Leave it out: it has no paint, and keeping
-  // it made every append to the live block a rewrite of that break, which
-  // costs the retained-text mapping on each provider fragment. Once a later
-  // block follows it, the separator is read in place and the update appends.
+  // Markdown renderers separate blocks with whitespace-only text nodes, so a streaming message
+  // ends in one. Leave it out: it has no paint, and keeping it made every append to the live
+  // block rewrite that break at the cost of the retained-text mapping. Once a later block
+  // follows, the separator is read in place and the update appends.
   while (nodes.length > 0 && nodes.at(-1)!.end === length && !/\S/u.test(chunks.at(-1)!)) {
     length = nodes.pop()!.start;
     chunks.pop();
@@ -1779,11 +1777,10 @@ function observeSmoothText(
     open.wholeLine = plan.wholeLine && open.duration < cadence.frameMs * 0.9;
   };
   /**
-   * Media and horizontal rules have no glyphs to play while they open, so the following row's
-   * space could only start once the box was complete, leaving a pause after
-   * every image. Once that row's first glyph has arrived, continue the box's
-   * curve over the row at the box's own pace. When the box retires the row
-   * already fits, and its glyphs continue on the shared character clock.
+   * Media and horizontal rules have no glyphs to play while they open, so the next row's space
+   * could only start once the box was complete, pausing after every image. Once that row's
+   * first glyph arrives, continue the box's curve over the row at the box's pace; when the box
+   * retires the row fits and its glyphs continue on the shared character clock.
    */
   const foldFollowingRow = (paintedAt: number) => {
     const open = reservations[0];
@@ -1922,11 +1919,9 @@ function observeSmoothText(
       Math.abs(reservedBottom! - open.glyphBottom) <= 0.5 &&
       lineLimit(open.target, open.start) >= open.end;
     const paintingAhead = open?.paintAhead && admittedOffset >= open.end && reservationUnchanged;
-    // Markdown reconciliation can replace every Text node in a list or a
-    // details panel while the same logical row is moving.  Keep that row's
-    // clock and retarget its height from the first glyph instead of throwing
-    // the reservation away; clearing it exposes the parser's full natural
-    // height on the next paint.
+    // Markdown reconciliation can replace every Text node in a list or details panel while the
+    // same logical row is moving. Keep that row's clock and retarget its height from the first
+    // glyph; clearing the reservation exposes the parser's full natural height on the next paint.
     const keepOpenReservation =
       open !== undefined &&
       (open.reflow ||
@@ -1988,12 +1983,10 @@ function observeSmoothText(
           open.from = open.target;
           open.distance = 0.1;
         }
-        // A one-off resize gets real travel time. Sustained movement above
-        // this row contributes its own velocity, without starving the FIFO.
-        // A one-off growth near the old deadline must not squeeze its added
-        // travel into a frame: bound that curve's peak by the painted speed or
-        // the configured yield pace. Layout that keeps moving every frame is
-        // sustained travel and keeps its deadline (the FIFO must not starve).
+        // A one-off resize gets real travel time: bound the curve's peak by the painted speed or the
+        // configured yield pace so growth near the old deadline is not squeezed into a frame.
+        // Sustained movement above this row contributes its own velocity and layout that moves every
+        // frame keeps its deadline, so the FIFO is not starved.
         const isolatedGrowth =
           open.geometryChangedAt === undefined ||
           now - open.geometryChangedAt > cadence.frameMs * 2;
@@ -2081,11 +2074,10 @@ function observeSmoothText(
     }
     const naturalHeight = geometryRootRect.height;
     lastNaturalHeight = naturalHeight;
-    // A box above visible text that grew during the stream (an image adopting
-    // its loaded size) has already moved that text down; the box itself
-    // changed size at once. Keep the moved text inside the frame immediately.
-    // Animating the edge instead clipped text the reader had already seen and
-    // held every following row behind the reflow.
+    // A box above visible text that grew during the stream (an image adopting its loaded size)
+    // already moved that text down, so keep the moved text inside the frame immediately.
+    // Animating the edge clipped text the reader had seen and held every following row behind
+    // the reflow.
     if (
       streaming &&
       !retainedTail &&
@@ -2108,11 +2100,9 @@ function observeSmoothText(
       !open.reflow &&
       open.target >= paintedBottom - 0.5 &&
       naturalHeight >= lastFrameHeight - 0.5;
-    // The frame grows only through reservations. `naturalHeight` also counts
-    // what a block owns below its last glyph — a table's toolbar, a block's
-    // bottom margin — and adopting it here raised the frame by that whole
-    // amount in one frame, which threw the trailing buttons down instead of
-    // letting them be pushed aside a line at a time. It stays a ceiling.
+    // The frame grows only through reservations. `naturalHeight` also counts what a block owns
+    // below its last glyph (a table's toolbar, a bottom margin); adopting it here raised the
+    // frame by that whole amount in one frame and threw trailing buttons down. It stays a ceiling.
     const tail = geometryEntries.at(-1);
     const pendingStart = model.nextStart;
     // Shiki separates trailing newlines from glyph nodes. They can grow a
@@ -3178,17 +3168,10 @@ function observeSmoothText(
             : !streaming
               ? Math.max(12, Math.min(64, Math.ceil(((now - frameStart) * 12) / (1_000 / 60))))
               : Math.max(8, Math.min(64, Math.ceil(model.pendingGraphemeCount / 4)));
-      // A late frame may catch up a bounded number of already-due rows.  The
-      // visual duration floor below keeps each high-rate reservation alive for
-      // a paint, while this cap prevents a slow device from replaying an
-      // unbounded multi-line backlog in one callback.
-      // A slow callback can have several line deadlines due at once. Releasing
-      // all of them in the same paint makes the hidden FIFO appear as a
-      // multi-line jump (most visible at the bottom and when completion closes
-      // the activity row). Allow a small, pace-dependent batch only after the
-      // filtered line curve is already in its continuous regime. Low-speed
-      // reservations always hand off one physical line per paint; the glyph
-      // budget remains independent so a long line can still catch up.
+      // A late frame may catch up a bounded number of already-due rows so a slow device cannot
+      // replay an unbounded backlog in one callback. Releasing every due deadline in one paint
+      // reads as a multi-line jump, so batch only once the line curve is continuous; low-speed
+      // reservations hand off one line per paint. The glyph budget stays independent.
       const sourceInterval = model.arrivalInterval(now);
       const arrivalPace = Math.min(1, cadence.frameMs / Math.max(1, sourceInterval));
       const linePace = Math.min(
@@ -3371,15 +3354,10 @@ function observeSmoothText(
           );
           if (advancedSeparator > candidate.start) continue;
         }
-        // Deferred publications need the measured space lead after this row's
-        // first glyph. Half a row can play faster than its space action while
-        // the next source arrivals still wait upstream of the consumable FIFO.
-        // Direct deliveries keep their existing isolated/continuous handoff.
-        // Its text still waits for the FIFO and its own complete paint space;
-        // only one next row may obtain that space. A moving bridge can
-        // continue into the single next reservation while this row waits on
-        // its glyph clock. FIFO still withholds that next row's glyphs; waiting
-        // for the first glyph here would stop an already moving height edge.
+        // Deferred publications need the measured space lead after this row's first glyph; half a
+        // row can play faster than its space action while later arrivals wait upstream of the FIFO.
+        // Direct deliveries keep their isolated/continuous handoff. Only one next row may obtain
+        // space: a moving bridge continues into it while FIFO withholds its glyphs.
         const remaining = admittedOffset - (model.nextStart ?? admittedOffset);
         const admittedLength = admittedOffset - admittedStart;
         const leadCharacters = Math.min(
@@ -3511,12 +3489,10 @@ function observeSmoothText(
             layoutAt,
             Math.min(waiting.at, model.lastRevealAt ?? waiting.at),
           );
-          // A low-rate row can become eligible while a previous handoff is
-          // still being painted. Do not replay that single missed frame:
-          // doing so lets a short reservation reach its target in the same
-          // frame that it is created, which exposes two rows at once. In the
-          // continuous high-rate regime the shared source clock is retained
-          // so the bounded pipeline can keep up with the provider.
+          // A low-rate row can become eligible while a previous handoff is still being painted. Do not
+          // replay that missed frame: a short reservation would reach its target in the frame it is
+          // created and expose two rows at once. In the continuous high-rate regime the shared source
+          // clock is retained so the bounded pipeline keeps up with the provider.
           const protectHandoffReplay =
             !hasStructuralContent() &&
             !rapidSource &&
@@ -3872,11 +3848,9 @@ function observeSmoothText(
         dispose();
     }
   };
-  // A hidden document still reveals completed text at once, but the painted
-  // frame keeps its height until the reader returns. Snapping the remaining
-  // rows in while hidden is invisible work that the reader then discovers as a
-  // jump the moment the window is visible again; easing them then costs one
-  // short reflow instead.
+  // A hidden document still reveals completed text at once, but the painted frame keeps its
+  // height until the reader returns. Snapping the remaining rows in while hidden would show up
+  // as a jump when the window becomes visible; easing them then costs one short reflow.
   let hiddenSettleHeight: number | null = null;
   const holdHiddenSettle = () => {
     if (!frameElement) return;
@@ -4371,10 +4345,9 @@ function observeSmoothText(
     geometryGeneration++;
     nextLineCache = null;
     if (!isAppend) {
-      // A rewrite can change the tail of the row whose space is opening, e.g.
-      // when a Markdown delimiter resolves. Keep a reservation whose first
-      // glyph and prefix survived, trimmed to the unchanged text; dropping it
-      // restarted the row's space curve on every such commit and stalled the
+      // A rewrite can change the tail of the row whose space is opening (e.g. a Markdown delimiter
+      // resolves). Keep a reservation whose first glyph and prefix survived, trimmed to the
+      // unchanged text; dropping it restarted the space curve on every such commit and stalled the
       // next line. syncGeometry still retargets or clears the row below.
       let unchanged = 0;
       while (
@@ -5219,15 +5192,19 @@ export function useSmoothText(
   const claimInitialTextRef = useRef(claimInitialText);
   const onSettledRef = useRef(onSettled);
   const onPlaybackCompleteRef = useRef(onPlaybackComplete);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- keeps the ref read by the playback loop at the latest onSettled callback
   useLayoutEffect(() => {
     onSettledRef.current = onSettled;
   }, [onSettled]);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- keeps the ref read by the playback loop at the latest onPlaybackComplete callback
   useLayoutEffect(() => {
     onPlaybackCompleteRef.current = onPlaybackComplete;
   }, [onPlaybackComplete]);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- keeps the ref read by the playback loop at the latest claimInitialText callback
   useLayoutEffect(() => {
     claimInitialTextRef.current = claimInitialText;
   }, [claimInitialText]);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- starts, retargets and disposes the playback observer on the text element and saves playback checkpoints
   useLayoutEffect(() => {
     const oldResume = resumeRef.current;
     const identityChanged = oldResume?.key !== resume?.key;
@@ -5423,6 +5400,7 @@ export function useSmoothText(
     retainOnComplete,
     resume,
   ]);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- checkpoints playback and clears the end marker on the text element when it unmounts
   useLayoutEffect(() => {
     const element = ref.current;
     return () => {

@@ -23,6 +23,7 @@ export function TimelineStatusHeight({
     start: number;
     value: number;
   } | null>(null);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- animates the status frame height on its DOM node with layout frames and restores it on cleanup
   useLayoutEffect(() => {
     // Consume disabled/history entrances too, so toggling smooth output cannot
     // replay an already visible status. Text/timer updates are not dependencies.

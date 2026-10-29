@@ -1,8 +1,9 @@
-import { EnvironmentId, ThreadId } from "@t3tools/contracts";
-import { createRef } from "react";
+import { StrictMode } from "react";
+import { EnvironmentId, ThreadId, type ScopedThreadRef } from "@t3tools/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { page } from "vite-plus/test/browser";
 import { act, render } from "../../../test/render";
+
 const preference = vi.hoisted(() => ({ autoExpandThreadDetailsPanel: true }));
 vi.mock("../../hooks/useSettings", async (original) => {
   const actual = await original<typeof import("../../hooks/useSettings")>();
@@ -13,96 +14,163 @@ vi.mock("../../hooks/useSettings", async (original) => {
       selector({ ...actual.getClientSettings(), ...preference }),
   };
 });
-import { useRightPanelStore } from "../../rightPanelStore";
+import { selectThreadPanelOpen, useRightPanelStore } from "../../rightPanelStore";
+import { PopoverCreateHandle } from "../ui/popover";
 import { ChatCanvasContext } from "./ChatCanvasContext";
 import { resolveChatCanvasLayout } from "./chatCanvasLayout";
 import { ThreadDetailsCard } from "./ThreadDetailsCard";
-import { PopoverCreateHandle } from "../ui/popover";
 
-async function setup() {
-  await using stack = new AsyncDisposableStack();
-  const original = useRightPanelStore.getState().threadPanelVisibilityByThreadKey;
-  stack.defer(() => {
-    useRightPanelStore.setState({ threadPanelVisibilityByThreadKey: original });
-  });
+const threadA: ScopedThreadRef = {
+  environmentId: EnvironmentId.make("environment"),
+  threadId: ThreadId.make("thread-a"),
+};
+const threadB: ScopedThreadRef = {
+  environmentId: EnvironmentId.make("environment"),
+  threadId: ThreadId.make("thread-b"),
+};
+const container = { width: 1200, height: 800 };
+const placement = { x: 908, y: 0, right: 12, width: 280, height: 400 } as const;
+
+function setup() {
   useRightPanelStore.setState({ threadPanelVisibilityByThreadKey: {} });
   preference.autoExpandThreadDetailsPanel = true;
-  const onPresentationChange = vi.fn();
-  const threadRef = {
-    environmentId: EnvironmentId.make("card-test"),
-    threadId: ThreadId.make("thread"),
-  };
-  const container = { width: 1600, height: 900 };
-  const lane = { padding: 48, minChatWidth: 640 };
-
-  const canvas = {
-    container,
-    lane,
-    layout: resolveChatCanvasLayout({ container, ...lane, preview: null }),
-    previewKey: null,
-    reportPreview: vi.fn(),
-    clearPreview: vi.fn(),
-    registerTimeline: vi.fn(),
-    reportDetailsCard: vi.fn(),
-    detailsCardTopInset: 0,
-  };
-
-  const anchor = createRef<HTMLButtonElement>();
-  const handle = PopoverCreateHandle();
-  const view = () => (
-    <ChatCanvasContext value={canvas}>
-      <button ref={anchor}>Workspace</button>
-      <ThreadDetailsCard
-        threadRef={threadRef}
-        anchor={anchor}
-        handle={handle}
-        onPresentationChange={onPresentationChange}
-      >
-        {() => <p>Workspace controls</p>}
-      </ThreadDetailsCard>
-    </ChatCanvasContext>
-  );
-  const screen = stack.use(await render(null));
-  const owned = stack.move();
+  const anchor = document.createElement("div");
+  document.body.append(anchor);
   return {
-    screen,
-    view,
-    threadRef,
-    onPresentationChange,
-    [Symbol.asyncDispose]: () => owned.disposeAsync(),
+    anchor: { current: anchor },
+    handle: PopoverCreateHandle(),
+    [Symbol.dispose]: () => anchor.remove(),
   };
 }
+
+const popoverOpen = (threadRef: ScopedThreadRef) =>
+  selectThreadPanelOpen(
+    useRightPanelStore.getState().threadPanelVisibilityByThreadKey,
+    threadRef,
+    "popover",
+  );
+
+function Card({
+  threadRef,
+  inline,
+  fixture,
+}: {
+  threadRef: ScopedThreadRef;
+  inline: boolean;
+  fixture: ReturnType<typeof setup>;
+}) {
+  return (
+    // The web root renders in StrictMode, which re-runs ref callbacks on every mount.
+    <StrictMode>
+      <ChatCanvasContext
+        value={{
+          container,
+          lane: { padding: 48, minChatWidth: 640 },
+          layout: resolveChatCanvasLayout({ container, preview: null }),
+          previewKey: null,
+          registerTimeline: () => {},
+          measureDetailsCard: () => {},
+          detailsCardTopInset: 0,
+          preferredDetailsCard: placement,
+          detailsCardPlacement: inline ? placement : null,
+        }}
+      >
+        <ThreadDetailsCard threadRef={threadRef} anchor={fixture.anchor} handle={fixture.handle}>
+          {() => <p>Details for {threadRef.threadId}</p>}
+        </ThreadDetailsCard>
+      </ChatCanvasContext>
+    </StrictMode>
+  );
+}
+
+it("stays open once opened", async () => {
+  using fixture = setup();
+  await using _screen = await render(<Card threadRef={threadB} inline={false} fixture={fixture} />);
+  await act(() => useRightPanelStore.getState().setThreadPanelOpen(threadB, "popover", true));
+  await expect.element(page.getByText("Details for thread-b")).toBeVisible();
+  expect(popoverOpen(threadB)).toBe(true);
+});
+
+it("closes a popup left open when the card switches inline, and reopens from the flag", async () => {
+  using fixture = setup();
+  await using screen = await render(<Card threadRef={threadB} inline={false} fixture={fixture} />);
+  const setOpen = (open: boolean) =>
+    act(() => useRightPanelStore.getState().setThreadPanelOpen(threadB, "popover", open));
+  await setOpen(true);
+  await expect.element(page.getByText("Details for thread-b")).toBeVisible();
+
+  useRightPanelStore.getState().setThreadPanelOpen(threadB, "inline", false);
+  await screen.rerender(<Card threadRef={threadB} inline fixture={fixture} />);
+  await expect.element(page.getByText("Details for thread-b")).not.toBeInTheDocument();
+  await setOpen(false);
+
+  await screen.rerender(<Card threadRef={threadB} inline={false} fixture={fixture} />);
+  await expect.element(page.getByText("Details for thread-b")).not.toBeInTheDocument();
+  await setOpen(true);
+  await expect.element(page.getByText("Details for thread-b")).toBeVisible();
+});
+
+it("does not reopen the popover when the card returns from inline mode", async () => {
+  using fixture = setup();
+  await using screen = await render(<Card threadRef={threadB} inline={false} fixture={fixture} />);
+  await act(() => useRightPanelStore.getState().setThreadPanelOpen(threadB, "popover", true));
+  await expect.element(page.getByText("Details for thread-b")).toBeVisible();
+
+  useRightPanelStore.getState().setThreadPanelOpen(threadB, "inline", false);
+  await screen.rerender(<Card threadRef={threadB} inline fixture={fixture} />);
+  await expect.element(page.getByText("Details for thread-b")).not.toBeInTheDocument();
+
+  await screen.rerender(<Card threadRef={threadB} inline={false} fixture={fixture} />);
+  await expect.element(page.getByText("Details for thread-b")).not.toBeInTheDocument();
+  expect(popoverOpen(threadB)).toBe(false);
+});
+
+it("removes the leaving thread's popup on a thread switch", async () => {
+  using fixture = setup();
+  await using screen = await render(<Card threadRef={threadB} inline={false} fixture={fixture} />);
+  await act(() => useRightPanelStore.getState().setThreadPanelOpen(threadB, "popover", true));
+  await expect.element(page.getByText("Details for thread-b")).toBeVisible();
+
+  await screen.rerender(<Card threadRef={threadA} inline={false} fixture={fixture} />);
+  await expect.element(page.getByText("Details for thread-b")).not.toBeInTheDocument();
+  await expect.element(page.getByText("Details for thread-a")).not.toBeInTheDocument();
+});
+
+it("reopens after a normal close", async () => {
+  using fixture = setup();
+  await using _screen = await render(<Card threadRef={threadB} inline={false} fixture={fixture} />);
+  const setOpen = (open: boolean) =>
+    act(() => useRightPanelStore.getState().setThreadPanelOpen(threadB, "popover", open));
+  await setOpen(true);
+  await expect.element(page.getByText("Details for thread-b")).toBeVisible();
+  await setOpen(false);
+  await expect.element(page.getByText("Details for thread-b")).not.toBeInTheDocument();
+  await setOpen(true);
+  await expect.element(page.getByText("Details for thread-b")).toBeVisible();
+});
+
 describe("workspace card preference", () => {
   it("keeps manual opening available when automatic expansion is disabled", async () => {
-    await using fixture = await setup();
-    const { screen, view, threadRef, onPresentationChange } = fixture;
+    using fixture = setup();
     preference.autoExpandThreadDetailsPanel = false;
-    await screen.rerender(view());
-    await expect
-      .element(page.getByText("Workspace controls", { exact: true }))
-      .not.toBeInTheDocument();
-    expect(onPresentationChange).toHaveBeenLastCalledWith("popover");
-    await act(() => useRightPanelStore.getState().setThreadPanelOpen(threadRef, "popover", true));
-    await expect.element(page.getByText("Workspace controls", { exact: true })).toBeVisible();
-    await act(() => useRightPanelStore.getState().setThreadPanelOpen(threadRef, "popover", false));
-    await expect
-      .element(page.getByText("Workspace controls", { exact: true }))
-      .not.toBeInTheDocument();
+    await using _screen = await render(<Card threadRef={threadB} inline fixture={fixture} />);
+    await expect.element(page.getByText("Details for thread-b")).not.toBeInTheDocument();
+    await act(() => useRightPanelStore.getState().setThreadPanelOpen(threadB, "popover", true));
+    await expect.element(page.getByText("Details for thread-b")).toBeVisible();
+    await act(() => useRightPanelStore.getState().setThreadPanelOpen(threadB, "popover", false));
+    await expect.element(page.getByText("Details for thread-b")).not.toBeInTheDocument();
   });
+
   it("applies preference changes while the thread is open", async () => {
-    await using fixture = await setup();
-    const { screen, view, onPresentationChange } = fixture;
-    await screen.rerender(view());
+    using fixture = setup();
+    await using screen = await render(<Card threadRef={threadB} inline fixture={fixture} />);
     expect(screen.container.querySelectorAll("aside")).toHaveLength(1);
-    expect(onPresentationChange).toHaveBeenLastCalledWith("inline");
     preference.autoExpandThreadDetailsPanel = false;
-    await screen.rerender(view());
+    await screen.rerender(<Card threadRef={threadB} inline fixture={fixture} />);
     expect(screen.container.querySelectorAll("aside")).toHaveLength(0);
-    await expect
-      .element(page.getByText("Workspace controls", { exact: true }))
-      .not.toBeInTheDocument();
+    await expect.element(page.getByText("Details for thread-b")).not.toBeInTheDocument();
     preference.autoExpandThreadDetailsPanel = true;
-    await screen.rerender(view());
+    await screen.rerender(<Card threadRef={threadB} inline fixture={fixture} />);
     expect(screen.container.querySelectorAll("aside")).toHaveLength(1);
   });
 });

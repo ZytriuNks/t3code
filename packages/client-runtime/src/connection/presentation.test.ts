@@ -19,7 +19,6 @@ import {
   connectionStatusText,
   connectionStatusTitle,
   environmentMcpUrl,
-  presentEnvironmentConnection,
   presentConnectionState,
 } from "./presentation.ts";
 
@@ -179,7 +178,7 @@ describe("connection presentation", () => {
 
   it("preserves the latest failure while the next attempt is active", () => {
     expect(
-      presentEnvironmentConnection(
+      presentConnectionState(
         supervisorState({
           phase: "connecting",
           stage: "opening",
@@ -236,7 +235,7 @@ describe("connection presentation", () => {
 
   it("presents the supervisor's offline state without consulting shell state", () => {
     expect(
-      presentEnvironmentConnection(
+      presentConnectionState(
         supervisorState({
           network: "offline",
           phase: "offline",
@@ -252,7 +251,7 @@ describe("connection presentation", () => {
 
   it("presents a connected supervisor snapshot as connected", () => {
     expect(
-      presentEnvironmentConnection(
+      presentConnectionState(
         supervisorState({
           phase: "connected",
           stage: null,
@@ -268,7 +267,7 @@ describe("connection presentation", () => {
 
   it("preserves an explicitly available environment while offline", () => {
     expect(
-      presentEnvironmentConnection(
+      presentConnectionState(
         supervisorState({
           desired: false,
           network: "offline",

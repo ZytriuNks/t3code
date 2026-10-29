@@ -118,6 +118,7 @@ function StreamingFootnoteHeading({
     claimInitialText: () => true,
     onPlaybackComplete: onReady,
   });
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- tells the playback owner the unanimated footnote list is ready after layout
   useLayoutEffect(() => {
     if (!animate) onReady();
   }, [animate, onReady]);
@@ -232,6 +233,7 @@ export function StreamingMarkdownFootnoteItem({ children, ...props }: React.Comp
   };
   // Prepare before the FIFO's layout effect: appends must hide old backrefs
   // before paint, but navigation-only changes must not replay authored text.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- hides and tracks footnote backref links in the DOM before paint and records playback state in refs
   useLayoutEffect(() => {
     const motion = window.matchMedia("(prefers-reduced-motion: reduce)");
     const contrast = window.matchMedia("(forced-colors: active)");
@@ -314,9 +316,11 @@ export function StreamingMarkdownFootnoteItem({ children, ...props }: React.Comp
       reveal();
     },
   });
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reveals footnote backref links in the DOM once playback allows it
   useLayoutEffect(() => {
     reveal();
   });
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- listens to reduced-motion, forced-colors and visibility changes and clears backref timers on cleanup
   useLayoutEffect(() => {
     const motion = window.matchMedia("(prefers-reduced-motion: reduce)");
     const contrast = window.matchMedia("(forced-colors: active)");
@@ -708,6 +712,7 @@ export function StreamingMarkdownFootnotes({
     if (ids.length > 0) setPlayback({ ...playback, closing: true, closingIds: ids });
   }
   const releasedGroup = useRef(false);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- releases the source handoff to the playback FIFO once the footnote group has played, exactly once
   useLayoutEffect(() => {
     if (!handoff?.ready || !groupPlayed) releasedGroup.current = false;
     if (!handoff?.ready || !groupPlayed || open || nextFollowsActive || runWaiting) return;
@@ -730,6 +735,7 @@ export function StreamingMarkdownFootnotes({
           ]),
     );
   };
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- drives the footnote panel close with frames, transition events and a MutationObserver, cancelled on cleanup
   useLayoutEffect(() => {
     // Enqueuing a note changes the head, not the identity of an ongoing close.
     const generation = ++closeGeneration.current;
@@ -783,6 +789,7 @@ export function StreamingMarkdownFootnotes({
       if (closeGeneration.current === generation) closeGeneration.current++;
     };
   }, [playback.closing, playback.closingIds, expanded, finishCollapse]);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- listens for the widget's t3-expand-footnotes DOM event
   useLayoutEffect(() => {
     const widget = widgetRef.current;
     const expand = () => {
@@ -800,6 +807,7 @@ export function StreamingMarkdownFootnotes({
     return () => widget?.removeEventListener("t3-expand-footnotes", expand);
   }, [handoff]);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- moves the footnote container node into its host element and dispatches layout events around the move
   useLayoutEffect(() => {
     if (!container) return;
     // The message-local host already sits below its body and above activity.
@@ -842,6 +850,7 @@ export function StreamingMarkdownFootnotes({
       );
     });
   }, [container, useLiveHost, host, inlineHost]);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- removes the footnote container node from the DOM on unmount
   useLayoutEffect(() => () => container?.remove(), [container]);
 
   const visibility = (() => ({

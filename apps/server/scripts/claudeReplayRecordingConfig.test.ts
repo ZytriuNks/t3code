@@ -8,7 +8,7 @@ it("rejects a query mode that is incompatible with the selected scenario", () =>
       validateClaudeReplayRecordingSelection({
         scenario: "simple",
         configuredQueryMode: "streaming",
-        selectedQueryMode: "fork_session_siblings",
+        selectedQueryMode: "fork_session_merge_back_siblings",
         configuredPromptCount: 1,
         selectedPromptCount: 1,
       }),
@@ -20,24 +20,24 @@ it("rejects prompt overrides that do not preserve the scenario shape", () => {
   assert.throws(
     () =>
       validateClaudeReplayRecordingSelection({
-        scenario: "thread_fork_native_siblings",
-        configuredQueryMode: "fork_session_siblings",
-        selectedQueryMode: "fork_session_siblings",
-        configuredPromptCount: 3,
+        scenario: "thread_merge_back_siblings",
+        configuredQueryMode: "fork_session_merge_back_siblings",
+        selectedQueryMode: "fork_session_merge_back_siblings",
+        configuredPromptCount: 6,
         selectedPromptCount: 1,
       }),
-    "requires exactly 3 prompt(s)",
+    "requires exactly 6 prompt(s)",
   );
 });
 
 it("accepts the configured scenario mode and prompt shape", () => {
   assert.doesNotThrow(() =>
     validateClaudeReplayRecordingSelection({
-      scenario: "thread_fork_native_siblings",
-      configuredQueryMode: "fork_session_siblings",
-      selectedQueryMode: "fork_session_siblings",
-      configuredPromptCount: 3,
-      selectedPromptCount: 3,
+      scenario: "thread_merge_back_siblings",
+      configuredQueryMode: "fork_session_merge_back_siblings",
+      selectedQueryMode: "fork_session_merge_back_siblings",
+      configuredPromptCount: 6,
+      selectedPromptCount: 6,
     }),
   );
 });

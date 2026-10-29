@@ -5,7 +5,8 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 
-import { resolveAttachmentPathById } from "../attachmentStore.ts";
+import { resolveAttachmentRelativePath } from "../attachmentPaths.ts";
+import { parseAttachmentFileExtension, resolveAttachmentPathById } from "../attachmentStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as PreviewManager from "../preview/Manager.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
@@ -53,59 +54,88 @@ export const layer = Layer.effect(
     const scheduledTasks = yield* ScheduledTaskService.ScheduledTaskService;
     const resources = yield* ThreadLifecycleResources.ThreadLifecycleResources;
     const ownership = yield* ThreadOwnership.ThreadOwnership;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
     return {
-      suspendScheduledTasks: (threadId: ThreadId) =>
-        scheduledTasks
+      suspendScheduledTasks: Effect.fn("ResourceCleanupService.suspendScheduledTasks")(function (
+        threadId: ThreadId,
+      ) {
+        return scheduledTasks
           .disableForThread(threadId)
           .pipe(
             Effect.mapError(
               (cause) =>
                 new ResourceCleanupError({ operation: "scheduled-tasks", threadId, cause }),
             ),
-          ),
-      cleanupScheduledTasks: (threadId: ThreadId) =>
-        scheduledTasks
+          );
+      }),
+      cleanupScheduledTasks: Effect.fn("ResourceCleanupService.cleanupScheduledTasks")(function (
+        threadId: ThreadId,
+      ) {
+        return scheduledTasks
           .deleteForThread(threadId)
           .pipe(
             Effect.mapError(
               (cause) =>
                 new ResourceCleanupError({ operation: "scheduled-tasks", threadId, cause }),
             ),
-          ),
-      cleanupTerminals: (threadId: string) =>
-        terminals
+          );
+      }),
+      cleanupTerminals: Effect.fn("ResourceCleanupService.cleanupTerminals")(function (
+        threadId: string,
+      ) {
+        return terminals
           .close({ threadId, deleteHistory: true })
           .pipe(
             Effect.mapError(
               (cause) => new ResourceCleanupError({ operation: "terminal", threadId, cause }),
             ),
-          ),
-      cleanupPreviews: (threadId: string) =>
-        previews
+          );
+      }),
+      cleanupPreviews: Effect.fn("ResourceCleanupService.cleanupPreviews")(function (
+        threadId: string,
+      ) {
+        return previews
           .close({ threadId: ThreadId.make(threadId) })
           .pipe(
             Effect.mapError(
               (cause) => new ResourceCleanupError({ operation: "preview", threadId, cause }),
             ),
-          ),
+          );
+      }),
       cleanupAttachments: Effect.fn("ResourceCleanupService.cleanupAttachments")(
         function* (attachmentIds: ReadonlyArray<string>, threadId: ThreadId) {
           const root = yield* ownership.resolveRoot(threadId);
-          const safe = new Set(
-            yield* ownership.withRoots([root], resources.safeAttachmentIds([threadId])),
+          const { history, safe } = yield* ownership.withRoots(
+            [root],
+            Effect.all({
+              history: projections
+                .getThreadAttachmentIds(threadId)
+                .pipe(Effect.map((ids) => new Set(ids))),
+              safe: resources.safeAttachmentIds([threadId]).pipe(Effect.map((ids) => new Set(ids))),
+            }),
           );
           // Deletion already committed under this root: new forks cannot acquire a source dependency.
+          // History files may be shared with forks; others (dismissed guest uploads) are this thread's own.
           // Keep filesystem I/O outside the short ownership publication boundary.
           yield* Effect.forEach(
-            attachmentIds.filter((id) => safe.has(id)),
+            attachmentIds.filter((id) => !history.has(id) || safe.has(id)),
             (attachmentId) => {
-              const path = resolveAttachmentPathById({
-                attachmentsDir: config.attachmentsDir,
-                attachmentId,
-              });
+              const extension = parseAttachmentFileExtension(attachmentId);
+              const path =
+                resolveAttachmentPathById({
+                  attachmentsDir: config.attachmentsDir,
+                  attachmentId,
+                }) ??
+                (extension
+                  ? resolveAttachmentRelativePath({
+                      attachmentsDir: config.attachmentsDir,
+                      relativePath: `${attachmentId}.${extension}`,
+                    })
+                  : null);
               return path === null
                 ? Effect.void
                 : fileSystem.remove(path, { force: true }).pipe(
+                    Effect.andThen(fileSystem.remove(`${path}.txt`, { force: true })),
                     Effect.mapError(
                       (cause) =>
                         new ResourceCleanupError({

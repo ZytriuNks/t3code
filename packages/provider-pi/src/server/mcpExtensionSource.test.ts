@@ -151,12 +151,11 @@ it("routes Pi durable child work through T3 in the generated prompt and register
     { ui: { notify: assert.fail } },
   );
   assert.ok(prompt);
-  assert.include(prompt.systemPrompt, "Inside Pi, use `mcp__t3-code__delegate_task` by default");
+  assert.include(prompt.systemPrompt, "inside Pi, use `mcp__t3-code__delegate_task` by default");
   assert.include(prompt.systemPrompt, "explicitly requested synchronous temporary work");
-  assert.notInclude(prompt.systemPrompt, "Prefer native subagent tools for same-provider work");
-  assert.include(prompt.systemPrompt, "configured custom models");
+  assert.notInclude(prompt.systemPrompt, "use your native tool when the child uses your provider");
   assert.include(prompt.systemPrompt, 'isolation:"worktree"');
-  assert.include(prompt.systemPrompt, "For every T3 delegated review round");
+  assert.include(prompt.systemPrompt, "Every new delegate review");
   for (const name of ["delegate_task", "create_threads"]) {
     const tool = bridge.tools.find((tool) => tool.name === `mcp__t3-code__${name}`)!;
     assert.include(tool.description, "Inside Pi, use mcp__t3-code__delegate_task by default");

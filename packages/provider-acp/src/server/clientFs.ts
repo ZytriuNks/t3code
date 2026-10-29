@@ -11,12 +11,9 @@ import {
 } from "./clientPolicy.ts";
 
 /**
- * Client-side handlers for the ACP `fs` capability.
- *
- * Agents that prefer client-mediated file access send `fs/read_text_file` and
- * `fs/write_text_file` instead of touching the disk themselves. The handlers
- * run with the server's privileges. The flavor wrapper below checks the current
- * runtime policy and approvals before any filesystem access.
+ * Client-side handlers for the ACP `fs` capability (`fs/read_text_file`,
+ * `fs/write_text_file`). They run with the server's privileges, so the flavor
+ * wrapper below checks runtime policy and approvals before any access.
  */
 
 export function makeAcpClientFileSystem(fileSystem: FileSystem.FileSystem) {
@@ -73,43 +70,41 @@ function assertAbsolutePath(path: string) {
 }
 
 /** Handles `fs/read_text_file`, applying the optional 1-based line window. */
-export const acpReadTextFile = (
+export const acpReadTextFile = Effect.fn("AcpClientFs.readTextFile")(function* (
   fileSystem: FileSystem.FileSystem,
   request: EffectAcpSchema.ReadTextFileRequest,
-): Effect.Effect<EffectAcpSchema.ReadTextFileResponse, EffectAcpErrors.AcpRequestError> =>
-  Effect.gen(function* () {
-    yield* assertAbsolutePath(request.path);
-    const content = yield* fileSystem
-      .readFileString(request.path)
-      .pipe(
-        Effect.mapError((cause) =>
-          fsRequestError(`Could not read text file '${request.path}'.`, cause),
-        ),
-      );
-    const line = request.line ?? undefined;
-    const limit = request.limit ?? undefined;
-    if (line === undefined && limit === undefined) {
-      return { content };
-    }
-    const lines = content.split(/\r?\n/u);
-    const startIndex = Math.max(0, (line ?? 1) - 1);
-    const selected =
-      limit === undefined ? lines.slice(startIndex) : lines.slice(startIndex, startIndex + limit);
-    return { content: selected.join("\n") };
-  });
-
-/** Handles `fs/write_text_file`, creating parent directories when needed. */
-export const acpWriteTextFile = (
-  fileSystem: FileSystem.FileSystem,
-  request: EffectAcpSchema.WriteTextFileRequest,
-): Effect.Effect<EffectAcpSchema.WriteTextFileResponse, EffectAcpErrors.AcpRequestError> =>
-  Effect.gen(function* () {
-    yield* assertAbsolutePath(request.path);
-    yield* fileSystem.makeDirectory(NodePath.dirname(request.path), { recursive: true }).pipe(
-      Effect.andThen(fileSystem.writeFileString(request.path, request.content)),
+): Effect.fn.Return<EffectAcpSchema.ReadTextFileResponse, EffectAcpErrors.AcpRequestError> {
+  yield* assertAbsolutePath(request.path);
+  const content = yield* fileSystem
+    .readFileString(request.path)
+    .pipe(
       Effect.mapError((cause) =>
-        fsRequestError(`Could not write text file '${request.path}'.`, cause),
+        fsRequestError(`Could not read text file '${request.path}'.`, cause),
       ),
     );
-    return {};
-  });
+  const line = request.line ?? undefined;
+  const limit = request.limit ?? undefined;
+  if (line === undefined && limit === undefined) {
+    return { content };
+  }
+  const lines = content.split(/\r?\n/u);
+  const startIndex = Math.max(0, (line ?? 1) - 1);
+  const selected =
+    limit === undefined ? lines.slice(startIndex) : lines.slice(startIndex, startIndex + limit);
+  return { content: selected.join("\n") };
+});
+
+/** Handles `fs/write_text_file`, creating parent directories when needed. */
+export const acpWriteTextFile = Effect.fn("AcpClientFs.writeTextFile")(function* (
+  fileSystem: FileSystem.FileSystem,
+  request: EffectAcpSchema.WriteTextFileRequest,
+): Effect.fn.Return<EffectAcpSchema.WriteTextFileResponse, EffectAcpErrors.AcpRequestError> {
+  yield* assertAbsolutePath(request.path);
+  yield* fileSystem.makeDirectory(NodePath.dirname(request.path), { recursive: true }).pipe(
+    Effect.andThen(fileSystem.writeFileString(request.path, request.content)),
+    Effect.mapError((cause) =>
+      fsRequestError(`Could not write text file '${request.path}'.`, cause),
+    ),
+  );
+  return {};
+});

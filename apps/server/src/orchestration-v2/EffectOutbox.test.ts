@@ -60,8 +60,7 @@ it.effect(
         ["legacy", "marked"],
       );
       assert.deepEqual(yield* outbox.listLifecycleCleanup([]), []);
-      for (let count = 0; count < 4; count++)
-        yield* outbox.claimNext({ workerId: "task6:worker", leaseDurationMs: 1000 });
+      for (let count = 0; count < 4; count++) yield* outbox.claimNext({ workerId: "task6:worker" });
       assert.isTrue(
         (yield* outbox.listLifecycleCleanup([R])).some((effect) => effect.status === "running"),
       );
@@ -114,7 +113,6 @@ it.effect(
       for (let count = 0; count < 4; count++) {
         const claimed = yield* outbox.claimNext({
           workerId: "task6:worker",
-          leaseDurationMs: 1000,
         });
         assert.isTrue(Option.isSome(claimed));
         if (Option.isSome(claimed))
@@ -144,7 +142,6 @@ it.effect(
       ]);
       const claim = yield* outbox.claimNext({
         workerId: "task6:old-process",
-        leaseDurationMs: 1000,
       });
       assert.isTrue(Option.isSome(claim));
       assert.deepEqual(yield* outbox.reconcileAfterProcessLoss, { requeued: 1, cancelled: 0 });
@@ -155,7 +152,6 @@ it.effect(
       assert.deepPropertyVal(recovered.request, "lifecycle", lifecycle);
       const replay = yield* outbox.claimNext({
         workerId: "task6:new-process",
-        leaseDurationMs: 1000,
       });
       assert.isTrue(Option.isSome(replay));
       yield* outbox.succeed({ effectId: "suspend", workerId: "task6:new-process" });

@@ -523,7 +523,7 @@ describe("translation messages", () => {
       "Monospace font",
     );
     expect(Reflect.get(EN_MESSAGES, "settings.appearance.wordWrap.ariaLabel")).toBe(
-      "Wrap code, tables, diffs, and file previews by default",
+      "Wrap code, diffs, and file previews by default",
     );
     expect(Reflect.get(EN_MESSAGES, "settings.appearance.motion.replayPreview")).toBe(
       "Replay panel animation preview",

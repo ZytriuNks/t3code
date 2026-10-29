@@ -1,4 +1,4 @@
-import { CheckpointRef, MessageId, RunId, ThreadId, type ServerProvider } from "@t3tools/contracts";
+import { CheckpointRef, MessageId, RunId, type ServerProvider } from "@t3tools/contracts";
 import { type ReactNode } from "react";
 import { Atom } from "effect/reactivity";
 import { expect, it, vi } from "vite-plus/test";
@@ -260,7 +260,7 @@ it("renders SnapShot window details after the preview resolves", async () => {
   const markup = markupScreen.container.innerHTML;
 
   expect(markup).toContain("Terminal");
-  expect(markup).toContain("t3code — Tests");
+  expect(markup).toContain("t3code: Tests");
   expect(markup).toContain('src="data:image/png;base64,aWNvbg=="');
   expect(onAnchorReady).toHaveBeenCalledOnce();
   expect(onAnchorReady).toHaveBeenCalledWith(firstEntry.message.id, 0);
@@ -274,7 +274,7 @@ it("does not render SnapShot window details before the preview resolves", async 
 
   expect(markup).toContain("screenshot.png");
   expect(markup).not.toContain("Terminal");
-  expect(markup).not.toContain("t3code — Tests");
+  expect(markup).not.toContain("t3code: Tests");
   expect(markup).not.toContain('src="data:image/png;base64,aWNvbg=="');
 });
 
@@ -400,7 +400,7 @@ it("renders collapse controls for long user messages", async () => {
   const markup = markupScreen.container.innerHTML;
 
   expect(markup).toContain("Show full message");
-  // LegendList owns ordinary end-follow (#5449): with live follow on and no
+  // LegendList owns ordinary end-follow: with live follow on and no
   // anchored end space, its maintainScrollAtEnd is enabled.
   expect(markup).toContain('data-user-message-collapsed="true"');
 });
@@ -448,10 +448,7 @@ it("keeps a subagent parent-thread link at the top of an empty timeline", async 
     <MessagesTimeline
       {...buildProps()}
       timelineEntries={[]}
-      parentThreadLink={{
-        threadId: ThreadId.make("thread-parent"),
-        title: "Architecture audit",
-      }}
+      parentThreadLink={{ title: "Architecture audit", open: () => {} }}
     />,
   );
   const markup = markupScreen.container.innerHTML;
@@ -1013,7 +1010,6 @@ it("renders V2 provider retries in the normal work log", async () => {
     <MessagesTimeline
       {...buildProps()}
       isWorking
-      activeTurnInProgress
       latestRun={{
         runId: RunId.make("run-1"),
         status: "running",

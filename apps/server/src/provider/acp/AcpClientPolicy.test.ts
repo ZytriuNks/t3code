@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -8,10 +9,15 @@ import type * as EffectAcpSchema from "effect-acp/compat";
 import * as NodePath from "node:path";
 import * as NodeFSP from "node:fs/promises";
 
-const linkDirectory = (target: string, link: string) =>
-  Effect.tryPromise(() =>
-    NodeFSP.symlink(target, link, process.platform === "win32" ? "junction" : "dir"),
+const linkDirectory = Effect.fn("AcpClientPolicyTest.linkDirectory")(function* (
+  target: string,
+  link: string,
+) {
+  const platform = yield* HostProcess.Platform;
+  return yield* Effect.tryPromise(() =>
+    NodeFSP.symlink(target, link, platform === "win32" ? "junction" : "dir"),
   );
+});
 
 import {
   acpClientExecuteDisposition,
@@ -101,6 +107,7 @@ describe("acpPermissionDisposition", () => {
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
+      const platform = yield* HostProcess.Platform;
       const workspace = yield* fileSystem.makeTempDirectoryScoped({
         prefix: "t3-acp-permission-workspace-",
       });
@@ -109,10 +116,8 @@ describe("acpPermissionDisposition", () => {
       });
       const outsideFile = path.join(outside, "existing.ts");
       yield* fileSystem.writeFileString(outsideFile, "outside");
-      const linkedFile =
-        process.platform === "win32" ? "linked-file/existing.ts" : "linked-file.ts";
-      if (process.platform === "win32")
-        yield* linkDirectory(outside, path.join(workspace, "linked-file"));
+      const linkedFile = platform === "win32" ? "linked-file/existing.ts" : "linked-file.ts";
+      if (platform === "win32") yield* linkDirectory(outside, path.join(workspace, "linked-file"));
       else yield* fileSystem.symlink(outsideFile, path.join(workspace, linkedFile));
       yield* linkDirectory(outside, path.join(workspace, "linked-directory"));
 
@@ -144,7 +149,7 @@ describe("acpPermissionDisposition", () => {
           realPolicy,
           permissionRequest("edit", [{ path: "linked-directory/../escaped-file.ts" }]),
         ),
-        process.platform === "win32" ? "allow" : "deny",
+        platform === "win32" ? "allow" : "deny",
         "Win32 normalizes parent segments before junction traversal; POSIX resolves symlinks first",
       );
     }).pipe(Effect.provide(NodeServices.layer)),
