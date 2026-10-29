@@ -1,6 +1,6 @@
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import type { ScopedThreadRef } from "@t3tools/contracts";
-import { useNavigate } from "@tanstack/react-router";
+import { useNavigate, useLocation } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 
 import ChatView from "./ChatView";
@@ -60,6 +60,10 @@ export function ThreadRouteView({ target }: { target: ThreadRouteTarget }) {
       : null;
 
   const shellStatus = useEnvironmentShellStatus(serverThreadRef?.environmentId ?? null);
+  const allowArchivedThread = useLocation({
+    select: (location) =>
+      (location.state as { readonly allowArchivedThread?: boolean }).allowArchivedThread === true,
+  });
   const serverThreadShell = serverThread;
   const environmentThreadRefs = useEnvironmentThreadRefs(serverThreadRef?.environmentId ?? null);
   const bootstrapComplete = isThreadRouteSnapshotAuthoritative(shellStatus);
@@ -105,6 +109,7 @@ export function ThreadRouteView({ target }: { target: ThreadRouteTarget }) {
     serverThreadDeleted: serverThreadShell?.deletedAt != null,
     unlistedThreadDetail,
     draftThreadExists: draftThread !== null,
+    allowArchivedThread,
   });
   const serverThreadStarted = threadHasStarted(serverThreadShell);
   const environmentHasAnyThreads = environmentThreadRefs.length > 0 || environmentHasDraftThreads;

@@ -17,7 +17,7 @@ export function useSubagentConversation({
 }: {
   owner: ScopedThreadRef;
   projection: Pick<OrchestrationV2ThreadProjection, "subagents"> | null;
-  onNavigate: (threadRef: ScopedThreadRef) => void;
+  onNavigate: (threadRef: ScopedThreadRef, allowArchived?: boolean) => void;
 }) {
   const ownerKey = scopedThreadKey(owner);
   const [selection, setSelection] = useState<{
@@ -31,19 +31,20 @@ export function useSubagentConversation({
     setSelection(null);
   }
   const current = selection?.ownerKey === ownerKey ? selection : null;
-  const openThread = (threadRef: ScopedThreadRef) => {
+  const openThread = (threadRef: ScopedThreadRef, allowArchived = false) => {
     setSelection(null);
-    onNavigate(threadRef);
+    if (allowArchived) onNavigate(threadRef, true);
+    else onNavigate(threadRef);
   };
   return {
     threadRef: current?.threadRef ?? null,
     closing: current?.closing ?? false,
-    openRelatedThread: (threadId: ThreadId) => {
+    openRelatedThread: (threadId: ThreadId, allowArchived = false) => {
       const target = scopeThreadRef(owner.environmentId, threadId);
       if (projection?.subagents.some((subagent) => subagent.childThreadId === threadId)) {
         setSelection({ ownerKey, threadRef: target, closing: false });
       } else {
-        openThread(target);
+        openThread(target, allowArchived);
       }
     },
     openThread,

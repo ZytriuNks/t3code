@@ -214,7 +214,7 @@ function currentSubagent<Agent extends RuntimeSubagent>(
 export function ThreadRelationshipsPanel(props: {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
-  readonly onOpenThread?: ((threadId: ThreadId) => void) | undefined;
+  readonly onOpenThread?: ((threadId: ThreadId, allowArchived?: boolean) => void) | undefined;
 }) {
   const { t } = useI18n();
   const ref = scopeThreadRef(props.environmentId, props.threadId);
@@ -338,14 +338,16 @@ export function ThreadRelationshipsPanel(props: {
     return null;
   }
 
-  const openThread = (threadId: ThreadId) => {
+  const openThread = (threadId: ThreadId, allowArchived = false) => {
     if (props.onOpenThread) {
-      props.onOpenThread(threadId);
+      if (allowArchived) props.onOpenThread(threadId, true);
+      else props.onOpenThread(threadId);
       return;
     }
     void navigate({
       to: "/$environmentId/$threadId",
       params: buildThreadRouteParams(scopeThreadRef(props.environmentId, threadId)),
+      ...(allowArchived ? { state: { allowArchivedThread: true } } : {}),
     });
   };
 
@@ -444,6 +446,7 @@ export function ThreadRelationshipsPanel(props: {
           {(visibleRows) =>
             visibleRows.map(({ threadId, edge }) => {
               const node = graph.nodes.get(threadId);
+              const allowArchived = node?.thread?.archivedAt != null;
               const isSubagent = edge.kind === "subagent";
               const isMergeTarget = threadId === mergeTargetThreadId;
               const isParent = isParentThreadRelationship(edge, props.threadId);
@@ -577,7 +580,7 @@ export function ThreadRelationshipsPanel(props: {
                         variant="ghost"
                         part={workflowGroup ? "primary" : "row"}
                         disabled={node?.missing === true}
-                        onClick={() => openThread(threadId)}
+                        onClick={() => openThread(threadId, allowArchived)}
                       />
                     }
                   >
@@ -595,7 +598,12 @@ export function ThreadRelationshipsPanel(props: {
                     provider={provider}
                     providers={providers}
                     driver={providerDriver}
-                    onOpenThread={(memberThreadId) => openThread(memberThreadId as ThreadId)}
+                    onOpenThread={(memberThreadId) =>
+                      openThread(
+                        memberThreadId as ThreadId,
+                        graph.nodes.get(memberThreadId as ThreadId)?.thread?.archivedAt != null,
+                      )
+                    }
                     isThreadAvailable={(memberThreadId) =>
                       graph.nodes.get(memberThreadId as ThreadId)?.missing === false
                     }
@@ -620,7 +628,7 @@ export function ThreadRelationshipsPanel(props: {
                               part="primary"
                               aria-label={`${threadTitle} ${threadRelationshipStatusLabel(rowStatus)}`}
                               disabled={node?.missing === true}
-                              onClick={() => openThread(threadId)}
+                              onClick={() => openThread(threadId, allowArchived)}
                             />
                           }
                         >
