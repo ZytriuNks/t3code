@@ -2187,8 +2187,9 @@ export const layerWithOptions = (
                     providerSessionId,
                     projectionStore.getRuntimeRequest(threadId, input.requestId),
                   );
+                  // Dispatch persists the resolution before the response effect calls here.
                   if (
-                    request?.status === "pending" &&
+                    request?.status === "resolved" &&
                     request.responseCapability.type === "live" &&
                     request.responseCapability.providerSessionId === providerSessionId
                   )

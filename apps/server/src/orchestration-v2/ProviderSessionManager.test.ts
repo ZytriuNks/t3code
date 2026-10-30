@@ -191,6 +191,7 @@ interface TestProviderRuntimeState {
   readonly interruptCount: number;
   readonly resumeCount: number;
   readonly unloadedNativeThreadIds: ReadonlyArray<string>;
+  readonly respondedRequestIds: ReadonlyArray<string>;
   readonly eventQueues: ReadonlyMap<
     string,
     Queue.Queue<ProviderAdapter.ProviderAdapterV2Event, Cause.Done>
@@ -203,6 +204,7 @@ const emptyState: TestProviderRuntimeState = {
   interruptCount: 0,
   resumeCount: 0,
   unloadedNativeThreadIds: [],
+  respondedRequestIds: [],
   eventQueues: new Map(),
 };
 
@@ -482,7 +484,11 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
                 })),
               ),
             ),
-          respondToRuntimeRequest: () => Effect.void,
+          respondToRuntimeRequest: ({ requestId }) =>
+            Ref.update(state, (current) => ({
+              ...current,
+              respondedRequestIds: [...current.respondedRequestIds, requestId],
+            })),
           readThreadSnapshot: () => unimplemented("readThreadSnapshot unused in test"),
           rollbackThread: () => unimplemented("rollbackThread unused in test"),
           forkThread: () => unimplemented("forkThread unused in test"),
@@ -2714,6 +2720,68 @@ it.effect("ProviderSessionManagerV2 marks pending runtime requests non-live on r
     yield* effect.pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 1000 })));
   }),
 );
+it.effect("ProviderSessionManagerV2 delivers an answer the orchestrator already resolved", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    yield* Effect.gen(function* () {
+      const eventSink = yield* EventSink.EventSinkV2;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const now = yield* DateTime.now;
+      const projectId = yield* idAllocator.allocate.project({
+        fixtureName: "provider-session-manager-request-answer",
+      });
+      const threadId = yield* idAllocator.allocate.thread({
+        fixtureName: "provider-session-manager-request-answer",
+        projectId,
+      });
+      const providerSessionId = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      });
+      yield* eventSink.write({
+        events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+      });
+      const request = yield* makePendingRuntimeRequestEvents({
+        idAllocator,
+        threadId,
+        providerSessionId,
+        providerThread: makeProviderThread({ idAllocator, threadId, providerSessionId, now }),
+        now,
+      });
+      yield* eventSink.write({ events: request.events });
+      const runtime = yield* manager.open({
+        threadId,
+        providerSessionId,
+        modelSelection,
+        runtimePolicy,
+      });
+      // The orchestrator persists the resolution before the response effect runs.
+      const pending = request.events.find((event) => event.type === "runtime-request.updated");
+      assert.isDefined(pending);
+      if (pending === undefined) return;
+      yield* eventSink.write({
+        events: [
+          {
+            ...pending,
+            id: yield* idAllocator.allocate.event({ threadId, providerSessionId }),
+            payload: {
+              ...pending.payload,
+              status: "resolved" as const,
+              resolvedAt: now,
+              decision: "accept" as const,
+            },
+          },
+        ],
+      });
+
+      yield* runtime.respondToRuntimeRequest({ requestId: request.requestId, decision: "accept" });
+
+      assert.deepEqual((yield* Ref.get(state)).respondedRequestIds, [request.requestId]);
+    }).pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 60000 })));
+  }),
+);
+
 it.effect("ProviderSessionManagerV2 retries release records that failed to persist", () =>
   Effect.gen(function* () {
     const state = yield* Ref.make(emptyState);
