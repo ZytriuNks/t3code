@@ -1,7 +1,7 @@
 import { MessageId, RunId } from "@t3tools/contracts";
 import { type ReactNode } from "react";
 import { expect, it, vi } from "vite-plus/test";
-import { act } from "../../../test/render";
+import { act, fakeTimers } from "../../../test/render";
 import { MessagesTimeline } from "./MessagesTimeline";
 import {
   MESSAGE_CREATED_AT,
@@ -26,6 +26,12 @@ function history() {
       message: { ...entry.message, id: MessageId.make(`message-${index}`) },
     };
   });
+}
+
+function turnFoldToggle(container: HTMLElement) {
+  return container.querySelector<HTMLButtonElement>(
+    '[data-timeline-row-kind="turn-fold"] button[aria-expanded="false"]',
+  );
 }
 
 async function move(viewport: HTMLElement, offset: number) {
@@ -112,12 +118,20 @@ it.each([true, false])(
         liveFollowEnabled={atEnd}
         contentInsetEndAdjustment={600}
       />,
-      true,
+      atEnd,
     );
     const viewport = props.listRef.current!.getScrollableNode()!;
     await move(viewport, viewport.scrollHeight);
+    if (!atEnd) {
+      await move(viewport, Math.max(0, viewport.scrollTop - 200));
+      await vi.waitFor(() =>
+        expect(props.listRef.current!.getState().scroll).toBe(viewport.scrollTop),
+      );
+      // Expanding the turn fold at the end restarts LegendList's initial scroll to the
+      // end; once the reader has left it, the fold opens in place.
+      await act(() => turnFoldToggle(screen.container)?.click());
+    }
     const row = screen.getByRole("button", { name: "echo output", exact: true });
-    if (!atEnd) await move(viewport, Math.max(0, viewport.scrollTop - 200));
     const initialOffset = viewport.scrollTop;
     for (const expanded of [true, false]) {
       await row.getByText("echo output", { exact: true }).click();
@@ -132,6 +146,29 @@ it.each([true, false])(
     }
   },
 );
+
+it("lets a reader leave the end while a tool disclosure settles", async () => {
+  // Fake frames let the reader scroll before the disclosure's two settle frames run.
+  using _timers = fakeTimers();
+  const props = buildProps();
+  await using screen = await renderContent(
+    <MessagesTimeline
+      {...props}
+      timelineEntries={[...history(), toolEntry("completed")]}
+      liveFollowEnabled={false}
+    />,
+  );
+  const viewport = props.listRef.current!.getScrollableNode()!;
+  await move(viewport, viewport.scrollHeight);
+  await act(() => vi.advanceTimersByTime(500));
+  const toggle = turnFoldToggle(screen.container);
+  expect(toggle).not.toBeNull();
+  await act(() => toggle!.click());
+  const readingOffset = viewport.scrollTop - 200;
+  await move(viewport, readingOffset);
+  await act(() => vi.advanceTimersByTime(500));
+  expect(Math.abs(viewport.scrollTop - readingOffset)).toBeLessThanOrEqual(1);
+});
 
 it("measures a sent attachment and preserves its send anchor", async () => {
   const props = buildProps();

@@ -1754,7 +1754,6 @@ const ConversationTimeline = memo(function ConversationTimeline({
   const canvas = useChatCanvas();
   const registerTimeline = canvas?.registerTimeline;
   const notifyHostNavigation = useStableCallback((navigation: TimelineNavigation) => {
-    if (!onManualNavigation) return;
     const state = () => listRef.current?.getState?.();
     if (
       navigationReleasesFollow(navigation, {
@@ -1766,7 +1765,9 @@ const ConversationTimeline = memo(function ConversationTimeline({
         awayFromEnd: () => resolveTimelineIsAtEnd(state()) === false,
       })
     ) {
-      onManualNavigation();
+      // A reader who leaves the end while a disclosure settles keeps their position.
+      disclosurePinsEndRef.current = false;
+      onManualNavigation?.();
     }
   });
   // Stable so the list attaches once per mount, not on every render.
