@@ -74,6 +74,12 @@ export function useSmoothScroll({
   const controllerRef = useRef<SmoothScrollHandle | null>(null);
   const handledEndRequestRef = useRef({ identity, value: endRequest });
   const request = useStableCallback(() => controllerRef.current?.request() ?? false);
+  // Callers pass fresh callbacks on every render. Rebuilding the controller for
+  // them drops follow whenever new rows already moved the end, so it keeps these.
+  const detach = useStableCallback(() => onDetach?.());
+  const followingChange = useStableCallback((following: boolean) => onFollowingChange?.(following));
+  const layoutRequest = useStableCallback(() => onLayoutRequest?.());
+  const hasLayoutRequest = onLayoutRequest !== undefined;
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- pins the scroll element to the content edge, following layout events and resize, cancelled on cleanup
   useLayoutEffect(() => {
@@ -192,7 +198,7 @@ export function useSmoothScroll({
       if (next) element.setAttribute("data-smooth-scroll-following", "");
       else element.removeAttribute("data-smooth-scroll-following");
       if (!next) clearFraction();
-      onFollowingChange?.(next);
+      followingChange(next);
     };
     const isFollowing = () =>
       !cancelled &&
@@ -268,7 +274,7 @@ export function useSmoothScroll({
         if (element.scrollTop < readEnd()) {
           cancelled = true;
           reportFollowing(false);
-          onDetach?.();
+          detach();
         }
         return;
       }
@@ -289,7 +295,7 @@ export function useSmoothScroll({
         pendingGrowth = 0;
         cancelled = true;
         reportFollowing(false);
-        onDetach?.();
+        detach();
         return;
       }
       // The virtualizer can publish this delta after it has already committed
@@ -315,7 +321,7 @@ export function useSmoothScroll({
     const CHASE_IDLE_FRAMES = 3;
     let chaseIdleFrames = 0;
     const scheduleChase = () => {
-      if (onLayoutRequest) return;
+      if (hasLayoutRequest) return;
       if (cancelled || chaseFrame !== null) return;
       chaseFrame = requestAnimationFrame(() => {
         chaseFrame = null;
@@ -328,7 +334,7 @@ export function useSmoothScroll({
             if (element.scrollTop < end) {
               cancelled = true;
               reportFollowing(false);
-              onDetach?.();
+              detach();
               return;
             }
           }
@@ -358,7 +364,7 @@ export function useSmoothScroll({
           if (lastPinnedTop !== null) {
             cancelled = true;
             reportFollowing(false);
-            onDetach?.();
+            detach();
           }
           return false;
         }
@@ -370,8 +376,8 @@ export function useSmoothScroll({
     };
     const handle: SmoothScrollHandle = {
       request: () => {
-        if (!onLayoutRequest) return pin();
-        onLayoutRequest();
+        if (!hasLayoutRequest) return pin();
+        layoutRequest();
         return isFollowing();
       },
       commitLayout(fraction, tails = []) {
@@ -396,9 +402,9 @@ export function useSmoothScroll({
           try {
             if (!cancelled) {
               if (!follow) lastPinnedTop = element.scrollTop;
-              else if (onLayoutRequest) {
+              else if (hasLayoutRequest) {
                 lastPinnedTop = element.scrollTop;
-                onLayoutRequest();
+                layoutRequest();
               } else pin();
             }
           } finally {
@@ -441,7 +447,7 @@ export function useSmoothScroll({
           trackedHeight = height;
           viewportResized = true;
         }
-        (onLayoutRequest ?? pin)();
+        (hasLayoutRequest ? layoutRequest : pin)();
       },
     );
     pin();
@@ -461,9 +467,10 @@ export function useSmoothScroll({
     footerRef,
     // oxlint-disable-next-line react/exhaustive-effect-dependencies -- A thread switch must discard the controller even when the DOM is reused.
     identity,
-    onDetach,
-    onFollowingChange,
-    onLayoutRequest,
+    detach,
+    followingChange,
+    hasLayoutRequest,
+    layoutRequest,
   ]);
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- jumps the scroll controller to the end when a new explicit end request arrives
