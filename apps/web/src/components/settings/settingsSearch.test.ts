@@ -62,6 +62,7 @@ describe("searchSettings", () => {
     ["无项目", "scratch-base-directory", "/settings/threads"],
     ["脚注", "footnotes-auto-collapse", "/settings/chat"],
     ["思考", "conversation-thinking-label", "/settings/chat"],
+    ["分区侧栏", "legacy-sidebar", "/settings/appearance"],
   ])("finds the restored preference for %s", (query, id, to) => {
     expect(
       searchSettings(query, SETTINGS_SEARCH_ITEMS, (key, values) =>
@@ -82,6 +83,14 @@ describe("searchSettings", () => {
       );
     },
   );
+  it.each(["sectioned sidebar", "legacy sidebar"])("finds the sidebar style for %s", (query) => {
+    expect(searchSettings(query).map((item) => item.id)).toContain("legacy-sidebar");
+  });
+  it("names the fork sidebar Sectioned sidebar in both languages", () => {
+    expect(translate("en", "settings.appearance.sidebar.option.legacy")).toBe("Sectioned sidebar");
+    expect(translate("zh-CN", "settings.appearance.sidebar.option.legacy")).toBe("分区侧栏");
+    expect(translate("zh-CN", "settings.search.requiresLegacySidebar")).toBe("仅适用于分区侧栏");
+  });
   it.each(["send shortcut", "multiline", "new line"])("finds Send shortcut for %s", (query) => {
     expect(searchSettings(query).map((item) => item.id)).toContain("send-shortcut");
   });

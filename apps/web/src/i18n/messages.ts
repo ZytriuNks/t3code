@@ -544,13 +544,13 @@ export const EN_MESSAGES = {
     "Shows context window usage as a circular indicator in the composer.",
   "settings.appearance.sidebar.title": "Sidebar",
   "settings.appearance.sidebar.option.default": "Default",
-  "settings.appearance.sidebar.option.legacy": "Legacy",
+  "settings.appearance.sidebar.option.legacy": "Sectioned sidebar",
   "settings.appearance.sidebar.description":
-    "Choose the default flat list or the legacy per-project thread tree.",
+    "Choose the default flat list or the sectioned sidebar with Pinned, Projects and No project sections.",
   "settings.appearance.sidebarProjectGuides.description":
     "Show indentation guides for conversations and drafts in Pinned, Projects and No project. Turn off to remove the guides and indentation.",
   "settings.appearance.sidebarThreadStatusDots.description":
-    "Show dim gray dots for idle threads and colored dots for other statuses in the legacy sidebar. Choose whether to show status text such as Working.",
+    "Show dim gray dots for idle threads and colored dots for other statuses in the sectioned sidebar. Choose whether to show status text such as Working.",
   "settings.appearance.sidebarThreadStatusDots.off": "Off",
   "settings.appearance.sidebarThreadStatusDots.labels": "Dots and status text",
   "settings.appearance.sidebarThreadStatusDots.dots": "Dots only",
@@ -1097,10 +1097,10 @@ export const EN_MESSAGES = {
     "composer meter usage tokens circle old",
   "settings.search.item.legacy-sidebar.title": "Sidebar style",
   "settings.search.item.legacy-sidebar.keywords":
-    "sidebar style default legacy project thread tree old flat list",
+    "sidebar style default sectioned sections pinned project thread tree legacy old flat list",
   "settings.search.item.legacy-sidebar-project-guides.title": "Indentation guides",
   "settings.search.item.legacy-sidebar-project-guides.keywords":
-    "project guides vertical lines thread tree indentation indent left align legacy sidebar pinned no project drafts",
+    "project guides vertical lines thread tree indentation indent left align sectioned sidebar pinned no project drafts",
   "settings.search.item.legacy-sidebar-thread-status-dots.title": "Thread status dots",
   "settings.search.item.legacy-sidebar-thread-status-dots.keywords":
     "thread status dots idle gray working completed indicator",
@@ -1243,7 +1243,7 @@ export const EN_MESSAGES = {
   "settings.search.clear": "Clear settings search",
   "settings.search.empty": "No settings found",
   "settings.search.results": "Settings search results",
-  "settings.search.requiresLegacySidebar": "Only available with the legacy sidebar",
+  "settings.search.requiresLegacySidebar": "Only available with the sectioned sidebar",
   "settings.section.project": "Project",
   "settings.section.general": "General",
   "settings.section.appearance": "Appearance",
@@ -3405,12 +3405,13 @@ export const ZH_CN_MESSAGES = {
     "在输入区以环形指示器显示上下文窗口用量。",
   "settings.appearance.sidebar.title": "侧栏",
   "settings.appearance.sidebar.option.default": "默认",
-  "settings.appearance.sidebar.option.legacy": "旧版",
-  "settings.appearance.sidebar.description": "选择默认的扁平列表，或旧版按项目分组的对话树。",
+  "settings.appearance.sidebar.option.legacy": "分区侧栏",
+  "settings.appearance.sidebar.description":
+    "选择默认的扁平列表，或按置顶、项目和无项目分区显示的分区侧栏。",
   "settings.appearance.sidebarProjectGuides.description":
     "统一显示置顶、项目和无项目下对话与草稿的缩进竖线。关闭后，移除竖线并取消列表缩进。",
   "settings.appearance.sidebarThreadStatusDots.description":
-    "在旧版侧栏中为空闲对话显示深灰色圆点，其他状态沿用原有圆点颜色，可选择是否显示 Working 等状态文字。",
+    "在分区侧栏中为空闲对话显示深灰色圆点，其他状态沿用原有圆点颜色，可选择是否显示 Working 等状态文字。",
   "settings.appearance.sidebarThreadStatusDots.off": "关闭",
   "settings.appearance.sidebarThreadStatusDots.labels": "圆点与状态文字",
   "settings.appearance.sidebarThreadStatusDots.dots": "仅圆点",
@@ -3905,10 +3906,11 @@ export const ZH_CN_MESSAGES = {
   "settings.search.item.legacy-context-window-indicator.keywords":
     "输入区 指示器 用量 token 圆环 旧版",
   "settings.search.item.legacy-sidebar.title": "侧栏样式",
-  "settings.search.item.legacy-sidebar.keywords": "侧栏 样式 外观 默认 项目 线程 树 旧版 扁平列表",
+  "settings.search.item.legacy-sidebar.keywords":
+    "侧栏 样式 外观 默认 分区 分区侧栏 置顶 项目 线程 树 旧版 扁平列表",
   "settings.search.item.legacy-sidebar-project-guides.title": "缩进竖线",
   "settings.search.item.legacy-sidebar-project-guides.keywords":
-    "项目 竖线 引导线 对话 线程 树 缩进 左对齐 旧版 侧栏 置顶 无项目 草稿",
+    "项目 竖线 引导线 对话 线程 树 缩进 左对齐 分区侧栏 置顶 无项目 草稿",
   "settings.search.item.legacy-sidebar-thread-status-dots.title": "对话状态圆点",
   "settings.search.item.legacy-sidebar-thread-status-dots.keywords":
     "对话 线程 状态 圆点 空闲 灰色 运行 完成 指示器",
@@ -4044,7 +4046,7 @@ export const ZH_CN_MESSAGES = {
   "settings.search.clear": "清除设置搜索",
   "settings.search.empty": "未找到设置",
   "settings.search.results": "设置搜索结果",
-  "settings.search.requiresLegacySidebar": "仅适用于旧版侧栏",
+  "settings.search.requiresLegacySidebar": "仅适用于分区侧栏",
   "settings.section.project": "项目",
   "settings.section.general": "常规",
   "settings.section.appearance": "外观",

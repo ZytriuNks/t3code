@@ -479,7 +479,7 @@ export function useSettingsRestore(onRestored?: () => void) {
         ? ["No-project chats base directory"]
         : []),
       ...(settings.legacySidebarEnabled !== DEFAULT_UNIFIED_SETTINGS.legacySidebarEnabled
-        ? ["Sidebar (legacy)"]
+        ? ["Sidebar style"]
         : []),
       ...(settings.legacySidebarProjectGuides !==
       DEFAULT_UNIFIED_SETTINGS.legacySidebarProjectGuides

@@ -278,14 +278,14 @@ export const SETTINGS_SEARCH_ITEMS = [
     title: "Indentation guides",
     to: "/settings/appearance",
     requiresLegacySidebar: true,
-    searchTerms: ["legacy sidebar guides 旧版 侧栏 缩进 引导线"],
+    searchTerms: ["sectioned sidebar guides 分区侧栏 缩进 引导线"],
   },
   {
     id: "legacy-sidebar-thread-status-dots",
     title: "Thread status dots",
     to: "/settings/appearance",
     requiresLegacySidebar: true,
-    searchTerms: ["legacy sidebar status dots text 旧版 侧栏 状态 圆点 文字"],
+    searchTerms: ["sectioned sidebar status dots text 分区侧栏 状态 圆点 文字"],
   },
   {
     id: "storage-worktree-keep-when",
@@ -845,9 +845,9 @@ export const SETTINGS_SEARCH_ITEMS = [
   },
   {
     id: "legacy-sidebar",
-    title: "Sidebar (legacy)",
+    title: "Sidebar style",
     to: "/settings/appearance",
-    searchTerms: ["project thread tree old flat list"],
+    searchTerms: ["sectioned pinned project thread tree legacy old flat list 分区侧栏"],
   },
   {
     id: "keybindings",
