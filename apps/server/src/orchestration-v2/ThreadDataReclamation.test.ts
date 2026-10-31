@@ -889,6 +889,196 @@ it.effect("resumes after a later batch rolls back without restoring committed ba
   }).pipe(Effect.provide(layerTest)),
 );
 
+it.effect("reclaims cancelled settled outbox rows but preserves lifecycle barriers", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const threadId = "thread:reclaim:cancelled-outbox";
+    const deletionCommandId = `delete:${threadId}`;
+    yield* seedDeletedThread({ threadId });
+    for (const [effectId, commandId, effectType, status, payloadJson] of [
+      ["cancelled:generic", "other:generic", "preview.cleanup", "cancelled", "{}"],
+      [
+        "cancelled:lifecycle",
+        "other:lifecycle",
+        "attachment.cleanup",
+        "cancelled",
+        '{"lifecycle":{"revision":1}}',
+      ],
+      ["cancelled:delete-barrier", deletionCommandId, "provider-session.detach", "cancelled", "{}"],
+      [
+        "succeeded:detach-lifecycle",
+        "other:detach-lifecycle",
+        "provider-session.detach",
+        "succeeded",
+        '{"lifecycle":{"revision":1}}',
+      ],
+    ] as const) {
+      yield* sql`
+        INSERT INTO orchestration_v2_effect_outbox (
+          effect_id, command_id, thread_id, effect_type, payload_json, status,
+          attempt_count, available_at, created_at, updated_at, completed_at
+        ) VALUES (
+          ${effectId}, ${commandId}, ${threadId}, ${effectType}, ${payloadJson}, ${status},
+          0, ${at}, ${at}, ${at}, ${at}
+        )
+      `;
+    }
+
+    const result = yield* reclaim();
+    assert.equal(result.reclaimedThreadCount, 1);
+    assert.equal(result.deletedOutboxCount, 1);
+    const retained = yield* sql<{ readonly effect_id: string }>`
+      SELECT effect_id FROM orchestration_v2_effect_outbox ORDER BY effect_id
+    `;
+    assert.deepEqual(retained.map((row) => row.effect_id), [
+      "cancelled:delete-barrier",
+      "cancelled:lifecycle",
+      "succeeded:detach-lifecycle",
+    ]);
+
+    const repeated = yield* reclaim();
+    assert.equal(repeated.deletedOutboxCount, 0);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("reclaims a large subagent closure in ordered bounded chunks and resumes", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const rootThreadId = "thread:reclaim:large:root";
+    const deleteCommandId = `delete:${rootThreadId}`;
+    const childCount = ThreadDataReclamation.THREAD_DATA_RECLAMATION_BATCH_SIZE + 1;
+    const childThreadIds: Array<string> = [];
+    for (let index = 0; index < childCount; index++) {
+      const childThreadId = `thread:reclaim:large:${String(index).padStart(3, "0")}`;
+      childThreadIds.push(childThreadId);
+      yield* seedDeletedThread({
+        threadId: childThreadId,
+        parentThreadId: rootThreadId,
+        relationshipToParent: "subagent",
+        rootThreadId,
+        operationRootThreadId: rootThreadId,
+        commandId: deleteCommandId,
+        insertReceipt: false,
+      });
+      yield* seedSubagentOwnership({
+        parentThreadId: rootThreadId,
+        childThreadId,
+      });
+      const payloadJson = JSON.stringify({
+        attachments:
+          index === 0 || index === childCount - 1
+            ? [{ id: "attachment:large-closure-shared", type: "file", name: "shared.txt" }]
+            : [],
+      });
+      yield* sql`
+        INSERT INTO orchestration_v2_projection_messages (
+          message_id, thread_id, run_id, node_id, role, streaming,
+          created_at, updated_at, payload_json
+        ) VALUES (
+          ${`message:${childThreadId}`}, ${childThreadId}, NULL, NULL, 'user', 0, ${at}, ${at}, ${payloadJson}
+        )
+      `;
+    }
+    yield* seedDeletedThread({ threadId: rootThreadId, commandId: deleteCommandId });
+    yield* sql`
+      INSERT INTO orchestration_v2_projection_messages (
+        message_id, thread_id, run_id, node_id, role, streaming,
+        created_at, updated_at, payload_json
+      ) VALUES (
+        ${`message:${rootThreadId}`}, ${rootThreadId}, NULL, NULL, 'user', 0, ${at}, ${at}, '{}'
+      )
+    `;
+    const failedChildThreadId = childThreadIds.at(-1)!;
+    const firstChildThreadId = childThreadIds[0]!;
+    const sharedProviderSessionId = "provider-session:large-closure-shared";
+    yield* sql`
+      INSERT INTO orchestration_v2_projection_provider_sessions (
+        provider_session_id, thread_id, provider, status, model, updated_at,
+        payload_json, driver, provider_instance_id
+      ) VALUES (
+        ${sharedProviderSessionId}, ${firstChildThreadId}, 'codex', 'idle', NULL, ${at}, '{}', 'codex', 'codex'
+      )
+    `;
+    yield* sql`
+      INSERT INTO orchestration_v2_projection_provider_session_bindings (
+        provider_session_id, thread_id
+      ) VALUES
+        (${sharedProviderSessionId}, ${firstChildThreadId}),
+        (${sharedProviderSessionId}, ${failedChildThreadId})
+    `;
+    for (const threadId of [firstChildThreadId, failedChildThreadId]) {
+      yield* sql`
+        INSERT INTO orchestration_v2_native_session_bindings (
+          binding_key, thread_id, provider_thread_id, provider_instance_id, driver,
+          native_id, storage_type, canonical_root, canonical_file, bound_at, payload_json
+        ) VALUES (
+          ${`native-binding:${threadId}`}, ${threadId}, ${`provider-thread:${threadId}`},
+          'codex', 'codex', 'native:large-closure-shared', 'resolved', '/sessions',
+          'large-closure-shared.jsonl', ${at}, '{}'
+        )
+      `;
+    }
+    yield* sql`
+      CREATE TRIGGER reject_reclamation_large_second_chunk
+      BEFORE DELETE ON orchestration_v2_projection_messages
+      WHEN OLD.thread_id = 'thread:reclaim:large:050'
+      BEGIN SELECT RAISE(ABORT, 'injected large-closure second-chunk failure'); END
+    `;
+
+    const failed = yield* Effect.exit(reclaim());
+    assert.isTrue(Exit.isFailure(failed));
+    const remainingMessages = yield* sql<{ readonly thread_id: string }>`
+      SELECT thread_id FROM orchestration_v2_projection_messages
+      WHERE thread_id LIKE 'thread:reclaim:large:%'
+      ORDER BY thread_id
+    `;
+    assert.deepEqual(remainingMessages.map((row) => row.thread_id), [failedChildThreadId, rootThreadId]);
+    const remainingOwnership = yield* sql<{ readonly child_thread_id: string }>`
+      SELECT child_thread_id
+      FROM orchestration_v2_projection_subagents
+      WHERE thread_id = ${rootThreadId}
+      ORDER BY child_thread_id
+    `;
+    assert.deepEqual(remainingOwnership.map((row) => row.child_thread_id), [failedChildThreadId]);
+    const remainingSharedProviderBindings = yield* sql<{ readonly thread_id: string }>`
+      SELECT thread_id
+      FROM orchestration_v2_projection_provider_session_bindings
+      WHERE provider_session_id = ${sharedProviderSessionId}
+      ORDER BY thread_id
+    `;
+    assert.deepEqual(remainingSharedProviderBindings.map((row) => row.thread_id), [failedChildThreadId]);
+    const remainingSharedNativeBindings = yield* sql<{ readonly thread_id: string }>`
+      SELECT thread_id
+      FROM orchestration_v2_native_session_bindings
+      WHERE native_id = 'native:large-closure-shared'
+    `;
+    assert.deepEqual(remainingSharedNativeBindings.map((row) => row.thread_id), [failedChildThreadId]);
+
+    yield* sql`DROP TRIGGER reject_reclamation_large_second_chunk`;
+    const resumed = yield* reclaim();
+    assert.equal(resumed.reclaimedThreadCount, childCount + 1);
+    const finalMessages = yield* sql`SELECT * FROM orchestration_v2_projection_messages`;
+    const finalOwnership = yield* sql`SELECT * FROM orchestration_v2_projection_subagents`;
+    const finalSharedProviderSessions = yield* sql`
+      SELECT * FROM orchestration_v2_projection_provider_sessions
+      WHERE provider_session_id = ${sharedProviderSessionId}
+    `;
+    const finalSharedProviderBindings = yield* sql`
+      SELECT * FROM orchestration_v2_projection_provider_session_bindings
+      WHERE provider_session_id = ${sharedProviderSessionId}
+    `;
+    const finalSharedNativeRows = yield* sql`
+      SELECT * FROM orchestration_v2_native_session_bindings
+      WHERE native_id = 'native:large-closure-shared'
+    `;
+    assert.deepEqual(finalMessages, []);
+    assert.deepEqual(finalOwnership, []);
+    assert.deepEqual(finalSharedProviderSessions, []);
+    assert.deepEqual(finalSharedProviderBindings, []);
+    assert.deepEqual(finalSharedNativeRows, []);
+  }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect("reclaim scans candidates using the fixed deterministic batch size", () =>
   Effect.gen(function* () {
     for (let index = 0; index < ThreadDataReclamation.THREAD_DATA_RECLAMATION_BATCH_SIZE + 1; index++) {
