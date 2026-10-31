@@ -152,7 +152,7 @@ const make = Effect.gen(function* () {
               FROM orchestration_command_receipts AS delete_receipt
               WHERE delete_receipt.command_id = deletion.command_id
                 AND delete_receipt.aggregate_kind = 'thread'
-                AND delete_receipt.aggregate_id = deletion.thread_id
+                AND delete_receipt.aggregate_id = deletion.operation_root_thread_id
                 AND delete_receipt.command_type = 'thread.delete'
                 AND delete_receipt.status = 'accepted'
                 AND delete_receipt.rowid <= ${input.receiptThroughRowId}

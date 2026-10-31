@@ -53,11 +53,13 @@ const seedDeletedThread = Effect.fn("test.seedDeletedThread")(function* (input: 
   readonly relationshipToParent?: string | null;
   readonly rootThreadId?: string;
   readonly operationRootThreadId?: string;
+  readonly commandId?: string;
+  readonly insertReceipt?: boolean;
   readonly forkedFrom?: unknown;
 }) {
   const sql = yield* SqlClient.SqlClient;
   yield* seedThread({ ...input, state: "deleted" });
-  const commandId = `delete:${input.threadId}`;
+  const commandId = input.commandId ?? `delete:${input.threadId}`;
   yield* sql`
     INSERT INTO orchestration_v2_thread_deletions (
       thread_id, project_id, parent_thread_id, operation_root_thread_id,
@@ -76,14 +78,17 @@ const seedDeletedThread = Effect.fn("test.seedDeletedThread")(function* (input: 
       ${commandId}, 'server', '{}', '{}', 2
     )
   `;
-  yield* sql`
-    INSERT INTO orchestration_command_receipts (
-      command_id, aggregate_kind, aggregate_id, accepted_at, result_sequence,
-      status, error, command_type
-    ) VALUES (
-      ${commandId}, 'thread', ${input.threadId}, ${at}, 0, 'accepted', NULL, 'thread.delete'
-    )
-  `;
+  if (input.insertReceipt !== false) {
+    yield* sql`
+      INSERT INTO orchestration_command_receipts (
+        command_id, aggregate_kind, aggregate_id, accepted_at, result_sequence,
+        status, error, command_type
+      ) VALUES (
+        ${commandId}, 'thread', ${input.operationRootThreadId ?? input.threadId},
+        ${at}, 0, 'accepted', NULL, 'thread.delete'
+      )
+    `;
+  }
 });
 
 const seedRun = Effect.fn("test.seedRun")(function* (input: {
@@ -297,18 +302,52 @@ it.effect("reclaim skips archived and active threads and considers only t3 delet
 
 it.effect("reclaim groups deleted subagent members into one eligible closure", () =>
   Effect.gen(function* () {
-    yield* seedDeletedThread({ threadId: "thread:parent" });
+    const rootCommandId = "delete:thread:parent";
+    yield* seedDeletedThread({ threadId: "thread:parent", commandId: rootCommandId });
     yield* seedDeletedThread({
       threadId: "thread:child",
       parentThreadId: "thread:parent",
       relationshipToParent: "subagent",
       rootThreadId: "thread:parent",
       operationRootThreadId: "thread:parent",
+      commandId: rootCommandId,
+      insertReceipt: false,
     });
     yield* seedSubagentOwnership({
       parentThreadId: "thread:parent",
       childThreadId: "thread:child",
     });
+
+    const result = yield* reclaim();
+
+    assert.equal(result.reclaimedThreadCount, 2);
+    assert.deepEqual(result.skippedThreads, []);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("reclaim matches descendant deletion records to the operation root receipt", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const commandId = "delete:cascade-root";
+    yield* seedDeletedThread({ threadId: "thread:receipt-root", commandId });
+    yield* seedDeletedThread({
+      threadId: "thread:receipt-child",
+      parentThreadId: "thread:receipt-root",
+      relationshipToParent: "subagent",
+      rootThreadId: "thread:receipt-root",
+      operationRootThreadId: "thread:receipt-root",
+      commandId,
+      insertReceipt: false,
+    });
+    yield* seedSubagentOwnership({
+      parentThreadId: "thread:receipt-root",
+      childThreadId: "thread:receipt-child",
+    });
+
+    const receipts = yield* sql<{ readonly command_id: string; readonly aggregate_id: string }>`
+      SELECT command_id, aggregate_id FROM orchestration_command_receipts
+    `;
+    assert.deepEqual(receipts, [{ command_id: commandId, aggregate_id: "thread:receipt-root" }]);
 
     const result = yield* reclaim();
 
