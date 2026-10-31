@@ -914,6 +914,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
     expandedAttemptIds: visibleExpandedAttemptIds,
     expandedWorkGroupIds,
     isWorking,
+    smoothStreaming,
     runlessWorkActive,
     activeTurnStartedAt,
     conversationStructure,

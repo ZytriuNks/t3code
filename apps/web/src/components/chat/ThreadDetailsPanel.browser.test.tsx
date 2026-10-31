@@ -63,6 +63,7 @@ function setup() {
     onAddProjectScript: vi.fn().mockResolvedValue(AsyncResult.success(undefined)),
     onUpdateProjectScript: vi.fn().mockResolvedValue(AsyncResult.success(undefined)),
     onDeleteProjectScript: vi.fn().mockResolvedValue(AsyncResult.success(undefined)),
+    usage: { providerInstanceId: null, providers: [], sources: [], contextWindow: null },
   } satisfies ThreadDetailsPanelProps;
   return {
     props,

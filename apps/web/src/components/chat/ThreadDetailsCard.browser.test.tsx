@@ -1,19 +1,11 @@
 import { StrictMode } from "react";
 import { EnvironmentId, ThreadId, type ScopedThreadRef } from "@t3tools/contracts";
-import { describe, expect, it, vi } from "vite-plus/test";
+import { describe, expect, it } from "vite-plus/test";
 import { page } from "vite-plus/test/browser";
 import { act, render } from "../../../test/render";
 
-const preference = vi.hoisted(() => ({ autoExpandThreadDetailsPanel: true }));
-vi.mock("../../hooks/useSettings", async (original) => {
-  const actual = await original<typeof import("../../hooks/useSettings")>();
-  type Settings = ReturnType<typeof actual.getClientSettings>;
-  return {
-    ...actual,
-    useClientSettings: <T,>(selector: (settings: Settings) => T) =>
-      selector({ ...actual.getClientSettings(), ...preference }),
-  };
-});
+import { __setClientSettingsForTests, getClientSettings } from "../../hooks/useSettings";
+
 import { selectThreadPanelOpen, useRightPanelStore } from "../../rightPanelStore";
 import { PopoverCreateHandle } from "../ui/popover";
 import { ChatCanvasContext } from "./ChatCanvasContext";
@@ -33,7 +25,10 @@ const placement = { x: 908, y: 0, right: 12, width: 280, height: 400 } as const;
 
 function setup() {
   useRightPanelStore.setState({ threadPanelVisibilityByThreadKey: {} });
-  preference.autoExpandThreadDetailsPanel = true;
+  __setClientSettingsForTests({
+    ...getClientSettings(),
+    autoExpandThreadDetailsPanel: true,
+  });
   const anchor = document.createElement("div");
   document.body.append(anchor);
   return {
@@ -54,10 +49,13 @@ function Card({
   threadRef,
   inline,
   fixture,
+  rows = 1,
 }: {
   threadRef: ScopedThreadRef;
   inline: boolean;
   fixture: ReturnType<typeof setup>;
+  /** Rows of 100px shown at full density. Compact always takes 50px. */
+  rows?: number;
 }) {
   return (
     // The web root renders in StrictMode, which re-runs ref callbacks on every mount.
@@ -75,8 +73,17 @@ function Card({
           detailsCardPlacement: inline ? placement : null,
         }}
       >
-        <ThreadDetailsCard threadRef={threadRef} anchor={fixture.anchor} handle={fixture.handle}>
-          {() => <p>Details for {threadRef.threadId}</p>}
+        <ThreadDetailsCard
+          threadRef={threadRef}
+          anchor={fixture.anchor}
+          handle={fixture.handle}
+          contentKey={String(rows)}
+        >
+          {(density) => (
+            <p style={{ height: density === "full" ? rows * 100 : 50 }}>
+              Details for {threadRef.threadId}
+            </p>
+          )}
         </ThreadDetailsCard>
       </ChatCanvasContext>
     </StrictMode>
@@ -152,7 +159,10 @@ it("reopens after a normal close", async () => {
 describe("workspace card preference", () => {
   it("keeps manual opening available when automatic expansion is disabled", async () => {
     using fixture = setup();
-    preference.autoExpandThreadDetailsPanel = false;
+    __setClientSettingsForTests({
+      ...getClientSettings(),
+      autoExpandThreadDetailsPanel: false,
+    });
     await using _screen = await render(<Card threadRef={threadB} inline fixture={fixture} />);
     await expect.element(page.getByText("Details for thread-b")).not.toBeInTheDocument();
     await act(() => useRightPanelStore.getState().setThreadPanelOpen(threadB, "popover", true));
@@ -165,12 +175,28 @@ describe("workspace card preference", () => {
     using fixture = setup();
     await using screen = await render(<Card threadRef={threadB} inline fixture={fixture} />);
     expect(screen.container.querySelectorAll("aside")).toHaveLength(1);
-    preference.autoExpandThreadDetailsPanel = false;
+    __setClientSettingsForTests({
+      ...getClientSettings(),
+      autoExpandThreadDetailsPanel: false,
+    });
     await screen.rerender(<Card threadRef={threadB} inline fixture={fixture} />);
     expect(screen.container.querySelectorAll("aside")).toHaveLength(0);
     await expect.element(page.getByText("Details for thread-b")).not.toBeInTheDocument();
-    preference.autoExpandThreadDetailsPanel = true;
+    __setClientSettingsForTests({
+      ...getClientSettings(),
+      autoExpandThreadDetailsPanel: true,
+    });
     await screen.rerender(<Card threadRef={threadB} inline fixture={fixture} />);
     expect(screen.container.querySelectorAll("aside")).toHaveLength(1);
   });
+});
+
+it("returns to full density when hidden items make the content fit", async () => {
+  using fixture = setup();
+  await using screen = await render(<Card threadRef={threadB} inline fixture={fixture} rows={6} />);
+  const card = page.getByRole("region", { name: "Thread details" });
+  await expect.element(card).toHaveAttribute("data-density", "compact");
+
+  await screen.rerender(<Card threadRef={threadB} inline fixture={fixture} rows={2} />);
+  await expect.element(card).toHaveAttribute("data-density", "full");
 });

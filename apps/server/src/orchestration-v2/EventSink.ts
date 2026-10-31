@@ -581,6 +581,8 @@ const layerBase: Layer.Layer<
           "thread.unarchive",
           "thread.delete",
           "provider-runtime.reconcile",
+          // Moving a folder into a project re-homes archived threads too; it never revives them.
+          "thread.project.adopt-folder",
         ].includes(input.commandType ?? "")
       ) {
         for (const guard of input.lifecycleGuard.prerequisites ?? []) {

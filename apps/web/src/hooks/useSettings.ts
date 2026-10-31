@@ -757,5 +757,7 @@ export function __setClientSettingsForTests(settings: ClientSettings): void {
   clientSettingsSnapshot = settings;
   clientSettingsHydrationStatus = "ready";
   setHideUnavailableContextMenuItems(settings.hideUnavailableContextMenuItems);
+  emitClientSettingsChange();
+  emitClientSettingsHydrationChange();
   clientSettingsHydrationPromise = null;
 }
