@@ -181,6 +181,8 @@ describe("restoring V2 settings", () => {
         allRemoteMembersAreDesktopLocal: false,
         allRemoteMembersAreWsl: false,
         remoteEnvironmentLabels: [member.environmentLabel],
+        pinned: false,
+        archived: false,
       };
       let saved: ServerSettings = {
         ...DEFAULT_SERVER_SETTINGS,

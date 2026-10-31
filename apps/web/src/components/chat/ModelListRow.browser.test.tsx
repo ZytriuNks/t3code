@@ -19,7 +19,7 @@ function row(overrides: Partial<ComponentProps<typeof ModelListRow>> = {}) {
       providerDisplayName="Pi"
       isFavorite={false}
       isSelected={false}
-      showProvider
+      showInstanceBadge={false}
       onToggleFavorite={() => {}}
       {...overrides}
     />
@@ -27,9 +27,9 @@ function row(overrides: Partial<ComponentProps<typeof ModelListRow>> = {}) {
 }
 
 it.each([
-  ["pi", "Pi", "openai", "Pi · openai"],
+  ["pi", "Pi", "openai", "openai"],
   ["pi", "Pi", undefined, "Pi"],
-  ["opencode", "opencode", "GitHub Copilot", "opencode · GitHub Copilot"],
+  ["opencode", "opencode", "GitHub Copilot", "GitHub Copilot"],
 ])(
   "shows the underlying provider for %s",
   async (driver, providerDisplayName, subProvider, label) => {
@@ -44,7 +44,7 @@ it.each([
   },
 );
 
-it("omits the provider footer when showProvider is false", async () => {
-  await using screen = await render(row({ showProvider: false, subProvider: "openai" }));
-  await expect.element(screen.getByText("Pi · openai")).not.toBeInTheDocument();
+it("renders the subprovider label", async () => {
+  await using screen = await render(row({ subProvider: "openai" }));
+  await expect.element(screen.getByText("openai", { exact: true })).toBeVisible();
 });

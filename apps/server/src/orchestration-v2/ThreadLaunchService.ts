@@ -490,19 +490,7 @@ const make = Effect.gen(function* () {
       ) {
         const oldBranch = branch;
         const worktreeCwd = worktreePath;
-        const snapshot = yield* threads.getShellSnapshot();
-        const sharing = yield* Effect.forEach(
-          [...snapshot.threads, ...snapshot.archivedThreads].filter(
-            (thread) =>
-              thread.id !== threadId &&
-              thread.worktreePath === worktreeCwd &&
-              thread.branch === oldBranch &&
-              thread.archivedAt === null,
-          ),
-          Effect.fn("ThreadLaunchService.captureBranchSource")(function* (thread) {
-            return { thread, guard: yield* lifecycle.resolveLifecycleSource(thread.id) };
-          }),
-        );
+        const visited = new Set([threadId]);
         branchRename = yield* generateBranchNameFor(worktreeCwd, initialMessage).pipe(
           Effect.flatMap(
             Effect.fn("ThreadLaunchService.renamePreparedBranch")(function* ({
@@ -546,34 +534,58 @@ const make = Effect.gen(function* () {
                     }),
                   ),
                 );
-              for (const { thread, guard } of sharing) {
-                const owner = yield* ThreadLifecycleGuard.DispatchLifecycleGuard;
-                if (
-                  owner === undefined ||
-                  (yield* lifecycle.check({ guard: owner, purpose: "activity" })) === "stale"
-                )
-                  return;
-                yield* threads
-                  .dispatch({
-                    type: "thread.metadata.update",
-                    commandId: CommandId.make(`${input.commandId}:branch-rename:${thread.id}`),
-                    threadId: thread.id,
-                    branch: renamed.branch,
-                    expectedBranch: oldBranch,
-                    expectedWorktreePath: worktreeCwd,
-                  })
-                  .pipe(
-                    Effect.provideService(ThreadLifecycleGuard.DispatchLifecycleGuard, {
-                      ...guard,
-                      prerequisites: [...(owner.prerequisites ?? []), owner],
-                    }),
-                    Effect.catchCause((cause) =>
-                      Effect.logWarning("Shared thread worktree branch update failed", {
-                        threadId: thread.id,
-                        cause,
-                      }),
+              while (true) {
+                const snapshot = yield* threads.getShellSnapshot({ worktreePath: worktreeCwd });
+                const sharing = yield* Effect.forEach(
+                  [...snapshot.threads, ...snapshot.archivedThreads]
+                    .filter(
+                      (thread) =>
+                        !visited.has(thread.id) &&
+                        thread.branch === oldBranch &&
+                        thread.archivedAt === null,
+                    )
+                    .toSorted((left, right) =>
+                      left.lineage.parentThreadId === null
+                        ? -1
+                        : right.lineage.parentThreadId === null
+                          ? 1
+                          : 0,
                     ),
-                  );
+                  Effect.fn("ThreadLaunchService.captureBranchSource")(function* (thread) {
+                    return { thread, guard: yield* lifecycle.resolveLifecycleSource(thread.id) };
+                  }),
+                );
+                if (sharing.length === 0) break;
+                for (const { thread, guard } of sharing) {
+                  visited.add(thread.id);
+                  const owner = yield* ThreadLifecycleGuard.DispatchLifecycleGuard;
+                  if (
+                    owner === undefined ||
+                    (yield* lifecycle.check({ guard: owner, purpose: "activity" })) === "stale"
+                  )
+                    return;
+                  yield* threads
+                    .dispatch({
+                      type: "thread.metadata.update",
+                      commandId: CommandId.make(`${input.commandId}:branch-rename:${thread.id}`),
+                      threadId: thread.id,
+                      branch: renamed.branch,
+                      expectedBranch: oldBranch,
+                      expectedWorktreePath: worktreeCwd,
+                    })
+                    .pipe(
+                      Effect.provideService(ThreadLifecycleGuard.DispatchLifecycleGuard, {
+                        ...guard,
+                        prerequisites: [...(owner.prerequisites ?? []), owner],
+                      }),
+                      Effect.catchCause((cause) =>
+                        Effect.logWarning("Shared thread worktree branch update failed", {
+                          threadId: thread.id,
+                          cause,
+                        }),
+                      ),
+                    );
+                }
               }
             }),
           ),
@@ -1116,12 +1128,14 @@ const make = Effect.gen(function* () {
     "ThreadLaunchService.prepareRun",
   )(function* (input) {
     const scheduled = yield* Effect.gen(function* () {
-      const projection = yield* threads.getThreadProjection(input.threadId);
-      const run = projection.runs.find((candidate) => candidate.id === input.runId);
+      const { thread, runs } = yield* threads.getThreadRecords(input.threadId, ["runs"], {
+        runIds: [input.runId],
+      });
+      const run = runs.find((candidate) => candidate.id === input.runId);
       const workspacePreparation = run?.workspacePreparation;
       if (run?.status !== "preparing" || workspacePreparation === undefined) return;
       if (!(yield* reservePreparation(input.commandId))) return;
-      yield* scheduleRunPreparation(input, projection, run, workspacePreparation).pipe(
+      yield* scheduleRunPreparation(input, thread, run, workspacePreparation).pipe(
         Effect.onError(() => releasePreparation(input.commandId)),
       );
     }).pipe(Effect.exit);
@@ -1143,30 +1157,33 @@ const make = Effect.gen(function* () {
     return dispatched;
   });
 
-  const scheduleRunPreparation = (
+  const scheduleRunPreparation = Effect.fn("ThreadLaunchService.scheduleRunPreparation")(function* (
     input: ThreadLaunchPreparationInput,
-    projection: OrchestrationV2ThreadProjection,
+    thread: OrchestrationV2ThreadProjection["thread"],
     run: OrchestrationV2ThreadProjection["runs"][number],
     workspacePreparation: ThreadLaunchWorkspaceStrategy,
-  ) => {
-    const message = projection.messages.find((candidate) => candidate.id === run.userMessageId);
+  ) {
+    const { messages } = yield* threads.getThreadRecords(input.threadId, ["messages"], {
+      messageIds: [run.userMessageId],
+    });
+    const message = messages.find((candidate) => candidate.id === run.userMessageId);
     const reuse =
       workspacePreparation.type === "worktree" &&
-      projection.thread.worktreePath !== null &&
-      projection.thread.branch !== null
+      thread.worktreePath !== null &&
+      thread.branch !== null
         ? {
             strategy: {
               type: "existing_worktree" as const,
-              worktreePath: projection.thread.worktreePath,
-              branch: projection.thread.branch,
+              worktreePath: thread.worktreePath,
+              branch: thread.branch,
             },
             reusedWorktree: { baseRef: workspacePreparation.baseRef },
           }
         : null;
-    return schedulePreparation(
+    return yield* schedulePreparation(
       {
         commandId: input.commandId,
-        projectId: projection.thread.projectId,
+        projectId: thread.projectId,
         workspaceStrategy: reuse?.strategy ?? workspacePreparation,
         ...(reuse === null ? {} : { reusedWorktree: reuse.reusedWorktree }),
         ...(message === undefined
@@ -1182,7 +1199,7 @@ const make = Effect.gen(function* () {
       input.threadId,
       run.id,
     );
-  };
+  });
 
   return ThreadLaunchService.of({ launch, checkWorktreeBase, retryPreparation, prepareRun });
 });

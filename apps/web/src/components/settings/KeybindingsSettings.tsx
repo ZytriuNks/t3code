@@ -858,6 +858,7 @@ function useKeybindingRowEditor({
       key: keyDraft,
       when: whenDraftExpression,
     },
+    navigator.platform,
     (command) => localizedCommandLabel(command, t),
   );
 
@@ -994,8 +995,13 @@ function WhenClauseControl({
   onValidityChange: (valid: boolean) => void;
 }) {
   const { t } = useI18n();
+  // Closing unmounts the builder, which drops an unparsed draft and keeps the last valid value.
+  const handleOpenChange = (open: boolean) => {
+    if (!open) onValidityChange(true);
+  };
+
   return (
-    <Popover>
+    <Popover onOpenChange={handleOpenChange}>
       <PopoverTrigger
         render={
           <Button
@@ -1192,6 +1198,7 @@ function useNewKeybindingDraft({
       key: keyDraft,
       when: whenDraftExpression,
     },
+    navigator.platform,
     (command) => localizedCommandLabel(command, t),
   );
   const commandLabelText = commandDraft
@@ -1457,7 +1464,9 @@ function useKeybindingCatalog() {
   const merged = mergeWithDefaultKeybindings(serverKeybindings ?? []);
   return {
     commandOptions: buildKeybindingCommandOptions(merged),
-    allRows: buildKeybindingRows(merged, "", (command) => localizedCommandLabel(command, t)),
+    allRows: buildKeybindingRows(merged, navigator.platform, "", (command) =>
+      localizedCommandLabel(command, t),
+    ),
   };
 }
 

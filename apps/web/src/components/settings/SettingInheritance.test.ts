@@ -49,6 +49,48 @@ const zhCopy: SettingInheritanceCopy = {
   projectOverrideSummary: (summary, count) => `${summary} · ${count} 个项目覆盖`,
   showSourceLabel: (summary) => `${summary}。查看此值的来源`,
 };
+describe("worktree cleanup inheritance", () => {
+  it("distinguishes project and environment worktree cleanup policies", () => {
+    const settings = {
+      ...DEFAULT_SERVER_SETTINGS,
+      worktreeCleanup: {
+        mode: "custom" as const,
+        rules: DEFAULT_SERVER_SETTINGS.storageCleanup,
+      },
+      projectSettingsOverrides: {
+        [projectId]: { worktreeCleanup: { mode: "off" as const } },
+      },
+    };
+    const layers = settingInheritanceLayers(
+      {
+        environmentId,
+        label: "Laptop",
+        projectId,
+        ...resolveProjectSettings(settings, projectId),
+      },
+      settings,
+      "worktreeCleanup",
+    );
+    expect(layers.map((layer) => [layer.key, layer.value, layer.effective])).toEqual([
+      ["project", "Off", true],
+      ["environment", "Custom", false],
+      ["built-in", "Not set", false],
+    ]);
+    expect(
+      settingInheritanceLayers(
+        {
+          environmentId,
+          label: "Laptop",
+          projectId,
+          ...resolveProjectSettings(settings, projectId),
+        },
+        settings,
+        "worktreeCleanup",
+        zhCopy,
+      ).map((layer) => layer.value),
+    ).toEqual(["关", "自定义", "未设置"]);
+  });
+});
 
 describe("settingInheritanceLayers", () => {
   it("marks the built-in default effective when nothing is set", () => {
@@ -270,6 +312,31 @@ describe("settingInheritanceLayers", () => {
       ).map((layer) => layer.value),
     ).toEqual(["/home/laptop/projects", "空"]);
   });
+  it("identifies the background activity profile supplied by each layer", () => {
+    const settings = {
+      ...DEFAULT_SERVER_SETTINGS,
+      backgroundActivity: {
+        schemaVersion: 1 as const,
+        profile: "performance" as const,
+        overrides: {},
+      },
+    };
+    const layers = settingInheritanceLayers(
+      {
+        environmentId,
+        label: "Laptop",
+        projectId: null,
+        ...resolveProjectSettings(settings, projectId),
+      },
+      settings,
+      "backgroundActivity",
+    );
+    expect(layers.map((layer) => [layer.key, layer.value, layer.effective])).toEqual([
+      ["environment", "Performance", true],
+      ["built-in", "Balanced", false],
+    ]);
+  });
+
   it("shows the checkout's t3.json as a layer for file-backed keys", () => {
     const file = { defaultThreadEnvMode: "worktree" as const };
     const fromFile = settingInheritanceLayers(

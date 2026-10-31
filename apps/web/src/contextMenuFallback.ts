@@ -152,6 +152,13 @@ const ICON_PATHS: Record<string, ReadonlyArray<{ tag: string; attrs: Record<stri
     { tag: "path", attrs: { d: "M3 5a2 2 0 0 0 2 2h3" } },
     { tag: "path", attrs: { d: "M3 3v13a2 2 0 0 0 2 2h3" } },
   ],
+  "text-search": [
+    { tag: "path", attrs: { d: "M21 5H3" } },
+    { tag: "path", attrs: { d: "M10 12H3" } },
+    { tag: "path", attrs: { d: "M10 19H3" } },
+    { tag: "circle", attrs: { cx: "17", cy: "15", r: "3" } },
+    { tag: "path", attrs: { d: "m21 19-1.9-1.9" } },
+  ],
   trash: [
     { tag: "path", attrs: { d: "M3 6h18" } },
     { tag: "path", attrs: { d: "M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" } },
@@ -262,8 +269,11 @@ export function showContextMenuFallback<T extends string>(
   const visibleItems = filterUnavailableContextMenuItems(items);
   if (visibleItems.length === 0) return Promise.resolve(null);
   return new Promise<T | null>((resolve) => {
-    const previouslyFocusedElement =
-      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    let focusedElement = document.activeElement;
+    while (focusedElement?.shadowRoot?.activeElement) {
+      focusedElement = focusedElement.shadowRoot.activeElement;
+    }
+    const previouslyFocusedElement = focusedElement instanceof HTMLElement ? focusedElement : null;
     const menuId = `context-menu-${++contextMenuSequence}`;
     const previousActiveDescendant =
       previouslyFocusedElement?.getAttribute("aria-activedescendant");
