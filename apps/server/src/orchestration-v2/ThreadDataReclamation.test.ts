@@ -5,10 +5,20 @@ import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as EventStore from "./EventStore.ts";
+import * as ProjectionMaintenance from "./ProjectionMaintenance.ts";
+import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ThreadDataReclamation from "./ThreadDataReclamation.ts";
 
 const layerTest = ThreadDataReclamation.layer.pipe(
   Layer.provideMerge(SqlitePersistence.layerMemory),
+);
+const layerMaintenanceStores = Layer.mergeAll(
+  EventStore.layer,
+  ProjectionStore.layer,
+).pipe(Layer.provideMerge(SqlitePersistence.layerMemory));
+const layerMaintenanceTest = ProjectionMaintenance.layer.pipe(
+  Layer.provideMerge(layerMaintenanceStores),
 );
 
 const at = "2026-10-31T12:00:00.000Z";
@@ -1091,4 +1101,57 @@ it.effect("reclaim scans candidates using the fixed deterministic batch size", (
     assert.equal(result.reclaimedThreadCount, 51);
     assert.deepEqual(result.skippedThreads, []);
   }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("compactEventStore does not reclaim deleted thread projections", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+    const threadId = "thread:reclaim:online-compaction-boundary";
+    yield* seedDeletedThread({ threadId });
+    yield* seedReclamationRows(threadId);
+
+    yield* maintenance.compactEventStore;
+
+    const retainedMessage = yield* sql<{ readonly count: number }>`
+      SELECT COUNT(*) AS count
+      FROM orchestration_v2_projection_messages
+      WHERE thread_id = ${threadId}
+    `;
+    const retainedShell = yield* sql<{ readonly count: number }>`
+      SELECT COUNT(*) AS count
+      FROM orchestration_v2_projection_threads
+      WHERE thread_id = ${threadId} AND deleted_at IS NOT NULL
+    `;
+    assert.equal(retainedMessage[0]?.count, 1);
+    assert.equal(retainedShell[0]?.count, 1);
+  }).pipe(Effect.provide(layerMaintenanceTest)),
+);
+
+it.effect("reclaimDeletedThreadData reclaims only after an explicit call", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+    const threadId = "thread:reclaim:explicit-maintenance-call";
+    yield* seedDeletedThread({ threadId });
+    yield* seedReclamationRows(threadId);
+
+    yield* maintenance.compactEventStore;
+    const beforeExplicitReclamation = yield* sql<{ readonly count: number }>`
+      SELECT COUNT(*) AS count
+      FROM orchestration_v2_projection_messages
+      WHERE thread_id = ${threadId}
+    `;
+    assert.equal(beforeExplicitReclamation[0]?.count, 1);
+
+    const summary = yield* maintenance.reclaimDeletedThreadData;
+
+    assert.equal(summary.reclaimedThreadCount, 1);
+    const afterExplicitReclamation = yield* sql<{ readonly count: number }>`
+      SELECT COUNT(*) AS count
+      FROM orchestration_v2_projection_messages
+      WHERE thread_id = ${threadId}
+    `;
+    assert.equal(afterExplicitReclamation[0]?.count, 0);
+  }).pipe(Effect.provide(layerMaintenanceTest)),
 );
