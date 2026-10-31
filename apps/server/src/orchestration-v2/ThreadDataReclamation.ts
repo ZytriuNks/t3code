@@ -54,7 +54,7 @@ export class ThreadDataReclamationError extends Schema.TaggedError<ThreadDataRec
   },
 ) {
   override get message(): string {
-    return "Failed to inspect deleted thread reclamation candidates.";
+    return "Failed to reclaim deleted thread data.";
   }
 }
 
@@ -528,6 +528,7 @@ const make = Effect.gen(function* () {
 
       let reclaimedThreadCount = 0;
       const skippedThreads: Array<ThreadDataReclamationSummary["skippedThreads"][number]> = [];
+      const reclaimableClosures: Array<Closure> = [];
       for (const closure of closures) {
         const closureBlockers = new Set<ThreadDataReclamationBlockerCode>();
         for (const threadId of closure.threadIds) {
@@ -535,6 +536,7 @@ const make = Effect.gen(function* () {
         }
         if (closureBlockers.size === 0) {
           reclaimedThreadCount += closure.threadIds.length;
+          reclaimableClosures.push(closure);
           continue;
         }
         const blockerCodes = blockerOrder.filter((blocker) => closureBlockers.has(blocker));
@@ -544,14 +546,643 @@ const make = Effect.gen(function* () {
       }
       skippedThreads.sort((left, right) => left.threadId.localeCompare(right.threadId));
 
+      // Keep each ownership closure atomic, even if one closure exceeds the nominal batch size.
+      const batches: Array<Array<Closure>> = [];
+      let currentBatch: Array<Closure> = [];
+      let currentBatchThreadCount = 0;
+      for (const closure of reclaimableClosures) {
+        if (
+          currentBatchThreadCount > 0 &&
+          currentBatchThreadCount + closure.threadIds.length > THREAD_DATA_RECLAMATION_BATCH_SIZE
+        ) {
+          batches.push(currentBatch);
+          currentBatch = [];
+          currentBatchThreadCount = 0;
+        }
+        currentBatch.push(closure);
+        currentBatchThreadCount += closure.threadIds.length;
+        if (currentBatchThreadCount >= THREAD_DATA_RECLAMATION_BATCH_SIZE) {
+          batches.push(currentBatch);
+          currentBatch = [];
+          currentBatchThreadCount = 0;
+        }
+      }
+      if (currentBatch.length > 0) batches.push(currentBatch);
+
+      const deleteClosure = (closure: Closure) =>
+        Effect.gen(function* () {
+          const threadIds = closure.threadIds;
+          const counts = {
+            deletedProjectionRowCount: 0,
+            deletedTurnItemPositionCount: 0,
+            deletedOutboxCount: 0,
+            deletedReceiptCount: 0,
+            deletedEventCount: 0,
+          };
+
+          const providerSessionRows = yield* sql<{ readonly provider_session_id: string }>`
+            SELECT provider_session_id
+            FROM orchestration_v2_projection_provider_sessions
+            WHERE thread_id IN ${sql.in(threadIds)}
+            UNION
+            SELECT provider_session_id
+            FROM orchestration_v2_projection_provider_session_bindings
+            WHERE thread_id IN ${sql.in(threadIds)}
+            UNION
+            SELECT provider_session_id
+            FROM orchestration_v2_projection_provider_threads
+            WHERE thread_id IN ${sql.in(threadIds)} AND provider_session_id IS NOT NULL
+          `;
+          const providerSessionIds = [
+            ...new Set(providerSessionRows.map((row) => row.provider_session_id)),
+          ];
+
+          const handoffs = yield* sql<{ readonly context_handoff_id: string }>`
+            DELETE FROM orchestration_v2_projection_context_handoffs AS handoff
+            WHERE handoff.thread_id IN ${sql.in(threadIds)}
+              AND handoff.target_run_id IN (
+                SELECT run.run_id
+                FROM orchestration_v2_projection_runs AS run
+                WHERE run.thread_id IN ${sql.in(threadIds)}
+              )
+              AND handoff.to_provider_thread_id IN (
+                SELECT provider_thread.provider_thread_id
+                FROM orchestration_v2_projection_provider_threads AS provider_thread
+                WHERE provider_thread.thread_id IN ${sql.in(threadIds)}
+              )
+            RETURNING context_handoff_id
+          `;
+          counts.deletedProjectionRowCount += handoffs.length;
+
+          const transfers = yield* sql<{ readonly context_transfer_id: string }>`
+            DELETE FROM orchestration_v2_projection_context_transfers
+            WHERE source_thread_id IN ${sql.in(threadIds)}
+              AND target_thread_id IN ${sql.in(threadIds)}
+              AND (
+                target_run_id IS NULL
+                OR target_run_id IN (
+                  SELECT run.run_id
+                  FROM orchestration_v2_projection_runs AS run
+                  WHERE run.thread_id IN ${sql.in(threadIds)}
+                )
+              )
+            RETURNING context_transfer_id
+          `;
+          counts.deletedProjectionRowCount += transfers.length;
+
+          const checkpoints = yield* sql<{ readonly checkpoint_id: string }>`
+            DELETE FROM orchestration_v2_projection_checkpoints AS checkpoint
+            WHERE checkpoint.thread_id IN ${sql.in(threadIds)}
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_checkpoints AS external_checkpoint
+                WHERE external_checkpoint.parent_checkpoint_id = checkpoint.checkpoint_id
+                  AND external_checkpoint.thread_id NOT IN ${sql.in(threadIds)}
+              )
+            RETURNING checkpoint_id
+          `;
+          counts.deletedProjectionRowCount += checkpoints.length;
+
+          const checkpointScopes = yield* sql<{ readonly scope_id: string }>`
+            DELETE FROM orchestration_v2_projection_checkpoint_scopes AS scope
+            WHERE scope.thread_id IN ${sql.in(threadIds)}
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_checkpoint_scopes AS external_scope
+                WHERE external_scope.parent_scope_id = scope.scope_id
+                  AND external_scope.thread_id NOT IN ${sql.in(threadIds)}
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_checkpoints AS external_checkpoint
+                WHERE external_checkpoint.scope_id = scope.scope_id
+                  AND external_checkpoint.thread_id NOT IN ${sql.in(threadIds)}
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_nodes AS external_node
+                WHERE external_node.checkpoint_scope_id = scope.scope_id
+                  AND external_node.thread_id NOT IN ${sql.in(threadIds)}
+              )
+            RETURNING scope_id
+          `;
+          counts.deletedProjectionRowCount += checkpointScopes.length;
+
+          const runtimeRequests = yield* sql<{ readonly runtime_request_id: string }>`
+            DELETE FROM orchestration_v2_projection_runtime_requests AS request
+            WHERE request.thread_id IN ${sql.in(threadIds)}
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_nodes AS external_node
+                WHERE external_node.runtime_request_id = request.runtime_request_id
+                  AND external_node.thread_id NOT IN ${sql.in(threadIds)}
+              )
+            RETURNING runtime_request_id
+          `;
+          counts.deletedProjectionRowCount += runtimeRequests.length;
+
+          const plans = yield* sql<{ readonly plan_id: string }>`
+            DELETE FROM orchestration_v2_projection_plans
+            WHERE thread_id IN ${sql.in(threadIds)}
+            RETURNING plan_id
+          `;
+          counts.deletedProjectionRowCount += plans.length;
+
+          const messages = yield* sql<{ readonly message_id: string }>`
+            DELETE FROM orchestration_v2_projection_messages AS message
+            WHERE message.thread_id IN ${sql.in(threadIds)}
+              AND NOT EXISTS (
+                SELECT 1
+                FROM json_each(message.payload_json, '$.attachments') AS attachment
+                WHERE EXISTS (
+                  SELECT 1
+                  FROM orchestration_v2_projection_messages AS external_message,
+                    json_each(external_message.payload_json, '$.attachments') AS external_attachment
+                  WHERE external_message.thread_id NOT IN ${sql.in(threadIds)}
+                    AND json_extract(external_attachment.value, '$.id') =
+                      json_extract(attachment.value, '$.id')
+                )
+              )
+            RETURNING message_id
+          `;
+          counts.deletedProjectionRowCount += messages.length;
+
+          const turnItems = yield* sql<{ readonly turn_item_id: string }>`
+            DELETE FROM orchestration_v2_projection_turn_items AS item
+            WHERE item.thread_id IN ${sql.in(threadIds)}
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_turn_items AS external_item
+                WHERE external_item.parent_item_id = item.turn_item_id
+                  AND external_item.thread_id NOT IN ${sql.in(threadIds)}
+              )
+            RETURNING turn_item_id
+          `;
+          counts.deletedProjectionRowCount += turnItems.length;
+
+          const positions = yield* sql<{ readonly turn_item_id: string }>`
+            DELETE FROM orchestration_v2_turn_item_positions AS position
+            WHERE position.thread_id IN ${sql.in(threadIds)}
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_turn_items AS item
+                WHERE item.thread_id = position.thread_id
+                  AND item.turn_item_id = position.turn_item_id
+              )
+            RETURNING turn_item_id
+          `;
+          counts.deletedTurnItemPositionCount += positions.length;
+
+          const providerTurns = yield* sql<{ readonly provider_turn_id: string }>`
+            DELETE FROM orchestration_v2_projection_provider_turns AS provider_turn
+            WHERE provider_turn.thread_id IN ${sql.in(threadIds)}
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_runtime_requests AS external_request
+                WHERE external_request.provider_turn_id = provider_turn.provider_turn_id
+                  AND external_request.thread_id NOT IN ${sql.in(threadIds)}
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_nodes AS external_node
+                WHERE external_node.provider_turn_id = provider_turn.provider_turn_id
+                  AND external_node.thread_id NOT IN ${sql.in(threadIds)}
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_turn_items AS external_item
+                WHERE external_item.provider_turn_id = provider_turn.provider_turn_id
+                  AND external_item.thread_id NOT IN ${sql.in(threadIds)}
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_run_attempts AS external_attempt
+                WHERE external_attempt.provider_turn_id = provider_turn.provider_turn_id
+                  AND external_attempt.thread_id NOT IN ${sql.in(threadIds)}
+              )
+            RETURNING provider_turn_id
+          `;
+          counts.deletedProjectionRowCount += providerTurns.length;
+
+          const providerThreads = yield* sql<{ readonly provider_thread_id: string }>`
+            DELETE FROM orchestration_v2_projection_provider_threads AS provider_thread
+            WHERE provider_thread.thread_id IN ${sql.in(threadIds)}
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_threads AS external_thread
+                WHERE external_thread.active_provider_thread_id = provider_thread.provider_thread_id
+                  AND external_thread.thread_id NOT IN ${sql.in(threadIds)}
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_runs AS external_run
+                WHERE external_run.provider_thread_id = provider_thread.provider_thread_id
+                  AND external_run.thread_id NOT IN ${sql.in(threadIds)}
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_nodes AS external_owner_node
+                WHERE external_owner_node.node_id = provider_thread.owner_node_id
+                  AND external_owner_node.thread_id NOT IN ${sql.in(threadIds)}
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_run_attempts AS external_attempt
+                WHERE external_attempt.provider_thread_id = provider_thread.provider_thread_id
+                  AND external_attempt.thread_id NOT IN ${sql.in(threadIds)}
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_nodes AS external_node
+                WHERE external_node.provider_thread_id = provider_thread.provider_thread_id
+                  AND external_node.thread_id NOT IN ${sql.in(threadIds)}
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_provider_turns AS external_turn
+                WHERE external_turn.provider_thread_id = provider_thread.provider_thread_id
+                  AND external_turn.thread_id NOT IN ${sql.in(threadIds)}
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_turn_items AS external_item
+                WHERE external_item.provider_thread_id = provider_thread.provider_thread_id
+                  AND external_item.thread_id NOT IN ${sql.in(threadIds)}
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_subagents AS external_subagent
+                WHERE external_subagent.provider_thread_id = provider_thread.provider_thread_id
+                  AND external_subagent.thread_id NOT IN ${sql.in(threadIds)}
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_context_handoffs AS external_handoff
+                WHERE external_handoff.to_provider_thread_id = provider_thread.provider_thread_id
+                  AND external_handoff.thread_id NOT IN ${sql.in(threadIds)}
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_native_session_bindings AS external_binding
+                WHERE external_binding.provider_thread_id = provider_thread.provider_thread_id
+                  AND external_binding.thread_id NOT IN ${sql.in(threadIds)}
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_thread_deletion_sessions AS external_session
+                WHERE external_session.provider_thread_id = provider_thread.provider_thread_id
+                  AND external_session.thread_id NOT IN ${sql.in(threadIds)}
+              )
+            RETURNING provider_thread_id
+          `;
+          counts.deletedProjectionRowCount += providerThreads.length;
+
+          const attempts = yield* sql<{ readonly attempt_id: string }>`
+            DELETE FROM orchestration_v2_projection_run_attempts AS attempt
+            WHERE attempt.thread_id IN ${sql.in(threadIds)}
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_provider_turns AS external_turn
+                WHERE external_turn.run_attempt_id = attempt.attempt_id
+                  AND external_turn.thread_id NOT IN ${sql.in(threadIds)}
+              )
+            RETURNING attempt_id
+          `;
+          counts.deletedProjectionRowCount += attempts.length;
+
+          const nodes = yield* sql<{ readonly node_id: string }>`
+            DELETE FROM orchestration_v2_projection_nodes AS node
+            WHERE node.thread_id IN ${sql.in(threadIds)}
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_nodes AS external_node
+                WHERE external_node.parent_node_id = node.node_id
+                  AND external_node.thread_id NOT IN ${sql.in(threadIds)}
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_nodes AS external_root_node
+                WHERE external_root_node.root_node_id = node.node_id
+                  AND external_root_node.thread_id NOT IN ${sql.in(threadIds)}
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_run_attempts AS external_attempt
+                WHERE external_attempt.root_node_id = node.node_id
+                  AND external_attempt.thread_id NOT IN ${sql.in(threadIds)}
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_runtime_requests AS external_request
+                WHERE external_request.node_id = node.node_id
+                  AND external_request.thread_id NOT IN ${sql.in(threadIds)}
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_plans AS external_plan
+                WHERE external_plan.node_id = node.node_id
+                  AND external_plan.thread_id NOT IN ${sql.in(threadIds)}
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_messages AS external_message
+                WHERE external_message.node_id = node.node_id
+                  AND external_message.thread_id NOT IN ${sql.in(threadIds)}
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_turn_items AS external_item
+                WHERE external_item.node_id = node.node_id
+                  AND external_item.thread_id NOT IN ${sql.in(threadIds)}
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_provider_turns AS external_turn
+                WHERE external_turn.node_id = node.node_id
+                  AND external_turn.thread_id NOT IN ${sql.in(threadIds)}
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_subagents AS external_subagent
+                WHERE external_subagent.parent_node_id = node.node_id
+                  AND external_subagent.thread_id NOT IN ${sql.in(threadIds)}
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_checkpoints AS external_checkpoint
+                WHERE external_checkpoint.node_id = node.node_id
+                  AND external_checkpoint.thread_id NOT IN ${sql.in(threadIds)}
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_checkpoint_scopes AS external_scope
+                WHERE external_scope.node_id = node.node_id
+                  AND external_scope.thread_id NOT IN ${sql.in(threadIds)}
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_provider_threads AS external_provider_thread
+                WHERE external_provider_thread.owner_node_id = node.node_id
+                  AND external_provider_thread.thread_id NOT IN ${sql.in(threadIds)}
+              )
+            RETURNING node_id
+          `;
+          counts.deletedProjectionRowCount += nodes.length;
+
+          const runs = yield* sql<{ readonly run_id: string }>`
+            DELETE FROM orchestration_v2_projection_runs AS run
+            WHERE run.thread_id IN ${sql.in(threadIds)}
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_run_attempts AS external_attempt
+                WHERE external_attempt.run_id = run.run_id
+                  AND external_attempt.thread_id NOT IN ${sql.in(threadIds)}
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_nodes AS external_node
+                WHERE external_node.run_id = run.run_id
+                  AND external_node.thread_id NOT IN ${sql.in(threadIds)}
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_messages AS external_message
+                WHERE external_message.run_id = run.run_id
+                  AND external_message.thread_id NOT IN ${sql.in(threadIds)}
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_plans AS external_plan
+                WHERE external_plan.run_id = run.run_id
+                  AND external_plan.thread_id NOT IN ${sql.in(threadIds)}
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_turn_items AS external_item
+                WHERE external_item.run_id = run.run_id
+                  AND external_item.thread_id NOT IN ${sql.in(threadIds)}
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_checkpoints AS external_checkpoint
+                WHERE external_checkpoint.run_id = run.run_id
+                  AND external_checkpoint.thread_id NOT IN ${sql.in(threadIds)}
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_checkpoint_scopes AS external_scope
+                WHERE external_scope.run_id = run.run_id
+                  AND external_scope.thread_id NOT IN ${sql.in(threadIds)}
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_context_handoffs AS external_handoff
+                WHERE external_handoff.target_run_id = run.run_id
+                  AND external_handoff.thread_id NOT IN ${sql.in(threadIds)}
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_subagents AS external_subagent
+                WHERE external_subagent.run_id = run.run_id
+                  AND external_subagent.thread_id NOT IN ${sql.in(threadIds)}
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_context_transfers AS external_transfer
+                WHERE external_transfer.target_run_id = run.run_id
+                  AND (
+                    external_transfer.source_thread_id NOT IN ${sql.in(threadIds)}
+                    OR external_transfer.target_thread_id NOT IN ${sql.in(threadIds)}
+                  )
+              )
+            RETURNING run_id
+          `;
+          counts.deletedProjectionRowCount += runs.length;
+
+          const subagents = yield* sql<{ readonly subagent_id: string }>`
+            DELETE FROM orchestration_v2_projection_subagents AS subagent
+            WHERE subagent.thread_id IN ${sql.in(threadIds)}
+              AND (subagent.child_thread_id IS NULL OR subagent.child_thread_id IN ${sql.in(threadIds)})
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_nodes AS external_node
+                WHERE external_node.node_id = subagent.parent_node_id
+                  AND external_node.thread_id NOT IN ${sql.in(threadIds)}
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_provider_threads AS external_provider_thread
+                WHERE external_provider_thread.provider_thread_id = subagent.provider_thread_id
+                  AND external_provider_thread.thread_id NOT IN ${sql.in(threadIds)}
+              )
+            RETURNING subagent_id
+          `;
+          counts.deletedProjectionRowCount += subagents.length;
+
+          const nativeBindings = yield* sql<{ readonly binding_key: string }>`
+            DELETE FROM orchestration_v2_native_session_bindings AS binding
+            WHERE binding.thread_id IN ${sql.in(threadIds)}
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_native_session_bindings AS external_binding
+                WHERE external_binding.driver = binding.driver
+                  AND external_binding.native_id = binding.native_id
+                  AND (
+                    binding.storage_type <> 'resolved'
+                    OR external_binding.storage_type <> 'resolved'
+                    OR (
+                      external_binding.canonical_root = binding.canonical_root
+                      AND external_binding.canonical_file = binding.canonical_file
+                    )
+                  )
+                  AND external_binding.thread_id NOT IN ${sql.in(threadIds)}
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_thread_deletion_sessions AS external_session
+                WHERE external_session.driver = binding.driver
+                  AND external_session.native_id = binding.native_id
+                  AND (
+                    binding.storage_type <> 'resolved'
+                    OR external_session.storage_type <> 'resolved'
+                    OR (
+                      external_session.canonical_root = binding.canonical_root
+                      AND external_session.canonical_file = binding.canonical_file
+                    )
+                  )
+                  AND external_session.thread_id NOT IN ${sql.in(threadIds)}
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_provider_threads AS external_provider_thread
+                WHERE external_provider_thread.provider_thread_id = binding.provider_thread_id
+                  AND external_provider_thread.thread_id NOT IN ${sql.in(threadIds)}
+              )
+            RETURNING binding_key
+          `;
+          counts.deletedProjectionRowCount += nativeBindings.length;
+
+          for (const providerSessionIdChunk of chunksOf(
+            providerSessionIds,
+            THREAD_DATA_RECLAMATION_BATCH_SIZE,
+          )) {
+            const providerSessions = yield* sql<{ readonly provider_session_id: string }>`
+              DELETE FROM orchestration_v2_projection_provider_sessions AS session
+              WHERE session.provider_session_id IN ${sql.in(providerSessionIdChunk)}
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM orchestration_v2_projection_provider_session_bindings AS external_binding
+                  WHERE external_binding.provider_session_id = session.provider_session_id
+                    AND external_binding.thread_id NOT IN ${sql.in(threadIds)}
+                )
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM orchestration_v2_projection_provider_sessions AS external_session
+                  WHERE external_session.provider_session_id = session.provider_session_id
+                    AND external_session.thread_id IS NOT NULL
+                    AND external_session.thread_id NOT IN ${sql.in(threadIds)}
+                )
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM orchestration_v2_projection_provider_threads AS external_thread
+                  WHERE external_thread.provider_session_id = session.provider_session_id
+                    AND external_thread.thread_id IS NOT NULL
+                    AND external_thread.thread_id NOT IN ${sql.in(threadIds)}
+                )
+              RETURNING provider_session_id
+            `;
+            counts.deletedProjectionRowCount += providerSessions.length;
+          }
+
+          const providerSessionBindings = yield* sql<{ readonly provider_session_id: string }>`
+            DELETE FROM orchestration_v2_projection_provider_session_bindings AS binding
+            WHERE binding.thread_id IN ${sql.in(threadIds)}
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_provider_session_bindings AS external_binding
+                WHERE external_binding.provider_session_id = binding.provider_session_id
+                  AND external_binding.thread_id NOT IN ${sql.in(threadIds)}
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_provider_sessions AS external_session
+                WHERE external_session.provider_session_id = binding.provider_session_id
+                  AND external_session.thread_id IS NOT NULL
+                  AND external_session.thread_id NOT IN ${sql.in(threadIds)}
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_provider_threads AS external_thread
+                WHERE external_thread.provider_session_id = binding.provider_session_id
+                  AND external_thread.thread_id IS NOT NULL
+                  AND external_thread.thread_id NOT IN ${sql.in(threadIds)}
+              )
+            RETURNING provider_session_id
+          `;
+          counts.deletedProjectionRowCount += providerSessionBindings.length;
+
+          const outbox = yield* sql<{ readonly effect_id: string }>`
+            DELETE FROM orchestration_v2_effect_outbox
+            WHERE thread_id IN ${sql.in(threadIds)} AND status = 'succeeded'
+            RETURNING effect_id
+          `;
+          counts.deletedOutboxCount += outbox.length;
+
+          const receipts = yield* sql<{ readonly command_id: string }>`
+            DELETE FROM orchestration_command_receipts AS receipt
+            WHERE receipt.aggregate_kind = 'thread'
+              AND receipt.aggregate_id IN ${sql.in(threadIds)}
+              AND receipt.rowid <= ${input.receiptThroughRowId}
+              AND receipt.command_type <> 'thread.delete'
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_thread_deletions AS deletion
+                WHERE deletion.command_id = receipt.command_id
+              )
+            RETURNING command_id
+          `;
+          counts.deletedReceiptCount += receipts.length;
+
+          const events = yield* sql<{ readonly event_id: string }>`
+            DELETE FROM orchestration_events
+            WHERE application_event_version = 2
+              AND aggregate_kind = 'thread'
+              AND stream_id IN ${sql.in(threadIds)}
+              AND sequence <= ${input.eventThroughSequence}
+              AND event_type NOT IN ('thread.created', 'thread.deleted')
+            RETURNING event_id
+          `;
+          counts.deletedEventCount += events.length;
+
+          return counts;
+        });
+
+      let deletedEventCount = 0;
+      let deletedReceiptCount = 0;
+      let deletedProjectionRowCount = 0;
+      let deletedTurnItemPositionCount = 0;
+      let deletedOutboxCount = 0;
+      for (const batch of batches) {
+        const batchCounts = yield* sql.withTransaction(
+          Effect.forEach(batch, deleteClosure, { concurrency: 1 }),
+        );
+        for (const counts of batchCounts) {
+          deletedEventCount += counts.deletedEventCount;
+          deletedReceiptCount += counts.deletedReceiptCount;
+          deletedProjectionRowCount += counts.deletedProjectionRowCount;
+          deletedTurnItemPositionCount += counts.deletedTurnItemPositionCount;
+          deletedOutboxCount += counts.deletedOutboxCount;
+        }
+      }
+
       return {
         reclaimedThreadCount,
         skippedThreads,
-        deletedEventCount: 0,
-        deletedReceiptCount: 0,
-        deletedProjectionRowCount: 0,
-        deletedTurnItemPositionCount: 0,
-        deletedOutboxCount: 0,
+        deletedEventCount,
+        deletedReceiptCount,
+        deletedProjectionRowCount,
+        deletedTurnItemPositionCount,
+        deletedOutboxCount,
       } satisfies ThreadDataReclamationSummary;
     },
     (effect) =>
