@@ -39,6 +39,7 @@ import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
+import * as EffectWorker from "./EffectWorker.ts";
 import * as EventSink from "./EventSink.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import { continueRestartedRun } from "./RestartContinuation.ts";
@@ -1327,6 +1328,8 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
             commandId: CommandId.make("lifecycle:result-restore"),
             threadId,
           });
+          // New work waits for the archive's resource cleanup.
+          yield* (yield* EffectWorker.OrchestrationEffectWorkerV2).drain();
           const before = yield* orchestrator.getThreadProjection(threadId);
           yield* orchestrator.recoverDelegatedTasks;
           yield* orchestrator.recoverDelegatedTasks;
@@ -1336,7 +1339,8 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
           assert.deepEqual(after.subagents, before.subagents);
           assert.deepEqual(after.contextTransfers, before.contextTransfers);
           const childProjection = yield* orchestrator.getThreadProjection(child.childThreadId);
-          assert.equal(childProjection.thread.lifecycleRevision, 0);
+          // The owner's archive and restore cascade to its subagent child.
+          assert.equal(childProjection.thread.lifecycleRevision, 2);
           assert.notEqual(
             (yield* orchestrator.resolveLifecycleSource(child.childThreadId)).sourceToken,
             childProjection.runs[0]?.lifecycleSourceToken,
