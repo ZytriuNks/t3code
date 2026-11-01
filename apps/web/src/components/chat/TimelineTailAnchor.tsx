@@ -16,6 +16,7 @@ export function TimelineTailAnchor({
   const { registerTailAnchor, tailMessageId } = use(TimelineRowCtx);
   const ref = useRef<HTMLDivElement | null>(null);
   const enabled = messageId === undefined || messageId === tailMessageId;
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- registers the tail anchor element with the timeline while mounted and unregisters on cleanup
   useLayoutEffect(() => {
     if (!enabled || !ref.current) return;
     return registerTailAnchor(ref.current);

@@ -1,8 +1,7 @@
 import { MessageId, RunId } from "@t3tools/contracts";
-import { type ComponentProps, type ReactNode } from "react";
+import { type ReactNode } from "react";
 import { expect, it, vi } from "vite-plus/test";
-import { page } from "vite-plus/test/browser";
-import { act } from "../../../test/render";
+import { act, fakeTimers } from "../../../test/render";
 import { MessagesTimeline } from "./MessagesTimeline";
 import {
   MESSAGE_CREATED_AT,
@@ -12,14 +11,12 @@ import {
   renderContent,
 } from "./MessagesTimeline.test-helpers";
 import { readTimelinePosition } from "./timelineScrollAnchoring";
-import { useComposerFocusState } from "./useComposerFocusState";
 import "~/index.css";
 
 vi.mock("../DiffWorkerPoolProvider", () => ({
   DiffWorkerPoolProvider: ({ children }: { children?: ReactNode }) => children,
 }));
 
-type TimelineProps = ComponentProps<typeof MessagesTimeline>;
 function history() {
   return Array.from({ length: 40 }, (_, index) => {
     const entry = buildUserTimelineEntry(`Message ${index}\n\n${"Reading history. ".repeat(30)}`);
@@ -29,6 +26,12 @@ function history() {
       message: { ...entry.message, id: MessageId.make(`message-${index}`) },
     };
   });
+}
+
+function turnFoldToggle(container: HTMLElement) {
+  return container.querySelector<HTMLButtonElement>(
+    '[data-timeline-row-kind="turn-fold"] button[aria-expanded="false"]',
+  );
 }
 
 async function move(viewport: HTMLElement, offset: number) {
@@ -56,21 +59,6 @@ it("remembers a manual reading position when the chat closes immediately after s
     atEnd: false,
     scrollOffset: offset,
   });
-});
-
-it("retains follow intent while the old timeline is held for a route transition", async () => {
-  const props = buildProps();
-  const entries = history();
-  await using screen = await renderContent(
-    <MessagesTimeline {...props} timelineEntries={entries} />,
-  );
-  const viewport = props.listRef.current!.getScrollableNode()!;
-  await move(viewport, viewport.scrollHeight);
-  await vi.waitFor(() => expect(readTimelinePosition(props.routeThreadKey)?.atEnd).toBe(true));
-  await screen.rerender(
-    <MessagesTimeline {...props} timelineEntries={entries} paintOnly liveFollowEnabled={false} />,
-  );
-  expect(readTimelinePosition(props.routeThreadKey)?.atEnd).toBe(true);
 });
 
 it("remembers a first send anchored above the live edge as a reading position", async () => {
@@ -119,63 +107,6 @@ function toolEntry(status: "inProgress" | "completed") {
   };
 }
 
-function ComposerTimeline(props: TimelineProps) {
-  const composer = useComposerFocusState();
-  return (
-    <>
-      <button onClick={() => composer.setIsComposerScrollCollapsed(true)}>Collapse composer</button>
-      <output data-composer-collapsed={composer.isComposerScrollCollapsed} />
-      <div className="min-h-0 flex-1">
-        <MessagesTimeline
-          {...props}
-          onToolOutputCollapsedAtEnd={composer.restoreAfterTimelineReachedEnd}
-        />
-      </div>
-    </>
-  );
-}
-
-it.each([
-  { status: "inProgress", atEnd: true },
-  { status: "inProgress", atEnd: false },
-  { status: "completed", atEnd: true },
-  { status: "completed", atEnd: false },
-] as const)(
-  "restores the composer after closing $status output only at the end: $atEnd",
-  async ({ status, atEnd }) => {
-    const props = buildProps();
-    await using screen = await renderContent(
-      <ComposerTimeline
-        {...props}
-        isWorking={status === "inProgress"}
-        runningRunId={status === "inProgress" ? RunId.make("tool-output-run") : null}
-        timelineEntries={[...history(), toolEntry(status)]}
-        liveFollowEnabled={atEnd}
-      />,
-      true,
-    );
-    const viewport = props.listRef.current!.getScrollableNode()!;
-    await move(viewport, viewport.scrollHeight);
-    const liveToggle = screen.container.querySelector<HTMLButtonElement>(
-      '[data-timeline-row-kind="work-live"] button[aria-expanded="false"]',
-    );
-    if (liveToggle) await page.elementLocator(liveToggle).click();
-    const row = screen.getByRole("button", { name: "echo output", exact: true }).last();
-    await row.getByText("echo output", { exact: true }).click();
-    await expect.element(row).toHaveAttribute("aria-expanded", "true");
-    await screen.getByRole("button", { name: "Collapse composer" }).click();
-    if (!atEnd) await move(viewport, Math.max(0, viewport.scrollTop - 200));
-    const header = row.getByText("echo output", { exact: true });
-    await header.click();
-    await expect.element(row).toHaveAttribute("aria-expanded", "false");
-    await vi.waitFor(() =>
-      expect(
-        screen.container.querySelector("output")?.getAttribute("data-composer-collapsed"),
-      ).toBe(String(!atEnd)),
-    );
-  },
-);
-
 it.each([true, false])(
   "keeps the end in view through tool disclosure changes only when following: %s",
   async (atEnd) => {
@@ -187,12 +118,20 @@ it.each([true, false])(
         liveFollowEnabled={atEnd}
         contentInsetEndAdjustment={600}
       />,
-      true,
+      atEnd,
     );
     const viewport = props.listRef.current!.getScrollableNode()!;
     await move(viewport, viewport.scrollHeight);
+    if (!atEnd) {
+      await move(viewport, Math.max(0, viewport.scrollTop - 200));
+      await vi.waitFor(() =>
+        expect(props.listRef.current!.getState().scroll).toBe(viewport.scrollTop),
+      );
+      // Expanding the turn fold at the end restarts LegendList's initial scroll to the
+      // end; once the reader has left it, the fold opens in place.
+      await act(() => turnFoldToggle(screen.container)?.click());
+    }
     const row = screen.getByRole("button", { name: "echo output", exact: true });
-    if (!atEnd) await move(viewport, Math.max(0, viewport.scrollTop - 200));
     const initialOffset = viewport.scrollTop;
     for (const expanded of [true, false]) {
       await row.getByText("echo output", { exact: true }).click();
@@ -207,6 +146,29 @@ it.each([true, false])(
     }
   },
 );
+
+it("lets a reader leave the end while a tool disclosure settles", async () => {
+  // Fake frames let the reader scroll before the disclosure's two settle frames run.
+  using _timers = fakeTimers();
+  const props = buildProps();
+  await using screen = await renderContent(
+    <MessagesTimeline
+      {...props}
+      timelineEntries={[...history(), toolEntry("completed")]}
+      liveFollowEnabled={false}
+    />,
+  );
+  const viewport = props.listRef.current!.getScrollableNode()!;
+  await move(viewport, viewport.scrollHeight);
+  await act(() => vi.advanceTimersByTime(500));
+  const toggle = turnFoldToggle(screen.container);
+  expect(toggle).not.toBeNull();
+  await act(() => toggle!.click());
+  const readingOffset = viewport.scrollTop - 200;
+  await move(viewport, readingOffset);
+  await act(() => vi.advanceTimersByTime(500));
+  expect(Math.abs(viewport.scrollTop - readingOffset)).toBeLessThanOrEqual(1);
+});
 
 it("measures a sent attachment and preserves its send anchor", async () => {
   const props = buildProps();
@@ -300,7 +262,6 @@ it("retains reserved end space as tool work begins while reading history", async
       {...props}
       timelineEntries={[first, toolEntry("inProgress")]}
       isWorking
-      activeTurnInProgress
       runningRunId={RunId.make("tool-output-run")}
       anchorMessageId={first.message.id}
       liveFollowEnabled={false}

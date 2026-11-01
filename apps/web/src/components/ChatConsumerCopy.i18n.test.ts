@@ -93,6 +93,7 @@ it("selects production Diff scope labels with the selected turn number", () => {
   ] as const) {
     const bindings = {
       t: translator(language),
+      toolCallSelection: null,
       selectedRunId: "selected",
       selectedGitScope: "unstaged",
       selectedTurn: { runId: "selected" },

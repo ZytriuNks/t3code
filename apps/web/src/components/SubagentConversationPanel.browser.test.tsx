@@ -29,7 +29,7 @@ import {
   useSubagentConversation,
 } from "./SubagentConversationOverlay";
 import { ThreadAgentsPanel } from "./ThreadAgentsPanel";
-import { ThreadDetailsPanel, type ThreadDetailsPanelProps } from "./chat/ThreadDetailsPanel";
+import { ThreadDetailsPanel } from "./chat/ThreadDetailsPanel";
 import { PopoverCreateHandle as createPopoverHandle } from "./ui/popover";
 import { RightPanelTabs } from "./RightPanelTabs";
 import { DEFAULT_RESOLVED_KEYBINDINGS } from "@t3tools/shared/keybindings";
@@ -90,13 +90,19 @@ vi.mock("~/state/orchestration", async () => {
 
 vi.mock("~/state/threads", { spy: true });
 vi.mock("~/state/environments", { spy: true });
-vi.mock("~/browser/browserDefaults", () => ({ useBrowserDefaults: () => ({ profiles: [] }) }));
+vi.mock("~/browser/browserDefaults", async () => ({
+  ...(await vi.importActual<typeof import("~/browser/browserDefaults")>(
+    "~/browser/browserDefaults",
+  )),
+  useBrowserDefaults: () => ({ profiles: [] }),
+}));
 
 vi.mock("~/hooks/useTheme", () => ({
   useTheme: () => ({ resolvedTheme: "light" }),
 }));
 
-vi.mock("~/hooks/useSettings", () => ({
+vi.mock("~/hooks/useSettings", async () => ({
+  ...(await vi.importActual<typeof import("~/hooks/useSettings")>("~/hooks/useSettings")),
   useEnvironmentSettings: () => ({
     timestampFormat: "locale",
     responseStreamingMode: "smooth",
@@ -127,7 +133,6 @@ vi.mock("./SubagentModelInfo", () => ({
 vi.mock("./chat/MessagesTimeline", () => ({
   MessagesTimeline: function TestTimeline(props: {
     isWorking: boolean;
-    activeTurnInProgress: boolean;
     activeTurnStartedAt: string | null;
     runningRunId: RunId | null;
     runlessWorkActive: boolean;
@@ -139,7 +144,7 @@ vi.mock("./chat/MessagesTimeline", () => ({
     timelineEntries?: Array<{ text?: string }>;
     listRef?: { current: { getScrollableNode: () => HTMLElement } | null };
   }) {
-    state.activity = props;
+    state.activity = { ...props, activeTurnInProgress: props.isWorking };
     // Consume the real Markdown buffer with Timeline's native-message completion
     // condition. The activity derivation in the panel is not mocked.
     const [buffer] = useState(createInlineBufferPlugin);
@@ -267,6 +272,7 @@ function threadRef(id: string): ScopedThreadRef {
 }
 
 type Props = ComponentProps<typeof SubagentConversationPanel>;
+type ThreadDetailsPanelProps = ComponentProps<typeof ThreadDetailsPanel>;
 async function renderPanel(mode: "overlay" | "sidebar", props: Partial<Props> = {}) {
   await using stack = new AsyncDisposableStack();
   const node = (next: Partial<Props> = {}) => (
@@ -989,7 +995,6 @@ async function renderOverlayEntry(onNavigate = vi.fn()) {
         <ThreadDetailsPanel
           anchor={{ current: null }}
           handle={createPopoverHandle()}
-          onPresentationChange={() => {}}
           environmentId={environmentId}
           threadId={threadRef(ownerId).threadId}
           projectId={v2Projection.thread.projectId}
@@ -1017,6 +1022,7 @@ async function renderOverlayEntry(onNavigate = vi.fn()) {
           onUpdateProjectScript={vi.fn() as ThreadDetailsPanelProps["onUpdateProjectScript"]}
           onDeleteProjectScript={vi.fn() as ThreadDetailsPanelProps["onDeleteProjectScript"]}
           onOpenThread={conversation.openRelatedThread}
+          usage={{ providerInstanceId: null, providers: [], sources: [], contextWindow: null }}
         />
         <SubagentConversationOverlay conversation={conversation} composerElement={null} />
       </>

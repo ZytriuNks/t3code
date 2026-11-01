@@ -87,11 +87,10 @@ async function setup() {
         height = nextHeight;
       },
       /**
-       * Report the same way the text frame does: the edge movement carried on
-       * the event, then one settling pass. The frame only compensates on the
-       * first write it sees, so a test that writes twice before a paint must let
-       * the settling pass run before asserting the second one — exactly as a real
-       * frame boundary does.
+       * Report the way the text frame does: edge movement on the event, then one settling pass.
+       * The frame only compensates on the first write it sees, so a test that writes twice
+       * before a paint must let the settling pass run before asserting the second, like a real
+       * frame boundary.
        */
       notifyGrowth(target: HTMLElement = element, delta?: number) {
         const amount = delta ?? growthDeltas.get(element) ?? 0;
@@ -122,6 +121,8 @@ async function setup() {
     identity = "thread-a",
     endRequest = 0,
     onFollowingChange,
+    onDetach,
+    onLayoutRequest,
     footerRef,
   }: {
     element: HTMLElement;
@@ -129,6 +130,8 @@ async function setup() {
     identity?: string;
     endRequest?: number;
     onFollowingChange?: (following: boolean) => void;
+    onDetach?: () => void;
+    onLayoutRequest?: () => void;
     footerRef?: RefObject<HTMLElement | null>;
   }) {
     const request = useSmoothScroll({
@@ -140,6 +143,8 @@ async function setup() {
       footerRef,
       endRequest,
       onFollowingChange,
+      onDetach,
+      onLayoutRequest,
     });
     useLayoutEffect(() => {
       requestRef.current = request;
@@ -286,6 +291,25 @@ describe("useSmoothScroll", () => {
       expect(controlRef.current?.isFollowing()).toBe(true);
       expect(controlRef.current?.isAtEdge()).toBe(true);
     }
+  });
+
+  it("keeps following when a re-render passes new callbacks after rows grew", async () => {
+    await using fixture = await setup();
+    const { screen, Probe, controlRef, scrollElements, makeScrollElement } = fixture;
+    const element = makeScrollElement(1600, 2000, 400);
+    scrollElements.push(element);
+    const onDetach = vi.fn();
+    await act(() => screen.rerender(<Probe element={element} onDetach={() => onDetach()} />));
+    expect(controlRef.current?.isFollowing()).toBe(true);
+
+    // A sent message adds a row before the next render hands the hook fresh
+    // callbacks. The viewport is still the follower's, not the reader's.
+    element.setHeight(2100);
+    await act(() => screen.rerender(<Probe element={element} onDetach={() => onDetach()} />));
+
+    expect(controlRef.current?.request()).toBe(true);
+    expect(element.scrollTop).toBe(1700);
+    expect(onDetach).not.toHaveBeenCalled();
   });
 
   it("re-pins the end after a panel resize reflows the list instead of detaching", async () => {

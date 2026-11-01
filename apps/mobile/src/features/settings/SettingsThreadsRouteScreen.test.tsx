@@ -7,7 +7,6 @@ import type { SettingsTarget } from "./settings-environment-filter";
 
 const state = vi.hoisted(() => ({
   updateSettings: vi.fn(async () => ({ _tag: "Success" as const })),
-  writable: new Set<string>(),
   filter: {
     selectedTargets: [] as SettingsTarget[],
     projectGroups: [] as { key: string; label: string; members: unknown[] }[],
@@ -19,8 +18,6 @@ vi.mock("react-native", async () => {
   const { createElement } = await import("react");
   return {
     View: (props: { readonly children?: unknown }) =>
-      createElement("div", null, props.children as never),
-    ScrollView: (props: { readonly children?: unknown }) =>
       createElement("div", null, props.children as never),
     Pressable: (props: {
       readonly children?: unknown;
@@ -38,16 +35,6 @@ vi.mock("react-native", async () => {
         },
         props.children as never,
       ),
-  };
-});
-vi.mock("react-native-safe-area-context", () => ({
-  useSafeAreaInsets: () => ({ top: 0, bottom: 0, left: 0, right: 0 }),
-}));
-vi.mock("../../components/ui/ScreenScrollView", async () => {
-  const { createElement } = await import("react");
-  return {
-    ScreenScrollView: (props: { readonly children?: unknown }) =>
-      createElement("div", null, props.children as never),
   };
 });
 vi.mock("../../components/ui/AppText", async () => {
@@ -69,53 +56,15 @@ vi.mock("../../components/ui/AppText", async () => {
       }),
   };
 });
-vi.mock("../../components/ui/Button", () => ({ Button: () => null }));
 vi.mock("../../state/server", () => ({
   serverEnvironment: { updateSettings: Symbol("updateSettings") },
 }));
 vi.mock("../../state/use-atom-command", () => ({
   useAtomCommand: () => state.updateSettings,
 }));
-vi.mock("../../state/preferences", () => ({
-  mobilePreferencesAtom: Symbol("mobilePreferences"),
-  updateMobilePreferencesAtom: Symbol("updateMobilePreferences"),
-}));
-vi.mock("@effect/atom-react", async () => {
-  const { AsyncResult } = await import("effect/reactivity");
-  return {
-    useAtomValue: () => AsyncResult.success({ workingShelfEnabled: false, planModeEnabled: false }),
-    useAtomSet: () => () => undefined,
-  };
-});
-vi.mock("../../state/session", () => ({
-  readEnvironmentScope: (environmentId: string) => state.writable.has(environmentId),
-  useEnvironmentsWithScope: (targets: readonly { readonly environmentId: string }[]) =>
-    new Set(
-      targets
-        .map((target) => target.environmentId)
-        .filter((environmentId) => state.writable.has(environmentId)),
-    ),
-}));
 vi.mock("./settings-environment-filter", () => ({
   useSettingsEnvironmentFilter: () => state.filter,
 }));
-vi.mock("./components/SettingsEnvironmentFilterHeader", async () => {
-  const { createElement } = await import("react");
-  const Empty = () => createElement("div", null);
-  return { AndroidSettingsEnvironmentFilter: Empty, SettingsEnvironmentFilterHeader: Empty };
-});
-vi.mock("./components/SettingsScreen", async () => {
-  const { createElement } = await import("react");
-  return {
-    SettingsScreen: (props: { readonly title?: string; readonly children?: unknown }) =>
-      createElement(
-        "div",
-        null,
-        props.title ? createElement("h1", null, props.title) : null,
-        props.children as never,
-      ),
-  };
-});
 vi.mock("./components/SettingsSection", async () => {
   const { createElement } = await import("react");
   return {
@@ -128,23 +77,8 @@ vi.mock("./components/SettingsSection", async () => {
       ),
   };
 });
-vi.mock("./components/SettingsSwitchRow", async () => {
-  const { createElement } = await import("react");
-  return {
-    SettingsSwitchRow: (props: { readonly label: string }) =>
-      createElement("div", null, props.label),
-  };
-});
-vi.mock("./components/SettingsProjectOverridesSection", async () => {
-  const { createElement } = await import("react");
-  return { SettingsProjectOverridesSection: () => createElement("div", null) };
-});
-vi.mock("./components/AutoSettleDaysField", async () => {
-  const { createElement } = await import("react");
-  return { AutoSettleDaysField: () => createElement("div", null) };
-});
 
-import { SettingsThreadsRouteScreen } from "./SettingsThreadsRouteScreen";
+import { ScratchBaseDirectorySettings } from "./ScratchBaseDirectorySettings";
 
 function settingsTarget(
   environmentId: EnvironmentId,
@@ -173,7 +107,6 @@ let root: Root;
 beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   state.updateSettings.mockClear();
-  state.writable = new Set([String(serverId)]);
   state.filter = { selectedTargets: [], projectGroups: [], selectedProjectKey: null };
   container = document.createElement("div");
   document.body.append(container);
@@ -186,7 +119,7 @@ afterEach(async () => {
 });
 
 async function renderThreads() {
-  await act(async () => root.render(<SettingsThreadsRouteScreen />));
+  await act(async () => root.render(<ScratchBaseDirectorySettings />));
 }
 
 async function typeIntoScratchInput(value: string) {

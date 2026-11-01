@@ -858,6 +858,7 @@ function useKeybindingRowEditor({
       key: keyDraft,
       when: whenDraftExpression,
     },
+    navigator.platform,
     (command) => localizedCommandLabel(command, t),
   );
 
@@ -994,8 +995,13 @@ function WhenClauseControl({
   onValidityChange: (valid: boolean) => void;
 }) {
   const { t } = useI18n();
+  // Closing unmounts the builder, which drops an unparsed draft and keeps the last valid value.
+  const handleOpenChange = (open: boolean) => {
+    if (!open) onValidityChange(true);
+  };
+
   return (
-    <Popover>
+    <Popover onOpenChange={handleOpenChange}>
       <PopoverTrigger
         render={
           <Button
@@ -1192,6 +1198,7 @@ function useNewKeybindingDraft({
       key: keyDraft,
       when: whenDraftExpression,
     },
+    navigator.platform,
     (command) => localizedCommandLabel(command, t),
   );
   const commandLabelText = commandDraft
@@ -1450,16 +1457,16 @@ function keybindingAnchorIds(rows: ReturnType<typeof buildKeybindingRows>) {
   return ids;
 }
 
-// Rows come from a hook so they are cached on the server keybindings alone. Built
-// inline, the compiler joins them to the query's cache scope (filtering might
-// mutate them), and every keystroke rebuilds and re-renders every row.
+// Cache rows in a separate hook so the compiler does not rebuild them per search keystroke.
 function useKeybindingCatalog() {
   const { t } = useI18n();
   const serverKeybindings = useSettingsScope().environment?.serverConfig?.keybindings;
   const merged = mergeWithDefaultKeybindings(serverKeybindings ?? []);
   return {
     commandOptions: buildKeybindingCommandOptions(merged),
-    allRows: buildKeybindingRows(merged, "", (command) => localizedCommandLabel(command, t)),
+    allRows: buildKeybindingRows(merged, navigator.platform, "", (command) =>
+      localizedCommandLabel(command, t),
+    ),
   };
 }
 

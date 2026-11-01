@@ -80,8 +80,9 @@ describe.skipIf(HostProcessPlatform.defaultValue() !== "win32")(
           "D:/two/other.txt",
           "\\\\server\\share\\file.txt",
         ];
-        const results = yield* Effect.all(
-          paths.map((selectedPath) => focusExistingWindowsFolder("D:/one", selectedPath)),
+        const results = yield* Effect.forEach(
+          paths,
+          (selectedPath) => focusExistingWindowsFolder("D:/one", selectedPath),
           { concurrency: "unbounded" },
         );
         assert.deepEqual(results, [false, false, false]);

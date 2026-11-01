@@ -15,7 +15,7 @@ import {
 } from "./LegacySidebar.logic";
 import { useI18n } from "../i18n/I18nProvider";
 import { useSupportsMultiplePullRequests } from "~/hooks/useSupportsMultiplePullRequests";
-import { resolveThreadCurrentPullRequestLink } from "@t3tools/shared/threadPullRequests";
+import { resolveThreadCurrentPullRequestLink } from "@t3tools/client-runtime/thread-pull-requests";
 import { Spinner } from "~/components/ui/spinner";
 import {
   ArchiveIcon,
@@ -92,7 +92,7 @@ import {
   type SidebarThreadPreviewCount,
   type SidebarThreadSortOrder,
 } from "@t3tools/contracts/settings";
-import { isDesktopLocalConnectionTarget, isWslConnectionTarget } from "../connection/desktopLocal";
+import { desktopLocalBackendId, isDesktopLocalConnectionTarget } from "../connection/desktopLocal";
 import { useDesktopLocalBootstraps } from "../connection/useDesktopLocalBootstraps";
 import { isElectron } from "../env";
 import { useStableCallback } from "../hooks/useStableCallback";
@@ -104,10 +104,9 @@ import { isMacPlatform } from "../lib/utils";
 import { useSidebarPendingFileDropStore } from "../sidebarPendingFileDropStore";
 import { makeWorkspaceFileDropHandlers } from "./chat/workspaceFileDrop";
 import {
-  readEnvironmentSupportsPinning,
-  readEnvironmentSupportsTitleRegeneration,
   readThreadShell,
   useProjects,
+  useDelegatedUnderParent,
   useThreadShells,
   useThreadShellsForProjectRefs,
   waitForProjectRemoval,
@@ -233,16 +232,16 @@ import {
 } from "./Sidebar.logic";
 import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
-import { useIsMobile } from "~/hooks/useMediaQuery";
+import { useMediaQuery } from "~/hooks/useMediaQuery";
 import { CommandDialogTrigger } from "./ui/command";
 import { useClientSettings, updateClientSettings } from "~/hooks/useSettings";
-import { primaryServerKeybindingsAtom } from "../state/server";
+import { environmentServerConfigsAtom, primaryServerKeybindingsAtom } from "../state/server";
+import { appAtomRegistry } from "../rpc/atomRegistry";
 import {
   derivePhysicalProjectKey,
-  deriveProjectGroupingOverrideKey,
   getProjectOrderKey,
   selectProjectGroupingSettings,
-} from "../logicalProject";
+} from "@t3tools/client-runtime/state/project-grouping";
 import type { SidebarThreadSummary } from "../types";
 import {
   buildPhysicalToLogicalProjectKeyMap,
@@ -303,7 +302,7 @@ function formatProjectMemberActionLabel(
   }
 
   return member.environmentLabel
-    ? `${member.environmentLabel} — ${member.workspaceRoot}`
+    ? `${member.environmentLabel} (${member.workspaceRoot})`
     : member.workspaceRoot;
 }
 
@@ -451,6 +450,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
   const threadRef = scopeThreadRef(thread.environmentId, thread.id);
   const threadKey = scopedThreadKey(threadRef);
   const [isFileDragOver, setIsFileDragOver] = useState(false);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- clears the file-drag highlight on the window dragend event
   useEffect(() => {
     if (!isFileDragOver) return;
     const clearFileDrag = () => setIsFileDragOver(false);
@@ -465,7 +465,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
     environmentId: thread.environmentId,
     threadId: thread.id,
   });
-  const isMobile = useIsMobile();
+  const isMobile = useMediaQuery("max-md");
   const discoveredPorts = useThreadDiscoveredPorts({
     environmentId: thread.environmentId,
     threadId: thread.id,
@@ -1261,7 +1261,13 @@ function useProjectThreads(project: SidebarProjectSnapshot, section: LegacySecti
       resolveThreadLastVisitedAt(thread.lastVisitedAt, threadLastVisitedAts[index] ?? undefined),
     ]),
   );
-  const visibleProjectThreads = legacySidebarThreads(sidebarThreads, section, threadSortOrder);
+  const delegatedUnderParent = useDelegatedUnderParent();
+  const visibleProjectThreads = legacySidebarThreads(
+    sidebarThreads,
+    section,
+    threadSortOrder,
+    delegatedUnderParent,
+  );
   const projectStatus = resolveProjectStatusIndicator(
     visibleProjectThreads.map((thread) =>
       resolveProjectThreadStatus(thread, lastVisitedAtByThreadKey),
@@ -1573,7 +1579,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   };
 
   const openProjectGroupingDialog = (member: SidebarProjectGroupMember) => {
-    const overrideKey = deriveProjectGroupingOverrideKey(member);
+    const overrideKey = derivePhysicalProjectKey(member);
     setProjectGroupingTarget(member);
     setProjectGroupingSelection(
       projectGroupingSettings.sidebarProjectGroupingOverrides?.[overrideKey] ?? "inherit",
@@ -2341,7 +2347,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       return;
     }
 
-    const overrideKey = deriveProjectGroupingOverrideKey(projectGroupingTarget);
+    const overrideKey = derivePhysicalProjectKey(projectGroupingTarget);
     const nextOverrides = {
       ...projectGroupingSettings.sidebarProjectGroupingOverrides,
     };
@@ -3465,7 +3471,10 @@ function useLegacySidebarProjects() {
   );
   const wslEnvironmentIds = new Set(
     environments
-      .filter((environment) => isWslConnectionTarget(environment.entry.target))
+      .filter(
+        (environment) =>
+          desktopLocalBackendId(environment.entry.target)?.startsWith("wsl:") === true,
+      )
       .map((environment) => environment.environmentId),
   );
   const orderedProjects = orderItemsByPreferredIds({
@@ -3520,6 +3529,7 @@ function useSortedLegacySidebarProjects(input: {
     sidebarProjectSortOrder,
   } = input;
   const sidebarThreads = useThreadShells();
+  const delegatedUnderParent = useDelegatedUnderParent();
   const sidebarProjectByKey = new Map(
     sidebarProjects.map((project) => [project.projectKey, project] as const),
   );
@@ -3527,7 +3537,11 @@ function useSortedLegacySidebarProjects(input: {
     ...project,
     id: project.projectKey,
   }));
-  const sortableThreads = filterSidebarV2VisibleThreads(sidebarThreads, null).map((thread) => {
+  const sortableThreads = filterSidebarV2VisibleThreads(
+    sidebarThreads,
+    null,
+    delegatedUnderParent,
+  ).map((thread) => {
     const physicalKey =
       projectPhysicalKeyByScopedRef.get(
         scopedProjectKey(scopeProjectRef(thread.environmentId, thread.projectId)),
@@ -3576,6 +3590,7 @@ function useLegacySidebarThreads(input: {
     expandedThreadListsByProject,
   } = input;
   const sidebarThreads = useThreadShells();
+  const delegatedUnderParent = useDelegatedUnderParent();
   const projectExpandedById = useUiStateStore((store) => store.projectExpandedById);
   const sidebarThreadByKey = new Map(
     sidebarThreads.map(
@@ -3609,6 +3624,7 @@ function useLegacySidebarThreads(input: {
       threadsByProjectKey.get(project.projectKey) ?? [],
       "projects",
       sidebarThreadSortOrder,
+      delegatedUnderParent,
     );
     const projectExpanded = resolveProjectExpanded(
       projectExpandedById,
@@ -3645,13 +3661,14 @@ function useLegacySidebarThreads(input: {
     });
   });
   const pinnedThreads = sectionExpanded.pinned
-    ? legacySidebarThreads(sidebarThreads, "pinned", sidebarThreadSortOrder)
+    ? legacySidebarThreads(sidebarThreads, "pinned", sidebarThreadSortOrder, delegatedUnderParent)
     : [];
   const unassignedThreads = sectionExpanded.unassigned
     ? legacySidebarThreads(
         unassignedProjects.flatMap((project) => threadsByProjectKey.get(project.projectKey) ?? []),
         "unassigned",
         sidebarThreadSortOrder,
+        delegatedUnderParent,
       )
     : [];
   const unassignedPreview =
@@ -3696,6 +3713,19 @@ function useLegacySidebarThreads(input: {
     threadJumpThreadKeys: [...threadJumpCommandByKey.keys()],
     prewarmedSidebarThreadRefs,
   };
+}
+
+function readEnvironmentCapabilities(environmentId: EnvironmentId) {
+  return appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment
+    .capabilities;
+}
+
+function readEnvironmentSupportsPinning(environmentId: EnvironmentId): boolean {
+  return readEnvironmentCapabilities(environmentId)?.threadPinning === true;
+}
+
+function readEnvironmentSupportsTitleRegeneration(environmentId: EnvironmentId): boolean {
+  return readEnvironmentCapabilities(environmentId)?.threadTitleRegeneration === true;
 }
 
 export default function LegacySidebar({ routeReveal }: { routeReveal: SidebarRouteReveal }) {
@@ -3767,7 +3797,12 @@ export default function LegacySidebar({ routeReveal }: { routeReveal: SidebarRou
     projectPhysicalKeyByScopedRef,
     sidebarProjectSortOrder,
   });
-  const visibleThreads = filterSidebarV2VisibleThreads(useThreadShells(), null);
+  const delegatedUnderParent = useDelegatedUnderParent();
+  const visibleThreads = filterSidebarV2VisibleThreads(
+    useThreadShells(),
+    null,
+    delegatedUnderParent,
+  );
   const { regular: regularProjects, unassigned: unassignedProjects } = (() =>
     splitLegacySidebarProjects(sortedProjects, scratchRoots))();
   const pinnedProject = (() =>
@@ -3790,6 +3825,7 @@ export default function LegacySidebar({ routeReveal }: { routeReveal: SidebarRou
     activeDraftProject && unassignedProjects.includes(activeDraftProject)
       ? "unassigned"
       : "projects";
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- expands the sidebar section and project that hold the newly active draft thread
   useEffect(() => {
     if (!activeDraftId || !activeDraftProjectKey) return;
     const section = activeDraftSection;
@@ -3833,6 +3869,7 @@ export default function LegacySidebar({ routeReveal }: { routeReveal: SidebarRou
     mountRevealOwed.current = false;
     activeRow.scrollIntoView({ block: "nearest" });
   });
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- scrolls the active route row into view in the sidebar DOM
   useEffect(revealRouteRow, [revealRouteRow, routeThreadKey, routeRowRendered]);
   const newThreadShortcutLabelOptions = {
     platform,
@@ -3922,6 +3959,7 @@ export default function LegacySidebar({ routeReveal }: { routeReveal: SidebarRou
     : EMPTY_THREAD_JUMP_LABELS;
   const orderedSidebarThreadKeys = visibleSidebarThreadKeys;
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reports thread jump hint visibility to the shortcut hint store
   useEffect(() => {
     updateThreadJumpHintsVisibility(shouldShowThreadJumpHintsNow);
   }, [shouldShowThreadJumpHintsNow, updateThreadJumpHintsVisibility]);
@@ -3980,6 +4018,7 @@ export default function LegacySidebar({ routeReveal }: { routeReveal: SidebarRou
     event.stopPropagation();
     navigateToThread(scopeThreadRef(targetThread.environmentId, targetThread.id));
   });
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- window keydown listener for the sidebar thread shortcuts
   useEffect(() => {
     const handleWindowKeyDown = (event: globalThis.KeyboardEvent) => onWindowKeyDown(event);
     window.addEventListener("keydown", handleWindowKeyDown);
@@ -3988,6 +4027,7 @@ export default function LegacySidebar({ routeReveal }: { routeReveal: SidebarRou
     };
   }, []);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- window mousedown listener that clears the thread multi-selection
   useEffect(() => {
     const onMouseDown = (event: globalThis.MouseEvent) => {
       if (!useThreadSelectionStore.getState().hasSelection()) return;

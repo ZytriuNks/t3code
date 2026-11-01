@@ -46,12 +46,10 @@ export function getProviderStatusKey(provider: ServerProvider | undefined): Prov
 }
 
 /**
- * Derive the headline + detail copy shown under a provider's name in the
- * settings page. Prefers `provider.message` for server-supplied detail and
- * falls back to generic phrasing when the server has not yet reported any
- * state — which happens before the first probe or when an instance names a
- * driver this build does not ship. A ready provider without account metadata
- * remains available and does not imply an authentication failure.
+ * Derive the headline and detail copy shown under a provider's name in settings. Prefers
+ * `provider.message`, falling back to generic phrasing before the first probe or for an
+ * unknown driver. A ready provider without account metadata stays available and implies
+ * no authentication failure.
  */
 export function getProviderSummary(
   provider: ServerProvider | undefined,
@@ -145,7 +143,6 @@ export function getProviderSummary(
 
 export function getProviderVersionLabel(version: string | null | undefined) {
   if (!version) return null;
-  // Antigravity reports a release tag such as `agy_acp_server_20260818_01_RC01`.
   const antigravity = /^agy_acp_server_(\d{4})(\d{2})(\d{2})_\d+(?:_(\w+))?$/.exec(version);
   if (antigravity) {
     const [, year, month, day, candidate] = antigravity;
@@ -196,8 +193,7 @@ export function getProviderVersionAdvisoryPresentation(
   ) {
     const targetVersion = compatibility.recommendedVersion;
     const recommendation = getProviderVersionLabel(targetVersion) ?? compatibility.recommendedRange;
-    // An installed version that is already the package's latest cannot be fixed by
-    // updating it, e.g. when the recommendation needs a different package.
+    // Latest package versions cannot be updated into recommendations requiring another package.
     const isAlreadyLatest = advisory?.status === "current";
     return {
       title: t

@@ -12,6 +12,7 @@ import {
   ProviderInstanceId,
   ProviderSessionId,
   ProviderThreadId,
+  ProviderTurnId,
   RunId,
   RuntimeRequestId,
   ThreadId,
@@ -22,11 +23,8 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as SqlClient from "effect/sql/SqlClient";
-import * as Stream from "effect/Stream";
 
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
-import { runMigrations } from "../persistence/Migrations.ts";
-import * as ThreadSearch from "./ThreadSearch.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
@@ -749,10 +747,7 @@ it.effect("recovers terminal subagent results until their cross-thread transfer 
   }).pipe(Effect.provide(layerTest)),
 );
 
-it.effect.each([
-  { name: "SQLite", layer: layerTest },
-  { name: "memory", layer: ProjectionStore.layerMemory },
-])("recovers only recorded follow-up results with $name projections", ({ layer }) =>
+it.effect("recovers only recorded follow-up results with SQLite projections", () =>
   Effect.gen(function* () {
     const projections = yield* ProjectionStore.ProjectionStoreV2;
     const now = yield* DateTime.now;
@@ -828,7 +823,7 @@ it.effect.each([
       payload: { ...task, status: "completed", result: "Follow-up result.", completedAt: now },
     });
     assert.deepEqual(yield* projections.getRecoveryThreadIds("subagent-results"), []);
-  }).pipe(Effect.provide(layer)),
+  }).pipe(Effect.provide(layerTest)),
 );
 
 it.effect("includes shared sessions and provider-owned background rosters in recovery", () =>
@@ -1273,76 +1268,101 @@ it.effect("marks fork descendants unreadable when their source is missing or cor
   }).pipe(Effect.provide(layerTest)),
 );
 
-it.effect(
-  "070 canonical recovery survives V2 rebuild and old cursors without guessing unknown history",
-  () =>
-    Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient;
-      const events = yield* EventStore.EventStoreV2;
-      const store = yield* ProjectionStore.ProjectionStoreV2;
-      const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
-      const search = yield* ThreadSearch.ThreadSearch;
-      const at = "2026-10-28T00:00:00.000Z";
-      yield* sql`INSERT INTO projection_projects (project_id, title, workspace_root, scripts_json, created_at, updated_at)
-      VALUES ('task8:legacy-project', 'Legacy', '/task8/legacy', '[]', ${at}, ${at})`;
-      yield* sql`INSERT INTO projection_threads (thread_id, project_id, title, model_selection_json, runtime_mode, interaction_mode, created_at, updated_at)
-      VALUES ('task8:legacy', 'task8:legacy-project', 'Legacy', '{"instanceId":"codex","model":"test"}', 'full-access', 'default', ${at}, ${at})`;
-      yield* sql`INSERT INTO projection_thread_messages (message_id, thread_id, turn_id, role, text, is_streaming, created_at, updated_at)
-      VALUES ('task8:canonical', 'task8:legacy', 'task8:turn', 'assistant', 'recoverable canonical token', 0, ${at}, ${at}),
-        ('task8:unknown', 'task8:legacy', 'task8:unknown-turn', 'assistant', 'unprovable history token', 0, ${at}, ${at})`;
-      yield* sql`INSERT INTO orchestration_events (event_id, aggregate_kind, stream_id, stream_version, event_type, occurred_at, actor_kind, payload_json, metadata_json, application_event_version)
-      VALUES ('task8:legacy-event', 'thread', 'task8:legacy', 1, 'thread.message-sent', ${at}, 'provider',
-        '{"threadId":"task8:legacy","turnId":"task8:turn","messageId":"task8:canonical","role":"assistant"}', '{}', 1)`;
-      const threadId = yield* createThread("task8-replay");
-      const thread = yield* store.getThread(threadId);
-      yield* events.append({
-        events: [
-          {
-            id: EventId.make("task8:replay-created"),
-            type: "thread.created",
-            threadId,
-            occurredAt: DateTime.makeUnsafe(at),
-            payload: thread,
-          },
-        ],
-      });
-      const cursor = yield* events.latestSequence();
-      const metadataEvent = {
-        id: EventId.make("task8:replay-metadata"),
-        type: "thread.metadata-updated" as const,
+it.effect("startup ends the provider turn of a native child root it cancels", () =>
+  Effect.gen(function* () {
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const recovery = yield* ProviderRuntimeRecovery.ProviderRuntimeRecoveryService;
+    const now = yield* DateTime.now;
+    const parentThreadId = yield* createThread("native-child-root-turn-parent");
+    const threadId = yield* createThread("native-child-root-turn");
+    const rootNodeId = NodeId.make(`node:${threadId}:thread-root`);
+    const providerThreadId = ProviderThreadId.make(`provider-thread:${threadId}`);
+    const providerTurnId = ProviderTurnId.make(`provider-turn:${threadId}`);
+    yield* projections.apply({
+      id: EventId.make(`event:${threadId}:root`),
+      type: "node.updated",
+      threadId,
+      nodeId: rootNodeId,
+      driver,
+      occurredAt: now,
+      payload: {
+        id: rootNodeId,
         threadId,
-        occurredAt: DateTime.makeUnsafe(at),
-        payload: { ...thread, title: "Recovered title" },
-      };
-      yield* events.append({ events: [metadataEvent] });
-      yield* store.apply(metadataEvent);
-      yield* sql`DELETE FROM effect_sql_migrations WHERE migration_id = 70`;
-      assert.deepEqual(
-        (yield* runMigrations()).map(([id]) => id),
-        [70],
-      );
-      const before = yield* search.search({ query: "recoverable canonical token" });
-      assert.deepEqual(
-        before.matches.map((row) => row.threadId),
-        ["task8:legacy"],
-      );
-      assert.deepEqual((yield* search.search({ query: "unprovable history token" })).matches, []);
-      assert.isTrue((yield* maintenance.rebuild).valid);
-      assert.deepEqual(yield* search.search({ query: "recoverable canonical token" }), before);
-      assert.equal((yield* store.getThread(threadId)).title, "Recovered title");
-      assert.deepEqual(
-        (yield* events.read({ afterSequence: cursor }).pipe(Stream.runCollect)).map(
-          (row) => row.event.id,
-        ),
-        [metadataEvent.id],
-      );
-      yield* sql`DELETE FROM legacy_canonical_assistant_messages`;
-      yield* sql`DELETE FROM effect_sql_migrations WHERE migration_id = 70`;
-      yield* runMigrations();
-      assert.deepEqual(yield* search.search({ query: "recoverable canonical token" }), before);
-      // Search must keep using the recovered index when event storage is unavailable.
-      yield* sql`DROP TABLE orchestration_events`;
-      assert.deepEqual(yield* search.search({ query: "recoverable canonical token" }), before);
-      assert.deepEqual((yield* search.search({ query: "unprovable history token" })).matches, []);
-    }).pipe(Effect.provide(ThreadSearch.layer.pipe(Layer.provideMerge(layerLifecycleTest)))),
+        runId: null,
+        parentNodeId: null,
+        rootNodeId,
+        kind: "root_turn",
+        status: "running",
+        countsForRun: false,
+        providerThreadId,
+        providerTurnId,
+        nativeItemRef: null,
+        runtimeRequestId: null,
+        checkpointScopeId: null,
+        startedAt: now,
+        completedAt: null,
+      },
+    });
+    // A native subagent's turn belongs to no run attempt.
+    yield* projections.apply({
+      id: EventId.make(`event:${threadId}:provider-turn`),
+      type: "provider-turn.updated",
+      threadId,
+      nodeId: rootNodeId,
+      driver,
+      occurredAt: now,
+      payload: {
+        id: providerTurnId,
+        providerThreadId,
+        nodeId: rootNodeId,
+        runAttemptId: null,
+        nativeTurnRef: null,
+        ordinal: 1,
+        status: "running",
+        startedAt: now,
+        completedAt: null,
+      },
+    });
+
+    const subagentId = NodeId.make(`node:${parentThreadId}:subagent`);
+    yield* projections.apply({
+      id: EventId.make(`event:${parentThreadId}:subagent`),
+      type: "subagent.updated",
+      threadId: parentThreadId,
+      occurredAt: now,
+      payload: {
+        id: subagentId,
+        threadId: parentThreadId,
+        runId: null,
+        parentNodeId: NodeId.make(`node:${parentThreadId}:root`),
+        origin: "provider_native",
+        createdBy: "agent",
+        driver,
+        providerInstanceId,
+        providerThreadId,
+        childThreadId: threadId,
+        nativeTaskRef: null,
+        title: null,
+        model: null,
+        prompt: "sleep 300",
+        status: "running",
+        result: null,
+        startedAt: now,
+        completedAt: null,
+        updatedAt: now,
+      },
+    });
+
+    yield* recovery.reconcile("startup");
+
+    const projection = yield* projections.getThreadProjection(threadId);
+    assert.deepEqual(
+      {
+        root: projection.nodes.find((node) => node.id === rootNodeId)?.status,
+        providerTurn: projection.providerTurns.find((turn) => turn.id === providerTurnId)?.status,
+      },
+      { root: "cancelled", providerTurn: "cancelled" },
+      "a root startup recovery cancelled left its provider turn running",
+    );
+  }).pipe(Effect.provide(layerRecoveryTest)),
 );

@@ -19,6 +19,7 @@ export function ScrollFrame({
 }) {
   const [frame, setFrame] = useState<HTMLDivElement | null>(null);
   const [scrollable, setScrollable] = useState<HTMLElement | null>(null);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- observes the frame's DOM children with a MutationObserver to find the scrollable child
   useLayoutEffect(() => {
     if (!frame) return;
     const update = () => {

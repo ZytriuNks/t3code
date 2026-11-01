@@ -39,7 +39,7 @@ export const CHAT_TIMELINE_ANCHOR_OFFSET = 24;
 
 export type TimelineScrollMode = "following-end" | "anchoring-new-turn" | "free-scrolling";
 
-export interface TimelineListMeasurementState {
+interface TimelineListMeasurementState {
   readonly data: readonly unknown[];
   readonly scroll: number;
   readonly scrollLength: number;
@@ -95,7 +95,7 @@ export function timelineContentOverflowsViewport(
     return false;
   }
   const lastIndex = state.data.length - 1;
-  // Overflow can use an unmeasured tail's lower bound; anchored-turn metrics need its height.
+  // Overflow can use an unmeasured tail's lower bound.
   const lastTop = state.positionAtIndex(lastIndex);
   const lastBottom =
     getRowBottom(state, lastIndex) ??

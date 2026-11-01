@@ -54,6 +54,7 @@ export function useTextPlaybackResume(
     activeMount = createMount();
     setMount(activeMount);
   }
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- records this playback surface key in the shared mounted-surface registry
   useLayoutEffect(() => {
     ctx.mountedPlaybackSurfaces.add(key);
   }, [ctx.mountedPlaybackSurfaces, key]);

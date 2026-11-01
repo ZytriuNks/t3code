@@ -96,11 +96,10 @@ export function createSmoothLineCadence() {
         pendingCharacters > 0 && pendingLines > 0
           ? pendingCharacters / pendingLines
           : (lineCharacters ?? 1);
-      // A partially received row is the best local measurement, but it can be
-      // much longer than the unread average while a fast stream is already
-      // opening many rows. Let that average shorten the estimate gradually;
-      // the eight-row cap keeps one short-lived partial DOM snapshot from
-      // turning a whole line into an abrupt sprint.
+      // A partially received row is the best local measurement but can be much longer than the
+      // unread average while a fast stream opens many rows. Let that average shorten the estimate
+      // gradually; the eight-row cap keeps a short-lived partial DOM snapshot from turning a
+      // whole line into an abrupt sprint.
       const measuredCharacters = Math.max(1, lineCharacters ?? queueCharacters);
       // Completed rows keep their local length. The caller forecasts an open
       // suffix separately, so later long rows must not delay an authored short row.
@@ -160,11 +159,10 @@ export function estimatePendingLines(
     if (lineStarts[middle]! <= from) low = middle + 1;
     else high = middle;
   }
-  // The exact loop is O(unread authored lines), which made every reservation
-  // re-scan a long answer's tail. For cadence we only need a stable estimate:
-  // authored breaks provide a lower bound and total unread width provides the
-  // automatic-wrap bound. Both are monotonic and preserve the old result for
-  // uniform lines while keeping the work logarithmic.
+  // The exact loop is O(unread authored lines) and re-scanned a long answer's tail on every
+  // reservation. Cadence only needs a stable estimate: authored breaks give a lower bound and
+  // total unread width gives the automatic-wrap bound. Both are monotonic and match the old
+  // result for uniform lines in logarithmic work.
   const authoredLines = lineStarts.length - low + 1;
   const unreadWidth = Math.max(0, length - from) / Math.max(1, columns);
   return Math.max(1, authoredLines, unreadWidth);

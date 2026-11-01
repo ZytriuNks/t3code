@@ -7,12 +7,15 @@ import { PlayIcon, WrapTextIcon } from "lucide-react";
 import { toHtml } from "hast-util-to-html";
 import React, { use, useEffect, useEffectEvent, useRef, useState, type ReactNode } from "react";
 
+import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { getClientSettings } from "../../hooks/useSettings";
 import type { DiffThemeName } from "../../lib/diffRendering";
 import {
   appendPlainCodeTail,
   reuseCompletedHighlightedLines,
   createIncrementalHighlightedDocument,
+  highlightCodeToHast,
+  type HighlightedRoot,
 } from "../../lib/incrementalHighlighting";
 import { LRUCache } from "../../lib/lruCache";
 import { getSyntaxHighlighterPromise } from "../../lib/syntaxHighlighting";
@@ -165,9 +168,19 @@ export function MarkdownCodeBlock({
   historical?: boolean;
   children: ReactNode;
 }) {
-  const [copied, setCopied] = useState(false);
+  const { copyToClipboard, isCopied: copied } = useCopyToClipboard({
+    timeout: 1200,
+    onError: (cause) =>
+      reportMarkdownActionFailure(
+        {
+          operation: "copy-code-block",
+          language,
+          ...(fenceTitle ? { fenceTitle } : {}),
+        },
+        cause,
+      ),
+  });
   const [wrapped, setWrapped] = useState(() => getClientSettings().wordWrap);
-  const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const wrapLabel = wrapped ? "Disable line wrap" : "Wrap lines";
   const copyLabel = copied ? "Copied" : "Copy code";
   const command = code.trim();
@@ -182,43 +195,7 @@ export function MarkdownCodeBlock({
     // make the rendered command differ from what the terminal would receive.
     !/[\p{Cc}\p{Cf}]/u.test(code.slice(0, -1));
 
-  const handleCopy = () => {
-    if (typeof navigator === "undefined" || navigator.clipboard == null) {
-      return;
-    }
-    void navigator.clipboard
-      .writeText(code)
-      .then(() => {
-        if (copiedTimerRef.current != null) {
-          clearTimeout(copiedTimerRef.current);
-        }
-        setCopied(true);
-        copiedTimerRef.current = setTimeout(() => {
-          setCopied(false);
-          copiedTimerRef.current = null;
-        }, 1200);
-      })
-      .catch((cause) => {
-        reportMarkdownActionFailure(
-          {
-            operation: "copy-code-block",
-            language,
-            ...(fenceTitle ? { fenceTitle } : {}),
-          },
-          cause,
-        );
-      });
-  };
-
-  useEffect(
-    () => () => {
-      if (copiedTimerRef.current != null) {
-        clearTimeout(copiedTimerRef.current);
-        copiedTimerRef.current = null;
-      }
-    },
-    [],
-  );
+  const handleCopy = () => copyToClipboard(code);
 
   const copyButton = (
     <Tooltip>
@@ -409,35 +386,36 @@ function UncachedShikiCodeBlock({
         };
   if (currentHighlight !== highlightState) setHighlightState(currentHighlight);
   const incrementalHighlight = currentHighlight.highlight;
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- disposes the incremental Shiki highlighter when it is replaced or the block unmounts
+  useEffect(() => () => incrementalHighlight?.dispose(), [incrementalHighlight]);
   const highlighted = (() => {
-    try {
-      if (incrementalHighlight) return incrementalHighlight(code);
-      return preserveLines
-        ? highlighter.codeToHast(code, { lang: language, theme: themeName })
-        : highlighter.codeToHtml(code, { lang: language, theme: themeName });
-    } catch (error) {
-      // Log highlighting failures for debugging while falling back to plain text
-      console.warn(
-        `Code highlighting failed for language "${language}", falling back to plain text.`,
-        error instanceof Error ? error.message : error,
-      );
-      // If highlighting fails for this language, render as plain text
-      return preserveLines
-        ? highlighter.codeToHast(code, { lang: "text", theme: themeName })
-        : highlighter.codeToHtml(code, { lang: "text", theme: themeName });
-    }
-  })();
-
-  useEffect(() => {
+    const result = (() => {
+      try {
+        if (incrementalHighlight) return incrementalHighlight(code);
+        return preserveLines
+          ? highlightCodeToHast(highlighter, code, language, themeName)
+          : highlighter.codeToHtml(code, { lang: language, theme: themeName });
+      } catch (error) {
+        console.warn(
+          `Code highlighting failed for language "${language}", falling back to plain text.`,
+          error instanceof Error ? error.message : error,
+        );
+        return preserveLines
+          ? highlightCodeToHast(highlighter, code, "text", themeName)
+          : highlighter.codeToHtml(code, { lang: "text", theme: themeName });
+      }
+    })();
+    // A finished block is cached for the next mount; a streaming one is still changing.
     if (!isStreaming) {
-      const highlightedHtml = typeof highlighted === "string" ? highlighted : toHtml(highlighted);
+      const highlightedHtml = typeof result === "string" ? result : toHtml(result);
       highlightedCodeCache.set(
         cacheKey,
         highlightedHtml,
         estimateHighlightedSize(highlightedHtml, code),
       );
     }
-  }, [cacheKey, code, highlighted, isStreaming]);
+    return result;
+  })();
 
   return typeof highlighted === "string" ? (
     <div className="chat-markdown-shiki" dangerouslySetInnerHTML={{ __html: highlighted }} />
@@ -461,7 +439,7 @@ function WorkerShikiCodeBlock({
     code: string;
     language: string;
     theme: DiffThemeName;
-    root: ReturnType<Awaited<ReturnType<typeof getSyntaxHighlighterPromise>>["codeToHast"]>;
+    root: HighlightedRoot;
   }>();
   const sessionRef = useRef<ReturnType<
     ReturnType<typeof getCodeHighlightCoordinator>["open"]
@@ -469,6 +447,7 @@ function WorkerShikiCodeBlock({
   const containerRef = useRef<HTMLDivElement>(null);
   const currentCode = useEffectEvent(() => code);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- opens a worker highlight session for the language and theme, closed on change or unmount
   useEffect(() => {
     const ownerDocument = containerRef.current?.ownerDocument;
     let pending: CodeHighlightResult | undefined;
@@ -544,10 +523,12 @@ function WorkerShikiCodeBlock({
     };
   }, [language, themeName]);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- sends new code to the open worker highlight session
   useEffect(() => {
     sessionRef.current?.update(code);
   }, [code]);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- writes a finished highlight into the module-level HTML cache
   useEffect(() => {
     if (
       isStreaming ||

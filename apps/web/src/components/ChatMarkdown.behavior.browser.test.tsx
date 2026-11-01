@@ -327,19 +327,34 @@ describe("ChatMarkdown streaming", () => {
     await using fixture = setup();
     const { mount } = fixture;
     const highlighter = await getSyntaxHighlighterPromise("typescript");
-    const highlight = vi.spyOn(highlighter, "codeToHast");
+    const tokenized: string[] = [];
+    const codeToTokens = vi.spyOn(highlighter, "codeToTokens");
+    const createStreamTokenizer = highlighter.createStreamTokenizer.bind(highlighter);
+    vi.spyOn(highlighter, "createStreamTokenizer").mockImplementation((...args) => {
+      const tokenizer = createStreamTokenizer(...args);
+      const enqueue = tokenizer.enqueue.bind(tokenizer);
+      vi.spyOn(tokenizer, "enqueue").mockImplementation((chunk) => {
+        tokenized.push(chunk);
+        return enqueue(chunk);
+      });
+      return tokenizer;
+    });
     let renderer: Screen | undefined;
     const text = "```typescript\nconst completed = 1;\nconst current = 2;";
     try {
       await act(async () => {
         renderer = await mount(<ChatMarkdown cwd="/tmp/project" text={text} isStreaming />);
       });
-      expect(highlight).toHaveBeenCalled();
-      highlight.mockClear();
+      expect(tokenized.join("")).toContain("const completed");
+      tokenized.length = 0;
+      codeToTokens.mockClear();
       await act(async () => {
         await renderer!.rerender(<ChatMarkdown cwd="/tmp/project" text={text + "\n```"} />);
       });
-      expect(highlight.mock.calls.every(([code]) => !code.includes("const completed"))).toBe(true);
+      expect(tokenized.every((chunk) => !chunk.includes("const completed"))).toBe(true);
+      expect(codeToTokens.mock.calls.every(([code]) => !code.includes("const completed"))).toBe(
+        true,
+      );
     } finally {
       await act(async () => renderer?.unmount());
       vi.restoreAllMocks();
@@ -350,11 +365,11 @@ describe("ChatMarkdown streaming", () => {
     await using fixture = setup();
     const { mount } = fixture;
     const highlighter = await getSyntaxHighlighterPromise("text");
-    const codeToHast = highlighter.codeToHast.bind(highlighter);
+    const codeToTokens = highlighter.codeToTokens.bind(highlighter);
     let fail = true;
-    vi.spyOn(highlighter, "codeToHast").mockImplementation((...args) => {
+    vi.spyOn(highlighter, "codeToTokens").mockImplementation((...args) => {
       if (fail) throw new Error("Temporary highlighter failure");
-      return codeToHast(...args);
+      return codeToTokens(...args);
     });
     vi.spyOn(console, "error").mockImplementation(() => {});
     vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -396,7 +411,8 @@ describe("ChatMarkdown streaming", () => {
     await using fixture = setup();
     const { mount } = fixture;
     const highlighter = await getSyntaxHighlighterPromise("text");
-    const highlight = vi.spyOn(highlighter, "codeToHast");
+    // The incremental document tokenizes an empty shell once; code goes through the stream tokenizer.
+    const highlight = vi.spyOn(highlighter, "codeToTokens");
     const writeText = vi.fn(async (_text: string) => {});
     fixture.use(
       stubGlobal("navigator", Object.create(navigator, { clipboard: { value: { writeText } } })),
@@ -545,8 +561,18 @@ describe("ChatMarkdown skill chips", () => {
             cwd="/tmp/project"
             text={text}
             skills={[
-              { name: "2spec", displayName: "2Spec" },
-              { name: "20k", displayName: "MoneySkill" },
+              {
+                name: "2spec",
+                displayName: "2Spec",
+                path: "/skills/2spec/SKILL.md",
+                enabled: true,
+              },
+              {
+                name: "20k",
+                displayName: "MoneySkill",
+                path: "/skills/20k/SKILL.md",
+                enabled: true,
+              },
             ]}
           />,
         );
@@ -1315,7 +1341,14 @@ it.each([
   async ({ text, query, count, lineBreaks, user, withTemplateAction }) => {
     await using fixture = setup();
     const { mount } = fixture;
-    const skills = [{ name: "test-t3-app", displayName: "T3 App Testing" }];
+    const skills = [
+      {
+        name: "test-t3-app",
+        displayName: "T3 App Testing",
+        path: "/skills/test-t3-app/SKILL.md",
+        enabled: true,
+      },
+    ];
     const highlights = new Map<string, Set<Range>>();
     fixture.use(
       stubGlobal(

@@ -5,10 +5,8 @@ import * as EffectAcpErrors from "effect-acp/errors";
 
 import {
   applyGrokAcpModelSelection,
-  buildGrokAcpSpawnInput,
   grokAcpRuntimeProcessOwnership,
   grokAcpSpawnArgs,
-  isValidGrokReasoningEffortToken,
   resolveGrokAcpBaseModelId,
 } from "./acpSupport.ts";
 

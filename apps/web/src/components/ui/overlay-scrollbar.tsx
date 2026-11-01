@@ -18,11 +18,10 @@ import {
   type ScrollbarGeometry,
 } from "~/lib/scrollbar-geometry";
 
-/** Visual thumb width. Reads --app-scrollbar-thumb-width, which the lane
- * initialises from the shared --app-scrollbar-width and a host may narrow via
- * the `width` prop. The default must stay equal to --app-scrollbar-width
- * because the virtualized-list fade masks carve out a lane of exactly that
- * width to keep the gradient from dimming the scrollbar.
+/**
+ * Visual thumb width: --app-scrollbar-thumb-width, initialised from --app-scrollbar-width and
+ * narrowable by hosts via the `width` prop. The default must equal --app-scrollbar-width
+ * because the virtualized-list fade masks carve out a lane of exactly that width.
  */
 const THUMB_CLASS = "w-[var(--app-scrollbar-thumb-width)]";
 
@@ -97,14 +96,10 @@ function StepTriangle({ direction }: { direction: StepDirection }) {
   );
 }
 
-/** Custom scrollbar drawn over a scroll container.
- *
- * The native scrollbar is hidden by the host (see the three-part
- * `[-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden`
- * class). Positioning the thumb with `right: 0` rather than insetting it with a
- * transparent border is what lets it sit against the window edge without
- * getting thinner — a border inset can only move where the thumb starts, not
- * free up space on the right.
+/**
+ * Custom scrollbar drawn over a scroll container whose native scrollbar the host hides.
+ * The thumb is positioned with `right: 0` instead of a transparent border inset, so it
+ * sits against the window edge without getting thinner.
  */
 function OverlayScrollbar({
   scrollable,
@@ -136,6 +131,7 @@ function OverlayScrollbar({
   const heldRef = useRef(false);
   const updateCompactRevealRef = useRef<((visible: boolean) => void) | null>(null);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reveals the auto-hide scrollbar from the scroll element's scroll events with a hide timer
   useLayoutEffect(() => {
     if (!autoHide || !scrollable) return;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -152,6 +148,7 @@ function OverlayScrollbar({
     };
   }, [autoHide, scrollable]);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- stops an active hold or drag when the scroll element goes away
   useLayoutEffect(() => {
     if (!scrollable) return;
     return () => {
@@ -160,11 +157,9 @@ function OverlayScrollbar({
     };
   }, [scrollable]);
 
-  // The lane is measured in the effect below, so the element has to exist
-  // before that runs. A ref alone cannot express this: on the first layout
-  // effect the ref is still null, so measuring there would always bail out
-  // and the bar would never appear. Holding the node in state breaks the
-  // cycle — the effect re-runs once it mounts.
+  // The lane is measured in the effect below, so the element must exist before it runs. A ref
+  // is still null on the first layout effect and measuring would bail out forever; holding
+  // the node in state makes the effect re-run once it mounts.
   const laneCallbackRef = useStableCallback((node: HTMLDivElement | null) => {
     laneRef.current = node;
     setLaneElement(node);
@@ -172,6 +167,7 @@ function OverlayScrollbar({
 
   // Re-measure whenever the content resizes. Virtualized lists change content
   // height without the viewport changing, so observe the content element too.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- measures the scroll element, lane and content, observing resize, mutations and window edge changes
   useLayoutEffect(() => {
     if (!scrollable || !laneElement) return;
     const measureWindowEdge = () => {
@@ -284,12 +280,10 @@ function OverlayScrollbar({
     }
   };
 
-  // Holding a triangle scrolls at a steady rate. A timer that re-issued the
-  // same step produced a stutter — a long dead pause, then a series of discrete
-  // jumps — so this advances scrollTop once per frame instead, which reads as
-  // continuous motion. The click step is handled by the host's onStep; this
-  // only takes over once the press is sustained. The pointer may leave the
-  // button while held, so stop on the next pointerup anywhere.
+  // Holding a triangle advances scrollTop once per frame for continuous motion; re-issuing
+  // the same step on a timer stuttered. The click step belongs to the host's onStep; this
+  // takes over once the press is sustained. The pointer may leave the button while held,
+  // so stop on the next pointerup anywhere.
   const startHold = (direction: StepDirection) => {
     stopHoldRef.current?.();
     heldRef.current = false;
@@ -383,11 +377,9 @@ function OverlayScrollbar({
         },
         trackHeight,
         (horizontal ? moveEvent.clientX : moveEvent.clientY) - trackTop,
-        // Where inside the thumb the pointer grabbed it. This must be the
-        // offset from the thumb's top, unchanged since pointerdown —
-        // subtracting it from the pointer position beforehand as well made
-        // the thumb accelerate away from the cursor and come to rest at the
-        // wrong offset, which then read as a jump on the next hover.
+        // Offset of the pointer inside the thumb, unchanged since pointerdown. Subtracting it from
+        // the pointer position beforehand as well made the thumb accelerate away from the cursor
+        // and rest at the wrong offset.
         pointerOffset,
       );
       const offset = horizontal ? scrollable.scrollLeft : scrollable.scrollTop;
@@ -476,11 +468,9 @@ function OverlayScrollbar({
     event.preventDefault();
   };
 
-  // The lane itself is always hit-testable so a hover can reach a bar that is
-  // currently faded out; only its contents fade. That makes the hover branch
-  // load-bearing again, but it is applied to the thumb and triangles below
-  // rather than to the lane, so the lane's own className never changes and
-  // hovering cannot make the track itself jump.
+  // The lane stays hit-testable so a hover can reach a faded-out bar; only its contents fade.
+  // The hover branch is applied to the thumb and triangles, not the lane, so the lane's
+  // className never changes and hovering cannot make the track jump.
   const shown = visible ?? (autoHide ? scrolling : true);
   // Hover never flips React state. Compact bars animate one inherited value
   // for both the thumb and row masks; page bars retain their CSS transition.
@@ -491,6 +481,7 @@ function OverlayScrollbar({
   const ready = geometry !== null;
   const travel = Math.max(1, trackLength - (geometry?.thumbHeight ?? 0));
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- animates the compact reveal on the lane's parent through hover and reduced-motion listeners
   useLayoutEffect(() => {
     const parent = laneElement?.parentElement;
     if (!parent || !laneElement || horizontal || thumbInset !== "gutter") return;
@@ -546,6 +537,7 @@ function OverlayScrollbar({
     };
   }, [laneElement, horizontal, thumbInset]);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- pushes content visibility to the compact reveal animation held in a ref
   useLayoutEffect(() => {
     updateCompactRevealRef.current?.(ready && contentsVisible);
   }, [contentsVisible, ready]);
@@ -553,6 +545,7 @@ function OverlayScrollbar({
   // Row padding varies between menus, virtualizers and model lists. Anchor
   // every fade to the thumb, including selected rows, and spare rows that
   // already leave 3px between their background and the thumb.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- marks scroll rows near the thumb in the DOM, observing scroll, resize and row changes
   useLayoutEffect(() => {
     if (!scrollable || !laneElement || horizontal || thumbInset !== "gutter" || !ready) return;
     let frame: number | undefined;
@@ -645,11 +638,9 @@ function OverlayScrollbar({
           : "right-0 top-[var(--overlay-scrollbar-top)] flex-col bottom-[var(--overlay-scrollbar-bottom)]",
         !ready && "pointer-events-none",
         !horizontal && LANE_CLASS,
-        // The lane stays hit-testable so a hover can reach a bar that is
-        // currently faded out. Code surfaces can supply an opaque background.
-        // Fading the *lane* instead of its contents also multiplied the
-        // children's opacity down, which is why a host-controlled bar could
-        // never be revealed by hovering it.
+        // The lane stays hit-testable so a hover can reach a faded-out bar; code surfaces can supply
+        // an opaque background. Fading the lane itself also multiplied the children's opacity down,
+        // so a host-controlled bar could never be revealed by hovering it.
         className,
       )}
       style={

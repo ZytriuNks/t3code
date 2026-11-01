@@ -120,7 +120,7 @@ describe("restoring V2 settings", () => {
     ["autoExpandThreadDetailsPanel", false, "Automatically expand workspace details"],
     ["hideUnavailableContextMenuItems", true, "Hide unavailable context menu items"],
     ["scratchBaseDirectory", "D:/isolated/scratch", "No-project chats base directory"],
-    ["legacySidebarEnabled", true, "Sidebar (legacy)"],
+    ["legacySidebarEnabled", true, "Sidebar style"],
     ["legacySidebarProjectGuides", false, "Indentation guides"],
     ["legacySidebarThreadStatusDots", true, "Thread status dots"],
     ["legacySidebarHideStatusLabels", true, "Hide thread status labels"],
@@ -181,6 +181,8 @@ describe("restoring V2 settings", () => {
         allRemoteMembersAreDesktopLocal: false,
         allRemoteMembersAreWsl: false,
         remoteEnvironmentLabels: [member.environmentLabel],
+        pinned: false,
+        archived: false,
       };
       let saved: ServerSettings = {
         ...DEFAULT_SERVER_SETTINGS,

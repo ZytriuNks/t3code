@@ -6,7 +6,7 @@ import { readBrowserClientSettings, writeBrowserClientSettings } from "./clientP
 
 let cachedApi: LocalApi | undefined;
 
-function createBrowserLocalApi(): LocalApi {
+export function createLocalApi(): LocalApi {
   return {
     dialogs: {
       pickFolder: async (options) => {
@@ -30,7 +30,7 @@ function createBrowserLocalApi(): LocalApi {
         window.open(url, "_blank", "noopener,noreferrer");
       },
       openSystemSettings: async (pane) => {
-        if (!window.desktopBridge?.openSystemSettings) {
+        if (!window.desktopBridge) {
           throw new Error("Unable to open System Settings.");
         }
         const opened = await window.desktopBridge.openSystemSettings(pane);
@@ -44,14 +44,11 @@ function createBrowserLocalApi(): LocalApi {
         items: readonly ContextMenuItem<T>[],
         position?: { x: number; y: number },
       ): Promise<T | null> => {
-        // Keep application menus in the renderer so they share the same themed
-        // surface and interaction states as dropdown menus in every client.
-        // System-owned menus (editing, links, images) remain handled by the
-        // desktop shell independently of this app menu facade.
+        // App menus render in the renderer to share the themed dropdown surface;
+        // the desktop shell still owns system menus (editing, links, images).
         return showContextMenuFallback(items, position);
       },
-      // The renderer menu needs an explicit dismiss when the state behind it
-      // goes away.
+      // The renderer menu needs dismissal when underlying state disappears.
       close: async () => {
         dismissContextMenu();
       },
@@ -71,10 +68,6 @@ function createBrowserLocalApi(): LocalApi {
       },
     },
   };
-}
-
-export function createLocalApi(): LocalApi {
-  return createBrowserLocalApi();
 }
 
 export function readLocalApi(): LocalApi | undefined {

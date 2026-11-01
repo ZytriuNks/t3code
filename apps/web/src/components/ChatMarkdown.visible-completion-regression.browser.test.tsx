@@ -164,7 +164,6 @@ async function setup() {
             : null
         }
         isWorking={working}
-        activeTurnInProgress={working}
         timelineEntries={[
           ...(options.user
             ? [
@@ -217,7 +216,6 @@ async function setup() {
         onOpenTurnDiff={() => {}}
         onOpenThread={() => {}}
         onForkFromRun={async () => {}}
-        onRollbackCheckpoint={() => {}}
         supportsConversationRollback={false}
         onRevertToTurnCount={() => {}}
         isRevertingCheckpoint={false}

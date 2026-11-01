@@ -179,6 +179,8 @@ export interface EventSinkV2Shape {
         readonly effectTypes: ReadonlyArray<EffectOutbox.OrchestrationEffectRequestV2["type"]>;
         readonly reason: string;
       };
+      /** Like writeWithEffects' updateDelegatedCompletionOnly, for this run's run.updated only. */
+      readonly updateDelegatedCompletionOnlyRunId?: RunId;
     },
   ) => Effect.Effect<
     {
@@ -290,16 +292,13 @@ const layerBase: Layer.Layer<
           Effect.andThen(publishLiveEvents(events)),
         );
 
-    // Transactions commit one at a time, but each writer publishes after its
-    // commit. If a writer is descheduled in between, a later commit reaches
-    // subscribers first, and clients drop any event at or below the newest
-    // sequence they have applied.
+    // Serialize commit and publish; reordered publication makes clients drop earlier sequences.
     const publishLane = yield* Semaphore.make(1);
     const commitThenPublish = <A, E, R>(
       transaction: Effect.Effect<A, E, R>,
       publish: (committed: A) => Effect.Effect<void>,
     ) =>
-      Effect.suspend(() => {
+      Effect.uninterruptibleMask((restore) => {
         let holdsLane = false;
         const takeLane = publishLane.take(1).pipe(
           Effect.andThen(
@@ -309,8 +308,11 @@ const layerBase: Layer.Layer<
           ),
           Effect.uninterruptible,
         );
+        // Cancellation may roll back the transaction's work. Once it commits,
+        // every subscriber must hear about it before this writer can exit.
+        // Otherwise a failed child run can leave its parent's task running.
         return sql
-          .withTransaction(Effect.tap(transaction, () => takeLane))
+          .withTransaction(Effect.tap(restore(transaction), () => takeLane))
           .pipe(
             Effect.tap(publish),
             Effect.ensuring(
@@ -579,6 +581,8 @@ const layerBase: Layer.Layer<
           "thread.unarchive",
           "thread.delete",
           "provider-runtime.reconcile",
+          // Moving a folder into a project re-homes archived threads too; it never revives them.
+          "thread.project.adopt-folder",
         ].includes(input.commandType ?? "")
       ) {
         for (const guard of input.lifecycleGuard.prerequisites ?? []) {
@@ -668,6 +672,28 @@ const layerBase: Layer.Layer<
       return true;
     });
 
+    // The enclosing write or commit span already traces this per-event projection merge.
+    const updateDelegatedCompletionOnly = Effect.fnUntraced(function* (
+      events: ReadonlyArray<OrchestrationV2DomainEvent>,
+      includesRun: (runId: RunId) => boolean,
+    ) {
+      return yield* Effect.forEach(events, (event) =>
+        Effect.gen(function* () {
+          if (event.type !== "run.updated" || !includesRun(event.payload.id)) return event;
+          const { runs } = yield* projectionStore.getThreadRecords(event.threadId, ["runs"], {
+            runIds: [event.payload.id],
+          });
+          const current = runs[0];
+          return current === undefined
+            ? event
+            : {
+                ...event,
+                payload: { ...current, delegatedCompletion: event.payload.delegatedCompletion },
+              };
+        }),
+      );
+    });
+
     const writeEffect = Effect.fn("orchestrationV2.EventSink.write")(function* (
       input: Parameters<EventSinkV2Shape["writeWithEffects"]>[0],
     ) {
@@ -701,26 +727,7 @@ const layerBase: Layer.Layer<
           // Checkpoint capture can finish after a cohort writer reads its parent run.
           // Merge in this transaction so the event log and projection keep that completion.
           const events = input.updateDelegatedCompletionOnly
-            ? yield* Effect.forEach(input.events, (event) =>
-                Effect.gen(function* () {
-                  if (event.type !== "run.updated") return event;
-                  const { runs } = yield* projectionStore.getThreadRecords(
-                    event.threadId,
-                    ["runs"],
-                    { runIds: [event.payload.id] },
-                  );
-                  const current = runs[0];
-                  return current === undefined
-                    ? event
-                    : {
-                        ...event,
-                        payload: {
-                          ...current,
-                          delegatedCompletion: event.payload.delegatedCompletion,
-                        },
-                      };
-                }),
-              )
+            ? yield* updateDelegatedCompletionOnly(input.events, () => true)
             : input.events;
           const normalized = yield* normalizeEvents(
             input.guardPendingUserInputCancellations === true
@@ -959,12 +966,23 @@ const layerBase: Layer.Layer<
             return { ...existing, committed: false as const, cancelledEffectIds: [] };
           }
 
-          const normalized = yield* normalizeEvents(input.events, input);
+          const runId = input.updateDelegatedCompletionOnlyRunId;
+          const normalized = yield* normalizeEvents(
+            runId === undefined
+              ? input.events
+              : yield* updateDelegatedCompletionOnly(input.events, (id) => id === runId),
+            input,
+          );
           const storedEvents = yield* eventStore.append({
             commandId: input.commandId,
             events: normalized,
           });
-          const sequence = storedEvents.at(-1)?.sequence;
+          // A Stop that changes nothing can still queue the stop of its delegated tasks.
+          const sequence =
+            storedEvents.at(-1)?.sequence ??
+            (input.effects.length === 0
+              ? undefined
+              : yield* eventStore.latestSequence({ threadId: input.threadId }));
           if (sequence === undefined) {
             return yield* Effect.die(
               new Error(`Command ${input.commandId} produced no orchestration events.`),

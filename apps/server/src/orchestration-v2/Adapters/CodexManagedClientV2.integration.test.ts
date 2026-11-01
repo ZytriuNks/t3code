@@ -31,6 +31,8 @@ import {
   type CodexAppServerClientFactoryShape,
 } from "./CodexAdapterV2.ts";
 
+const decodeCodexSettings = Schema.decodeEffect(CodexSettings);
+
 it.effect(
   "the production Codex adapter refreshes changed managed credentials before a turn and refuses rotation while busy",
   () =>
@@ -42,7 +44,7 @@ it.effect(
       const bindings: string[] = [];
       const resumes: unknown[] = [];
       const initializations: unknown[] = [];
-      const settings = yield* Schema.decodeEffect(CodexSettings)({});
+      const settings = yield* decodeCodexSettings({});
       const factory: CodexAppServerClientFactoryShape = {
         open: (input) =>
           Effect.gen(function* () {
@@ -85,6 +87,8 @@ it.effect(
                   }),
                 handleUnknownServerRequest: () => Effect.void,
                 handleUnknownServerNotification: () => Effect.void,
+                // The fake app-server stays up for the whole test.
+                awaitTermination: Effect.never,
               }),
             );
             return yield* Effect.service(CodexClient.CodexAppServerClient).pipe(

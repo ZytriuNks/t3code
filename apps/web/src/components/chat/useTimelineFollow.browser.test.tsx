@@ -1,9 +1,10 @@
-import { MessageId, ThreadId } from "@t3tools/contracts";
+import { MessageId } from "@t3tools/contracts";
 import type { LegendListRef } from "@legendapp/list/react";
 import { createRef, useLayoutEffect, useState } from "react";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { act, render, fakeTimers } from "../../../test/render";
-import type { ChatComposerHandle } from "./ChatComposer";
+import type { SmoothScrollHandle } from "../../hooks/useSmoothScroll";
+import { attachTimelineViewport } from "./timelineViewport";
 import { useTimelineFollow } from "./useTimelineFollow";
 
 type Controller = ReturnType<typeof useTimelineFollow>;
@@ -34,15 +35,7 @@ async function setup() {
   };
   const legendListRef = createRef<LegendListRef>();
   legendListRef.current = list as unknown as LegendListRef;
-  const composerRef = createRef<ChatComposerHandle>();
-  const restore = vi.fn();
-  const collapse = vi.fn();
-  composerRef.current = {
-    restoreAfterTimelineReachedEnd: restore,
-    collapseForTimelineScrollKey: collapse,
-  } as unknown as ChatComposerHandle;
-  const smoothScrollRef =
-    createRef<Parameters<typeof useTimelineFollow>[0]["smoothScrollRef"]["current"]>();
+  const smoothScrollRef = createRef<SmoothScrollHandle>();
   const smoothRequest = vi.fn();
   const publication = {
     controller: null as Controller | null,
@@ -61,16 +54,11 @@ async function setup() {
       smoothScrollRef,
       setSmoothEndRequest: smoothRequest,
       smoothOutputEnabled: true,
-      paintOnlyDisplayedTimeline: false,
       prefersReducedMotion: true,
-      setTimelineOverflows: () => {},
       legendListRef,
-      composerRef,
-      composerOverlayElement: null,
       composerTimelineInset: 0,
       routeThreadKey: threadKey,
       activeThreadKey: threadKey,
-      activeThreadId: ThreadId.make("thread"),
       isServerThread: false,
       serverProjection: null,
       threadStatus: "live",
@@ -96,6 +84,13 @@ async function setup() {
   await screen.rerender(<Probe />);
   await act(() => vi.advanceTimersToNextFrame());
   const controller = () => publication.controller!;
+  // Follow hears wheel, key, and scrollbar input through the viewport's navigation signal.
+  const viewport = attachTimelineViewport(scroll);
+  const releaseViewport = controller().attachTimelineViewport(viewport);
+  stack.defer(() => {
+    releaseViewport();
+    viewport.dispose();
+  });
   const wheel = (deltaY: number) =>
     act(() => scroll.dispatchEvent(new WheelEvent("wheel", { deltaY, bubbles: true })));
   const report = (atEnd: boolean) => act(() => controller().onIsAtEndChangeStable(atEnd));
@@ -112,8 +107,7 @@ async function setup() {
     scroll,
     publication,
     threadKey,
-    restore,
-    collapse,
+    viewport,
     smoothRequest,
     wheel,
     report,
@@ -131,27 +125,27 @@ describe("timeline follow entry points", () => {
     expect(f.publication.anchor).toBe("sent");
   });
 
-  it.each([-1, undefined] as const)(
-    "clears stale downward intent on manual detach (%s)",
-    async (direction) => {
+  it.each(["scrollbar", "command"] as const)(
+    "clears stale downward intent on a manual %s detach",
+    async (kind) => {
       await using f = await setup();
       await f.wheel(100);
-      await act(() => f.controller().cancelTimelineLiveFollowForUserNavigationStable(direction));
+      if (kind === "scrollbar")
+        await act(() => f.scroll.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true })));
+      else await act(() => f.viewport.navigate({ releasesFollow: true }));
       await f.report(false);
       await f.report(true);
       await expect.element(f.screen.getByTestId("follow-state")).toHaveTextContent("reading");
     },
   );
 
-  it.each(["wheel", "timeline", "keyboard", "page"] as const)(
+  it.each(["wheel", "keyboard", "page"] as const)(
     "re-arms after deliberate downward %s navigation",
     async (kind) => {
       await using f = await setup();
       await f.detach();
       await f.report(true);
       if (kind === "wheel") await f.wheel(100);
-      else if (kind === "timeline")
-        await act(() => f.controller().cancelTimelineLiveFollowForUserNavigationStable(1));
       else if (kind === "keyboard")
         await act(() =>
           document.body.dispatchEvent(
@@ -159,7 +153,9 @@ describe("timeline follow entry points", () => {
           ),
         );
       else {
+        // Moving the node reports an upward scroll once; it must land before the page key.
         f.scroll.scrollTop = 500;
+        await act(() => f.scroll.dispatchEvent(new Event("scroll")));
         await act(() => f.controller().onComposerPageScrollKeyDownStable("PageDown"));
         await act(() => f.controller().onComposerPageScrollKeyUpStable("PageDown"));
       }
@@ -167,7 +163,6 @@ describe("timeline follow entry points", () => {
       await f.report(true);
       await expect.element(f.screen.getByTestId("follow-state")).toHaveTextContent("following");
       expect(f.publication.anchor).toBeNull();
-      expect(f.restore).toHaveBeenCalled();
     },
   );
 

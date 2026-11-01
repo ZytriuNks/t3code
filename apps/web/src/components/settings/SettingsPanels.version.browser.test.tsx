@@ -61,7 +61,12 @@ vi.mock("./CliCommandSettingsRow", () => ({ CliCommandSettingsRow: () => null })
 vi.mock("./MobileAppSettingsRow", () => ({ MobileAppSettingsRow: () => null }));
 vi.mock("./BackgroundActivitySettings", () => ({ BackgroundActivitySettingsRow: () => null }));
 import { DEFAULT_UNIFIED_SETTINGS } from "@t3tools/contracts";
-import { GeneralSettingsPanel } from "./SettingsPanels";
+import {
+  AboutSettingsPanel,
+  ChatSettingsPanel,
+  DiffsSettingsPanel,
+  GeneralSettingsPanel,
+} from "./SettingsPanels";
 
 const installedState: DesktopUpdateState = {
   enabled: true,
@@ -101,7 +106,16 @@ function setup(getUpdateState?: () => Promise<DesktopUpdateState>) {
   return {
     view: () => (
       <RegistryContext.Provider value={registry}>
+        <AboutSettingsPanel />
+      </RegistryContext.Provider>
+    ),
+    // The titles checked for translation live on these four pages.
+    titlesView: () => (
+      <RegistryContext.Provider value={registry}>
         <GeneralSettingsPanel />
+        <ChatSettingsPanel />
+        <DiffsSettingsPanel />
+        <AboutSettingsPanel />
       </RegistryContext.Provider>
     ),
     emit: (state: DesktopUpdateState) => {
@@ -118,10 +132,10 @@ function setup(getUpdateState?: () => Promise<DesktopUpdateState>) {
 describe("settings app version", () => {
   it("switches general setting titles to Chinese without remounting", async () => {
     using fixture = setup();
-    await using screen = await render(fixture.view());
+    await using screen = await render(fixture.titlesView());
     await expect.element(screen.getByRole("heading", { name: "Project grouping" })).toBeVisible();
     state.language = "zh-CN";
-    await screen.rerender(fixture.view());
+    await screen.rerender(fixture.titlesView());
     for (const name of ["项目分组", "项目排序", "主动面板", "发送快捷键", "开源许可证"]) {
       await expect.element(screen.getByRole("heading", { name, exact: true })).toBeVisible();
     }

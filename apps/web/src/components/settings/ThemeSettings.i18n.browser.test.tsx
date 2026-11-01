@@ -6,7 +6,7 @@ import { page, userEvent } from "vite-plus/test/browser";
 import { act, render } from "../../../test/render";
 import { useI18n } from "../../i18n/I18nProvider";
 import { translate } from "../../i18n/messages";
-import type { ComposerAccessibleCopy } from "../ComposerPromptEditor";
+import type { ComposerAccessibleCopy } from "../ComposerPromptEditorTiptap";
 import { importOpenVsxThemeExtension, searchOpenVsxThemes } from "../../openVsxThemes";
 import {
   CUSTOM_THEMES_STORAGE_KEY,
@@ -40,8 +40,8 @@ vi.mock("../../hooks/useTheme", () => ({
   useRenderedAppearance: () => "dark",
 }));
 vi.mock("@pierre/diffs/ssr", () => ({ preloadPatchFile: async () => [] }));
-vi.mock("../ComposerPromptEditor", () => ({
-  ComposerPromptEditor: ({
+vi.mock("../ComposerPromptEditorTiptap", () => ({
+  ComposerPromptEditorTiptap: ({
     value,
     accessibleCopy: copy,
   }: {
@@ -387,7 +387,9 @@ describe("theme workflow localization", () => {
     ]);
     const onInstalled = vi.fn();
     await using screen = await render(
-      fixture.wrap(<ThemeSearchSection open onInstalled={onInstalled} />),
+      fixture.wrap(
+        <ThemeSearchSection signal={new AbortController().signal} onInstalled={onInstalled} />,
+      ),
     );
     const search = screen.getByRole("searchbox", { name: "搜索 Open VSX 主题", exact: true });
     await search.fill("dracula");

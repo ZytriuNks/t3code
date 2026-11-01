@@ -16,6 +16,7 @@ export function useStreamingMarkdownText(text: string, streaming: boolean) {
   const interval = useRef(MARKDOWN_COMMIT_INTERVAL_MS);
   const append = text.startsWith(buffered);
   if ((!streaming || !append) && text !== buffered) setBuffered(text);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- measures commit cost after layout to pace the next throttled Markdown commit
   useLayoutEffect(() => {
     committedAt.current ??= performance.now();
     if (measuredText.current !== buffered) {
@@ -81,6 +82,7 @@ export function useStreamingMarkdownText(text: string, streaming: boolean) {
       ),
     );
   }, [text, streaming, append, buffered]);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- clears the pending throttled commit timer on unmount
   useLayoutEffect(
     () => () => {
       if (pending.current !== null) clearTimeout(pending.current);

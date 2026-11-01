@@ -599,14 +599,14 @@ it.effect(
         },
       ]);
       assert.equal((yield* outbox.attachmentRetirements(R))[0]?.status, "pending");
-      yield* outbox.claimNext({ workerId: "lost-worker", leaseDurationMs: 1000 });
+      yield* outbox.claimNext({ workerId: "lost-worker" });
       const restarted = yield* EffectOutbox.EffectOutboxV2.pipe(
         Effect.provide(Layer.fresh(EffectOutbox.layer)),
       );
       assert.equal((yield* restarted.attachmentRetirements(R))[0]?.status, "running");
       yield* restarted.reconcileAfterProcessLoss;
       assert.equal((yield* restarted.attachmentRetirements(R))[0]?.status, "pending");
-      yield* restarted.claimNext({ workerId: "new-worker", leaseDurationMs: 1000 });
+      yield* restarted.claimNext({ workerId: "new-worker" });
       yield* restarted.fail({
         effectId: "retirement:restart",
         workerId: "new-worker",

@@ -8,7 +8,6 @@ import {
 import * as DateTime from "effect/DateTime";
 import { useNavigate } from "@tanstack/react-router";
 import { expect, it, vi } from "vite-plus/test";
-import { page } from "vite-plus/test/browser";
 import { act, render } from "../../../test/render";
 import { ThreadRelationshipsPanel } from "./ThreadRelationshipsControl";
 import { SubagentTooltipContent } from "./SubagentTooltipContent";
@@ -27,6 +26,7 @@ const state = vi.hoisted(() => ({
 }));
 vi.mock("@tanstack/react-router", { spy: true });
 vi.mock("../../state/entities", () => ({
+  useQuietThreadShell: () => null,
   useThreadProjection: (ref: { threadId: string } | null) => {
     const projection = state.projection as { thread: { id: string } } | null;
     return { projection: ref && projection?.thread.id === ref.threadId ? projection : null };
@@ -38,10 +38,14 @@ vi.mock("../../state/entities", () => ({
   useProjects: () => state.projects,
 }));
 vi.mock("../../state/environments", () => ({
+  useEnvironment: () => null,
   useEnvironmentProviders: () =>
     new Map(
       [...state.configs].map(([id, value]) => [id, (value as { providers: unknown[] }).providers]),
     ),
+  useEnvironments: () => ({ environments: [] }),
+  usePrimaryEnvironment: () => null,
+  usePrimaryEnvironmentId: () => null,
 }));
 vi.mock("../../lib/archivedThreadsState", () => ({
   useArchivedThreadSnapshots: () => ({ snapshots: state.archived }),
@@ -187,19 +191,17 @@ it("opens an archived child and disables a deleted child despite a stale archive
   };
   const open = vi.fn();
   await using screen = await render(panel("parent", "remote", open));
-  await screen.getByRole("button", { name: /Archived worker/ }).click();
-  expect(open).toHaveBeenCalledExactlyOnceWith("child");
+  await screen.getByRole("button", { name: /Archived worker \d+[hm]/ }).click();
+  expect(open).toHaveBeenCalledExactlyOnceWith("child", true);
   state.shells = [
     { environmentId: "remote", source: { ...child, deletedAt: DateTime.makeUnsafe("2026-10-27") } },
   ];
   await screen.rerender(panel("parent", "remote", open));
-  await expect.element(screen.getByRole("button", { name: /Archived worker/ })).toBeDisabled();
-  await screen.getByRole("button", { name: /Archived worker/ }).hover();
   await expect
-    .element(page.getByText("This related thread is unavailable", { exact: true }))
-    .toBeVisible();
+    .element(screen.getByRole("button", { name: /Archived worker/ }).first())
+    .toBeDisabled();
   expect(
-    screen.getByRole("button", { name: /Stop|Archive|Unarchive|Delete/ }).elements(),
+    screen.getByRole("button", { name: /Stop subagent|Stop workflow/ }).elements(),
   ).toHaveLength(0);
   expect(open).toHaveBeenCalledTimes(1);
 });
@@ -288,6 +290,15 @@ it("waits for workflow stop acknowledgement and reports a rejected stop", async 
         title: "Coordinator chat",
         lineage: { parentThreadId: "parent", relationshipToParent: "subagent" },
         activityRunStatus: "waiting",
+      },
+    },
+    {
+      environmentId: "remote",
+      source: {
+        id: "worker-chat",
+        title: "Worker",
+        lineage: { parentThreadId: "parent", relationshipToParent: "subagent" },
+        activityRunStatus: "running",
       },
     },
   ];
@@ -603,7 +614,7 @@ it("groups and counts workflows by the workflow status rather than coordinator a
       threadId={ThreadId.make("parent")}
     />,
   );
-  await expect.element(screen.getByRole("heading", { name: "Lineage", exact: true })).toBeVisible();
+  await expect.element(screen.getByRole("region", { name: "Lineage", exact: true })).toBeVisible();
   await expect
     .element(screen.getByRole("button", { name: "Open Checker chat", exact: true }))
     .not.toBeInTheDocument();
@@ -732,6 +743,16 @@ it("refreshes settled child details and pages previous agents without losing the
     ],
   };
   state.projection = projection;
+  state.shells = [
+    {
+      environmentId: "test",
+      source: {
+        id: "child-1",
+        title: "Checker",
+        lineage: { parentThreadId: "parent", relationshipToParent: "subagent" },
+      },
+    },
+  ];
   const panel = (
     <ThreadRelationshipsPanel
       environmentId={EnvironmentId.make("test")}

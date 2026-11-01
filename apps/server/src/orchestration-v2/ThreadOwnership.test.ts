@@ -76,11 +76,8 @@ const seed = Effect.fn("test.seedOwnership")(function* (
 });
 
 const layerSql = ProjectionStore.layer.pipe(Layer.provide(SqlitePersistence.layerMemory));
-describe.each([
-  ["SQLite", layerSql],
-  ["memory", ProjectionStore.layerMemory],
-] as const)("ThreadOwnership %s", (_name, storeLayer) => {
-  const layerTest = ThreadOwnership.layer.pipe(Layer.provideMerge(storeLayer));
+describe("ThreadOwnership SQLite", () => {
+  const layerTest = ThreadOwnership.layer.pipe(Layer.provideMerge(layerSql));
   it.effect("resolves only direct subagent ownership, crossing deleted nodes for delete", () =>
     Effect.gen(function* () {
       yield* seed([
@@ -215,7 +212,7 @@ describe.each([
 });
 
 const layerLocks = ThreadOwnership.layer.pipe(
-  Layer.provide(ProjectionStore.layerMemory),
+  Layer.provide(layerSql),
   Layer.provideMerge(ThreadCommandExecutor.layer),
 );
 

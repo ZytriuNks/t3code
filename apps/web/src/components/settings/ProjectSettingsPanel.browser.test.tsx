@@ -1,4 +1,4 @@
-import { RegistryContext } from "@effect/atom-react";
+import { RegistryContext, useAtomValue } from "@effect/atom-react";
 import type {
   DeleteProjectInput,
   UpdateProjectInput,
@@ -6,36 +6,34 @@ import type {
 import {
   AuthOrchestrationOperateScope,
   AuthSettingsWriteScope,
+  DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
   ProjectId,
-  ProviderDriverKind,
   ProviderInstanceId,
-  sessionGrantsScope,
   type AuthEnvironmentScope,
   type AuthSessionState,
-  type ResolvedKeybindingsConfig,
-  type ServerProvider,
 } from "@t3tools/contracts";
-import { DEFAULT_CLIENT_SETTINGS } from "@t3tools/contracts/settings";
+import { DEFAULT_CLIENT_SETTINGS, type LanguagePreference } from "@t3tools/contracts/settings";
 import { DEFAULT_RESOLVED_KEYBINDINGS } from "@t3tools/shared/keybindings";
+import {
+  createMemoryHistory,
+  createRootRoute,
+  createRoute,
+  createRouter,
+  RouterProvider,
+} from "@tanstack/react-router";
 import * as Cause from "effect/Cause";
-import * as Option from "effect/Option";
-import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
+import { AsyncResult, Atom } from "effect/reactivity";
 import { describe, expect, it, vi } from "vite-plus/test";
-import { act, render } from "../../../test/render";
-import { useComposerDraftStore } from "../../composerDraftStore";
-import { ensureLocalApi } from "../../localApi";
-import "~/index.css";
+import { page, userEvent } from "vite-plus/test/browser";
+
+import { act, render, type Screen } from "../../../test/render";
 import type { Project } from "../../types";
+
 type SessionResult = AsyncResult.AsyncResult<AuthSessionState, Error>;
-const languageState = vi.hoisted(() => ({ current: "en" as "en" | "zh-CN" }));
 const state = vi.hoisted(() => ({
-  registry: null as AtomRegistry.AtomRegistry | null,
   sessions: new Map<EnvironmentId, Atom.Writable<SessionResult>>(),
-  providers: null as Atom.Atom<ReadonlyArray<ServerProvider>> | null,
-  config: null as Atom.Atom<{ keybindings: ResolvedKeybindingsConfig }> | null,
-  editable: null as Atom.Atom<ReadonlySet<EnvironmentId>> | null,
-  locale: null as Atom.Writable<"en" | "zh-CN"> | null,
+  language: null as Atom.Writable<LanguagePreference> | null,
   projects: [] as Project[],
   update:
     vi.fn<
@@ -52,49 +50,102 @@ const state = vi.hoisted(() => ({
       }) => Promise<AsyncResult.Success<void>>
     >(),
   confirm: vi.fn<(message: string) => Promise<boolean>>(),
-  updateSettings: vi.fn(),
-  upsertKeybinding: vi.fn(),
-  removeKeybinding: vi.fn(),
-  updateClientSettings: vi.fn(),
   releaseUploads: vi.fn(),
   clearDraft: vi.fn(),
-  copy: vi.fn(),
-  navigate: vi.fn(),
+  toast: vi.fn(),
 }));
 
-vi.mock("../../i18n/I18nProvider", { spy: true });
-vi.mock("../../state/session", { spy: true });
-vi.mock("../../state/environments", { spy: true });
-vi.mock("../../state/entities", { spy: true });
-vi.mock("../../state/use-orchestration-command", { spy: true });
-vi.mock("../../hooks/useSettings", { spy: true });
-vi.mock("../../lib/composerDraftUploads", { spy: true });
-import { useAtomValue } from "@effect/atom-react";
-import { useI18n } from "../../i18n/I18nProvider";
-import { translate } from "../../i18n/messages";
-import { readEnvironmentScope, useEnvironmentsWithScope } from "../../state/session";
-import { useEnvironments, usePrimaryEnvironmentId } from "../../state/environments";
-import { useProjects, useThreadShells, waitForProjectRemoval } from "../../state/entities";
-import { useOrchestrationCommand } from "../../state/use-orchestration-command";
-import { projectEnvironment } from "../../state/projects";
-import { useClientSettings } from "../../hooks/useSettings";
-import { releaseProjectDraftUploads } from "../../lib/composerDraftUploads";
-vi.mock("./ProjectDefaultsSettings", () => ({ ProjectDefaultsSettings: () => null }));
-vi.mock("./ProjectActionsSettings", () => ({ ProjectActionsSettings: () => null }));
-vi.mock("./ProjectFaviconPickerDialog", () => ({
-  canPickExternalProjectFavicon: () => false,
-  ProjectFaviconPickerDialog: ({
-    open,
-    onSelect,
-  }: {
-    open: boolean;
-    onSelect: (path: string) => void;
-  }) =>
-    open ? <button onClick={() => onSelect("/work/icon.png")}>Select fixture icon</button> : null,
+// Session grants come from the server; each test drives them through these atoms.
+vi.mock(import("@t3tools/client-runtime/state/session"), async (original) => {
+  const actual = await original();
+  return {
+    ...actual,
+    createEnvironmentSessionAtoms: ((
+      ...args: Parameters<typeof actual.createEnvironmentSessionAtoms>
+    ) => ({
+      ...actual.createEnvironmentSessionAtoms(...args),
+      sessionStateAtom: (id: EnvironmentId) => state.sessions.get(id)!,
+    })) as typeof actual.createEnvironmentSessionAtoms,
+  };
+});
+vi.mock(import("~/state/environments"), async (original) => ({
+  ...(await original()),
+  useEnvironments: (() => ({ environments })) as never,
+  readEnvironment: ((id: EnvironmentId) =>
+    environments.find((environment) => environment.environmentId === id) ?? null) as never,
+  usePrimaryEnvironmentId: () => primaryId,
 }));
-vi.mock("./ProjectIconPickerDialog", () => ({ ProjectIconPickerDialog: () => null }));
+vi.mock(import("~/state/entities"), async (original) => ({
+  ...(await original()),
+  useProjects: (() => state.projects) as never,
+  useThreadShells: () => [],
+  useServerConfigs: (() =>
+    new Map(
+      environments.map((environment) => [environment.environmentId, environment.serverConfig]),
+    )) as never,
+  waitForProjectRemoval: async () => true,
+}));
+vi.mock(import("~/state/projects"), async (original) => {
+  const actual = await original();
+  return {
+    ...actual,
+    projectEnvironment: {
+      ...actual.projectEnvironment,
+      update: "update",
+      delete: "delete",
+    } as unknown as typeof actual.projectEnvironment,
+  };
+});
+vi.mock(import("~/state/use-atom-command"), async (original) => ({
+  ...(await original()),
+  useAtomCommand: ((command: "update" | "delete") => state[command]) as never,
+}));
+vi.mock(import("~/hooks/useSettings"), async (original) => ({
+  ...(await original()),
+  // The language preference is an atom so a test can switch locales while mounted.
+  useClientSettings: ((selector?: (settings: typeof DEFAULT_CLIENT_SETTINGS) => unknown) => {
+    const settings = { ...DEFAULT_CLIENT_SETTINGS, language: useAtomValue(state.language!) };
+    return selector ? selector(settings) : settings;
+  }) as never,
+}));
+vi.mock(import("~/localApi"), async (original) => ({
+  ...(await original()),
+  readLocalApi: (() => ({ dialogs: { confirm: state.confirm } })) as never,
+}));
+vi.mock(import("~/lib/composerDraftUploads"), async (original) => ({
+  ...(await original()),
+  releaseProjectDraftUploads: state.releaseUploads,
+}));
+// No toaster is mounted in these tests; the guard's error toast is read at this seam.
+vi.mock(import("../ui/toast"), async (original) => {
+  const actual = await original();
+  return { ...actual, toastManager: { ...actual.toastManager, add: state.toast } };
+});
+// These sections have separate data sources and their own tests.
+vi.mock(import("./ProjectDefaultsSettings"), async (original) => ({
+  ...(await original()),
+  ProjectDefaultsSettings: (() => null) as never,
+}));
+vi.mock(import("./ProjectActionsSettings"), async (original) => ({
+  ...(await original()),
+  ProjectActionsSettings: (() => null) as never,
+}));
+
+vi.mock(import("../files/projectFilesQueryState"), async (original) => ({
+  ...(await original()),
+  getProjectFileQueryAtom: () => missingProjectFile,
+}));
+
+import { useComposerDraftStore } from "../../composerDraftStore";
+import { I18nProvider } from "../../i18n/I18nProvider";
+import { appAtomRegistry } from "../../rpc/atomRegistry";
 import { buildSidebarProjectSnapshots } from "../../sidebarProjectGrouping";
 import { ProjectSettingsPanel } from "./ProjectSettingsPanel";
+import { ProjectsSettings } from "./ProjectsSettings";
+import { SettingsScopeProvider } from "./SettingsScopeContext";
+import { validateSettingsScopeSearch, type SettingsScopeSearch } from "./settingsScope";
+import { retainSettingsScope, validateSettingsRouteSearch } from "./settingsScopeNavigation";
+
 const primaryId = EnvironmentId.make("primary");
 const remoteId = EnvironmentId.make("remote");
 const instanceId = ProviderInstanceId.make("codex");
@@ -102,7 +153,11 @@ const environments = [primaryId, remoteId].map((environmentId) => ({
   environmentId,
   label: environmentId,
   connection: { phase: "connected" },
-  serverConfig: { keybindings: DEFAULT_RESOLVED_KEYBINDINGS },
+  serverConfig: {
+    keybindings: DEFAULT_RESOLVED_KEYBINDINGS,
+    settings: DEFAULT_SERVER_SETTINGS,
+    environment: { platform: { machine: "server" }, capabilities: { projectOrganization: true } },
+  },
 }));
 const session = (scopes: ReadonlyArray<AuthEnvironmentScope>): AuthSessionState => ({
   authenticated: true,
@@ -115,6 +170,7 @@ const session = (scopes: ReadonlyArray<AuthEnvironmentScope>): AuthSessionState 
   },
 });
 const writable = () => AsyncResult.success(session([AuthOrchestrationOperateScope]));
+const missingProjectFile = Atom.make(AsyncResult.initial<never, never>());
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -126,27 +182,10 @@ function deferred<T>() {
 
 function setup() {
   vi.clearAllMocks();
-  languageState.current = "en";
-  const registry = AtomRegistry.make();
-  state.registry = registry;
-  state.locale = Atom.make<"en" | "zh-CN">("en");
+  state.language = Atom.make<LanguagePreference>("en").pipe(Atom.keepAlive);
   state.sessions.clear();
   for (const id of [primaryId, remoteId])
     state.sessions.set(id, Atom.make<SessionResult>(writable()).pipe(Atom.keepAlive));
-  state.editable = Atom.make(
-    (get) =>
-      new Set(
-        [primaryId, remoteId].filter((id) => {
-          const result = get(state.sessions.get(id)!);
-          const value = Option.getOrNull(AsyncResult.value(result));
-          return (
-            result._tag !== "Failure" &&
-            value !== null &&
-            sessionGrantsScope(value, AuthOrchestrationOperateScope)
-          );
-        }),
-      ),
-  );
   state.projects = [primaryId, remoteId].map((environmentId) => ({
     id: ProjectId.make(`project-${environmentId}`),
     environmentId,
@@ -165,22 +204,6 @@ function setup() {
     updatedAt: "2026-01-01T00:00:00.000Z",
     scripts: [],
   }));
-  state.providers = Atom.make<ReadonlyArray<ServerProvider>>([
-    {
-      instanceId,
-      driver: ProviderDriverKind.make("codex"),
-      enabled: true,
-      installed: true,
-      version: null,
-      status: "ready",
-      auth: { status: "authenticated" },
-      checkedAt: "2026-01-01T00:00:00.000Z",
-      models: [],
-      slashCommands: [],
-      skills: [],
-    },
-  ]);
-  state.config = Atom.make({ keybindings: DEFAULT_RESOLVED_KEYBINDINGS });
   state.update.mockImplementation(async ({ environmentId, input }) => {
     const { projectId, ...updates } = input;
     const patch = Object.fromEntries(
@@ -194,162 +217,274 @@ function setup() {
     return AsyncResult.success(undefined);
   });
   state.delete.mockResolvedValue(AsyncResult.success(undefined));
-  state.updateSettings.mockResolvedValue(AsyncResult.success(undefined));
   state.confirm.mockResolvedValue(true);
-  vi.mocked(useI18n).mockImplementation(function useTestI18n() {
-    const language = useAtomValue(state.locale!);
-    return { language, preference: language, t: (key, values) => translate(language, key, values) };
-  });
-  vi.mocked(useEnvironmentsWithScope).mockImplementation(() => useAtomValue(state.editable!));
-  vi.mocked(readEnvironmentScope).mockImplementation((id, scope) => {
-    const result = registry.get(state.sessions.get(id)!);
-    const value = Option.getOrNull(AsyncResult.value(result));
-    return result._tag !== "Failure" && value !== null && sessionGrantsScope(value, scope);
-  });
-  vi.mocked(useEnvironments).mockReturnValue({ environments } as never);
-  vi.mocked(usePrimaryEnvironmentId).mockReturnValue(primaryId);
-  vi.mocked(useProjects).mockImplementation(() => state.projects);
-  vi.mocked(useThreadShells).mockReturnValue([]);
-  vi.mocked(waitForProjectRemoval).mockResolvedValue(true);
-  vi.mocked(useOrchestrationCommand).mockImplementation(((command: unknown) =>
-    command === projectEnvironment.update ? state.update : state.delete) as never);
-  vi.mocked(useClientSettings).mockImplementation(((
-    select: (settings: typeof DEFAULT_CLIENT_SETTINGS) => unknown,
-  ) => select(DEFAULT_CLIENT_SETTINGS)) as never);
-  vi.mocked(releaseProjectDraftUploads).mockImplementation(state.releaseUploads);
-  const clearDraft = vi
-    .spyOn(useComposerDraftStore.getState(), "clearProjectDraftThreadId")
-    .mockImplementation(state.clearDraft);
-  const confirm = vi.spyOn(ensureLocalApi().dialogs, "confirm").mockImplementation(state.confirm);
-  return {
-    [Symbol.dispose]() {
-      confirm.mockRestore();
-      clearDraft.mockRestore();
-      registry.dispose();
-      vi.resetAllMocks();
-    },
-  };
+  useComposerDraftStore.setState({ clearProjectDraftThreadId: state.clearDraft });
 }
-function group() {
+
+function projectKey() {
   return buildSidebarProjectSnapshots({
     projects: state.projects,
     settings: DEFAULT_CLIENT_SETTINGS,
     primaryEnvironmentId: primaryId,
     resolveEnvironmentLabel: (id) => id,
-  })[0]!;
-}
-const view = () => (
-  <RegistryContext.Provider value={state.registry!}>
-    <ProjectSettingsPanel projectKey={group().projectKey} />
-  </RegistryContext.Provider>
-);
-const grant = async (id: EnvironmentId, result: SessionResult) =>
-  act(() => state.registry!.set(state.sessions.get(id)!, result));
-async function rename(screen: Awaited<ReturnType<typeof render>>) {
-  await screen.getByRole("textbox", { name: "Project name" }).fill("Renamed");
-  await screen.getByRole("button", { name: "Choose file", exact: true }).click();
+  })[0]!.projectKey;
 }
 
-describe("project settings", () => {
+async function mountPanel(search: Omit<SettingsScopeSearch, "project"> = {}) {
+  const key = projectKey();
+  const rootRoute = createRootRoute();
+  const settingsRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "settings",
+    validateSearch: validateSettingsRouteSearch,
+    search: { middlewares: [retainSettingsScope] },
+  });
+  const projectsRoute = createRoute({
+    getParentRoute: () => settingsRoute,
+    path: "projects",
+    component: () => (
+      <ProjectSettingsPanel
+        projectKey={key}
+        environmentId={search.machine ? EnvironmentId.make(search.machine) : null}
+        checkoutKey={search.checkout ?? null}
+      />
+    ),
+  });
+  const query = new URLSearchParams({ project: key });
+  for (const [name, value] of Object.entries(search)) {
+    if (value !== undefined) query.set(name, value);
+  }
+  const router = createRouter({
+    routeTree: rootRoute.addChildren([settingsRoute.addChildren([projectsRoute])]),
+    history: createMemoryHistory({ initialEntries: [`/settings/projects?${query}`] }),
+  });
+  await router.load();
+  await using stack = new AsyncDisposableStack();
+  const screen = stack.use(
+    // The panel's own route tree validates settings search params, which the default router lacks.
+    await render(
+      <RegistryContext.Provider value={appAtomRegistry}>
+        <I18nProvider>
+          <RouterProvider router={router} />
+        </I18nProvider>
+      </RegistryContext.Provider>,
+      { router: false },
+    ),
+  );
+  await vi.waitFor(() => expect(nameInput(screen)).not.toBeNull());
+  stack.move();
+  return { ...screen, router };
+}
+
+async function mountSettings(search: SettingsScopeSearch) {
+  const searchParams = new URLSearchParams(
+    Object.entries(search).flatMap(([key, value]) => (value === undefined ? [] : [[key, value]])),
+  );
+  const route = createRootRoute({
+    validateSearch: validateSettingsScopeSearch,
+    component: () => (
+      <SettingsScopeProvider
+        search={route.useSearch()}
+        onChange={(next) => void router.navigate({ to: "/settings/projects", search: () => next })}
+      >
+        <ProjectsSettings />
+      </SettingsScopeProvider>
+    ),
+  });
+  const router = createRouter({
+    routeTree: route,
+    history: createMemoryHistory({
+      initialEntries: [`/settings/projects?${searchParams.toString()}`],
+    }),
+  });
+  await router.load();
+  // The settings route tree above validates scope search params, which the default router lacks.
+  const screen = await render(
+    <RegistryContext.Provider value={appAtomRegistry}>
+      <I18nProvider>
+        <RouterProvider router={router} />
+      </I18nProvider>
+    </RegistryContext.Provider>,
+    { router: false },
+  );
+  return { ...screen, router };
+}
+
+const nameInput = (screen: Screen) =>
+  screen.container.querySelector<HTMLInputElement>('[aria-label="Project name"]')!;
+const chooseFaviconFile = (screen: Screen) =>
+  screen.container.querySelector<HTMLButtonElement>('[aria-label="Choose file"]')!;
+const removeCheckout = (screen: Screen, root: string) =>
+  screen.container.querySelector<HTMLButtonElement>(`[aria-label="Remove checkout ${root}"]`)!;
+const removeAll = (screen: Screen) =>
+  [...screen.container.querySelectorAll("button")].find((button) =>
+    button.textContent?.includes("Remove all entries"),
+  )!;
+
+async function grant(id: EnvironmentId, result: SessionResult) {
+  await act(async () => appAtomRegistry.set(state.sessions.get(id)!, result));
+}
+
+async function rename(screen: Screen, title: string) {
+  await userEvent.fill(nameInput(screen), title);
+  await userEvent.keyboard("{Enter}");
+}
+
+// The recheck reports the denial by toast; seeing it proves the recheck ran.
+async function expectProjectAccessDeniedToast(title: string) {
+  await vi.waitFor(() =>
+    expect(state.toast).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "error",
+        title,
+        description: "This connection cannot change projects in remote.",
+      }),
+    ),
+  );
+  expect(state.toast).toHaveBeenCalledOnce();
+}
+
+describe("project settings localization", () => {
   it("switches project icon controls and removal confirmation to Chinese", async () => {
-    using _fixture = setup();
-    await using screen = await render(view());
-    await expect.element(screen.getByRole("button", { name: "Choose project icon" })).toBeVisible();
-    await act(() => state.registry!.set(state.locale!, "zh-CN"));
-    await screen.rerender(view());
-    await expect.element(screen.getByRole("button", { name: "选择项目图标" })).toBeVisible();
-    await expect
-      .element(screen.getByRole("button", { name: "选择文件", exact: true }))
-      .toBeVisible();
-    await screen.getByRole("button", { name: "移除所有条目", exact: true }).click();
-    expect(state.confirm).toHaveBeenCalledOnce();
+    setup();
+    await using _screen = await mountPanel();
+    await expect.element(page.getByRole("button", { name: "Choose project icon" })).toBeVisible();
+
+    await act(async () => appAtomRegistry.set(state.language!, "zh-CN"));
+    await expect.element(page.getByRole("button", { name: "选择项目图标" })).toBeVisible();
+    await expect.element(page.getByRole("button", { name: "选择文件", exact: true })).toBeVisible();
+    await userEvent.click(page.getByRole("button", { name: "移除所有条目", exact: true }));
+    await vi.waitFor(() => expect(state.confirm).toHaveBeenCalledOnce());
     expect(state.confirm.mock.calls[0]![0]).toContain("要移除项目");
     expect(state.confirm.mock.calls[0]![0]).not.toContain("Remove project");
   });
-  it("preflights every member before any shared field update", async () => {
-    using _fixture = setup();
-    await grant(remoteId, AsyncResult.success(session([AuthSettingsWriteScope])));
-    await using screen = await render(view());
-    await expect.element(screen.getByRole("textbox", { name: "Project name" })).toBeDisabled();
-    await expect
-      .element(screen.getByRole("button", { name: "Choose file", exact: true }))
-      .toBeDisabled();
-    await expect
-      .element(screen.getByRole("button", { name: "Remove all entries", exact: true }))
-      .toBeDisabled();
-    expect(state.update).not.toHaveBeenCalled();
-    expect(state.projects.every((project) => project.title === "Shared repo")).toBe(true);
-  });
-  it("updates every member with project access without settings access", async () => {
-    using _fixture = setup();
-    await using screen = await render(view());
-    await rename(screen);
+});
+
+describe("project organization", () => {
+  it("archives the checkout on every machine while one machine is picked", async () => {
+    setup();
+    await using _screen = await mountPanel({ machine: primaryId });
+    await userEvent.click(page.getByRole("button", { name: "Archive" }));
     await vi.waitFor(() => expect(state.update).toHaveBeenCalledTimes(2));
+    expect(
+      state.update.mock.calls.map(([request]) => [request.environmentId, request.input.archived]),
+    ).toEqual([
+      [primaryId, true],
+      [remoteId, true],
+    ]);
+  });
+});
+
+describe("project settings permissions", () => {
+  it("disables shared edits when any member lacks project access", async () => {
+    setup();
+    await grant(remoteId, AsyncResult.success(session([AuthSettingsWriteScope])));
+    await using screen = await mountPanel();
+
+    expect(nameInput(screen).disabled).toBe(true);
+    expect(chooseFaviconFile(screen).disabled).toBe(true);
+    expect(removeAll(screen).disabled).toBe(true);
+    expect(screen.container.textContent).toContain(
+      "Shared settings require permission to change every checkout in this group.",
+    );
+    expect(state.update).not.toHaveBeenCalled();
+  });
+
+  it("renames every member when all have project access without settings access", async () => {
+    setup();
+    await using screen = await mountPanel();
+    await rename(screen, "Renamed");
     expect(state.update.mock.calls.map(([request]) => request.environmentId)).toEqual([
       primaryId,
       remoteId,
     ]);
-    expect(state.projects.map((project) => project.title)).toEqual(["Renamed", "Renamed"]);
+    expect(nameInput(screen).value).toBe("Renamed");
   });
-  it("stops before the next member when permission is revoked during an earlier update", async () => {
-    using _fixture = setup();
-    const first = deferred<AsyncResult.Success<void>>();
-    state.update.mockReturnValueOnce(first.promise);
-    await using screen = await render(view());
-    await rename(screen);
+
+  it("stops before the next member if its grant is revoked during an earlier update", async () => {
+    setup();
+    const firstUpdate = deferred<AsyncResult.Success<void>>();
+    state.update.mockReturnValueOnce(firstUpdate.promise);
+    await using screen = await mountPanel();
+    await rename(screen, "Renamed");
     expect(state.update).toHaveBeenCalledOnce();
+
     await grant(remoteId, AsyncResult.success(session([])));
-    await act(() => first.resolve(AsyncResult.success(undefined)));
+    await act(async () => {
+      firstUpdate.resolve(AsyncResult.success(undefined));
+      await firstUpdate.promise;
+    });
+    await expectProjectAccessDeniedToast("Failed to rename project");
     expect(state.update).toHaveBeenCalledOnce();
     expect(state.update.mock.calls[0]![0].environmentId).toBe(primaryId);
   });
-  it("permits removing a writable checkout while denying removal of a mixed group", async () => {
-    using _fixture = setup();
+
+  it("disables removal for a checkout whose project grant is missing", async () => {
+    setup();
     await grant(remoteId, AsyncResult.success(session([])));
-    await using screen = await render(view());
-    await expect
-      .element(screen.getByRole("button", { name: "Remove checkout /work/remote" }))
-      .toBeDisabled();
-    await expect
-      .element(screen.getByRole("button", { name: "Remove all entries", exact: true }))
-      .toBeDisabled();
-    expect(state.confirm).not.toHaveBeenCalled();
-    await screen.getByRole("button", { name: "Remove checkout /work/primary" }).click();
-    await vi.waitFor(() => expect(state.clearDraft).toHaveBeenCalledOnce());
-    expect(state.delete).toHaveBeenCalledExactlyOnceWith({
+    await using screen = await mountPanel();
+    expect(removeCheckout(screen, "/work/remote").disabled).toBe(true);
+    expect(removeCheckout(screen, "/work/primary").disabled).toBe(false);
+  });
+
+  it("removes a writable checkout while removal of the mixed group stays denied", async () => {
+    setup();
+    await grant(remoteId, AsyncResult.success(session([])));
+    await using screen = await mountPanel();
+    const initialHref = screen.router.state.location.href;
+    expect(removeAll(screen).disabled).toBe(true);
+
+    await userEvent.click(removeCheckout(screen, "/work/primary"));
+    await vi.waitFor(() => expect(state.delete).toHaveBeenCalledOnce());
+    expect(state.delete).toHaveBeenCalledWith({
       environmentId: primaryId,
       input: { projectId: state.projects[0]!.id, force: true },
     });
-    expect(state.releaseUploads).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(state.releaseUploads).toHaveBeenCalledOnce());
+    expect(state.clearDraft).toHaveBeenCalledOnce();
+    expect(screen.router.state.location.href).toBe(initialHref);
   });
-  it("rechecks removal targets after confirmation before deleting or clearing drafts", async () => {
-    using _fixture = setup();
+
+  it("rechecks every removal target after confirmation before deleting or clearing drafts", async () => {
+    setup();
     const confirmed = deferred<boolean>();
     state.confirm.mockReturnValueOnce(confirmed.promise);
-    await using screen = await render(view());
-    await screen.getByRole("button", { name: "Remove all entries", exact: true }).click();
+    await using screen = await mountPanel();
+    await userEvent.click(removeAll(screen));
     expect(state.confirm).toHaveBeenCalledOnce();
+
     await grant(remoteId, AsyncResult.success(session([])));
-    await act(() => confirmed.resolve(true));
+    await act(async () => {
+      confirmed.resolve(true);
+      await confirmed.promise;
+    });
+    await expectProjectAccessDeniedToast("Failed to remove project");
     expect(state.delete).not.toHaveBeenCalled();
     expect(state.releaseUploads).not.toHaveBeenCalled();
     expect(state.clearDraft).not.toHaveBeenCalled();
   });
-  it("reacts to revoked and restored permissions and guards a pending blur", async () => {
-    using _fixture = setup();
-    await using screen = await render(view());
-    const input = screen.getByRole("textbox", { name: "Project name" });
-    await input.fill("Renamed");
+
+  it("does not save an edit whose grant was revoked mid-edit, and recovers when restored", async () => {
+    setup();
+    await using screen = await mountPanel();
+    await userEvent.fill(nameInput(screen), "Renamed");
     await grant(remoteId, AsyncResult.success(session([])));
-    await act(() => input.element().dispatchEvent(new FocusEvent("focusout", { bubbles: true })));
+    // Chromium takes focus off a newly disabled input without firing blur. Send the
+    // focusout so the save attempt runs and hits the same recheck as a real blur.
+    await act(async () => {
+      nameInput(screen).dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    });
+    await expectProjectAccessDeniedToast("Failed to rename project");
     expect(state.update).not.toHaveBeenCalled();
-    await expect.element(input).toBeDisabled();
+    expect(nameInput(screen).disabled).toBe(true);
+
     await grant(remoteId, writable());
-    await expect.element(input).toBeEnabled();
-    await input.fill("Shared repo");
-    await rename(screen);
+    expect(nameInput(screen).disabled).toBe(false);
+    await rename(screen, "Recovered");
     await vi.waitFor(() => expect(state.update).toHaveBeenCalledTimes(2));
+    expect(nameInput(screen).value).toBe("Recovered");
   });
+
   it.each([
     ["loading", () => AsyncResult.initial<AuthSessionState, Error>(), false],
     [
@@ -361,16 +496,164 @@ describe("project settings", () => {
   ] as const)(
     "uses the current grant while a member's session is %s",
     async (_state, result, allowed) => {
-      using _fixture = setup();
+      setup();
       await grant(remoteId, result());
-      await using screen = await render(view());
-      if (allowed) {
-        await rename(screen);
-        await vi.waitFor(() => expect(state.update).toHaveBeenCalledTimes(2));
-      } else {
-        await expect.element(screen.getByRole("textbox", { name: "Project name" })).toBeDisabled();
-        expect(state.update).not.toHaveBeenCalled();
-      }
+      await using screen = await mountPanel();
+      expect(nameInput(screen).disabled).toBe(!allowed);
+      if (!allowed) return;
+      await rename(screen, "Renamed");
+      expect(state.update).toHaveBeenCalledTimes(2);
     },
   );
+});
+
+describe("project identity reset", () => {
+  const scratchIcon = { kind: "lucide", name: "message-square-dashed", color: "gray" } as const;
+  const resetButton = (screen: Screen, label: string) =>
+    screen.container.querySelector<HTMLButtonElement>(`[aria-label="Reset ${label} to default"]`);
+  const asScratch = (project: Project): Project => ({
+    ...project,
+    isScratch: true,
+    title: "Notes",
+    workspaceRoot: "/t3/scratch",
+    projectIcon: { kind: "emoji", emoji: "📝" },
+  });
+
+  it("restores a renamed scratch project's built-in name and icon", async () => {
+    setup();
+    state.projects = [{ ...asScratch(state.projects[0]!), faviconPath: null, projectIcon: null }];
+    await using screen = await mountPanel();
+
+    await userEvent.click(resetButton(screen, "project name")!);
+    await vi.waitFor(() =>
+      expect(state.update).toHaveBeenCalledWith({
+        environmentId: primaryId,
+        input: { projectId: state.projects[0]!.id, title: "No project" },
+      }),
+    );
+    await userEvent.click(resetButton(screen, "project icon")!);
+    await vi.waitFor(() =>
+      expect(state.update).toHaveBeenLastCalledWith({
+        environmentId: primaryId,
+        input: { projectId: state.projects[0]!.id, faviconPath: null, projectIcon: scratchIcon },
+      }),
+    );
+  });
+
+  it("resets each member of a mixed group to its own default icon", async () => {
+    setup();
+    const [primary, remote] = state.projects;
+    state.projects = [asScratch(primary!), { ...remote!, faviconPath: "logo.png" }];
+    await using screen = await mountPanel();
+
+    expect(resetButton(screen, "project name")).toBeNull();
+    await userEvent.click(resetButton(screen, "project icon")!);
+    await vi.waitFor(() => expect(state.update).toHaveBeenCalledTimes(2));
+    expect(state.update.mock.calls.map(([request]) => request)).toEqual([
+      {
+        environmentId: primaryId,
+        input: { projectId: primary!.id, faviconPath: null, projectIcon: scratchIcon },
+      },
+      {
+        environmentId: remoteId,
+        input: { projectId: remote!.id, faviconPath: null, projectIcon: null },
+      },
+    ]);
+  });
+});
+
+describe("project settings scope", () => {
+  const environmentMenu = () => page.getByRole("button", { name: /^Environment scope:/ });
+  const primaryOption = () => page.getByRole("menuitemradio", { name: /^primary/ });
+  const remoteOption = () => page.getByRole("menuitemradio", { name: /^remote/ });
+
+  it("offers every environment while no project is selected", async () => {
+    setup();
+    state.projects = state.projects.filter((project) => project.environmentId === primaryId);
+    await using _screen = await mountSettings({});
+
+    await userEvent.click(environmentMenu());
+    await expect.element(primaryOption()).toBeVisible();
+    await expect.element(remoteOption()).toBeVisible();
+  });
+
+  it("offers only the selected project's checkout environments", async () => {
+    setup();
+    state.projects = state.projects.filter((project) => project.environmentId === primaryId);
+    await using _screen = await mountSettings({ project: projectKey() });
+
+    await expect.element(page.getByRole("textbox", { name: "Project name" })).toBeVisible();
+    await userEvent.click(environmentMenu());
+    await expect.element(primaryOption()).toBeVisible();
+    await expect.element(remoteOption()).not.toBeInTheDocument();
+  });
+
+  it("keeps an unknown project recoverable from any environment", async () => {
+    setup();
+    state.projects = state.projects.filter((project) => project.environmentId === primaryId);
+    await using screen = await mountSettings({ project: "removed-project" });
+
+    await userEvent.click(environmentMenu());
+    await expect.element(primaryOption()).toBeVisible();
+    await expect.element(remoteOption()).toBeVisible();
+    await userEvent.click(remoteOption());
+    await vi.waitFor(() =>
+      expect(screen.router.state.location.search).toEqual({
+        project: "removed-project",
+        machine: remoteId,
+      }),
+    );
+  });
+
+  it.each([
+    [undefined, "This project has no checkout on this environment."],
+    [
+      "removed-checkout",
+      "This checkout is no longer available in the selected project and environment.",
+    ],
+  ])("recovers a stale environment link with checkout %s", async (checkout, message) => {
+    setup();
+    state.projects = state.projects.filter((project) => project.environmentId === primaryId);
+    const key = projectKey();
+    await using screen = await mountSettings({
+      project: key,
+      machine: remoteId,
+      ...(checkout ? { checkout } : {}),
+    });
+
+    await expect.element(page.getByText(message, { exact: true })).toBeVisible();
+    await expect.element(page.getByRole("button", { name: /^Project scope:/ })).toBeVisible();
+    await expect
+      .element(page.getByRole("button", { name: "Environment scope: remote" }))
+      .toBeVisible();
+    await userEvent.click(page.getByRole("button", { name: "Show all environments" }));
+
+    await expect
+      .element(page.getByRole("textbox", { name: "Project name" }))
+      .toHaveValue("Shared repo");
+    expect(screen.router.state.location.search).toEqual({ project: key });
+    await expect
+      .element(page.getByRole("button", { name: "Environment scope: All environments" }))
+      .toBeVisible();
+    await expect.element(page.getByText(message, { exact: true })).not.toBeInTheDocument();
+    await expect
+      .element(page.getByRole("button", { name: "Remove project", exact: true }))
+      .toBeEnabled();
+  });
+});
+
+it("returns to the project overview after removal, clearing the selection but keeping the environment", async () => {
+  setup();
+  state.projects = [state.projects[1]!];
+  await using screen = await mountPanel({ machine: remoteId, checkout: "remote:/work/remote" });
+  const removeProject = [...screen.container.querySelectorAll("button")].find(
+    (button) => button.textContent === "Remove project",
+  )!;
+
+  await userEvent.click(removeProject);
+
+  await vi.waitFor(() => {
+    expect(screen.router.state.location.pathname).toBe("/settings/projects");
+    expect(screen.router.state.location.search).toEqual({ machine: remoteId });
+  });
 });

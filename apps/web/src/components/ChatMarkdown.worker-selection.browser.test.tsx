@@ -2,6 +2,8 @@ import { getSharedHighlighter } from "@pierre/diffs";
 import { act, render as renderScreen, stubGlobal } from "../../test/render";
 import { describe, expect, it, vi } from "vite-plus/test";
 import type { CodeHighlightResult } from "../lib/asyncCodeHighlighting";
+import { highlightCodeToHast } from "../lib/incrementalHighlighting";
+import { PREFERRED_HIGHLIGHTER } from "../lib/syntaxHighlighting";
 const workerState = vi.hoisted(() => ({
   callback: null as ((result: CodeHighlightResult) => void) | null,
   code: "",
@@ -43,7 +45,7 @@ async function setup() {
     const highlighter = await getSharedHighlighter({
       langs: ["javascript"],
       themes: ["pierre-dark"],
-      preferredHighlighter: "shiki-wasm",
+      preferredHighlighter: PREFERRED_HIGHLIGHTER,
     });
     await act(async () =>
       callback!({
@@ -53,10 +55,7 @@ async function setup() {
         ...(error
           ? { error }
           : {
-              root: highlighter.codeToHast(workerState.code, {
-                lang: "javascript",
-                theme: "pierre-dark",
-              }),
+              root: highlightCodeToHast(highlighter, workerState.code, "javascript", "pierre-dark"),
             }),
       }),
     );

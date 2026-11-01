@@ -1301,9 +1301,7 @@ it.effect("compactEventStore does not reclaim deleted thread projections", () =>
     yield* seedDeletedThread({ threadId });
     yield* seedReclamationRows(threadId);
 
-    yield* maintenance.compactEventStore;
-
-    const retainedMessage = yield* sql<{ readonly count: number }>`
+    yield* maintenance.compactEventStore(); = yield* sql<{ readonly count: number }>`
       SELECT COUNT(*) AS count
       FROM orchestration_v2_projection_messages
       WHERE thread_id = ${threadId}
@@ -1326,7 +1324,7 @@ it.effect("reclaimDeletedThreadData reclaims only after an explicit call", () =>
     yield* seedDeletedThread({ threadId });
     yield* seedReclamationRows(threadId);
 
-    yield* maintenance.compactEventStore;
+    yield* maintenance.compactEventStore();
     const beforeExplicitReclamation = yield* sql<{ readonly count: number }>`
       SELECT COUNT(*) AS count
       FROM orchestration_v2_projection_messages

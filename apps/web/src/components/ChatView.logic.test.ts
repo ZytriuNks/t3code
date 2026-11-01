@@ -19,7 +19,6 @@ import {
 import type { CodexArtifactTemplate } from "@t3tools/shared/codexArtifactTemplates";
 import {
   boundAttachmentIds,
-  findRecordedWorktreeSetup,
   mergeDirectPreviewAnnotation,
   planComposerTurn,
   snapshotComposerSend,
@@ -64,10 +63,7 @@ import {
   rememberReadyThreadTimeline,
   resetHeldThreadTimeline,
   resolveThreadSwitchTimeline,
-  threadKeysShareEnvironment,
   timelineHasEphemeralPreviewUrls,
-  scheduleEnvironmentReconnectWarning,
-  hasEnvironmentReconnectWarningGraceElapsed,
   codexArtifactTemplatePromptToAppend,
   shouldDockDraftHeroForSubmission,
   shouldReleaseTimelineAnchorForToolActivity,
@@ -85,7 +81,6 @@ import {
   deriveComposerSendState,
   deriveLockedProvider,
   hasServerAcknowledgedLocalDispatch,
-  resolveDraftPromotionNavigationTarget,
   waitForRevertedMessage,
 } from "./ChatView.logic";
 
@@ -138,51 +133,6 @@ const readySession = {
   updatedAt: "2026-03-29T00:00:10.000Z",
 };
 
-describe("resolveDraftPromotionNavigationTarget", () => {
-  const serverThreadRef = { environmentId, threadId };
-  const preparingRun = {
-    ...completedTurn,
-    status: "preparing" as const,
-    startedAt: null,
-    completedAt: null,
-  };
-
-  it("stays on the draft until the server owns the send", () => {
-    expect(
-      resolveDraftPromotionNavigationTarget({
-        serverThreadRef,
-        serverThread: makeThread({ latestRun: preparingRun }),
-        backgroundSubmissionPending: false,
-      }),
-    ).toBeNull();
-    expect(
-      resolveDraftPromotionNavigationTarget({
-        serverThreadRef,
-        serverThread: makeThread(),
-        backgroundSubmissionPending: false,
-      }),
-    ).toBeNull();
-  });
-
-  it("promotes a persisted send while its worktree is still preparing", () => {
-    const serverThread = makeThread({ latestRun: preparingRun, latestUserMessageAt: now });
-    expect(
-      resolveDraftPromotionNavigationTarget({
-        serverThreadRef,
-        serverThread,
-        backgroundSubmissionPending: false,
-      }),
-    ).toBe(serverThreadRef);
-    expect(
-      resolveDraftPromotionNavigationTarget({
-        serverThreadRef,
-        serverThread,
-        backgroundSubmissionPending: true,
-      }),
-    ).toBeNull();
-  });
-});
-
 describe("deriveComposerSendState", () => {
   it("keeps text sendable while excluding expired terminal pills", () => {
     const state = deriveComposerSendState({
@@ -205,6 +155,22 @@ describe("deriveComposerSendState", () => {
     expect(state.trimmedPrompt).toBe("yoo  waddup");
     expect(state.expiredTerminalContextCount).toBe(1);
     expect(state.hasSendableContent).toBe(true);
+  });
+});
+
+describe("buildExpiredTerminalContextToastCopy", () => {
+  it("refers to several expired contexts as them", () => {
+    expect(buildExpiredTerminalContextToastCopy(2, "empty")).toEqual({
+      title: "Expired terminal contexts won't be sent",
+      description: "Remove them or re-add them to include terminal output.",
+    });
+    expect(buildExpiredTerminalContextToastCopy(2, "omitted")).toEqual({
+      title: "Expired terminal contexts omitted from message",
+      description: "Re-add them if you want that terminal output included.",
+    });
+    expect(buildExpiredTerminalContextToastCopy(1, "omitted").description).toBe(
+      "Re-add it if you want that terminal output included.",
+    );
   });
 });
 
@@ -450,19 +416,18 @@ describe("resolveThreadSwitchTimeline", () => {
         activeThreadKey: "env-1:thread-a",
         nextEntries: [],
       }),
-    ).toEqual({ entries: ["a1", "a2"], displayThreadKey: "env-1:thread-a" });
+    ).toEqual(["a1", "a2"]);
   });
 
-  it("does not hold another environment's timeline across a jump", () => {
-    expect(threadKeysShareEnvironment("env-1:thread-a", "env-2:thread-b")).toBe(false);
+  it("does not paint the last-viewed thread for a destination with nothing remembered", () => {
+    rememberReadyThreadTimeline(held);
     expect(
       resolveThreadSwitchTimeline({
         loading: true,
         activeThreadKey: "env-2:thread-b",
         nextEntries: [],
-        lastReady: held,
       }),
-    ).toEqual({ entries: [], displayThreadKey: "env-2:thread-b" });
+    ).toEqual([]);
   });
 
   it("does not remember a timeline that still has handoff blob previews", () => {
@@ -725,42 +690,6 @@ describe("shouldShowWorkingActivity", () => {
   });
 });
 
-describe("environment reconnect warning grace", () => {
-  afterEach(() => vi.useRealTimers());
-
-  it("shows a persistent reconnect after the grace period", () => {
-    vi.useFakeTimers();
-    const showWarning = vi.fn();
-
-    scheduleEnvironmentReconnectWarning(showWarning);
-    vi.advanceTimersByTime(1_999);
-    expect(showWarning).not.toHaveBeenCalled();
-
-    vi.advanceTimersByTime(1);
-    expect(showWarning).toHaveBeenCalledOnce();
-  });
-
-  it("cancels the warning when the connection recovers during the grace period", () => {
-    vi.useFakeTimers();
-    const showWarning = vi.fn();
-
-    const cancel = scheduleEnvironmentReconnectWarning(showWarning);
-    cancel();
-    vi.advanceTimersByTime(2_000);
-
-    expect(showWarning).not.toHaveBeenCalled();
-  });
-
-  it("does not reuse elapsed grace from another environment", () => {
-    const anotherEnvironmentId = EnvironmentId.make("environment-remote");
-
-    expect(hasEnvironmentReconnectWarningGraceElapsed(environmentId, environmentId)).toBe(true);
-    expect(hasEnvironmentReconnectWarningGraceElapsed(anotherEnvironmentId, environmentId)).toBe(
-      false,
-    );
-  });
-});
-
 describe("resolveComposerProviderSelection", () => {
   const catalogModels: ServerProvider["models"] = [
     { slug: "gemini-pro", name: "Gemini Pro", isCustom: false, capabilities: null },
@@ -995,16 +924,6 @@ describe("worktree setup visibility", () => {
     expect(resolve(base, newest)).toEqual({ snapshot: newest, isPreparingWorktree: false });
     const other = { ...base, threadId: ThreadId.make("another-thread") };
     expect(resolve(other, other)).toEqual({ snapshot: null, isPreparingWorktree: false });
-  });
-
-  it("reads the settled snapshot back from the thread's activities", () => {
-    const activities = [
-      { kind: "setup-script.started", payload: {} },
-      { kind: "worktree-setup", payload: settledDone },
-      { kind: "worktree-setup", payload: { not: "a snapshot" } },
-    ];
-    expect(findRecordedWorktreeSetup(activities, threadId)).toEqual(settledDone);
-    expect(findRecordedWorktreeSetup(activities, ThreadId.make("other"))).toBeNull();
   });
 });
 
@@ -1335,6 +1254,7 @@ describe("snapshotComposerSend", () => {
       previewAnnotations: [],
       reviewComments: [],
       threadContexts: [],
+      environmentContexts: [],
     });
 
     expect(snapshot.terminalContexts).toEqual([live]);
@@ -1375,14 +1295,21 @@ describe("planComposerTurn", () => {
   });
 
   it("queues behind a compaction of a stale session, except for /compact itself", () => {
-    expect(planComposerTurn({ ...base, resumeCompactionTokens: 120_000 })).toMatchObject({
-      compactBeforeSend: true,
-      turnDispatchMode: "queue",
-      shouldQueueBehindActiveRun: true,
-    });
-    expect(
-      planComposerTurn({ ...base, resumeCompactionTokens: 120_000, messageText: "/COMPACT" }),
-    ).toMatchObject({ compactBeforeSend: false, turnDispatchMode: "auto" });
+    const stale = { ...base, resumeCompactionTokens: 120_000 };
+    for (const messageText of ["hello", "/compactfoo"]) {
+      expect(planComposerTurn({ ...stale, messageText })).toMatchObject({
+        compactBeforeSend: true,
+        turnDispatchMode: "queue",
+        shouldQueueBehindActiveRun: true,
+      });
+    }
+    for (const messageText of ["/COMPACT", "/compact keep the API notes", "/compact\n  tests"]) {
+      expect(planComposerTurn({ ...stale, messageText })).toMatchObject({
+        compactBeforeSend: false,
+        turnDispatchMode: "auto",
+        shouldQueueBehindActiveRun: false,
+      });
+    }
   });
 
   it("queues behind a running turn only when asked to", () => {
@@ -1407,22 +1334,12 @@ describe("withMessageContext", () => {
     Parameters<typeof withMessageContext>[0]["context"]
   >;
 
-  it("sends the context inline when the server supports it", () => {
-    expect(withMessageContext({ text: "hi", context, supportsInlineMessageContext: true })).toEqual(
-      { text: "hi", context },
-    );
-  });
-
-  it("folds the context into the text for older servers", () => {
-    const result = withMessageContext({ text: "hi", context, supportsInlineMessageContext: false });
-    expect(result.context).toBeUndefined();
-    expect(result.text).toContain("hi");
+  it("sends the context inline", () => {
+    expect(withMessageContext({ text: "hi", context })).toEqual({ text: "hi", context });
   });
 
   it("sends the text alone without context", () => {
-    expect(
-      withMessageContext({ text: "hi", context: undefined, supportsInlineMessageContext: false }),
-    ).toEqual({ text: "hi" });
+    expect(withMessageContext({ text: "hi", context: undefined })).toEqual({ text: "hi" });
   });
 });
 
@@ -1556,26 +1473,15 @@ describe("buildExpiredTerminalContextToastCopy", () => {
     });
     expect(buildExpiredTerminalContextToastCopy(2, "omitted")).toEqual({
       title: "Expired terminal contexts omitted from message",
-      description: "Re-add it if you want that terminal output included.",
+      description: "Re-add them if you want that terminal output included.",
     });
   });
 });
 
 describe("getStartedThreadModelChangeBlockReason", () => {
-  const providers = [
-    {
-      instanceId: ProviderInstanceId.make("codex"),
-    },
-    {
-      instanceId: ProviderInstanceId.make("grok"),
-      requiresNewThreadForModelChange: true,
-    },
-  ];
-
   it("allows model changes before a provider session has started", () => {
     expect(
       getStartedThreadModelChangeBlockReason({
-        providers,
         hasStartedSession: false,
         currentModelSelection: {
           instanceId: ProviderInstanceId.make("grok"),
@@ -1589,27 +1495,9 @@ describe("getStartedThreadModelChangeBlockReason", () => {
     ).toBeNull();
   });
 
-  it("allows unchanged model selections for restricted providers", () => {
+  it("allows model changes within the same provider after the session has started", () => {
     expect(
       getStartedThreadModelChangeBlockReason({
-        providers,
-        hasStartedSession: true,
-        currentModelSelection: {
-          instanceId: ProviderInstanceId.make("grok"),
-          model: "grok-build",
-        },
-        nextModelSelection: {
-          instanceId: ProviderInstanceId.make("grok"),
-          model: "grok-build",
-        },
-      }),
-    ).toBeNull();
-  });
-
-  it("blocks started-session model changes for providers that require a new thread", () => {
-    expect(
-      getStartedThreadModelChangeBlockReason({
-        providers,
         hasStartedSession: true,
         currentModelSelection: {
           instanceId: ProviderInstanceId.make("grok"),
@@ -1620,11 +1508,31 @@ describe("getStartedThreadModelChangeBlockReason", () => {
           model: "grok-other",
         },
       }),
-    ).toEqual({
-      title: "Start a new chat to change models",
-      description:
-        "This provider does not allow switching models after a conversation has started.",
+    ).toBeNull();
+  });
+
+  it("blocks a started-session provider switch unless handoff is supported", () => {
+    const input = {
+      hasStartedSession: true,
+      currentModelSelection: {
+        instanceId: ProviderInstanceId.make("codex"),
+        model: "gpt-5",
+      },
+      nextModelSelection: {
+        instanceId: ProviderInstanceId.make("grok"),
+        model: "grok-build",
+      },
+    };
+    expect(getStartedThreadModelChangeBlockReason(input)).toEqual({
+      title: "Start a new chat to switch providers",
+      description: "This thread does not support switching providers after it has started.",
     });
+    expect(
+      getStartedThreadModelChangeBlockReason({
+        ...input,
+        supportsProviderSwitchingViaHandoff: true,
+      }),
+    ).toBeNull();
   });
 });
 
@@ -1931,16 +1839,6 @@ describe("draft hero submission transition", () => {
         backgroundSubmissionPending: true,
       }),
     ).toBe(true);
-  });
-
-  it("does not auto-navigate a background submission after server promotion", () => {
-    expect(
-      resolveDraftPromotionNavigationTarget({
-        serverThreadRef: { environmentId, threadId },
-        serverThread: makeThread({ latestRun: completedTurn }),
-        backgroundSubmissionPending: true,
-      }),
-    ).toBeNull();
   });
 });
 

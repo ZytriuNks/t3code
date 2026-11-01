@@ -10,7 +10,6 @@ import {
   RunId,
   ThreadId,
 } from "@t3tools/contracts";
-import { CursorSettings } from "@t3tools/provider-cursor/settings";
 import * as CursorAgentSdk from "@t3tools/provider-cursor/server/CursorAgentSdk";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
@@ -21,7 +20,6 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
-import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { makeCursorAdapterV2 } from "../../../../../packages/provider-cursor/src/server/adapter.ts";
 
@@ -47,7 +45,6 @@ it.effect("sends discovered skills as native slash invocations with runtime inst
     });
     const adapter = yield* makeCursorAdapterV2({
       instanceId,
-      settings: yield* Schema.decodeEffect(CursorSettings)({}),
       environment: { HOME: workspace },
     }).pipe(
       Effect.provideService(CursorAgentSdk.CursorAgentSdkRunner, {
