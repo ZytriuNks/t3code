@@ -216,8 +216,6 @@ const make = Effect.gen(function* () {
           WHERE thread_id IN (SELECT thread_id FROM candidate_ids)
         UNION SELECT thread_id FROM orchestration_v2_projection_subagents
           WHERE thread_id IN (SELECT thread_id FROM candidate_ids)
-        UNION SELECT thread_id FROM orchestration_v2_projection_provider_sessions
-          WHERE thread_id IN (SELECT thread_id FROM candidate_ids)
         UNION SELECT thread_id FROM orchestration_v2_projection_provider_session_bindings
           WHERE thread_id IN (SELECT thread_id FROM candidate_ids)
         UNION SELECT thread_id FROM orchestration_v2_native_session_bindings
@@ -1512,6 +1510,18 @@ const make = Effect.gen(function* () {
           const cleanThreadIds = new Set(
             threadIds.filter((threadId) => !threadsWithRemainingData.has(threadId)),
           );
+          const internallyRetainedSessionThreads = yield* sql<{ readonly thread_id: string }>`
+            SELECT DISTINCT session.thread_id
+            FROM orchestration_v2_projection_provider_sessions AS session
+            WHERE session.thread_id IN ${sql.in(threadIds)}
+              AND EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_provider_session_bindings AS binding
+                WHERE binding.provider_session_id = session.provider_session_id
+                  AND binding.thread_id NOT IN ${sql.in(threadIds)}
+              )
+          `;
+          for (const row of internallyRetainedSessionThreads) cleanThreadIds.add(row.thread_id);
           const reclaimableSubagentIds = closure.subagentRows
             .filter((row) => cleanThreadIds.has(row.child_thread_id))
             .map((row) => row.subagent_id);

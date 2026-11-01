@@ -13,7 +13,7 @@ import * as EventStore from "../orchestration-v2/EventStore.ts";
 import * as ProjectionMaintenance from "../orchestration-v2/ProjectionMaintenance.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import { rebuildMessageSearch } from "../orchestration-v2/messageSearchIndex.ts";
-import type * as ThreadDataReclamation from "../orchestration-v2/ThreadDataReclamation.ts";
+import * as ThreadDataReclamation from "../orchestration-v2/ThreadDataReclamation.ts";
 
 export class DatabaseMissingError extends Schema.TaggedError<DatabaseMissingError>()(
   "DatabaseMissingError",

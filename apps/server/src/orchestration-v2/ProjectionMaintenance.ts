@@ -174,6 +174,45 @@ export const layer: Layer.Layer<
             if (page.length < pageSize) break;
             yield* Effect.yieldNow;
           }
+          // Deletion sessions outlive reclaimed provider-thread history. Restore
+          // importer protection even when its original provider event is gone;
+          // json_array uses the same key tuple as NativeSessionBindings.applyProviderThread.
+          yield* sql`
+            INSERT OR IGNORE INTO orchestration_v2_native_session_bindings (
+              binding_key,
+              thread_id,
+              provider_thread_id,
+              provider_instance_id,
+              driver,
+              native_id,
+              storage_type,
+              canonical_root,
+              canonical_file,
+              bound_at,
+              payload_json
+            )
+            SELECT
+              json_array(
+                thread_id,
+                provider_thread_id,
+                driver,
+                storage_type,
+                canonical_root,
+                canonical_file,
+                native_id
+              ),
+              thread_id,
+              provider_thread_id,
+              provider_instance_id,
+              driver,
+              native_id,
+              storage_type,
+              canonical_root,
+              canonical_file,
+              json_extract(payload_json, '$.boundAt'),
+              payload_json
+            FROM orchestration_v2_thread_deletion_sessions
+          `;
           const now = DateTime.formatIso(yield* DateTime.now);
           yield* sql`
             INSERT INTO orchestration_v2_projection_metadata (

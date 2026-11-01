@@ -837,7 +837,7 @@ it.effect("reclaims dependent rows while preserving deletion anchors and the thr
     assert.equal(after.threads.filter((row) => row.thread_id === threadId).length, 1);
     assert.equal(after.deletions.filter((row) => row.thread_id === threadId).length, 1);
     assert.equal(after.deletionSessions.filter((row) => row.thread_id === threadId).length, 1);
-    assert.equal(after.contextTransfers.length, 0);
+    assert.equal(after.transfers.length, 0);
     assert.equal(after.handoffs.length, 0);
     assert.equal(after.checkpoints.length, 0);
     assert.equal(after.checkpointScopes.length, 0);
@@ -1301,7 +1301,9 @@ it.effect("compactEventStore does not reclaim deleted thread projections", () =>
     yield* seedDeletedThread({ threadId });
     yield* seedReclamationRows(threadId);
 
-    yield* maintenance.compactEventStore(); = yield* sql<{ readonly count: number }>`
+    yield* maintenance.compactEventStore();
+
+    const retainedMessage = yield* sql<{ readonly count: number }>`
       SELECT COUNT(*) AS count
       FROM orchestration_v2_projection_messages
       WHERE thread_id = ${threadId}
