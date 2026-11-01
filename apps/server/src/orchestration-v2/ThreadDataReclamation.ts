@@ -814,7 +814,27 @@ const make = Effect.gen(function* () {
           SELECT DISTINCT cleanup.thread_id
           FROM orchestration_v2_effect_outbox AS cleanup
           WHERE ${sql.in("cleanup.thread_id", candidateIdChunk)}
-            AND cleanup.status IN ('pending', 'running', 'failed', 'cancelled')
+            AND (
+              cleanup.status IN ('pending', 'running', 'failed')
+              OR (
+                cleanup.status = 'cancelled'
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM orchestration_v2_effect_outbox AS succeeded_cleanup
+                  WHERE succeeded_cleanup.thread_id = cleanup.thread_id
+                    AND succeeded_cleanup.status = 'succeeded'
+                    AND succeeded_cleanup.effect_type IN (
+                      'provider-session.detach', 'terminal.cleanup', 'preview.cleanup',
+                      'scheduled-tasks.cleanup', 'scheduled-tasks.suspend', 'attachment.cleanup'
+                    )
+                    AND json_type(succeeded_cleanup.payload_json, '$.lifecycle') IS 'object'
+                    AND json_extract(succeeded_cleanup.payload_json, '$.lifecycle.rootThreadId') =
+                      json_extract(cleanup.payload_json, '$.lifecycle.rootThreadId')
+                    AND json_extract(succeeded_cleanup.payload_json, '$.lifecycle.revision') =
+                      json_extract(cleanup.payload_json, '$.lifecycle.revision')
+                )
+              )
+            )
             AND cleanup.effect_type IN (
               'provider-session.detach', 'terminal.cleanup', 'preview.cleanup',
               'scheduled-tasks.cleanup', 'scheduled-tasks.suspend', 'attachment.cleanup'

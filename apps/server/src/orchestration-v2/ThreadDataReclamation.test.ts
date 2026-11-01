@@ -164,7 +164,8 @@ const seedLifecycleCleanup = Effect.fn("test.seedLifecycleCleanup")(function* (i
       attempt_count, available_at, created_at, updated_at
     ) VALUES (
       ${`cleanup:${input.threadId}`}, ${commandId}, ${input.threadId}, 'attachment.cleanup',
-      '{"lifecycle":{"revision":1}}', ${input.status}, 0, ${at}, ${at}, ${at}
+      ${JSON.stringify({ lifecycle: { rootThreadId: input.threadId, revision: 1 } })},
+      ${input.status}, 0, ${at}, ${at}, ${at}
     )
   `;
 });
@@ -946,6 +947,8 @@ it.effect("reclaims cancelled settled outbox rows but preserves lifecycle barrie
     const threadId = "thread:reclaim:cancelled-outbox";
     const deletionCommandId = `delete:${threadId}`;
     yield* seedDeletedThread({ threadId });
+    // Reclamation is permitted only because the success row matches both cancelled
+    // lifecycle barriers' rootThreadId and revision.
     for (const [effectId, commandId, effectType, status, payloadJson] of [
       ["cancelled:generic", "other:generic", "preview.cleanup", "cancelled", "{}"],
       [
@@ -953,15 +956,21 @@ it.effect("reclaims cancelled settled outbox rows but preserves lifecycle barrie
         "other:lifecycle",
         "attachment.cleanup",
         "cancelled",
-        '{"lifecycle":{"revision":1}}',
+        `{"lifecycle":{"rootThreadId":"${threadId}","revision":1}}`,
       ],
-      ["cancelled:delete-barrier", deletionCommandId, "provider-session.detach", "cancelled", "{}"],
+      [
+        "cancelled:delete-barrier",
+        deletionCommandId,
+        "provider-session.detach",
+        "cancelled",
+        `{"lifecycle":{"rootThreadId":"${threadId}","revision":1}}`,
+      ],
       [
         "succeeded:detach-lifecycle",
         "other:detach-lifecycle",
         "provider-session.detach",
         "succeeded",
-        '{"lifecycle":{"revision":1}}',
+        `{"lifecycle":{"rootThreadId":"${threadId}","revision":1}}`,
       ],
     ] as const) {
       yield* sql`
@@ -989,6 +998,37 @@ it.effect("reclaims cancelled settled outbox rows but preserves lifecycle barrie
 
     const repeated = yield* reclaim();
     assert.equal(repeated.deletedOutboxCount, 0);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("blocks cancelled lifecycle cleanup when only a different revision succeeded", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const threadId = "thread:reclaim:cancelled-revision-mismatch";
+    yield* seedDeletedThread({ threadId });
+    for (const [effectId, status, revision] of [
+      ["cancelled:lifecycle", "cancelled", 1],
+      ["succeeded:lifecycle", "succeeded", 2],
+    ] as const) {
+      yield* sql`
+        INSERT INTO orchestration_v2_effect_outbox (
+          effect_id, command_id, thread_id, effect_type, payload_json, status,
+          attempt_count, available_at, created_at, updated_at, completed_at
+        ) VALUES (
+          ${effectId}, ${`cleanup:${effectId}`}, ${threadId}, 'attachment.cleanup',
+          ${JSON.stringify({ lifecycle: { rootThreadId: threadId, revision } })}, ${status},
+          0, ${at}, ${at}, ${at}, ${at}
+        )
+      `;
+    }
+
+    const before = yield* snapshotRows();
+    const result = yield* reclaim();
+    const after = yield* snapshotRows();
+
+    assert.deepEqual(after, before);
+    assert.equal(result.reclaimedThreadCount, 0);
+    expectBlockers(result, threadId, ["lifecycle_cleanup"]);
   }).pipe(Effect.provide(layerTest)),
 );
 
