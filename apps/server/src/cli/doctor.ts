@@ -108,11 +108,22 @@ export const runDoctor = Effect.fn("runDoctor")(function* (
       maintenance
         .compact(databasePath)
         .pipe(
-          Effect.tap((result) =>
-            Console.log(
-              `Done: ${formatBytes(result.beforeBytes)} -> ${formatBytes(result.afterBytes)}, ${result.deletedEventCount} superseded events removed.`,
-            ),
-          ),
+          Effect.tap((result) => {
+            const reclamation = result.reclamation;
+            const deletedDependentRowCount =
+              reclamation.deletedEventCount +
+              reclamation.deletedReceiptCount +
+              reclamation.deletedProjectionRowCount +
+              reclamation.deletedTurnItemPositionCount +
+              reclamation.deletedOutboxCount;
+            return Console.log(
+              `Done: ${formatBytes(result.beforeBytes)} -> ${formatBytes(result.afterBytes)}, ` +
+                `${result.deletedEventCount} superseded events removed; deleted-thread reclamation: ` +
+                `${reclamation.reclaimedThreadCount} threads reclaimed, ` +
+                `${deletedDependentRowCount} dependent rows removed, ` +
+                `skipped threads: ${reclamation.skippedThreads.length}.`,
+            );
+          }),
         ),
     );
   }

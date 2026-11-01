@@ -677,8 +677,72 @@ it.effect("thread resume across compacted history keeps message order and final 
         )
       `;
     }
-    // Only the event between a's first and newest is deleted.
+    // A complete deleted-thread candidate guards the online boundary:
+    // this method only compacts events.
+    const reclaimCandidate = "thread:ws-online-reclamation";
+    const deleteCommandId = "delete:thread:ws-online-reclamation";
+    yield* sql`
+      INSERT INTO orchestration_v2_projection_threads (
+        thread_id, project_id, title, default_provider, runtime_mode, interaction_mode,
+        active_provider_thread_id, created_at, updated_at, archived_at, deleted_at, payload_json
+      ) VALUES (
+        ${reclaimCandidate}, 'project:replay', 'reclaim candidate', 'codex', 'full-access', 'default',
+        NULL, ${now}, ${now}, NULL, ${now}, ${JSON.stringify({
+          lineage: {
+            parentThreadId: null,
+            relationshipToParent: null,
+            rootThreadId: reclaimCandidate,
+          },
+          forkedFrom: null,
+        })}
+      )
+    `;
+    yield* sql`
+      INSERT INTO orchestration_v2_thread_deletions (
+        thread_id, project_id, parent_thread_id, operation_root_thread_id,
+        deleted_at, command_id, scope, payload_json
+      ) VALUES (
+        ${reclaimCandidate}, 'project:replay', NULL, ${reclaimCandidate}, ${now},
+        ${deleteCommandId}, 't3_only', '{}'
+      )
+    `;
+    yield* sql`
+      INSERT INTO orchestration_events (
+        event_id, aggregate_kind, stream_id, stream_version, event_type, occurred_at,
+        command_id, actor_kind, payload_json, metadata_json, application_event_version
+      ) VALUES (
+        'ws-online-reclamation:deleted', 'thread', ${reclaimCandidate}, 1, 'thread.deleted', ${now},
+        ${deleteCommandId}, 'server', '{}', '{}', 2
+      )
+    `;
+    yield* sql`
+      INSERT INTO orchestration_command_receipts (
+        command_id, aggregate_kind, aggregate_id, accepted_at, result_sequence,
+        status, error, command_type
+      ) VALUES (
+        ${deleteCommandId}, 'thread', ${reclaimCandidate}, ${now}, 0,
+        'accepted', NULL, 'thread.delete'
+      )
+    `;
+    yield* sql`
+      INSERT INTO orchestration_v2_projection_messages (
+        message_id, thread_id, run_id, node_id, role, streaming,
+        created_at, updated_at, payload_json
+      ) VALUES (
+        'message:ws-online-reclamation', ${reclaimCandidate}, NULL, NULL, 'user', 0,
+        ${now}, ${now}, '{}'
+      )
+    `;
+
+    // Only the event between a's first and newest is deleted;
+    // deleted-thread data remains untouched.
     assert.equal((yield* maintenance.compactEventStore).deletedEventCount, 1);
+    const retainedCandidateMessage = yield* sql<{ readonly count: number }>`
+      SELECT COUNT(*) AS count
+      FROM orchestration_v2_projection_messages
+      WHERE thread_id = ${reclaimCandidate}
+    `;
+    assert.equal(retainedCandidateMessage[0]?.count, 1);
 
     const items = yield* subscribeOrchestrationV2Thread({
       threadId,

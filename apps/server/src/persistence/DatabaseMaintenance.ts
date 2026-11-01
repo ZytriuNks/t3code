@@ -12,6 +12,7 @@ import { isSqlError } from "effect/sql/SqlError";
 import * as EventStore from "../orchestration-v2/EventStore.ts";
 import * as ProjectionMaintenance from "../orchestration-v2/ProjectionMaintenance.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
+import type * as ThreadDataReclamation from "../orchestration-v2/ThreadDataReclamation.ts";
 
 export class DatabaseMissingError extends Schema.TaggedError<DatabaseMissingError>()(
   "DatabaseMissingError",
@@ -81,13 +82,14 @@ export class DatabaseMaintenance extends Context.Service<
       },
       DatabaseMissingError | DatabaseInspectError
     >;
-    /** Compacts history, then VACUUMs into incremental auto_vacuum. Refuses while a server has it open. */
+    /** Offline-only: compacts history, reclaims eligible deleted threads, then VACUUMs. */
     readonly compact: (databasePath: string) => Effect.Effect<
       {
         readonly beforeBytes: number;
         readonly afterBytes: number;
         readonly deletedEventCount: number;
         readonly deletedReceiptCount: number;
+        readonly reclamation: ThreadDataReclamation.ThreadDataReclamationSummary;
       },
       | DatabaseMissingError
       | DatabaseInUseError
@@ -189,6 +191,7 @@ const make = Effect.gen(function* () {
           return yield* new DatabaseProjectionsInvalidError({ path: databasePath });
         }
         const summary = yield* maintenance.compactEventStore;
+        const reclamation = yield* maintenance.reclaimDeletedThreadData;
         if (!(yield* maintenance.verify).valid) {
           return yield* new DatabaseProjectionsInvalidError({ path: databasePath });
         }
@@ -197,7 +200,7 @@ const make = Effect.gen(function* () {
         yield* sql`PRAGMA auto_vacuum = INCREMENTAL`;
         yield* sql`VACUUM`;
         yield* sql`PRAGMA wal_checkpoint(TRUNCATE)`;
-        return summary;
+        return { summary, reclamation };
       }).pipe(
         Effect.provide(
           ProjectionMaintenance.layer.pipe(
@@ -210,8 +213,9 @@ const make = Effect.gen(function* () {
       return {
         beforeBytes,
         afterBytes,
-        deletedEventCount: result.deletedEventCount,
-        deletedReceiptCount: result.deletedReceiptCount,
+        deletedEventCount: result.summary.deletedEventCount,
+        deletedReceiptCount: result.summary.deletedReceiptCount,
+        reclamation: result.reclamation,
       };
     },
     (effect, databasePath) =>
