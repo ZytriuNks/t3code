@@ -823,6 +823,7 @@ const make = Effect.gen(function* () {
                   FROM orchestration_v2_effect_outbox AS succeeded_cleanup
                   WHERE succeeded_cleanup.thread_id = cleanup.thread_id
                     AND succeeded_cleanup.status = 'succeeded'
+                    AND succeeded_cleanup.effect_type = cleanup.effect_type
                     AND succeeded_cleanup.effect_type IN (
                       'provider-session.detach', 'terminal.cleanup', 'preview.cleanup',
                       'scheduled-tasks.cleanup', 'scheduled-tasks.suspend', 'attachment.cleanup'

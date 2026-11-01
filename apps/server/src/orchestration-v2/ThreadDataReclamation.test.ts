@@ -947,8 +947,8 @@ it.effect("reclaims cancelled settled outbox rows but preserves lifecycle barrie
     const threadId = "thread:reclaim:cancelled-outbox";
     const deletionCommandId = `delete:${threadId}`;
     yield* seedDeletedThread({ threadId });
-    // Reclamation is permitted only because the success row matches both cancelled
-    // lifecycle barriers' rootThreadId and revision.
+    // Reclamation is permitted only because each success row matches its cancelled
+    // lifecycle barrier's rootThreadId, revision, and effect type.
     for (const [effectId, commandId, effectType, status, payloadJson] of [
       ["cancelled:generic", "other:generic", "preview.cleanup", "cancelled", "{}"],
       [
@@ -972,6 +972,13 @@ it.effect("reclaims cancelled settled outbox rows but preserves lifecycle barrie
         "succeeded",
         `{"lifecycle":{"rootThreadId":"${threadId}","revision":1}}`,
       ],
+      [
+        "succeeded:attachment-lifecycle",
+        "other:attachment-lifecycle",
+        "attachment.cleanup",
+        "succeeded",
+        `{"lifecycle":{"rootThreadId":"${threadId}","revision":1}}`,
+      ],
     ] as const) {
       yield* sql`
         INSERT INTO orchestration_v2_effect_outbox (
@@ -986,7 +993,7 @@ it.effect("reclaims cancelled settled outbox rows but preserves lifecycle barrie
 
     const result = yield* reclaim();
     assert.equal(result.reclaimedThreadCount, 1);
-    assert.equal(result.deletedOutboxCount, 1);
+    assert.equal(result.deletedOutboxCount, 2);
     const retained = yield* sql<{ readonly effect_id: string }>`
       SELECT effect_id FROM orchestration_v2_effect_outbox ORDER BY effect_id
     `;
@@ -1030,6 +1037,108 @@ it.effect("blocks cancelled lifecycle cleanup when only a different revision suc
     assert.equal(result.reclaimedThreadCount, 0);
     expectBlockers(result, threadId, ["lifecycle_cleanup"]);
   }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("blocks cancelled lifecycle cleanup when only a different root thread succeeded", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const threadId = "thread:reclaim:cancelled-root-mismatch";
+    yield* seedDeletedThread({ threadId });
+    for (const [effectId, status, rootThreadId] of [
+      ["cancelled:lifecycle", "cancelled", threadId],
+      ["succeeded:lifecycle", "succeeded", "thread:other-root"],
+    ] as const) {
+      yield* sql`
+        INSERT INTO orchestration_v2_effect_outbox (
+          effect_id, command_id, thread_id, effect_type, payload_json, status,
+          attempt_count, available_at, created_at, updated_at, completed_at
+        ) VALUES (
+          ${effectId}, ${`cleanup:${effectId}`}, ${threadId}, 'attachment.cleanup',
+          ${JSON.stringify({ lifecycle: { rootThreadId, revision: 1 } })}, ${status},
+          0, ${at}, ${at}, ${at}, ${at}
+        )
+      `;
+    }
+
+    const before = yield* snapshotRows();
+    const result = yield* reclaim();
+    const after = yield* snapshotRows();
+
+    assert.deepEqual(after, before);
+    assert.equal(result.reclaimedThreadCount, 0);
+    expectBlockers(result, threadId, ["lifecycle_cleanup"]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect(
+  "does not let provider-session.detach replace cancelled attachment.cleanup",
+  () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const threadId = "thread:reclaim:cancelled-effect-mismatch";
+      yield* seedDeletedThread({ threadId });
+      for (const [effectId, status, effectType] of [
+        ["cancelled:attachment", "cancelled", "attachment.cleanup"],
+        ["succeeded:detach", "succeeded", "provider-session.detach"],
+      ] as const) {
+        yield* sql`
+          INSERT INTO orchestration_v2_effect_outbox (
+            effect_id, command_id, thread_id, effect_type, payload_json, status,
+            attempt_count, available_at, created_at, updated_at, completed_at
+          ) VALUES (
+            ${effectId}, ${`cleanup:${effectId}`}, ${threadId}, ${effectType},
+            ${JSON.stringify({ lifecycle: { rootThreadId: threadId, revision: 1 } })}, ${status},
+            0, ${at}, ${at}, ${at}, ${at}
+          )
+        `;
+      }
+
+      const before = yield* snapshotRows();
+      const result = yield* reclaim();
+      const after = yield* snapshotRows();
+
+      assert.deepEqual(after, before);
+      assert.equal(result.reclaimedThreadCount, 0);
+      expectBlockers(result, threadId, ["lifecycle_cleanup"]);
+    }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect(
+  "keeps a cancelled legacy deletion barrier without lifecycle payload when its receipt is accepted",
+  () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const threadId = "thread:reclaim:cancelled-legacy-delete-barrier";
+      yield* seedDeletedThread({ threadId });
+      yield* sql`
+        INSERT INTO orchestration_v2_effect_outbox (
+          effect_id, command_id, thread_id, effect_type, payload_json, status,
+          attempt_count, available_at, created_at, updated_at, completed_at
+        ) VALUES (
+          'cancelled:legacy-delete-barrier', ${`delete:${threadId}`}, ${threadId},
+          'provider-session.detach', '{}', 'cancelled', 0, ${at}, ${at}, ${at}, ${at}
+        )
+      `;
+      yield* sql`
+        INSERT INTO orchestration_v2_effect_outbox (
+          effect_id, command_id, thread_id, effect_type, payload_json, status,
+          attempt_count, available_at, created_at, updated_at, completed_at
+        ) VALUES (
+          'succeeded:matching-lifecycle-detach', 'cleanup:succeeded-detach', ${threadId},
+          'provider-session.detach',
+          ${JSON.stringify({ lifecycle: { rootThreadId: threadId, revision: 1 } })},
+          'succeeded', 0, ${at}, ${at}, ${at}, ${at}
+        )
+      `;
+
+      const before = yield* snapshotRows();
+      const result = yield* reclaim();
+      const after = yield* snapshotRows();
+
+      assert.deepEqual(after, before);
+      assert.equal(result.reclaimedThreadCount, 0);
+      expectBlockers(result, threadId, ["lifecycle_cleanup"]);
+    }).pipe(Effect.provide(layerTest)),
 );
 
 it.effect("reclaims a large subagent closure in ordered bounded chunks and resumes", () =>
