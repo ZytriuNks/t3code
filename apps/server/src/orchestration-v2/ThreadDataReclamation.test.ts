@@ -154,7 +154,7 @@ const seedSubagentOwnership = Effect.fn("test.seedSubagentOwnership")(function* 
 
 const seedLifecycleCleanup = Effect.fn("test.seedLifecycleCleanup")(function* (input: {
   readonly threadId: string;
-  readonly status: "pending" | "running" | "failed";
+  readonly status: "pending" | "running" | "failed" | "cancelled";
 }) {
   const sql = yield* SqlClient.SqlClient;
   const commandId = `delete:${input.threadId}`;
@@ -612,9 +612,9 @@ it.effect("reclaim matches descendant deletion records to the operation root rec
   }).pipe(Effect.provide(layerTest)),
 );
 
-it.effect("reclaim blocks pending running and failed lifecycle cleanup", () =>
+it.effect("reclaim blocks pending running failed and cancelled lifecycle cleanup", () =>
   Effect.gen(function* () {
-    for (const status of ["pending", "running", "failed"] as const) {
+    for (const status of ["pending", "running", "failed", "cancelled"] as const) {
       const threadId = `thread:cleanup:${status}`;
       yield* seedDeletedThread({ threadId });
       yield* seedLifecycleCleanup({ threadId, status });
@@ -626,7 +626,7 @@ it.effect("reclaim blocks pending running and failed lifecycle cleanup", () =>
 
     assert.deepEqual(after, before);
     assert.equal(result.reclaimedThreadCount, 0);
-    for (const status of ["pending", "running", "failed"] as const) {
+    for (const status of ["pending", "running", "failed", "cancelled"] as const) {
       expectBlockers(result, `thread:cleanup:${status}`, ["lifecycle_cleanup"]);
     }
   }).pipe(Effect.provide(layerTest)),
@@ -768,6 +768,47 @@ it.effect(
       expectBlockers(result, "thread:shared-native", ["shared_native_session"]);
       expectBlockers(result, "thread:shared-attachment", ["shared_attachment"]);
     }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("preserves non-delete receipts referenced by retained outbox rows", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const threadId = "thread:reclaim:receipt-outbox";
+    const commandId = `update:${threadId}`;
+    yield* seedDeletedThread({ threadId });
+    yield* sql`
+      INSERT INTO orchestration_command_receipts (
+        command_id, aggregate_kind, aggregate_id, accepted_at, result_sequence,
+        status, error, command_type
+      ) VALUES (
+        ${commandId}, 'thread', ${threadId}, ${at}, 0,
+        'accepted', NULL, 'thread.update'
+      )
+    `;
+    yield* sql`
+      INSERT INTO orchestration_v2_effect_outbox (
+        effect_id, command_id, thread_id, effect_type, payload_json, status,
+        attempt_count, available_at, created_at, updated_at
+      ) VALUES (
+        ${`outbox:${commandId}`}, ${commandId}, ${threadId}, 'preview.cleanup', '{}',
+        'pending', 0, ${at}, ${at}, ${at}
+      )
+    `;
+
+    const result = yield* reclaim();
+    const after = yield* snapshotRows();
+
+    assert.equal(result.reclaimedThreadCount, 1);
+    assert.equal(result.deletedReceiptCount, 0);
+    assert.deepEqual(
+      after.receipts.map((row) => ({ command_id: row.command_id, command_type: row.command_type })),
+      [
+        { command_id: `delete:${threadId}`, command_type: "thread.delete" },
+        { command_id: commandId, command_type: "thread.update" },
+      ],
+    );
+    assert.deepEqual(after.outbox.map((row) => row.command_id), [commandId]);
+  }).pipe(Effect.provide(layerTest)),
 );
 
 it.effect("reclaims dependent rows while preserving deletion anchors and the thread shell", () =>

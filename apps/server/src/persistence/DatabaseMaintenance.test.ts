@@ -17,6 +17,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as SqlClient from "effect/sql/SqlClient";
+import * as Tracer from "effect/Tracer";
 
 import * as DatabaseMaintenance from "./DatabaseMaintenance.ts";
 import * as Sqlite from "./Sqlite.ts";
@@ -294,7 +295,31 @@ it.layer(
       assert.equal(refused._tag, "DatabaseInUseError");
       assert.equal((yield* fs.stat(dbPath)).size, sizeBefore);
 
-      const result = yield* maintenance.compact(dbPath);
+      const compactStatements: Array<string> = [];
+      const compactTracer = Tracer.make({
+        span(options) {
+          const span = new Tracer.NativeSpan(options);
+          const end = span.end.bind(span);
+          span.end = (endTime, exit) => {
+            end(endTime, exit);
+            const query = span.attributes.get("db.query.text");
+            if (typeof query === "string") compactStatements.push(query);
+          };
+          return span;
+        },
+      });
+      const result = yield* maintenance
+        .compact(dbPath)
+        .pipe(Effect.withTracer(compactTracer));
+      const checkpointIndex = compactStatements.findIndex((query) =>
+        query.toLowerCase().includes("wal_checkpoint"),
+      );
+      assert.isAtLeast(checkpointIndex, 0);
+      assert.isTrue(
+        compactStatements
+          .slice(checkpointIndex + 1)
+          .some((query) => query.includes("orchestration_events_v2_created_threads_idx")),
+      );
       assert.equal(result.deletedEventCount, 0);
       assert.equal(result.deletedReceiptCount, 0);
       assert.equal(result.reclamation.reclaimedThreadCount, 1);
@@ -348,6 +373,7 @@ it.layer(
       const repeated = yield* maintenance.compact(dbPath);
       assert.equal(repeated.deletedEventCount, 0);
       assert.equal(repeated.deletedReceiptCount, 0);
+      assert.equal(repeated.reclamation.reclaimedThreadCount, 1);
       assert.equal(repeated.reclamation.deletedEventCount, 0);
       assert.equal(repeated.reclamation.deletedReceiptCount, 0);
       assert.equal(repeated.reclamation.deletedProjectionRowCount, 0);

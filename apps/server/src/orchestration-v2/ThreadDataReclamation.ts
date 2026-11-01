@@ -814,7 +814,7 @@ const make = Effect.gen(function* () {
           SELECT DISTINCT cleanup.thread_id
           FROM orchestration_v2_effect_outbox AS cleanup
           WHERE ${sql.in("cleanup.thread_id", candidateIdChunk)}
-            AND cleanup.status IN ('pending', 'running', 'failed')
+            AND cleanup.status IN ('pending', 'running', 'failed', 'cancelled')
             AND cleanup.effect_type IN (
               'provider-session.detach', 'terminal.cleanup', 'preview.cleanup',
               'scheduled-tasks.cleanup', 'scheduled-tasks.suspend', 'attachment.cleanup'
@@ -1600,6 +1600,11 @@ const make = Effect.gen(function* () {
                 SELECT 1
                 FROM orchestration_v2_thread_deletions AS deletion
                 WHERE deletion.command_id = receipt.command_id
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM orchestration_v2_effect_outbox AS retained_outbox
+                WHERE retained_outbox.command_id = receipt.command_id
               )
             RETURNING command_id
           `;

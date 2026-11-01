@@ -200,6 +200,9 @@ const make = Effect.gen(function* () {
         yield* sql`PRAGMA auto_vacuum = INCREMENTAL`;
         yield* sql`VACUUM`;
         yield* sql`PRAGMA wal_checkpoint(TRUNCATE)`;
+        if (!(yield* maintenance.verify).valid) {
+          return yield* new DatabaseProjectionsInvalidError({ path: databasePath });
+        }
         return { summary, reclamation };
       }).pipe(
         Effect.provide(

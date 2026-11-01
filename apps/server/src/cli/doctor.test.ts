@@ -14,6 +14,7 @@ it.effect(
   () =>
     Effect.gen(function* () {
       const calls: string[] = [];
+      let compactCount = 0;
       const doctor = (dryRun: boolean) =>
         runDoctor("/test/statev2.sqlite", { fix: true, dryRun, interactive: false });
       const layer = Layer.mergeAll(
@@ -39,10 +40,11 @@ it.effect(
           compact: () =>
             Effect.sync(() => {
               calls.push("compact");
+              const isFirstCompact = compactCount++ === 0;
               return {
                 beforeBytes: 2000,
                 afterBytes: 1000,
-                deletedEventCount: 1,
+                deletedEventCount: isFirstCompact ? 1 : 0,
                 deletedReceiptCount: 0,
                 reclamation: {
                   reclaimedThreadCount: 2,
@@ -52,11 +54,11 @@ it.effect(
                       blockerCodes: ["shared_native_session"],
                     },
                   ],
-                  deletedEventCount: 2,
-                  deletedReceiptCount: 1,
-                  deletedProjectionRowCount: 4,
-                  deletedTurnItemPositionCount: 1,
-                  deletedOutboxCount: 2,
+                  deletedEventCount: isFirstCompact ? 2 : 0,
+                  deletedReceiptCount: isFirstCompact ? 1 : 0,
+                  deletedProjectionRowCount: isFirstCompact ? 4 : 0,
+                  deletedTurnItemPositionCount: isFirstCompact ? 1 : 0,
+                  deletedOutboxCount: isFirstCompact ? 2 : 0,
                 },
               };
             }),
@@ -68,12 +70,30 @@ it.effect(
         assert.deepEqual(calls, []);
         yield* doctor(false);
         assert.deepEqual(calls, ["pause", "compact", "resume"]);
+        yield* doctor(false);
+        assert.deepEqual(calls, [
+          "pause",
+          "compact",
+          "resume",
+          "pause",
+          "compact",
+          "resume",
+        ]);
         const output = yield* TestConsole.logLines;
-        const summaryLine =
-          "Done: 2 KiB -> 1 KiB, 1 superseded events removed; " +
-          "deleted-thread reclamation: 2 threads reclaimed, " +
-          "10 dependent rows removed, skipped threads: 1.";
-        assert.isTrue(output.includes(summaryLine));
+        assert.isTrue(
+          output.includes(
+            "Done: 2 KiB -> 1 KiB, 1 superseded events removed; " +
+              "deleted-thread reclamation: 2 threads eligible for reclamation, " +
+              "10 dependent rows removed, skipped threads: 1.",
+          ),
+        );
+        assert.isTrue(
+          output.includes(
+            "Done: 2 KiB -> 1 KiB, 0 superseded events removed; " +
+              "deleted-thread reclamation: 2 threads eligible for reclamation, " +
+              "0 dependent rows removed, skipped threads: 1.",
+          ),
+        );
         assert.isFalse(output.some((line) => String(line).includes("thread:private-path")));
       }).pipe(Effect.provide(layer));
     }),
