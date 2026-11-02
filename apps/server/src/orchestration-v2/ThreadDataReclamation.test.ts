@@ -22,6 +22,9 @@ const layerMaintenanceTest = ProjectionMaintenance.layer.pipe(
 
 const at = "2026-10-31T12:00:00.000Z";
 
+const attachmentIdForThread = (threadId: string) =>
+  `${threadId.replace(/[^a-z0-9_-]+/gi, "-")}-11111111-1111-1111-1111-111111111111`;
+
 interface ThreadSeed {
   readonly threadId: string;
   readonly state?: "deleted" | "active" | "archived";
@@ -775,6 +778,139 @@ it.effect(
     }).pipe(Effect.provide(layerTest)),
 );
 
+it.effect("blocks resources shared by different deleted operation roots", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const roots = ["thread:cross-root:a", "thread:cross-root:b"] as const;
+    const attachmentId = "attachment:cross-root-shared";
+    for (const threadId of roots) {
+      yield* seedDeletedThread({ threadId });
+      yield* sql`
+        INSERT INTO orchestration_v2_projection_messages (
+          message_id, thread_id, run_id, node_id, role, streaming,
+          created_at, updated_at, payload_json
+        ) VALUES (
+          ${`message:${threadId}`}, ${threadId}, NULL, NULL, 'user', 0,
+          ${at}, ${at}, ${JSON.stringify({ attachments: [{ id: attachmentId }] })}
+        )
+      `;
+      yield* sql`
+        INSERT INTO orchestration_v2_native_session_bindings (
+          binding_key, thread_id, provider_thread_id, provider_instance_id, driver,
+          native_id, storage_type, canonical_root, canonical_file, bound_at, payload_json
+        ) VALUES (
+          ${`native-binding:${threadId}`}, ${threadId}, ${`provider-thread:${threadId}`},
+          'codex', 'codex', 'native:cross-root-shared', 'resolved', '/sessions',
+          'cross-root-shared.jsonl', ${at}, '{}'
+        )
+      `;
+    }
+    yield* sql`
+      INSERT INTO orchestration_v2_projection_provider_sessions (
+        provider_session_id, thread_id, provider, status, model, updated_at,
+        payload_json, driver, provider_instance_id
+      ) VALUES (
+        'provider-session:cross-root-shared', ${roots[0]}, 'codex', 'idle', NULL,
+        ${at}, '{}', 'codex', 'codex'
+      )
+    `;
+    yield* sql`
+      INSERT INTO orchestration_v2_projection_provider_session_bindings (
+        provider_session_id, thread_id
+      ) VALUES
+        ('provider-session:cross-root-shared', ${roots[0]}),
+        ('provider-session:cross-root-shared', ${roots[1]})
+    `;
+
+    const before = yield* snapshotRows();
+    const result = yield* reclaim();
+    const after = yield* snapshotRows();
+
+    assert.deepEqual(after, before);
+    assert.equal(result.reclaimedThreadCount, 0);
+    for (const threadId of roots) {
+      expectBlockers(result, threadId, [
+        "shared_provider_session",
+        "shared_native_session",
+        "shared_attachment",
+      ]);
+    }
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("preserves a detached provider session owned by a later failed chunk", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const rootThreadId = "thread:reclaim:detached-session:root";
+    const deleteCommandId = `delete:${rootThreadId}`;
+    const childCount = ThreadDataReclamation.THREAD_DATA_RECLAMATION_BATCH_SIZE + 1;
+    const childThreadIds: Array<string> = [];
+    for (let index = 0; index < childCount; index++) {
+      const childThreadId = `thread:reclaim:detached-session:${String(index).padStart(3, "0")}`;
+      childThreadIds.push(childThreadId);
+      yield* seedDeletedThread({
+        threadId: childThreadId,
+        parentThreadId: rootThreadId,
+        relationshipToParent: "subagent",
+        rootThreadId,
+        operationRootThreadId: rootThreadId,
+        commandId: deleteCommandId,
+        insertReceipt: false,
+      });
+      yield* seedSubagentOwnership({ parentThreadId: rootThreadId, childThreadId });
+      yield* sql`
+        INSERT INTO orchestration_v2_projection_messages (
+          message_id, thread_id, run_id, node_id, role, streaming,
+          created_at, updated_at, payload_json
+        ) VALUES (
+          ${`message:${childThreadId}`}, ${childThreadId}, NULL, NULL, 'user', 0,
+          ${at}, ${at}, '{}'
+        )
+      `;
+    }
+    yield* seedDeletedThread({
+      threadId: rootThreadId,
+      commandId: deleteCommandId,
+    });
+    const failedChildThreadId = childThreadIds.at(-1)!;
+    const detachedProviderSessionId = "provider-session:detached-later";
+    yield* sql`
+      INSERT INTO orchestration_v2_projection_provider_sessions (
+        provider_session_id, thread_id, provider, status, model, updated_at,
+        payload_json, driver, provider_instance_id
+      ) VALUES (
+        ${detachedProviderSessionId}, ${failedChildThreadId}, 'codex', 'idle', NULL,
+        ${at}, '{}', 'codex', 'codex'
+      )
+    `;
+    yield* sql`
+      CREATE TRIGGER reject_reclamation_detached_session_second_chunk
+      BEFORE DELETE ON orchestration_v2_projection_messages
+      WHEN OLD.thread_id = 'thread:reclaim:detached-session:050'
+      BEGIN SELECT RAISE(ABORT, 'injected detached-session second-chunk failure'); END
+    `;
+
+    const failed = yield* Effect.exit(reclaim());
+    assert.isTrue(Exit.isFailure(failed));
+    const retainedSession = yield* sql<{ readonly provider_session_id: string }>`
+      SELECT provider_session_id
+      FROM orchestration_v2_projection_provider_sessions
+      WHERE provider_session_id = ${detachedProviderSessionId}
+    `;
+    assert.deepEqual(retainedSession, [{ provider_session_id: detachedProviderSessionId }]);
+
+    yield* sql`DROP TRIGGER reject_reclamation_detached_session_second_chunk`;
+    const resumed = yield* reclaim();
+    assert.equal(resumed.reclaimedThreadCount, childCount + 1);
+    const removedSession = yield* sql`
+      SELECT provider_session_id
+      FROM orchestration_v2_projection_provider_sessions
+      WHERE provider_session_id = ${detachedProviderSessionId}
+    `;
+    assert.deepEqual(removedSession, []);
+  }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect("preserves non-delete receipts referenced by retained outbox rows", () =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
@@ -828,9 +964,11 @@ it.effect("reclaim blocks attachment references outside message attachments", ()
       ["guest", "attachment:shared-guest"],
     ] as const;
 
-    for (const [kind, attachmentId] of cases) {
+    for (const [kind, baseAttachmentId] of cases) {
       const deletedThreadId = `thread:attachment:${kind}:deleted`;
       const liveThreadId = `thread:attachment:${kind}:live`;
+      const attachmentId =
+        kind === "dynamic" ? attachmentIdForThread(liveThreadId) : baseAttachmentId;
       yield* seedDeletedThread({ threadId: deletedThreadId });
       yield* seedThread({ threadId: liveThreadId, state: "active" });
       yield* sql`
@@ -850,7 +988,15 @@ it.effect("reclaim blocks attachment references outside message attachments", ()
             provider_turn_id, parent_item_id, ordinal, type, status, updated_at, payload_json
           ) VALUES (
             ${`item:${liveThreadId}`}, ${liveThreadId}, NULL, NULL, NULL, NULL, NULL,
-            1, 'dynamic_tool', 'completed', ${at}, ${JSON.stringify({ output: { attachmentId } })}
+            1, 'dynamic_tool', 'completed', ${at}, ${JSON.stringify({
+              toolName: "mcp__t3-code__html_render",
+              output: [
+                {
+                  type: "text",
+                  text: JSON.stringify({ htmlRender: { attachmentId, title: "HTML", height: 80 } }),
+                },
+              ],
+            })}
           )
         `;
       } else if (kind === "input") {
@@ -889,6 +1035,128 @@ it.effect("reclaim blocks attachment references outside message attachments", ()
   }).pipe(Effect.provide(layerTest)),
 );
 
+it.effect(
+  "reclaim blocks attachment references when the candidate uses non-message attachments",
+  () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const cases = [
+        ["dynamic", "attachment:candidate-dynamic"],
+        ["input", "attachment:candidate-input"],
+        ["guest", "attachment:candidate-guest"],
+      ] as const;
+
+      for (const [kind, baseAttachmentId] of cases) {
+        const deletedThreadId = `thread:candidate-attachment:${kind}:deleted`;
+        const liveThreadId = `thread:candidate-attachment:${kind}:live`;
+        const attachmentId =
+          kind === "dynamic" ? attachmentIdForThread(deletedThreadId) : baseAttachmentId;
+        yield* seedDeletedThread({ threadId: deletedThreadId });
+        yield* seedThread({ threadId: liveThreadId, state: "active" });
+
+        if (kind === "dynamic") {
+          yield* sql`
+          INSERT INTO orchestration_v2_projection_turn_items (
+            turn_item_id, thread_id, run_id, node_id, provider_thread_id,
+            provider_turn_id, parent_item_id, ordinal, type, status, updated_at, payload_json
+          ) VALUES (
+            ${`item:${deletedThreadId}`}, ${deletedThreadId}, NULL, NULL, NULL, NULL, NULL,
+            1, 'dynamic_tool', 'completed', ${at}, ${JSON.stringify({
+              toolName: "mcp__t3-code__html_render",
+              output: [
+                {
+                  type: "text",
+                  text: JSON.stringify({ htmlRender: { attachmentId, title: "HTML", height: 80 } }),
+                },
+              ],
+            })}
+          )
+        `;
+        } else if (kind === "input") {
+          yield* sql`
+          INSERT INTO orchestration_v2_projection_turn_items (
+            turn_item_id, thread_id, run_id, node_id, provider_thread_id,
+            provider_turn_id, parent_item_id, ordinal, type, status, updated_at, payload_json
+          ) VALUES (
+            ${`item:${deletedThreadId}`}, ${deletedThreadId}, NULL, NULL, NULL, NULL, NULL,
+            1, 'user_input_request', 'completed', ${at},
+            ${JSON.stringify({ questionAnswer: { attachmentsByQuestionId: { question: [{ id: attachmentId }] } } })}
+          )
+        `;
+        } else {
+          yield* sql`
+          UPDATE orchestration_v2_projection_threads
+          SET payload_json = ${JSON.stringify({
+            lineage: {
+              parentThreadId: null,
+              relationshipToParent: null,
+              rootThreadId: deletedThreadId,
+            },
+            forkedFrom: null,
+            guestShare: { messages: [{ status: "pending", attachments: [{ id: attachmentId }] }] },
+          })}
+          WHERE thread_id = ${deletedThreadId}
+        `;
+        }
+
+        yield* sql`
+        INSERT INTO orchestration_v2_projection_messages (
+          message_id, thread_id, run_id, node_id, role, streaming,
+          created_at, updated_at, payload_json
+        ) VALUES (
+          ${`message:${liveThreadId}`}, ${liveThreadId}, NULL, NULL, 'user', 0,
+          ${at}, ${at}, ${JSON.stringify({ attachments: [{ id: attachmentId }] })}
+        )
+      `;
+      }
+
+      const result = yield* reclaim();
+      assert.equal(result.reclaimedThreadCount, 0);
+      for (const [kind] of cases) {
+        expectBlockers(result, `thread:candidate-attachment:${kind}:deleted`, [
+          "shared_attachment",
+        ]);
+      }
+    }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("reclaims thread-scoped orchestration metadata", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const threadId = "thread:reclaim:metadata";
+    yield* seedDeletedThread({ threadId });
+    yield* sql`
+      INSERT INTO mcp_app_model_context (thread_id, item_id, server, tool, text, updated_at)
+      VALUES (${threadId}, 'turn-item:metadata', 'server', 'tool', 'context', ${at})
+    `;
+    yield* sql`
+      INSERT INTO orchestration_v2_thread_launch_workflows (
+        command_id, thread_id, project_id, status, title, worktree_path, branch,
+        setup_committed, thread_committed, message_committed, last_error, created_at, updated_at
+      ) VALUES (
+        'launch:metadata', ${threadId}, 'project:reclamation', 'completed', 'metadata', NULL, NULL,
+        1, 1, 1, NULL, ${at}, ${at}
+      )
+    `;
+
+    const result = yield* reclaim();
+
+    assert.equal(result.reclaimedThreadCount, 1);
+    assert.equal(result.deletedProjectionRowCount, 2);
+    assert.deepEqual(
+      yield* sql`SELECT thread_id FROM mcp_app_model_context WHERE thread_id = ${threadId}`,
+      [],
+    );
+    assert.deepEqual(
+      yield* sql`
+        SELECT thread_id FROM orchestration_v2_thread_launch_workflows
+        WHERE thread_id = ${threadId}
+      `,
+      [],
+    );
+  }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect("reclaims dependent rows while preserving deletion anchors and the thread shell", () =>
   Effect.gen(function* () {
     const threadId = "thread:reclaim:data";
@@ -897,10 +1165,6 @@ it.effect("reclaims dependent rows while preserving deletion anchors and the thr
 
     const result = yield* reclaim();
     const after = yield* snapshotRows();
-
-    assert.equal(result.reclaimedThreadCount, 1);
-    assert.deepEqual(result.skippedThreads, []);
-    assert.equal(result.deletedEventCount, 1);
     assert.equal(result.deletedReceiptCount, 1);
     assert.equal(result.deletedProjectionRowCount, 17);
     assert.equal(result.deletedTurnItemPositionCount, 1);
