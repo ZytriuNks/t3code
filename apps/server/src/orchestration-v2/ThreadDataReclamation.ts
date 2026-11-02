@@ -7,6 +7,11 @@ import * as SqlClient from "effect/sql/SqlClient";
 
 export const THREAD_DATA_RECLAMATION_BATCH_SIZE = 50;
 
+const encodeStringPair = Schema.encodeSync(
+  Schema.fromJsonString(Schema.Tuple([Schema.String, Schema.String])),
+);
+const encodeStringArray = Schema.encodeSync(Schema.fromJsonString(Schema.Array(Schema.String)));
+
 export type ThreadDataReclamationBlockerCode =
   | "lifecycle_cleanup"
   | "active_work"
@@ -174,9 +179,10 @@ const chunksOf = <A>(values: ReadonlyArray<A>, size: number): ReadonlyArray<Read
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
 
-  const findThreadsWithReclaimableData = (threadIds: ReadonlyArray<string>) =>
-    Effect.gen(function* () {
-      const rows = yield* sql<{ readonly thread_id: string }>`
+  const findThreadsWithReclaimableData = Effect.fn(
+    "ThreadDataReclamation.findThreadsWithReclaimableData",
+  )(function* (threadIds: ReadonlyArray<string>) {
+    const rows = yield* sql<{ readonly thread_id: string }>`
         WITH candidate_ids AS (
           SELECT thread_id
           FROM orchestration_v2_projection_threads
@@ -236,59 +242,11 @@ const make = Effect.gen(function* () {
             AND stream_id IN (SELECT thread_id FROM candidate_ids)
             AND event_type NOT IN ('thread.created', 'thread.deleted')
       `;
-      return new Set(rows.map((row) => row.thread_id));
-    });
+    return new Set(rows.map((row) => row.thread_id));
+  });
 
-  const reclaim = Effect.fn("ThreadDataReclamation.reclaim")(
-    function* (input: ThreadDataReclamationInput) {
-      const candidates: Array<CandidateRow> = [];
-      let lastThreadId = "";
-      while (true) {
-        const page = yield* sql<CandidateRow>`
-          SELECT
-            deletion.thread_id,
-            deletion.project_id,
-            shell.project_id AS shell_project_id,
-            deletion.parent_thread_id,
-            deletion.operation_root_thread_id,
-            json_extract(shell.payload_json, '$.lineage.parentThreadId') AS lineage_parent_thread_id,
-            json_extract(shell.payload_json, '$.lineage.relationshipToParent') AS relationship_to_parent,
-            json_extract(shell.payload_json, '$.forkedFrom.type') AS forked_from_type,
-            json_extract(shell.payload_json, '$.forkedFrom.threadId') AS forked_from_thread_id
-          FROM orchestration_v2_thread_deletions AS deletion
-          INNER JOIN orchestration_v2_projection_threads AS shell
-            ON shell.thread_id = deletion.thread_id
-          WHERE deletion.scope = 't3_only'
-            AND shell.deleted_at IS NOT NULL
-            AND deletion.thread_id > ${lastThreadId}
-            AND EXISTS (
-              SELECT 1
-              FROM orchestration_events AS deleted_event
-              WHERE deleted_event.aggregate_kind = 'thread'
-                AND deleted_event.stream_id = deletion.thread_id
-                AND deleted_event.event_type = 'thread.deleted'
-                AND deleted_event.command_id = deletion.command_id
-                AND deleted_event.application_event_version = 2
-                AND deleted_event.sequence <= ${input.eventThroughSequence}
-            )
-            AND EXISTS (
-              SELECT 1
-              FROM orchestration_command_receipts AS delete_receipt
-              WHERE delete_receipt.command_id = deletion.command_id
-                AND delete_receipt.aggregate_kind = 'thread'
-                AND delete_receipt.aggregate_id = deletion.operation_root_thread_id
-                AND delete_receipt.command_type = 'thread.delete'
-                AND delete_receipt.status = 'accepted'
-                AND delete_receipt.rowid <= ${input.receiptThroughRowId}
-            )
-          ORDER BY deletion.thread_id ASC
-          LIMIT ${THREAD_DATA_RECLAMATION_BATCH_SIZE}
-        `;
-        candidates.push(...page);
-        if (page.length < THREAD_DATA_RECLAMATION_BATCH_SIZE) break;
-        lastThreadId = page.at(-1)!.thread_id;
-      }
-
+  const reclaimCandidateBatch = Effect.fn("ThreadDataReclamation.reclaimCandidateBatch")(
+    function* (input: ThreadDataReclamationInput, candidates: ReadonlyArray<CandidateRow>) {
       const blockersByThreadId = new Map<string, Set<ThreadDataReclamationBlockerCode>>();
       const addBlocker = (threadId: string, blocker: ThreadDataReclamationBlockerCode) => {
         let blockers = blockersByThreadId.get(threadId);
@@ -298,13 +256,12 @@ const make = Effect.gen(function* () {
         }
         blockers.add(blocker);
       };
-      const candidateById = new Map(candidates.map((candidate) => [candidate.thread_id, candidate]));
+      const candidateById = new Map(
+        candidates.map((candidate) => [candidate.thread_id, candidate]),
+      );
       const candidateIds = candidates.map((candidate) => candidate.thread_id);
       const candidateThreadsWithData = new Set<string>();
-      for (const candidateIdChunk of chunksOf(
-        candidateIds,
-        THREAD_DATA_RECLAMATION_BATCH_SIZE,
-      )) {
+      for (const candidateIdChunk of chunksOf(candidateIds, THREAD_DATA_RECLAMATION_BATCH_SIZE)) {
         for (const threadId of yield* findThreadsWithReclaimableData(candidateIdChunk)) {
           candidateThreadsWithData.add(threadId);
         }
@@ -344,7 +301,7 @@ const make = Effect.gen(function* () {
               candidateById.get(ownership.parent_thread_id)?.operation_root_thread_id &&
             child.project_id === candidateById.get(ownership.parent_thread_id)?.project_id;
           if (matchesLineage) {
-            const pair = JSON.stringify([ownership.parent_thread_id, ownership.child_thread_id]);
+            const pair = encodeStringPair([ownership.parent_thread_id, ownership.child_thread_id]);
             directSubagentPairs.add(pair);
             const rows = subagentRowsByPair.get(pair) ?? [];
             rows.push(ownership);
@@ -385,7 +342,7 @@ const make = Effect.gen(function* () {
             parent === undefined ||
             parent.operation_root_thread_id !== candidate.operation_root_thread_id ||
             parent.project_id !== candidate.project_id ||
-            (!directSubagentPairs.has(JSON.stringify([parentThreadId, candidate.thread_id])) &&
+            (!directSubagentPairs.has(encodeStringPair([parentThreadId, candidate.thread_id])) &&
               candidateThreadsWithData.has(candidate.thread_id))
           ) {
             addBlocker(candidate.thread_id, "unknown_dependency");
@@ -442,8 +399,9 @@ const make = Effect.gen(function* () {
         }
         threadIds.sort((left, right) => left.localeCompare(right));
         const subagentRows = threadIds.flatMap((parentThreadId) =>
-          (childrenByParentId.get(parentThreadId) ?? []).flatMap((child) =>
-            subagentRowsByPair.get(JSON.stringify([parentThreadId, child.thread_id])) ?? [],
+          (childrenByParentId.get(parentThreadId) ?? []).flatMap(
+            (child) =>
+              subagentRowsByPair.get(JSON.stringify([parentThreadId, child.thread_id])) ?? [],
           ),
         );
         closures.push({
@@ -502,11 +460,7 @@ const make = Effect.gen(function* () {
             transfer.target_run_id === null ||
             (transfer.target_run_thread_id !== null &&
               closureRootByThreadId.get(transfer.target_run_thread_id) === rootThreadId);
-          if (
-            rootThreadId !== undefined &&
-            rootThreadId === targetRootThreadId &&
-            runIsInternal
-          ) {
+          if (rootThreadId !== undefined && rootThreadId === targetRootThreadId && runIsInternal) {
             const byId = contextTransfersByRoot.get(rootThreadId) ?? new Map();
             byId.set(transfer.context_transfer_id, {
               context_transfer_id: transfer.context_transfer_id,
@@ -613,10 +567,7 @@ const make = Effect.gen(function* () {
         unsharedProviderSessionIdsByRoot.set(rootThreadId, unsharedIds);
       }
 
-      const candidateNativeBindingsByRoot = new Map<
-        string,
-        Array<ReclaimableNativeBindingRow>
-      >();
+      const candidateNativeBindingsByRoot = new Map<string, Array<ReclaimableNativeBindingRow>>();
       const candidateNativeIds = new Set<string>();
       for (const candidateIdChunk of chunksOf(candidateIds, THREAD_DATA_RECLAMATION_BATCH_SIZE)) {
         const rows = yield* sql<ReclaimableNativeBindingRow>`
@@ -666,8 +617,8 @@ const make = Effect.gen(function* () {
       ) =>
         candidate.driver === owner.driver &&
         candidate.native_id === owner.native_id &&
-        (candidate.storage_type !== 'resolved' ||
-          owner.storage_type !== 'resolved' ||
+        (candidate.storage_type !== "resolved" ||
+          owner.storage_type !== "resolved" ||
           (candidate.canonical_root === owner.canonical_root &&
             candidate.canonical_file === owner.canonical_file));
       const unsharedNativeBindingsByRoot = new Map<
@@ -902,7 +853,9 @@ const make = Effect.gen(function* () {
           const referencedIds = new Set(
             [reference.parent_thread_id, reference.forked_from_thread_id].filter(
               (threadId): threadId is string =>
-                threadId !== null && candidateById.has(threadId) && candidateIdChunk.includes(threadId),
+                threadId !== null &&
+                candidateById.has(threadId) &&
+                candidateIdChunk.includes(threadId),
             ),
           );
           for (const sourceThreadId of referencedIds) {
@@ -1001,24 +954,53 @@ const make = Effect.gen(function* () {
         `;
         for (const row of sharedNativeRows) addBlocker(row.thread_id, "shared_native_session");
 
+        const attachmentIdsJson = encodeStringArray(candidateAttachmentIds);
         const sharedAttachmentRows = yield* sql<{ readonly thread_id: string }>`
-          WITH message_attachments AS (
+          WITH candidate_attachments AS (
+            SELECT DISTINCT
+              message.thread_id,
+              json_extract(attachment.value, '$.id') AS attachment_id
+            FROM orchestration_v2_projection_messages AS message,
+              json_each(message.payload_json, '$.attachments') AS attachment
+            WHERE message.thread_id IN ${sql.in(candidateIdChunk)}
+              AND json_extract(attachment.value, '$.id') IS NOT NULL
+          ),
+          attachment_refs AS (
             SELECT
               message.thread_id,
               json_extract(attachment.value, '$.id') AS attachment_id
             FROM orchestration_v2_projection_messages AS message,
               json_each(message.payload_json, '$.attachments') AS attachment
             WHERE json_extract(attachment.value, '$.id') IS NOT NULL
+            UNION ALL
+            SELECT item.thread_id, candidate.value AS attachment_id
+            FROM orchestration_v2_projection_turn_items AS item,
+              json_each(${attachmentIdsJson}) AS candidate
+            WHERE item.type = 'dynamic_tool'
+              AND instr(item.payload_json, candidate.value) > 0
+            UNION ALL
+            SELECT item.thread_id, json_extract(attachment.value, '$.id') AS attachment_id
+            FROM orchestration_v2_projection_turn_items AS item,
+              json_each(item.payload_json, '$.questionAnswer.attachmentsByQuestionId') AS question,
+              json_each(question.value) AS attachment
+            WHERE item.type = 'user_input_request'
+              AND json_extract(attachment.value, '$.id') IS NOT NULL
+            UNION ALL
+            SELECT thread.thread_id, json_extract(attachment.value, '$.id') AS attachment_id
+            FROM orchestration_v2_projection_threads AS thread,
+              json_each(thread.payload_json, '$.guestShare.messages') AS guest_message,
+              json_each(guest_message.value, '$.attachments') AS attachment
+            WHERE json_extract(guest_message.value, '$.status') = 'pending'
+              AND json_extract(attachment.value, '$.id') IS NOT NULL
           )
           SELECT DISTINCT candidate.thread_id
-          FROM message_attachments AS candidate
-          INNER JOIN message_attachments AS shared
+          FROM candidate_attachments AS candidate
+          INNER JOIN attachment_refs AS shared
             ON shared.attachment_id = candidate.attachment_id
             AND shared.thread_id <> candidate.thread_id
           INNER JOIN orchestration_v2_projection_threads AS live_thread
             ON live_thread.thread_id = shared.thread_id
             AND live_thread.deleted_at IS NULL
-          WHERE ${sql.in("candidate.thread_id", candidateIdChunk)}
           ORDER BY candidate.thread_id ASC
         `;
         for (const row of sharedAttachmentRows) addBlocker(row.thread_id, "shared_attachment");
@@ -1030,7 +1012,8 @@ const make = Effect.gen(function* () {
       for (const closure of closures) {
         const closureBlockers = new Set<ThreadDataReclamationBlockerCode>();
         for (const threadId of closure.threadIds) {
-          for (const blocker of blockersByThreadId.get(threadId) ?? []) closureBlockers.add(blocker);
+          for (const blocker of blockersByThreadId.get(threadId) ?? [])
+            closureBlockers.add(blocker);
         }
         if (closureBlockers.size === 0) {
           reclaimedThreadCount += closure.threadIds.length;
@@ -1089,42 +1072,43 @@ const make = Effect.gen(function* () {
       }
       if (currentBatch.length > 0) batches.push(currentBatch);
 
-      const deleteClosure = (closure: Closure) =>
-        Effect.gen(function* () {
-          const threadIds = closure.threadIds;
-          const counts = {
-            deletedProjectionRowCount: 0,
-            deletedTurnItemPositionCount: 0,
-            deletedOutboxCount: 0,
-            deletedReceiptCount: 0,
-            deletedEventCount: 0,
-          };
+      const deleteClosure = Effect.fn("ThreadDataReclamation.deleteClosure")(function* (
+        closure: Closure,
+      ) {
+        const threadIds = closure.threadIds;
+        const counts = {
+          deletedProjectionRowCount: 0,
+          deletedTurnItemPositionCount: 0,
+          deletedOutboxCount: 0,
+          deletedReceiptCount: 0,
+          deletedEventCount: 0,
+        };
 
-          for (const handoffIdChunk of chunksOf(
-            closure.contextHandoffs.map((row) => row.context_handoff_id),
-            THREAD_DATA_RECLAMATION_BATCH_SIZE,
-          )) {
-            const handoffs = yield* sql<{ readonly context_handoff_id: string }>`
+        for (const handoffIdChunk of chunksOf(
+          closure.contextHandoffs.map((row) => row.context_handoff_id),
+          THREAD_DATA_RECLAMATION_BATCH_SIZE,
+        )) {
+          const handoffs = yield* sql<{ readonly context_handoff_id: string }>`
               DELETE FROM orchestration_v2_projection_context_handoffs
               WHERE context_handoff_id IN ${sql.in(handoffIdChunk)}
               RETURNING context_handoff_id
             `;
-            counts.deletedProjectionRowCount += handoffs.length;
-          }
+          counts.deletedProjectionRowCount += handoffs.length;
+        }
 
-          for (const transferIdChunk of chunksOf(
-            closure.contextTransfers.map((row) => row.context_transfer_id),
-            THREAD_DATA_RECLAMATION_BATCH_SIZE,
-          )) {
-            const transfers = yield* sql<{ readonly context_transfer_id: string }>`
+        for (const transferIdChunk of chunksOf(
+          closure.contextTransfers.map((row) => row.context_transfer_id),
+          THREAD_DATA_RECLAMATION_BATCH_SIZE,
+        )) {
+          const transfers = yield* sql<{ readonly context_transfer_id: string }>`
               DELETE FROM orchestration_v2_projection_context_transfers
               WHERE context_transfer_id IN ${sql.in(transferIdChunk)}
               RETURNING context_transfer_id
             `;
-            counts.deletedProjectionRowCount += transfers.length;
-          }
+          counts.deletedProjectionRowCount += transfers.length;
+        }
 
-          const checkpoints = yield* sql<{ readonly checkpoint_id: string }>`
+        const checkpoints = yield* sql<{ readonly checkpoint_id: string }>`
             DELETE FROM orchestration_v2_projection_checkpoints AS checkpoint
             WHERE checkpoint.thread_id IN ${sql.in(threadIds)}
               AND NOT EXISTS (
@@ -1135,9 +1119,9 @@ const make = Effect.gen(function* () {
               )
             RETURNING checkpoint_id
           `;
-          counts.deletedProjectionRowCount += checkpoints.length;
+        counts.deletedProjectionRowCount += checkpoints.length;
 
-          const checkpointScopes = yield* sql<{ readonly scope_id: string }>`
+        const checkpointScopes = yield* sql<{ readonly scope_id: string }>`
             DELETE FROM orchestration_v2_projection_checkpoint_scopes AS scope
             WHERE scope.thread_id IN ${sql.in(threadIds)}
               AND NOT EXISTS (
@@ -1160,9 +1144,9 @@ const make = Effect.gen(function* () {
               )
             RETURNING scope_id
           `;
-          counts.deletedProjectionRowCount += checkpointScopes.length;
+        counts.deletedProjectionRowCount += checkpointScopes.length;
 
-          const runtimeRequests = yield* sql<{ readonly runtime_request_id: string }>`
+        const runtimeRequests = yield* sql<{ readonly runtime_request_id: string }>`
             DELETE FROM orchestration_v2_projection_runtime_requests AS request
             WHERE request.thread_id IN ${sql.in(threadIds)}
               AND NOT EXISTS (
@@ -1173,28 +1157,28 @@ const make = Effect.gen(function* () {
               )
             RETURNING runtime_request_id
           `;
-          counts.deletedProjectionRowCount += runtimeRequests.length;
+        counts.deletedProjectionRowCount += runtimeRequests.length;
 
-          const plans = yield* sql<{ readonly plan_id: string }>`
+        const plans = yield* sql<{ readonly plan_id: string }>`
             DELETE FROM orchestration_v2_projection_plans
             WHERE thread_id IN ${sql.in(threadIds)}
             RETURNING plan_id
           `;
-          counts.deletedProjectionRowCount += plans.length;
+        counts.deletedProjectionRowCount += plans.length;
 
-          for (const messageIdChunk of chunksOf(
-            closure.messages.map((row) => row.message_id),
-            THREAD_DATA_RECLAMATION_BATCH_SIZE,
-          )) {
-            const messages = yield* sql<{ readonly message_id: string }>`
+        for (const messageIdChunk of chunksOf(
+          closure.messages.map((row) => row.message_id),
+          THREAD_DATA_RECLAMATION_BATCH_SIZE,
+        )) {
+          const messages = yield* sql<{ readonly message_id: string }>`
               DELETE FROM orchestration_v2_projection_messages
               WHERE message_id IN ${sql.in(messageIdChunk)}
               RETURNING message_id
             `;
-            counts.deletedProjectionRowCount += messages.length;
-          }
+          counts.deletedProjectionRowCount += messages.length;
+        }
 
-          const turnItems = yield* sql<{ readonly turn_item_id: string }>`
+        const turnItems = yield* sql<{ readonly turn_item_id: string }>`
             DELETE FROM orchestration_v2_projection_turn_items AS item
             WHERE item.thread_id IN ${sql.in(threadIds)}
               AND NOT EXISTS (
@@ -1205,9 +1189,9 @@ const make = Effect.gen(function* () {
               )
             RETURNING turn_item_id
           `;
-          counts.deletedProjectionRowCount += turnItems.length;
+        counts.deletedProjectionRowCount += turnItems.length;
 
-          const positions = yield* sql<{ readonly turn_item_id: string }>`
+        const positions = yield* sql<{ readonly turn_item_id: string }>`
             DELETE FROM orchestration_v2_turn_item_positions AS position
             WHERE position.thread_id IN ${sql.in(threadIds)}
               AND NOT EXISTS (
@@ -1218,9 +1202,9 @@ const make = Effect.gen(function* () {
               )
             RETURNING turn_item_id
           `;
-          counts.deletedTurnItemPositionCount += positions.length;
+        counts.deletedTurnItemPositionCount += positions.length;
 
-          const providerTurns = yield* sql<{ readonly provider_turn_id: string }>`
+        const providerTurns = yield* sql<{ readonly provider_turn_id: string }>`
             DELETE FROM orchestration_v2_projection_provider_turns AS provider_turn
             WHERE provider_turn.thread_id IN ${sql.in(threadIds)}
               AND NOT EXISTS (
@@ -1249,9 +1233,9 @@ const make = Effect.gen(function* () {
               )
             RETURNING provider_turn_id
           `;
-          counts.deletedProjectionRowCount += providerTurns.length;
+        counts.deletedProjectionRowCount += providerTurns.length;
 
-          const providerThreads = yield* sql<{ readonly provider_thread_id: string }>`
+        const providerThreads = yield* sql<{ readonly provider_thread_id: string }>`
             DELETE FROM orchestration_v2_projection_provider_threads AS provider_thread
             WHERE provider_thread.thread_id IN ${sql.in(threadIds)}
               AND NOT EXISTS (
@@ -1322,9 +1306,9 @@ const make = Effect.gen(function* () {
               )
             RETURNING provider_thread_id
           `;
-          counts.deletedProjectionRowCount += providerThreads.length;
+        counts.deletedProjectionRowCount += providerThreads.length;
 
-          const attempts = yield* sql<{ readonly attempt_id: string }>`
+        const attempts = yield* sql<{ readonly attempt_id: string }>`
             DELETE FROM orchestration_v2_projection_run_attempts AS attempt
             WHERE attempt.thread_id IN ${sql.in(threadIds)}
               AND NOT EXISTS (
@@ -1335,9 +1319,9 @@ const make = Effect.gen(function* () {
               )
             RETURNING attempt_id
           `;
-          counts.deletedProjectionRowCount += attempts.length;
+        counts.deletedProjectionRowCount += attempts.length;
 
-          const nodes = yield* sql<{ readonly node_id: string }>`
+        const nodes = yield* sql<{ readonly node_id: string }>`
             DELETE FROM orchestration_v2_projection_nodes AS node
             WHERE node.thread_id IN ${sql.in(threadIds)}
               AND NOT EXISTS (
@@ -1414,9 +1398,9 @@ const make = Effect.gen(function* () {
               )
             RETURNING node_id
           `;
-          counts.deletedProjectionRowCount += nodes.length;
+        counts.deletedProjectionRowCount += nodes.length;
 
-          const runs = yield* sql<{ readonly run_id: string }>`
+        const runs = yield* sql<{ readonly run_id: string }>`
             DELETE FROM orchestration_v2_projection_runs AS run
             WHERE run.thread_id IN ${sql.in(threadIds)}
               AND NOT EXISTS (
@@ -1484,9 +1468,9 @@ const make = Effect.gen(function* () {
               )
             RETURNING run_id
           `;
-          counts.deletedProjectionRowCount += runs.length;
+        counts.deletedProjectionRowCount += runs.length;
 
-          const unownedSubagents = yield* sql<{ readonly subagent_id: string }>`
+        const unownedSubagents = yield* sql<{ readonly subagent_id: string }>`
             DELETE FROM orchestration_v2_projection_subagents AS subagent
             WHERE subagent.thread_id IN ${sql.in(threadIds)}
               AND subagent.child_thread_id IS NULL
@@ -1504,13 +1488,13 @@ const make = Effect.gen(function* () {
               )
             RETURNING subagent_id
           `;
-          counts.deletedProjectionRowCount += unownedSubagents.length;
+        counts.deletedProjectionRowCount += unownedSubagents.length;
 
-          const threadsWithRemainingData = yield* findThreadsWithReclaimableData(threadIds);
-          const cleanThreadIds = new Set(
-            threadIds.filter((threadId) => !threadsWithRemainingData.has(threadId)),
-          );
-          const internallyRetainedSessionThreads = yield* sql<{ readonly thread_id: string }>`
+        const threadsWithRemainingData = yield* findThreadsWithReclaimableData(threadIds);
+        const cleanThreadIds = new Set(
+          threadIds.filter((threadId) => !threadsWithRemainingData.has(threadId)),
+        );
+        const internallyRetainedSessionThreads = yield* sql<{ readonly thread_id: string }>`
             SELECT DISTINCT session.thread_id
             FROM orchestration_v2_projection_provider_sessions AS session
             WHERE session.thread_id IN ${sql.in(threadIds)}
@@ -1521,15 +1505,15 @@ const make = Effect.gen(function* () {
                   AND binding.thread_id NOT IN ${sql.in(threadIds)}
               )
           `;
-          for (const row of internallyRetainedSessionThreads) cleanThreadIds.add(row.thread_id);
-          const reclaimableSubagentIds = closure.subagentRows
-            .filter((row) => cleanThreadIds.has(row.child_thread_id))
-            .map((row) => row.subagent_id);
-          for (const subagentIdChunk of chunksOf(
-            reclaimableSubagentIds,
-            THREAD_DATA_RECLAMATION_BATCH_SIZE,
-          )) {
-            const subagents = yield* sql<{ readonly subagent_id: string }>`
+        for (const row of internallyRetainedSessionThreads) cleanThreadIds.add(row.thread_id);
+        const reclaimableSubagentIds = closure.subagentRows
+          .filter((row) => cleanThreadIds.has(row.child_thread_id))
+          .map((row) => row.subagent_id);
+        for (const subagentIdChunk of chunksOf(
+          reclaimableSubagentIds,
+          THREAD_DATA_RECLAMATION_BATCH_SIZE,
+        )) {
+          const subagents = yield* sql<{ readonly subagent_id: string }>`
               DELETE FROM orchestration_v2_projection_subagents AS subagent
               WHERE subagent.subagent_id IN ${sql.in(subagentIdChunk)}
                 AND NOT EXISTS (
@@ -1546,34 +1530,34 @@ const make = Effect.gen(function* () {
                 )
               RETURNING subagent_id
             `;
-            counts.deletedProjectionRowCount += subagents.length;
-          }
+          counts.deletedProjectionRowCount += subagents.length;
+        }
 
-          for (const bindingKeyChunk of chunksOf(
-            closure.nativeBindings.map((row) => row.binding_key),
-            THREAD_DATA_RECLAMATION_BATCH_SIZE,
-          )) {
-            const nativeBindings = yield* sql<{ readonly binding_key: string }>`
+        for (const bindingKeyChunk of chunksOf(
+          closure.nativeBindings.map((row) => row.binding_key),
+          THREAD_DATA_RECLAMATION_BATCH_SIZE,
+        )) {
+          const nativeBindings = yield* sql<{ readonly binding_key: string }>`
               DELETE FROM orchestration_v2_native_session_bindings
               WHERE binding_key IN ${sql.in(bindingKeyChunk)}
               RETURNING binding_key
             `;
-            counts.deletedProjectionRowCount += nativeBindings.length;
-          }
+          counts.deletedProjectionRowCount += nativeBindings.length;
+        }
 
-          for (const providerSessionIdChunk of chunksOf(
-            closure.providerSessionIds,
-            THREAD_DATA_RECLAMATION_BATCH_SIZE,
-          )) {
-            const providerSessionBindings = yield* sql<{ readonly provider_session_id: string }>`
+        for (const providerSessionIdChunk of chunksOf(
+          closure.providerSessionIds,
+          THREAD_DATA_RECLAMATION_BATCH_SIZE,
+        )) {
+          const providerSessionBindings = yield* sql<{ readonly provider_session_id: string }>`
               DELETE FROM orchestration_v2_projection_provider_session_bindings
               WHERE thread_id IN ${sql.in(threadIds)}
                 AND provider_session_id IN ${sql.in(providerSessionIdChunk)}
               RETURNING provider_session_id
             `;
-            counts.deletedProjectionRowCount += providerSessionBindings.length;
+          counts.deletedProjectionRowCount += providerSessionBindings.length;
 
-            const providerSessions = yield* sql<{ readonly provider_session_id: string }>`
+          const providerSessions = yield* sql<{ readonly provider_session_id: string }>`
               DELETE FROM orchestration_v2_projection_provider_sessions AS session
               WHERE session.provider_session_id IN ${sql.in(providerSessionIdChunk)}
                 AND (session.thread_id IS NULL OR session.thread_id IN ${sql.in(threadIds)})
@@ -1589,10 +1573,10 @@ const make = Effect.gen(function* () {
                 )
               RETURNING provider_session_id
             `;
-            counts.deletedProjectionRowCount += providerSessions.length;
-          }
+          counts.deletedProjectionRowCount += providerSessions.length;
+        }
 
-          const outbox = yield* sql<{ readonly effect_id: string }>`
+        const outbox = yield* sql<{ readonly effect_id: string }>`
             DELETE FROM orchestration_v2_effect_outbox AS cleanup
             WHERE cleanup.thread_id IN ${sql.in(threadIds)}
               AND cleanup.status IN ('succeeded', 'cancelled')
@@ -1619,9 +1603,9 @@ const make = Effect.gen(function* () {
               )
             RETURNING effect_id
           `;
-          counts.deletedOutboxCount += outbox.length;
+        counts.deletedOutboxCount += outbox.length;
 
-          const receipts = yield* sql<{ readonly command_id: string }>`
+        const receipts = yield* sql<{ readonly command_id: string }>`
             DELETE FROM orchestration_command_receipts AS receipt
             WHERE receipt.aggregate_kind = 'thread'
               AND receipt.aggregate_id IN ${sql.in(threadIds)}
@@ -1639,9 +1623,9 @@ const make = Effect.gen(function* () {
               )
             RETURNING command_id
           `;
-          counts.deletedReceiptCount += receipts.length;
+        counts.deletedReceiptCount += receipts.length;
 
-          const events = yield* sql<{ readonly event_id: string }>`
+        const events = yield* sql<{ readonly event_id: string }>`
             DELETE FROM orchestration_events
             WHERE application_event_version = 2
               AND aggregate_kind = 'thread'
@@ -1650,10 +1634,10 @@ const make = Effect.gen(function* () {
               AND event_type NOT IN ('thread.created', 'thread.deleted')
             RETURNING event_id
           `;
-          counts.deletedEventCount += events.length;
+        counts.deletedEventCount += events.length;
 
-          return counts;
-        });
+        return counts;
+      });
 
       let deletedEventCount = 0;
       let deletedReceiptCount = 0;
@@ -1698,6 +1682,127 @@ const make = Effect.gen(function* () {
         effect,
         (cause) => new ThreadDataReclamationError({ operation: "reclaim", cause }),
       ),
+  );
+
+  const reclaimOperation = Effect.fn("ThreadDataReclamation.reclaimOperation")(function* (
+    input: ThreadDataReclamationInput,
+  ) {
+    let lastOperationRootId = "";
+    let reclaimedThreadCount = 0;
+    const skippedThreads: Array<ThreadDataReclamationSummary["skippedThreads"][number]> = [];
+    let deletedEventCount = 0;
+    let deletedReceiptCount = 0;
+    let deletedProjectionRowCount = 0;
+    let deletedTurnItemPositionCount = 0;
+    let deletedOutboxCount = 0;
+
+    while (true) {
+      const roots = yield* sql<{ readonly operation_root_thread_id: string }>`
+        SELECT DISTINCT deletion.operation_root_thread_id
+        FROM orchestration_v2_thread_deletions AS deletion
+        INNER JOIN orchestration_v2_projection_threads AS shell
+          ON shell.thread_id = deletion.thread_id
+        WHERE deletion.scope = 't3_only'
+          AND deletion.thread_id = deletion.operation_root_thread_id
+          AND shell.deleted_at IS NOT NULL
+          AND deletion.operation_root_thread_id > ${lastOperationRootId}
+          AND EXISTS (
+            SELECT 1
+            FROM orchestration_events AS deleted_event
+            WHERE deleted_event.aggregate_kind = 'thread'
+              AND deleted_event.stream_id = deletion.thread_id
+              AND deleted_event.event_type = 'thread.deleted'
+              AND deleted_event.command_id = deletion.command_id
+              AND deleted_event.application_event_version = 2
+              AND deleted_event.sequence <= ${input.eventThroughSequence}
+          )
+          AND EXISTS (
+            SELECT 1
+            FROM orchestration_command_receipts AS delete_receipt
+            WHERE delete_receipt.command_id = deletion.command_id
+              AND delete_receipt.aggregate_kind = 'thread'
+              AND delete_receipt.aggregate_id = deletion.operation_root_thread_id
+              AND delete_receipt.command_type = 'thread.delete'
+              AND delete_receipt.status = 'accepted'
+              AND delete_receipt.rowid <= ${input.receiptThroughRowId}
+          )
+        ORDER BY deletion.operation_root_thread_id ASC
+        LIMIT ${THREAD_DATA_RECLAMATION_BATCH_SIZE}
+      `;
+      if (roots.length === 0) break;
+
+      const rootIds = roots.map((row) => row.operation_root_thread_id);
+      const candidates = yield* sql<CandidateRow>`
+        SELECT
+          deletion.thread_id,
+          deletion.project_id,
+          shell.project_id AS shell_project_id,
+          deletion.parent_thread_id,
+          deletion.operation_root_thread_id,
+          json_extract(shell.payload_json, '$.lineage.parentThreadId') AS lineage_parent_thread_id,
+          json_extract(shell.payload_json, '$.lineage.relationshipToParent') AS relationship_to_parent,
+          json_extract(shell.payload_json, '$.forkedFrom.type') AS forked_from_type,
+          json_extract(shell.payload_json, '$.forkedFrom.threadId') AS forked_from_thread_id
+        FROM orchestration_v2_thread_deletions AS deletion
+        INNER JOIN orchestration_v2_projection_threads AS shell
+          ON shell.thread_id = deletion.thread_id
+        WHERE deletion.scope = 't3_only'
+          AND shell.deleted_at IS NOT NULL
+          AND deletion.operation_root_thread_id IN ${sql.in(rootIds)}
+          AND EXISTS (
+            SELECT 1
+            FROM orchestration_events AS deleted_event
+            WHERE deleted_event.aggregate_kind = 'thread'
+              AND deleted_event.stream_id = deletion.thread_id
+              AND deleted_event.event_type = 'thread.deleted'
+              AND deleted_event.command_id = deletion.command_id
+              AND deleted_event.application_event_version = 2
+              AND deleted_event.sequence <= ${input.eventThroughSequence}
+          )
+          AND EXISTS (
+            SELECT 1
+            FROM orchestration_command_receipts AS delete_receipt
+            WHERE delete_receipt.command_id = deletion.command_id
+              AND delete_receipt.aggregate_kind = 'thread'
+              AND delete_receipt.aggregate_id = deletion.operation_root_thread_id
+              AND delete_receipt.command_type = 'thread.delete'
+              AND delete_receipt.status = 'accepted'
+              AND delete_receipt.rowid <= ${input.receiptThroughRowId}
+          )
+        ORDER BY deletion.operation_root_thread_id ASC, deletion.thread_id ASC
+      `;
+      const summary = yield* reclaimCandidateBatch(input, candidates);
+      reclaimedThreadCount += summary.reclaimedThreadCount;
+      skippedThreads.push(...summary.skippedThreads);
+      deletedEventCount += summary.deletedEventCount;
+      deletedReceiptCount += summary.deletedReceiptCount;
+      deletedProjectionRowCount += summary.deletedProjectionRowCount;
+      deletedTurnItemPositionCount += summary.deletedTurnItemPositionCount;
+      deletedOutboxCount += summary.deletedOutboxCount;
+      lastOperationRootId = rootIds.at(-1)!;
+      if (roots.length < THREAD_DATA_RECLAMATION_BATCH_SIZE) break;
+    }
+
+    skippedThreads.sort((left, right) => left.threadId.localeCompare(right.threadId));
+    return {
+      reclaimedThreadCount,
+      skippedThreads,
+      deletedEventCount,
+      deletedReceiptCount,
+      deletedProjectionRowCount,
+      deletedTurnItemPositionCount,
+      deletedOutboxCount,
+    } satisfies ThreadDataReclamationSummary;
+  });
+
+  const reclaim = Effect.fn("ThreadDataReclamation.reclaim")((input: ThreadDataReclamationInput) =>
+    reclaimOperation(input).pipe(
+      Effect.mapError((cause) =>
+        cause._tag === "ThreadDataReclamationError"
+          ? cause
+          : new ThreadDataReclamationError({ operation: "reclaim", cause }),
+      ),
+    ),
   );
 
   return ThreadDataReclamation.of({ reclaim });

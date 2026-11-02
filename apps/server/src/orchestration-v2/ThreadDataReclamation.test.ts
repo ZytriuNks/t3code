@@ -13,10 +13,9 @@ import * as ThreadDataReclamation from "./ThreadDataReclamation.ts";
 const layerTest = ThreadDataReclamation.layer.pipe(
   Layer.provideMerge(SqlitePersistence.layerMemory),
 );
-const layerMaintenanceStores = Layer.mergeAll(
-  EventStore.layer,
-  ProjectionStore.layer,
-).pipe(Layer.provideMerge(SqlitePersistence.layerMemory));
+const layerMaintenanceStores = Layer.mergeAll(EventStore.layer, ProjectionStore.layer).pipe(
+  Layer.provideMerge(SqlitePersistence.layerMemory),
+);
 const layerMaintenanceTest = ProjectionMaintenance.layer.pipe(
   Layer.provideMerge(layerMaintenanceStores),
 );
@@ -520,7 +519,6 @@ const expectBlockers = (
 
 it.effect("reclaim skips archived and active threads and considers only t3 deletion records", () =>
   Effect.gen(function* () {
-    const sql = yield* SqlClient.SqlClient;
     yield* seedThread({ threadId: "thread:active", state: "active" });
     yield* seedThread({ threadId: "thread:archived", state: "archived" });
     yield* seedDeletedThread({ threadId: "thread:eligible" });
@@ -538,10 +536,10 @@ it.effect("reclaim skips archived and active threads and considers only t3 delet
     assert.equal(result.reclaimedThreadCount, 1);
     expectBlockers(result, "thread:busy", ["active_work"]);
     expectBlockers(result, "thread:busy-provider-turn", ["active_work"]);
-    assert.deepEqual(result.skippedThreads.map((entry) => entry.threadId), [
-      "thread:busy",
-      "thread:busy-provider-turn",
-    ]);
+    assert.deepEqual(
+      result.skippedThreads.map((entry) => entry.threadId),
+      ["thread:busy", "thread:busy-provider-turn"],
+    );
     assert.equal(result.deletedEventCount, 0);
     assert.equal(result.deletedReceiptCount, 0);
     assert.equal(result.deletedProjectionRowCount, 0);
@@ -633,23 +631,21 @@ it.effect("reclaim blocks pending running failed and cancelled lifecycle cleanup
   }).pipe(Effect.provide(layerTest)),
 );
 
-it.effect(
-  "reclaim blocks a deleted source with a surviving fork or pending context transfer",
-  () =>
-    Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient;
-      yield* seedDeletedThread({ threadId: "thread:fork-source" });
-      yield* seedThread({
-        threadId: "thread:fork-reader",
-        state: "active",
-        parentThreadId: "thread:fork-source",
-        relationshipToParent: "fork",
-        forkedFrom: { type: "run", threadId: "thread:fork-source", runId: "run:source" },
-      });
+it.effect("reclaim blocks a deleted source with a surviving fork or pending context transfer", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* seedDeletedThread({ threadId: "thread:fork-source" });
+    yield* seedThread({
+      threadId: "thread:fork-reader",
+      state: "active",
+      parentThreadId: "thread:fork-source",
+      relationshipToParent: "fork",
+      forkedFrom: { type: "run", threadId: "thread:fork-source", runId: "run:source" },
+    });
 
-      yield* seedDeletedThread({ threadId: "thread:transfer-source" });
-      yield* seedThread({ threadId: "thread:transfer-target", state: "active" });
-      yield* sql`
+    yield* seedDeletedThread({ threadId: "thread:transfer-source" });
+    yield* seedThread({ threadId: "thread:transfer-target", state: "active" });
+    yield* sql`
         INSERT INTO orchestration_v2_projection_context_transfers (
           context_transfer_id, source_thread_id, target_thread_id, target_run_id,
           type, status, source_provider, target_provider, updated_at,
@@ -660,25 +656,25 @@ it.effect(
         )
       `;
 
-      // This unresolved parent edge cannot be treated as an owned subagent or a known fork.
-      yield* seedThread({
-        threadId: "thread:unknown-edge-reader",
-        state: "active",
-        parentThreadId: "thread:unknown-source",
-        relationshipToParent: "unrecognized",
-      });
-      yield* seedDeletedThread({ threadId: "thread:unknown-source" });
+    // This unresolved parent edge cannot be treated as an owned subagent or a known fork.
+    yield* seedThread({
+      threadId: "thread:unknown-edge-reader",
+      state: "active",
+      parentThreadId: "thread:unknown-source",
+      relationshipToParent: "unrecognized",
+    });
+    yield* seedDeletedThread({ threadId: "thread:unknown-source" });
 
-      const before = yield* snapshotRows();
-      const result = yield* reclaim();
-      const after = yield* snapshotRows();
+    const before = yield* snapshotRows();
+    const result = yield* reclaim();
+    const after = yield* snapshotRows();
 
-      assert.deepEqual(after, before);
-      assert.equal(result.reclaimedThreadCount, 0);
-      expectBlockers(result, "thread:fork-source", ["surviving_fork"]);
-      expectBlockers(result, "thread:transfer-source", ["pending_transfer"]);
-      expectBlockers(result, "thread:unknown-source", ["unknown_dependency"]);
-    }).pipe(Effect.provide(layerTest)),
+    assert.deepEqual(after, before);
+    assert.equal(result.reclaimedThreadCount, 0);
+    expectBlockers(result, "thread:fork-source", ["surviving_fork"]);
+    expectBlockers(result, "thread:transfer-source", ["pending_transfer"]);
+    expectBlockers(result, "thread:unknown-source", ["unknown_dependency"]);
+  }).pipe(Effect.provide(layerTest)),
 );
 
 it.effect(
@@ -745,7 +741,15 @@ it.effect(
           nodeId: null,
           role: "user",
           text: "",
-          attachments: [{ id: "attachment:shared", type: "file", name: "shared.txt", mimeType: "text/plain", sizeBytes: 1 }],
+          attachments: [
+            {
+              id: "attachment:shared",
+              type: "file",
+              name: "shared.txt",
+              mimeType: "text/plain",
+              sizeBytes: 1,
+            },
+          ],
           streaming: false,
           createdAt: at,
           updatedAt: at,
@@ -808,13 +812,85 @@ it.effect("preserves non-delete receipts referenced by retained outbox rows", ()
         { command_id: commandId, command_type: "thread.update" },
       ],
     );
-    assert.deepEqual(after.outbox.map((row) => row.command_id), [commandId]);
+    assert.deepEqual(
+      after.outbox.map((row) => row.command_id),
+      [commandId],
+    );
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("reclaim blocks attachment references outside message attachments", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const cases = [
+      ["dynamic", "attachment:shared-dynamic"],
+      ["input", "attachment:shared-input"],
+      ["guest", "attachment:shared-guest"],
+    ] as const;
+
+    for (const [kind, attachmentId] of cases) {
+      const deletedThreadId = `thread:attachment:${kind}:deleted`;
+      const liveThreadId = `thread:attachment:${kind}:live`;
+      yield* seedDeletedThread({ threadId: deletedThreadId });
+      yield* seedThread({ threadId: liveThreadId, state: "active" });
+      yield* sql`
+        INSERT INTO orchestration_v2_projection_messages (
+          message_id, thread_id, run_id, node_id, role, streaming,
+          created_at, updated_at, payload_json
+        ) VALUES (
+          ${`message:${deletedThreadId}`}, ${deletedThreadId}, NULL, NULL, 'user', 0,
+          ${at}, ${at}, ${JSON.stringify({ attachments: [{ id: attachmentId }] })}
+        )
+      `;
+
+      if (kind === "dynamic") {
+        yield* sql`
+          INSERT INTO orchestration_v2_projection_turn_items (
+            turn_item_id, thread_id, run_id, node_id, provider_thread_id,
+            provider_turn_id, parent_item_id, ordinal, type, status, updated_at, payload_json
+          ) VALUES (
+            ${`item:${liveThreadId}`}, ${liveThreadId}, NULL, NULL, NULL, NULL, NULL,
+            1, 'dynamic_tool', 'completed', ${at}, ${JSON.stringify({ output: { attachmentId } })}
+          )
+        `;
+      } else if (kind === "input") {
+        yield* sql`
+          INSERT INTO orchestration_v2_projection_turn_items (
+            turn_item_id, thread_id, run_id, node_id, provider_thread_id,
+            provider_turn_id, parent_item_id, ordinal, type, status, updated_at, payload_json
+          ) VALUES (
+            ${`item:${liveThreadId}`}, ${liveThreadId}, NULL, NULL, NULL, NULL, NULL,
+            1, 'user_input_request', 'completed', ${at},
+            ${JSON.stringify({ questionAnswer: { attachmentsByQuestionId: { question: [{ id: attachmentId }] } } })}
+          )
+        `;
+      } else {
+        yield* sql`
+          UPDATE orchestration_v2_projection_threads
+          SET payload_json = ${JSON.stringify({
+            lineage: {
+              parentThreadId: null,
+              relationshipToParent: null,
+              rootThreadId: liveThreadId,
+            },
+            forkedFrom: null,
+            guestShare: { messages: [{ status: "pending", attachments: [{ id: attachmentId }] }] },
+          })}
+          WHERE thread_id = ${liveThreadId}
+        `;
+      }
+    }
+
+    const result = yield* reclaim();
+    assert.equal(result.reclaimedThreadCount, 0);
+    for (const [kind] of cases) {
+      expectBlockers(result, `thread:attachment:${kind}:deleted`, ["shared_attachment"]);
+    }
   }).pipe(Effect.provide(layerTest)),
 );
 
 it.effect("reclaims dependent rows while preserving deletion anchors and the thread shell", () =>
   Effect.gen(function* () {
-    const sql = yield* SqlClient.SqlClient;
     const threadId = "thread:reclaim:data";
     yield* seedDeletedThread({ threadId });
     yield* seedReclamationRows(threadId);
@@ -830,10 +906,16 @@ it.effect("reclaims dependent rows while preserving deletion anchors and the thr
     assert.equal(result.deletedTurnItemPositionCount, 1);
     assert.equal(result.deletedOutboxCount, 1);
     assert.deepEqual(
-      after.events.filter((row) => row.stream_id === threadId).map((row) => row.event_type).sort(),
+      after.events
+        .filter((row) => row.stream_id === threadId)
+        .map((row) => row.event_type)
+        .sort(),
       ["thread.created", "thread.deleted"],
     );
-    assert.deepEqual(after.receipts.map((row) => row.command_type), ["thread.delete"]);
+    assert.deepEqual(
+      after.receipts.map((row) => row.command_type),
+      ["thread.delete"],
+    );
     assert.equal(after.threads.filter((row) => row.thread_id === threadId).length, 1);
     assert.equal(after.deletions.filter((row) => row.thread_id === threadId).length, 1);
     assert.equal(after.deletionSessions.filter((row) => row.thread_id === threadId).length, 1);
@@ -864,7 +946,10 @@ it.effect("reclaims dependent rows while preserving deletion anchors and the thr
     assert.equal(second.deletedProjectionRowCount, 0);
     assert.equal(second.deletedTurnItemPositionCount, 0);
     assert.equal(second.deletedOutboxCount, 0);
-    assert.equal((yield* snapshotRows()).events.filter((row) => row.stream_id === threadId).length, 2);
+    assert.equal(
+      (yield* snapshotRows()).events.filter((row) => row.stream_id === threadId).length,
+      2,
+    );
   }).pipe(Effect.provide(layerTest)),
 );
 
@@ -927,7 +1012,10 @@ it.effect("resumes after a later batch rolls back without restoring committed ba
       WHERE thread_id LIKE 'thread:reclaim:batch:%'
       ORDER BY thread_id
     `;
-    assert.deepEqual(afterFailure.map((row) => row.thread_id), ["thread:reclaim:batch:050"]);
+    assert.deepEqual(
+      afterFailure.map((row) => row.thread_id),
+      ["thread:reclaim:batch:050"],
+    );
 
     yield* sql`DROP TRIGGER reject_reclamation_second_batch`;
     const resumed = yield* reclaim();
@@ -997,11 +1085,10 @@ it.effect("reclaims cancelled settled outbox rows but preserves lifecycle barrie
     const retained = yield* sql<{ readonly effect_id: string }>`
       SELECT effect_id FROM orchestration_v2_effect_outbox ORDER BY effect_id
     `;
-    assert.deepEqual(retained.map((row) => row.effect_id), [
-      "cancelled:delete-barrier",
-      "cancelled:lifecycle",
-      "succeeded:detach-lifecycle",
-    ]);
+    assert.deepEqual(
+      retained.map((row) => row.effect_id),
+      ["cancelled:delete-barrier", "cancelled:lifecycle", "succeeded:detach-lifecycle"],
+    );
 
     const repeated = yield* reclaim();
     assert.equal(repeated.deletedOutboxCount, 0);
@@ -1070,18 +1157,16 @@ it.effect("blocks cancelled lifecycle cleanup when only a different root thread 
   }).pipe(Effect.provide(layerTest)),
 );
 
-it.effect(
-  "does not let provider-session.detach replace cancelled attachment.cleanup",
-  () =>
-    Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient;
-      const threadId = "thread:reclaim:cancelled-effect-mismatch";
-      yield* seedDeletedThread({ threadId });
-      for (const [effectId, status, effectType] of [
-        ["cancelled:attachment", "cancelled", "attachment.cleanup"],
-        ["succeeded:detach", "succeeded", "provider-session.detach"],
-      ] as const) {
-        yield* sql`
+it.effect("does not let provider-session.detach replace cancelled attachment.cleanup", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const threadId = "thread:reclaim:cancelled-effect-mismatch";
+    yield* seedDeletedThread({ threadId });
+    for (const [effectId, status, effectType] of [
+      ["cancelled:attachment", "cancelled", "attachment.cleanup"],
+      ["succeeded:detach", "succeeded", "provider-session.detach"],
+    ] as const) {
+      yield* sql`
           INSERT INTO orchestration_v2_effect_outbox (
             effect_id, command_id, thread_id, effect_type, payload_json, status,
             attempt_count, available_at, created_at, updated_at, completed_at
@@ -1091,16 +1176,16 @@ it.effect(
             0, ${at}, ${at}, ${at}, ${at}
           )
         `;
-      }
+    }
 
-      const before = yield* snapshotRows();
-      const result = yield* reclaim();
-      const after = yield* snapshotRows();
+    const before = yield* snapshotRows();
+    const result = yield* reclaim();
+    const after = yield* snapshotRows();
 
-      assert.deepEqual(after, before);
-      assert.equal(result.reclaimedThreadCount, 0);
-      expectBlockers(result, threadId, ["lifecycle_cleanup"]);
-    }).pipe(Effect.provide(layerTest)),
+    assert.deepEqual(after, before);
+    assert.equal(result.reclaimedThreadCount, 0);
+    expectBlockers(result, threadId, ["lifecycle_cleanup"]);
+  }).pipe(Effect.provide(layerTest)),
 );
 
 it.effect(
@@ -1232,27 +1317,39 @@ it.effect("reclaims a large subagent closure in ordered bounded chunks and resum
       WHERE thread_id LIKE 'thread:reclaim:large:%'
       ORDER BY thread_id
     `;
-    assert.deepEqual(remainingMessages.map((row) => row.thread_id), [failedChildThreadId, rootThreadId]);
+    assert.deepEqual(
+      remainingMessages.map((row) => row.thread_id),
+      [failedChildThreadId, rootThreadId],
+    );
     const remainingOwnership = yield* sql<{ readonly child_thread_id: string }>`
       SELECT child_thread_id
       FROM orchestration_v2_projection_subagents
       WHERE thread_id = ${rootThreadId}
       ORDER BY child_thread_id
     `;
-    assert.deepEqual(remainingOwnership.map((row) => row.child_thread_id), [failedChildThreadId]);
+    assert.deepEqual(
+      remainingOwnership.map((row) => row.child_thread_id),
+      [failedChildThreadId],
+    );
     const remainingSharedProviderBindings = yield* sql<{ readonly thread_id: string }>`
       SELECT thread_id
       FROM orchestration_v2_projection_provider_session_bindings
       WHERE provider_session_id = ${sharedProviderSessionId}
       ORDER BY thread_id
     `;
-    assert.deepEqual(remainingSharedProviderBindings.map((row) => row.thread_id), [failedChildThreadId]);
+    assert.deepEqual(
+      remainingSharedProviderBindings.map((row) => row.thread_id),
+      [failedChildThreadId],
+    );
     const remainingSharedNativeBindings = yield* sql<{ readonly thread_id: string }>`
       SELECT thread_id
       FROM orchestration_v2_native_session_bindings
       WHERE native_id = 'native:large-closure-shared'
     `;
-    assert.deepEqual(remainingSharedNativeBindings.map((row) => row.thread_id), [failedChildThreadId]);
+    assert.deepEqual(
+      remainingSharedNativeBindings.map((row) => row.thread_id),
+      [failedChildThreadId],
+    );
 
     yield* sql`DROP TRIGGER reject_reclamation_large_second_chunk`;
     const resumed = yield* reclaim();
@@ -1281,14 +1378,15 @@ it.effect("reclaims a large subagent closure in ordered bounded chunks and resum
 
 it.effect("reclaim scans candidates using the fixed deterministic batch size", () =>
   Effect.gen(function* () {
-    for (let index = 0; index < ThreadDataReclamation.THREAD_DATA_RECLAMATION_BATCH_SIZE + 1; index++) {
+    const count = ThreadDataReclamation.THREAD_DATA_RECLAMATION_BATCH_SIZE * 3 + 1;
+    for (let index = 0; index < count; index++) {
       yield* seedDeletedThread({ threadId: `thread:batch:${String(index).padStart(3, "0")}` });
     }
 
     const result = yield* reclaim();
 
     assert.equal(ThreadDataReclamation.THREAD_DATA_RECLAMATION_BATCH_SIZE, 50);
-    assert.equal(result.reclaimedThreadCount, 51);
+    assert.equal(result.reclaimedThreadCount, count);
     assert.deepEqual(result.skippedThreads, []);
   }).pipe(Effect.provide(layerTest)),
 );

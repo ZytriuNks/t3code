@@ -60,6 +60,7 @@ const compactionLayer = (
     Layer.provide(
       Layer.succeed(ProjectionMaintenance.ProjectionMaintenanceV2, {
         compactEventStore,
+        reclaimDeletedThreadData: Effect.die("unexpected reclamation"),
         verify: Effect.die("unexpected verification"),
         rebuild: Effect.die("unexpected rebuild"),
       }),
