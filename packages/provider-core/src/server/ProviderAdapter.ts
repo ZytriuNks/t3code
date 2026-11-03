@@ -361,6 +361,28 @@ export class ProviderAdapterEventStreamError extends Schema.TaggedError<Provider
   }
 }
 
+export const ProviderAdapterNativeThreadDeleteReason = Schema.Literals([
+  "unresolved_identity",
+  "path_boundary",
+  "non_regular_target",
+  "filesystem_failure",
+]);
+export type ProviderAdapterNativeThreadDeleteReason =
+  typeof ProviderAdapterNativeThreadDeleteReason.Type;
+
+export class ProviderAdapterNativeThreadDeleteError extends Schema.TaggedError<ProviderAdapterNativeThreadDeleteError>()(
+  "ProviderAdapterNativeThreadDeleteError",
+  {
+    driver: ProviderDriverKind,
+    reason: ProviderAdapterNativeThreadDeleteReason,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  override get message(): string {
+    return `Failed to delete ${this.driver} native thread (${this.reason}).`;
+  }
+}
+
 // Only fixed reasons reach failure messages; detail can contain private configuration.
 const ProviderAdapterFailureReason = Schema.Literals([
   "previous_turn_active",
@@ -398,6 +420,7 @@ export const ProviderAdapterV2Error = Schema.Union([
   ProviderAdapterInterruptError,
   ProviderAdapterRuntimeRequestResponseError,
   ProviderAdapterEventStreamError,
+  ProviderAdapterNativeThreadDeleteError,
   ProviderAdapterProtocolError,
 ]);
 export type ProviderAdapterV2Error = typeof ProviderAdapterV2Error.Type;
@@ -468,6 +491,10 @@ export interface ProviderAdapterV2ThreadSnapshot {
 }
 
 export interface ProviderAdapterV2ReadThreadSnapshotInput {
+  readonly providerThread: OrchestrationV2ProviderThread;
+}
+
+export interface ProviderAdapterV2DeleteNativeThreadInput {
   readonly providerThread: OrchestrationV2ProviderThread;
 }
 
@@ -659,6 +686,9 @@ export class ProviderAdapterV2 extends Context.Service<
     readonly planSelectionTransition: (
       input: ProviderSelectionTransitionInput,
     ) => Effect.Effect<ProviderSelectionTransitionPlan, ProviderAdapterV2Error>;
+    readonly deleteNativeThread?: (
+      input: ProviderAdapterV2DeleteNativeThreadInput,
+    ) => Effect.Effect<void, ProviderAdapterV2Error>;
     readonly openSession: (
       input: ProviderAdapterV2OpenSessionInput,
     ) => Effect.Effect<ProviderAdapterV2SessionRuntime, ProviderAdapterV2Error, Scope.Scope>;

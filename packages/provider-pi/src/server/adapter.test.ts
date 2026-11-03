@@ -564,6 +564,36 @@ describe("PiAdapterV2", () => {
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  it.effect("deletes a native session through the provider-level adapter capability", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pi-delete-adapter-" });
+      const sessionFile = path.join(root, "session.jsonl");
+      yield* fs.writeFileString(sessionFile, "session");
+
+      const fake = yield* makeFakePi;
+      fake.queueState({ sessionFile });
+      const adapter = yield* makeAdapter(fake);
+      const runtime = yield* adapter.openSession({
+        threadId: THREAD_ID,
+        providerSessionId: SESSION_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+
+      assert.isDefined(adapter.deleteNativeThread);
+      yield* adapter.deleteNativeThread!({ providerThread });
+
+      assert.isFalse(yield* fs.exists(sessionFile));
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   it.effect.each([false, true])(
     "completes a resumed user turn before native wake events arrive, Pi streaming=%s",
     (streaming) =>
