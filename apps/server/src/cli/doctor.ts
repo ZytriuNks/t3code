@@ -103,15 +103,24 @@ export const runDoctor = Effect.fn("runDoctor")(function* (
     yield* Console.log("\nReclaiming database space. This can take several minutes...");
     // Report the repair before restarting, which can fail independently.
     yield* service.withStopped(
-      maintenance
-        .compact(databasePath)
-        .pipe(
-          Effect.tap((result) =>
-            Console.log(
-              `Done: ${formatBytes(result.beforeBytes)} -> ${formatBytes(result.afterBytes)}, ${result.deletedEventCount} superseded events removed.`,
-            ),
-          ),
-        ),
+      maintenance.compact(databasePath).pipe(
+        Effect.tap((result) => {
+          const reclamation = result.reclamation;
+          const deletedDependentRowCount =
+            reclamation.deletedEventCount +
+            reclamation.deletedReceiptCount +
+            reclamation.deletedProjectionRowCount +
+            reclamation.deletedTurnItemPositionCount +
+            reclamation.deletedOutboxCount;
+          return Console.log(
+            `Done: ${formatBytes(result.beforeBytes)} -> ${formatBytes(result.afterBytes)}, ` +
+              `${result.deletedEventCount} superseded events removed; deleted-thread reclamation: ` +
+              `${reclamation.reclaimedThreadCount} threads eligible for reclamation, ` +
+              `${deletedDependentRowCount} dependent rows removed, ` +
+              `skipped threads: ${reclamation.skippedThreads.length}.`,
+          );
+        }),
+      ),
     );
   }
   if (selected.includes("legacy")) {

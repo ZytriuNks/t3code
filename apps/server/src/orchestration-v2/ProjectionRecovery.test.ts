@@ -22,6 +22,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -156,6 +157,148 @@ it.effect(
       assert.equal((yield* projections.getThread(threadId)).lifecycleRevision, 7);
       assert.isTrue((yield* maintenance.rebuild).valid);
       assert.deepEqual(Option.getOrThrow(yield* deletions.get(threadId)), record);
+    }).pipe(Effect.provide(layerLifecycleTest)),
+);
+
+it.effect(
+  "rebuild restores a deleted shell and native bindings from retained deletion sessions after provider rows are reclaimed",
+  () =>
+    Effect.gen(function* () {
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const events = yield* EventStore.EventStoreV2;
+      const bindings = yield* NativeSessionBindings.NativeSessionBindings;
+      const deletions = yield* ThreadDeletionRecords.ThreadDeletionRecords;
+      const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+      const sql = yield* SqlClient.SqlClient;
+      const threadId = yield* createThread("reclaimed-provider-history");
+      const thread = yield* projections.getThread(threadId);
+      const at = DateTime.makeUnsafe("2026-10-26T00:00:00.000Z");
+      yield* events.append({
+        events: [
+          {
+            id: EventId.make("reclaimed-provider-history:create"),
+            type: "thread.created",
+            threadId,
+            occurredAt: at,
+            payload: thread,
+          },
+        ],
+      });
+      const providerThreadId = ProviderThreadId.make("provider-thread:reclaimed-history");
+      const providerEvent = {
+        id: EventId.make("reclaimed-provider-history:provider-thread"),
+        type: "provider-thread.updated" as const,
+        threadId,
+        occurredAt: at,
+        payload: {
+          id: providerThreadId,
+          driver: ProviderDriverKind.make("codex"),
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          providerSessionId: null,
+          appThreadId: threadId,
+          ownerNodeId: null,
+          nativeThreadRef: {
+            driver: ProviderDriverKind.make("codex"),
+            nativeId: "native:reclaimed-history",
+            strength: "strong" as const,
+          },
+          nativeConversationHeadRef: null,
+          nativeStorage: { type: "resolved" as const, canonicalRoot: "C:/codex/reclaimed" },
+          status: "idle" as const,
+          firstRunOrdinal: null,
+          lastRunOrdinal: null,
+          handoffIds: [],
+          forkedFrom: null,
+          createdAt: at,
+          updatedAt: at,
+        },
+      };
+      yield* events.append({ events: [providerEvent] });
+      yield* projections.apply(providerEvent);
+      const sessions = yield* bindings.listForThreads([threadId]);
+      assert.lengthOf(sessions, 1);
+      const commandId = CommandId.make("reclaimed-provider-history:delete");
+      const record = {
+        threadId,
+        projectId: thread.projectId,
+        parentThreadId: null,
+        operationRootThreadId: threadId,
+        deletedAt: DateTime.formatIso(at),
+        commandId,
+        scope: "t3_only" as const,
+        sessions,
+      };
+      const deletionEvent = {
+        id: EventId.make("reclaimed-provider-history:delete"),
+        type: "thread.deleted" as const,
+        threadId,
+        occurredAt: at,
+        payload: { ...thread, deletedAt: at },
+        deletionRecord: record,
+      };
+      const [storedDelete] = yield* events.append({ commandId, events: [deletionEvent] });
+      yield* projections.apply(deletionEvent);
+      yield* sql`
+        INSERT INTO orchestration_command_receipts (
+          command_id, aggregate_kind, aggregate_id, accepted_at, result_sequence,
+          status, error, command_type
+        ) VALUES (
+          ${commandId}, 'thread', ${threadId}, ${DateTime.formatIso(at)},
+          ${storedDelete!.sequence}, 'accepted', NULL, 'thread.delete'
+        )
+      `;
+
+      const summary = yield* maintenance.reclaimDeletedThreadData;
+      assert.equal(summary.reclaimedThreadCount, 1);
+      const reclaimedProviderRows = yield* sql<{ readonly count: number }>`
+        SELECT COUNT(*) AS count
+        FROM orchestration_v2_projection_provider_threads
+        WHERE thread_id = ${threadId}
+      `;
+      assert.equal(reclaimedProviderRows[0]?.count, 0);
+      assert.deepEqual(yield* bindings.listForThreads([threadId]), []);
+      assert.deepEqual(yield* deletions.get(threadId), Option.some(record));
+
+      const rebuilt = yield* maintenance.rebuild;
+
+      assert.isTrue(rebuilt.valid);
+      const rebuiltThread = yield* projections.getThread(threadId);
+      assert.equal(DateTime.formatIso(rebuiltThread.deletedAt!), DateTime.formatIso(at));
+      assert.deepEqual(yield* bindings.listForThreads([threadId]), sessions);
+      assert.deepEqual(yield* deletions.get(threadId), Option.some(record));
+      const restoredBindingRows = yield* sql<{
+        readonly binding_key: string;
+        readonly payload_json: string;
+      }>`
+        SELECT binding_key, payload_json
+        FROM orchestration_v2_native_session_bindings
+        WHERE thread_id = ${threadId}
+      `;
+      const retainedSessionRows = yield* sql<{ readonly payload_json: string }>`
+        SELECT payload_json
+        FROM orchestration_v2_thread_deletion_sessions
+        WHERE thread_id = ${threadId}
+      `;
+      assert.deepEqual(restoredBindingRows, [
+        {
+          binding_key:
+            '["thread:recovery:reclaimed-provider-history","provider-thread:reclaimed-history","codex","resolved","C:/codex/reclaimed","","native:reclaimed-history"]',
+          payload_json: retainedSessionRows[0]!.payload_json,
+        },
+      ]);
+      const providerRowsAfterRebuild = yield* sql<{ readonly count: number }>`
+        SELECT COUNT(*) AS count
+        FROM orchestration_v2_projection_provider_threads
+        WHERE thread_id = ${threadId}
+      `;
+      assert.equal(providerRowsAfterRebuild[0]?.count, 0);
+      const retainedEvents = yield* events.read({ threadId }).pipe(Stream.runCollect);
+      assert.deepEqual(
+        retainedEvents.map((row) => row.event.type),
+        ["thread.created", "thread.deleted"],
+      );
+      assert.isTrue((yield* maintenance.rebuild).valid);
+      assert.deepEqual(yield* bindings.listForThreads([threadId]), sessions);
     }).pipe(Effect.provide(layerLifecycleTest)),
 );
 

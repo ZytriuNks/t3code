@@ -1080,6 +1080,72 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
     }),
   );
 
+  it.effect("old cursor replay keeps thread.deleted after non-anchor history is reclaimed", () =>
+    Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const events = yield* EventStore.EventStoreV2;
+      const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+      const sql = yield* SqlClient.SqlClient;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("thread:reclaimed-old-cursor");
+      const thread = makeThread(threadId, now);
+      const commandId = CommandId.make("command:reclaimed-old-cursor:delete");
+      const deletedAt = now;
+      const written = yield* sink.write({
+        commandId,
+        events: [
+          threadCreatedEvent({ id: "event:reclaimed-old-cursor:create", thread, now }),
+          {
+            id: EventId.make("event:reclaimed-old-cursor:middle"),
+            type: "thread.metadata-updated",
+            threadId,
+            occurredAt: now,
+            payload: { ...thread, title: "Intermediate title" },
+          },
+          {
+            id: EventId.make("event:reclaimed-old-cursor:delete"),
+            type: "thread.deleted",
+            threadId,
+            occurredAt: deletedAt,
+            payload: { ...thread, deletedAt },
+            deletionRecord: {
+              threadId,
+              projectId: thread.projectId,
+              parentThreadId: null,
+              operationRootThreadId: threadId,
+              deletedAt: DateTime.formatIso(deletedAt),
+              commandId,
+              scope: "t3_only",
+              sessions: [],
+            },
+          },
+        ],
+      });
+      const cursor = written[0]!.sequence;
+      const deletionSequence = written[2]!.sequence;
+      yield* sql`
+        INSERT INTO orchestration_command_receipts (
+          command_id, aggregate_kind, aggregate_id, accepted_at, result_sequence,
+          status, error, command_type
+        ) VALUES (
+          ${commandId}, 'thread', ${threadId}, ${DateTime.formatIso(now)},
+          ${deletionSequence}, 'accepted', NULL, 'thread.delete'
+        )
+      `;
+
+      const summary = yield* maintenance.reclaimDeletedThreadData;
+      const replayed = yield* events
+        .read({ threadId, afterSequence: cursor })
+        .pipe(Stream.runCollect);
+
+      assert.equal(summary.reclaimedThreadCount, 1);
+      assert.deepEqual(
+        replayed.map((row) => [row.sequence, row.event.type]),
+        [[deletionSequence, "thread.deleted"]],
+      );
+    }),
+  );
+
   it.effect("preserves partial replay when a tool finishes after its run", () =>
     Effect.gen(function* () {
       const sink = yield* EventSink.EventSinkV2;

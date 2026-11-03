@@ -10,6 +10,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 
 import * as EventStore from "./EventStore.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import * as ThreadDataReclamation from "./ThreadDataReclamation.ts";
 
 export interface ProjectionVerificationV2 {
   readonly valid: boolean;
@@ -40,6 +41,10 @@ export interface ProjectionMaintenanceV2Shape {
     },
     ProjectionMaintenanceError
   >;
+  readonly reclaimDeletedThreadData: Effect.Effect<
+    ThreadDataReclamation.ThreadDataReclamationSummary,
+    ProjectionMaintenanceError
+  >;
 }
 
 export class ProjectionMaintenanceV2 extends Context.Service<
@@ -66,6 +71,7 @@ export const layer: Layer.Layer<
     const sql = yield* SqlClient.SqlClient;
     const eventStore = yield* EventStore.EventStoreV2;
     const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+    const threadDataReclamation = yield* ThreadDataReclamation.ThreadDataReclamation;
 
     const verify = Effect.gen(function* () {
       const expectedThreadRows = yield* sql<{ readonly thread_id: string }>`
@@ -168,6 +174,45 @@ export const layer: Layer.Layer<
             if (page.length < pageSize) break;
             yield* Effect.yieldNow;
           }
+          // Deletion sessions outlive reclaimed provider-thread history. Restore
+          // importer protection even when its original provider event is gone;
+          // json_array uses the same key tuple as NativeSessionBindings.applyProviderThread.
+          yield* sql`
+            INSERT OR IGNORE INTO orchestration_v2_native_session_bindings (
+              binding_key,
+              thread_id,
+              provider_thread_id,
+              provider_instance_id,
+              driver,
+              native_id,
+              storage_type,
+              canonical_root,
+              canonical_file,
+              bound_at,
+              payload_json
+            )
+            SELECT
+              json_array(
+                thread_id,
+                provider_thread_id,
+                driver,
+                storage_type,
+                canonical_root,
+                canonical_file,
+                native_id
+              ),
+              thread_id,
+              provider_thread_id,
+              provider_instance_id,
+              driver,
+              native_id,
+              storage_type,
+              canonical_root,
+              canonical_file,
+              json_extract(payload_json, '$.boundAt'),
+              payload_json
+            FROM orchestration_v2_thread_deletion_sessions
+          `;
           const now = DateTime.formatIso(yield* DateTime.now);
           yield* sql`
             INSERT INTO orchestration_v2_projection_metadata (
@@ -200,6 +245,21 @@ export const layer: Layer.Layer<
         );
 
     // Keep thread.created as the verification and replay anchor; clients recognize deletion by thread.deleted event type.
+    const reclaimDeletedThreadData = Effect.gen(function* () {
+      const bounds = yield* sql<{
+        readonly event_sequence: number;
+        readonly receipt_row_id: number;
+      }>`
+        SELECT
+          COALESCE((SELECT MAX(sequence) FROM orchestration_events), 0) AS event_sequence,
+          COALESCE((SELECT MAX(rowid) FROM orchestration_command_receipts), 0) AS receipt_row_id
+      `;
+      return yield* threadDataReclamation.reclaim({
+        eventThroughSequence: bounds[0]?.event_sequence ?? 0,
+        receiptThroughRowId: bounds[0]?.receipt_row_id ?? 0,
+      });
+    });
+
     const SUPERSEDABLE_THREAD_EVENT_TYPES = [
       "thread.archived",
       "thread.unarchived",
@@ -433,6 +493,7 @@ export const layer: Layer.Layer<
       verify: mapError("verify")(verify),
       rebuild: mapError("rebuild")(rebuild),
       compactEventStore,
+      reclaimDeletedThreadData: mapError("reclaim deleted thread data")(reclaimDeletedThreadData),
     });
   }),
-);
+).pipe(Layer.provide(ThreadDataReclamation.layer));

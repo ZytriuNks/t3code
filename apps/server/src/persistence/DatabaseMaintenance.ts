@@ -13,6 +13,7 @@ import * as EventStore from "../orchestration-v2/EventStore.ts";
 import * as ProjectionMaintenance from "../orchestration-v2/ProjectionMaintenance.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import { rebuildMessageSearch } from "../orchestration-v2/messageSearchIndex.ts";
+import * as ThreadDataReclamation from "../orchestration-v2/ThreadDataReclamation.ts";
 
 export class DatabaseMissingError extends Schema.TaggedError<DatabaseMissingError>()(
   "DatabaseMissingError",
@@ -88,6 +89,7 @@ export class DatabaseMaintenance extends Context.Service<
         readonly afterBytes: number;
         readonly deletedEventCount: number;
         readonly deletedReceiptCount: number;
+        readonly reclamation: ThreadDataReclamation.ThreadDataReclamationSummary;
       },
       | DatabaseMissingError
       | DatabaseInUseError
@@ -185,6 +187,7 @@ const make = Effect.gen(function* () {
           return yield* new DatabaseProjectionsInvalidError({ path: databasePath });
         }
         const summary = yield* maintenance.compactEventStore();
+        const reclamation = yield* maintenance.reclaimDeletedThreadData;
         if (!(yield* maintenance.verify).valid) {
           return yield* new DatabaseProjectionsInvalidError({ path: databasePath });
         }
@@ -193,7 +196,10 @@ const make = Effect.gen(function* () {
         yield* sql`VACUUM`;
         yield* rebuildMessageSearch(sql);
         yield* sql`PRAGMA wal_checkpoint(TRUNCATE)`;
-        return summary;
+        if (!(yield* maintenance.verify).valid) {
+          return yield* new DatabaseProjectionsInvalidError({ path: databasePath });
+        }
+        return { summary, reclamation };
       }).pipe(
         Effect.provide(
           ProjectionMaintenance.layer.pipe(
@@ -206,8 +212,9 @@ const make = Effect.gen(function* () {
       return {
         beforeBytes,
         afterBytes,
-        deletedEventCount: result.deletedEventCount,
-        deletedReceiptCount: result.deletedReceiptCount,
+        deletedEventCount: result.summary.deletedEventCount,
+        deletedReceiptCount: result.summary.deletedReceiptCount,
+        reclamation: result.reclamation,
       };
     },
     (effect, databasePath) =>
