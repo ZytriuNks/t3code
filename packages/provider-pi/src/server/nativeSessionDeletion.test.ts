@@ -1,4 +1,6 @@
+// @effect-diagnostics nodeBuiltinImport:off - the symlink regression needs an explicit junction type on Windows.
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as NodeFSP from "node:fs/promises";
 import {
   ProviderDriverKind,
   ProviderInstanceId,
@@ -14,6 +16,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 import { expect, it } from "@effect/vitest";
+import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 
 import { deletePiNativeSessionFile } from "./nativeSessionDeletion.ts";
 import type { ProviderAdapterNativeThreadDeleteError } from "@t3tools/provider-core/server/ProviderAdapter";
@@ -201,6 +204,129 @@ it.effect("rejects unresolved storage and missing canonical file", () =>
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
+it.effect.skipIf(!symlinksSupported)(
+  "rejects a canonical parent redirected outside root without deleting the external file",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pi-delete-" });
+      const canonicalParent = path.join(root, "sessions");
+      const savedParent = path.join(root, "sessions-saved");
+      const outside = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pi-delete-outside-" });
+      const canonicalFile = path.join(canonicalParent, "session.jsonl");
+      const externalFile = path.join(outside, "session.jsonl");
+      yield* fs.makeDirectory(canonicalParent);
+      yield* fs.writeFileString(canonicalFile, "original");
+      yield* fs.writeFileString(externalFile, "keep");
+      const canonicalRoot = yield* fs.realPath(root);
+      const persistedCanonicalFile = yield* fs.realPath(canonicalFile);
+      yield* fs.rename(canonicalParent, savedParent);
+      yield* Effect.promise(() =>
+        NodeFSP.symlink(
+          outside,
+          canonicalParent,
+          process.platform === "win32" ? "junction" : "dir",
+        ),
+      );
+
+      const error = yield* expectDeleteError(
+        runDelete(
+          makeProviderThread({
+            type: "resolved",
+            canonicalRoot,
+            canonicalFile: persistedCanonicalFile,
+          }),
+        ),
+      );
+
+      expect(error.reason).toBe("path_boundary");
+      expect(error.message).not.toContain(canonicalRoot);
+      expect(error.message).not.toContain(persistedCanonicalFile);
+      expect(yield* fs.exists(externalFile)).toBe(true);
+      expect(yield* fs.readFileString(externalFile)).toBe("keep");
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("rejects a redirected parent before stat or remove can reach an external file", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pi-delete-" });
+    const canonicalParent = path.join(root, "sessions");
+    const outside = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pi-delete-outside-" });
+    const canonicalFile = path.join(canonicalParent, "session.jsonl");
+    const externalFile = path.join(outside, "session.jsonl");
+    yield* fs.makeDirectory(canonicalParent);
+    yield* fs.writeFileString(externalFile, "keep");
+    const canonicalRoot = yield* fs.realPath(root);
+    const redirectedFileSystem = FileSystem.FileSystem.of({
+      ...fs,
+      realPath: (requestedPath: string) =>
+        requestedPath === canonicalParent ? fs.realPath(outside) : fs.realPath(requestedPath),
+      stat: (requestedPath: string) =>
+        requestedPath === canonicalFile ? fs.stat(externalFile) : fs.stat(requestedPath),
+      remove: (requestedPath: string) =>
+        requestedPath === canonicalFile ? fs.remove(externalFile) : fs.remove(requestedPath),
+    });
+
+    const error = yield* deletePiNativeSessionFile(
+      makeProviderThread({
+        type: "resolved",
+        canonicalRoot,
+        canonicalFile,
+      }),
+    ).pipe(
+      Effect.provideService(FileSystem.FileSystem, redirectedFileSystem),
+      Effect.provideService(Path.Path, path),
+      Effect.flip,
+    );
+
+    expect(error.reason).toBe("path_boundary");
+    expect(error.message).not.toContain(canonicalRoot);
+    expect(error.message).not.toContain(canonicalFile);
+    expect(yield* fs.exists(externalFile)).toBe(true);
+    expect(yield* fs.readFileString(externalFile)).toBe("keep");
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("treats a successful stat followed by NotFound remove as idempotent success", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pi-delete-" });
+    const sessionFile = path.join(root, "session.jsonl");
+    yield* fs.writeFileString(sessionFile, "session");
+    const canonicalRoot = yield* fs.realPath(root);
+    const canonicalFile = yield* fs.realPath(sessionFile);
+    const removeNotFoundFileSystem = FileSystem.FileSystem.of({
+      ...fs,
+      remove: () =>
+        Effect.fail(
+          new PlatformError.PlatformError(
+            new PlatformError.SystemError({
+              _tag: "NotFound",
+              module: "test",
+              method: "remove",
+            }),
+          ),
+        ),
+    });
+
+    yield* deletePiNativeSessionFile(
+      makeProviderThread({
+        type: "resolved",
+        canonicalRoot,
+        canonicalFile,
+      }),
+    ).pipe(
+      Effect.provideService(FileSystem.FileSystem, removeNotFoundFileSystem),
+      Effect.provideService(Path.Path, path),
+    );
+
+    expect(yield* fs.exists(sessionFile)).toBe(true);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
 it.effect("treats a path whose type cannot be safely established as failure", () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;

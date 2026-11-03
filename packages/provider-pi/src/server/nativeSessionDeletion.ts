@@ -1,4 +1,5 @@
 import { type OrchestrationV2ProviderThread, ProviderDriverKind } from "@t3tools/contracts";
+import { normalizeProjectPathForComparison } from "@t3tools/shared/path";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
@@ -54,6 +55,25 @@ export const deletePiNativeSessionFile = Effect.fn("deletePiNativeSessionFile")(
     return yield* deleteError("path_boundary");
   }
 
+  // FileSystem.remove has no no-follow option. Reject redirects observed while
+  // resolving each existing path component before attempting the single-file removal.
+  const isCanonicalPath = (actual: string, expected: string): boolean =>
+    normalizeProjectPathForComparison(actual) === normalizeProjectPathForComparison(expected);
+  const resolveCanonicalPath = (candidate: string, expected: string) =>
+    fileSystem.realPath(candidate).pipe(
+      Effect.map((actual) => isCanonicalPath(actual, expected)),
+      Effect.catchIf(
+        () => true,
+        (error) => Effect.fail(deleteError("filesystem_failure", error)),
+        (error) => Effect.fail(deleteError("filesystem_failure", error)),
+      ),
+    );
+  const rootIsCanonical = yield* resolveCanonicalPath(canonicalRoot, canonicalRoot);
+  if (!rootIsCanonical) return yield* deleteError("path_boundary");
+  const parent = path.dirname(canonicalFile);
+  const parentIsCanonical = yield* resolveCanonicalPath(parent, parent);
+  if (!parentIsCanonical) return yield* deleteError("path_boundary");
+
   const recoverFilesystemFailure = (error: unknown) =>
     isNotFound(error) ? Effect.succeedNone : Effect.fail(deleteError("filesystem_failure", error));
   const recoverRemoveFailure = (error: unknown) =>
@@ -69,6 +89,8 @@ export const deletePiNativeSessionFile = Effect.fn("deletePiNativeSessionFile")(
   if (targetInfo.value.type !== "File") {
     return yield* deleteError("non_regular_target");
   }
+  const targetIsCanonical = yield* resolveCanonicalPath(canonicalFile, canonicalFile);
+  if (!targetIsCanonical) return yield* deleteError("path_boundary");
 
   yield* fileSystem
     .remove(canonicalFile)

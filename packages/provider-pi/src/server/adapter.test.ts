@@ -564,7 +564,7 @@ describe("PiAdapterV2", () => {
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
-  it.effect("deletes a native session through the provider-level adapter capability", () =>
+  it.effect("deletes a native session after the Pi runtime scope closes", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
@@ -575,17 +575,21 @@ describe("PiAdapterV2", () => {
       const fake = yield* makeFakePi;
       fake.queueState({ sessionFile });
       const adapter = yield* makeAdapter(fake);
-      const runtime = yield* adapter.openSession({
-        threadId: THREAD_ID,
-        providerSessionId: SESSION_ID,
-        modelSelection: modelSelection("default"),
-        runtimePolicy,
-      });
-      const providerThread = yield* runtime.ensureThread({
-        threadId: THREAD_ID,
-        modelSelection: modelSelection("default"),
-        runtimePolicy,
-      });
+      const providerThread = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const runtime = yield* adapter.openSession({
+            threadId: THREAD_ID,
+            providerSessionId: SESSION_ID,
+            modelSelection: modelSelection("default"),
+            runtimePolicy,
+          });
+          return yield* runtime.ensureThread({
+            threadId: THREAD_ID,
+            modelSelection: modelSelection("default"),
+            runtimePolicy,
+          });
+        }),
+      );
 
       assert.isDefined(adapter.deleteNativeThread);
       yield* adapter.deleteNativeThread!({ providerThread });
