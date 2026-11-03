@@ -286,6 +286,9 @@ const make = Effect.gen(function* () {
       input: ThreadDataReclamationInput,
       candidates: ReadonlyArray<CandidateRow>,
       performDeletion = true,
+      eligibleThreadIds: ReadonlySet<string> = new Set(
+        candidates.map((candidate) => candidate.thread_id),
+      ),
     ) {
       const blockersByThreadId = new Map<string, Set<ThreadDataReclamationBlockerCode>>();
       const addBlocker = (threadId: string, blocker: ThreadDataReclamationBlockerCode) => {
@@ -299,6 +302,17 @@ const make = Effect.gen(function* () {
       const candidateIds = candidates.map((candidate) => candidate.thread_id);
       const candidateIdSet = new Set(candidateIds);
       const batchOperationRootThreadId = candidates[0]?.operation_root_thread_id ?? "";
+      const ineligibleOperationRootRows = yield* sql<{ readonly thread_id: string }>`
+        SELECT deletion.thread_id
+        FROM orchestration_v2_thread_deletions AS deletion
+        LEFT JOIN orchestration_v2_projection_threads AS shell
+          ON shell.thread_id = deletion.thread_id
+        WHERE deletion.scope = 't3_only'
+          AND deletion.operation_root_thread_id = ${batchOperationRootThreadId}
+      `;
+      if (ineligibleOperationRootRows.some((row) => !eligibleThreadIds.has(row.thread_id))) {
+        for (const candidateId of candidateIds) addBlocker(candidateId, "unknown_dependency");
+      }
       const parentIds = [
         ...new Set(
           candidates
@@ -328,7 +342,9 @@ const make = Effect.gen(function* () {
             AND deletion.operation_root_thread_id = ${batchOperationRootThreadId}
             AND deletion.thread_id IN ${sql.in(parentIds)}
         `;
-        for (const parent of parentRows) candidateById.set(parent.thread_id, parent);
+        for (const parent of parentRows) {
+          if (eligibleThreadIds.has(parent.thread_id)) candidateById.set(parent.thread_id, parent);
+        }
       }
       const candidateThreadsWithData = new Set<string>();
       for (const candidateIdChunk of chunksOf(candidateIds, THREAD_DATA_RECLAMATION_BATCH_SIZE)) {
@@ -570,29 +586,27 @@ const make = Effect.gen(function* () {
           ORDER BY transfer.context_transfer_id ASC
         `;
         for (const transfer of transferRows) {
-          const rootThreadId =
-            closureRootByThreadId.get(transfer.source_thread_id) ??
-            (transfer.source_operation_root_thread_id === batchOperationRootThreadId
-              ? batchOperationRootThreadId
-              : undefined);
-          const targetRootThreadId =
-            closureRootByThreadId.get(transfer.target_thread_id) ??
-            (transfer.target_operation_root_thread_id === batchOperationRootThreadId
-              ? batchOperationRootThreadId
-              : undefined);
+          const sourceIsEligible = eligibleThreadIds.has(transfer.source_thread_id);
+          const targetIsEligible = eligibleThreadIds.has(transfer.target_thread_id);
+          const rootThreadId = sourceIsEligible ? batchOperationRootThreadId : undefined;
+          const targetRootThreadId = targetIsEligible ? batchOperationRootThreadId : undefined;
           const runIsInternal =
             transfer.target_run_id === null ||
             (transfer.target_run_thread_id !== null &&
-              (closureRootByThreadId.get(transfer.target_run_thread_id) === rootThreadId ||
-                transfer.target_run_operation_root_thread_id === rootThreadId));
-          if (rootThreadId !== undefined && rootThreadId === targetRootThreadId && runIsInternal) {
-            const byId = contextTransfersByRoot.get(rootThreadId) ?? new Map();
+              eligibleThreadIds.has(transfer.target_run_thread_id));
+          if (
+            sourceIsEligible &&
+            targetIsEligible &&
+            rootThreadId === targetRootThreadId &&
+            runIsInternal
+          ) {
+            const byId = contextTransfersByRoot.get(batchOperationRootThreadId) ?? new Map();
             byId.set(transfer.context_transfer_id, {
               context_transfer_id: transfer.context_transfer_id,
               source_thread_id: transfer.source_thread_id,
               target_thread_id: transfer.target_thread_id,
             });
-            contextTransfersByRoot.set(rootThreadId, byId);
+            contextTransfersByRoot.set(batchOperationRootThreadId, byId);
           } else if (transfer.status !== "pending" && transfer.status !== "running") {
             if (candidateIdSet.has(transfer.source_thread_id))
               addBlocker(transfer.source_thread_id, "unknown_dependency");
@@ -636,24 +650,22 @@ const make = Effect.gen(function* () {
           ORDER BY handoff.context_handoff_id ASC
         `;
         for (const handoff of handoffRows) {
-          const rootThreadId =
-            closureRootByThreadId.get(handoff.thread_id) ??
-            (handoff.thread_operation_root_thread_id === batchOperationRootThreadId
-              ? batchOperationRootThreadId
-              : undefined);
-          if (
-            rootThreadId !== undefined &&
-            (closureRootByThreadId.get(handoff.target_run_thread_id ?? "") === rootThreadId ||
-              handoff.target_run_operation_root_thread_id === rootThreadId) &&
-            (closureRootByThreadId.get(handoff.target_provider_thread_id ?? "") === rootThreadId ||
-              handoff.target_provider_operation_root_thread_id === rootThreadId)
-          ) {
-            const byId = contextHandoffsByRoot.get(rootThreadId) ?? new Map();
+          const rootThreadId = eligibleThreadIds.has(handoff.thread_id)
+            ? batchOperationRootThreadId
+            : undefined;
+          const targetRunIsEligible =
+            handoff.target_run_thread_id !== null &&
+            eligibleThreadIds.has(handoff.target_run_thread_id);
+          const targetProviderIsEligible =
+            handoff.target_provider_thread_id !== null &&
+            eligibleThreadIds.has(handoff.target_provider_thread_id);
+          if (rootThreadId !== undefined && targetRunIsEligible && targetProviderIsEligible) {
+            const byId = contextHandoffsByRoot.get(batchOperationRootThreadId) ?? new Map();
             byId.set(handoff.context_handoff_id, {
               context_handoff_id: handoff.context_handoff_id,
               thread_id: handoff.thread_id,
             });
-            contextHandoffsByRoot.set(rootThreadId, byId);
+            contextHandoffsByRoot.set(batchOperationRootThreadId, byId);
           } else if (candidateIdSet.has(handoff.thread_id)) {
             addBlocker(handoff.thread_id, "unknown_dependency");
           }
@@ -739,14 +751,18 @@ const make = Effect.gen(function* () {
         const unsharedIds = [...providerSessionIds].filter((providerSessionId) =>
           (allProviderSessionOwnersById.get(providerSessionId) ?? []).every((owner) => {
             if (owner.thread_id === null) return owner.owner_kind === "session";
-            const ownerRootThreadId =
-              owner.operation_root_thread_id ?? closureRootByThreadId.get(owner.thread_id ?? "");
-            return ownerRootThreadId === batchOperationRootThreadId;
+            return (
+              eligibleThreadIds.has(owner.thread_id) &&
+              owner.operation_root_thread_id === batchOperationRootThreadId
+            );
           }),
         );
         unsharedProviderSessionIdsByRoot.set(rootThreadId, unsharedIds);
       }
 
+      const allProviderSessionIds = [
+        ...new Set([...unsharedProviderSessionIdsByRoot.values()].flatMap((ids) => [...ids])),
+      ];
       const candidateNativeBindingsByRoot = new Map<string, Array<ReclaimableNativeBindingRow>>();
       const candidateNativeIds = new Set<string>();
       for (const candidateIdChunk of chunksOf(candidateIds, THREAD_DATA_RECLAMATION_BATCH_SIZE)) {
@@ -821,7 +837,8 @@ const make = Effect.gen(function* () {
               !(nativeOwnersById.get(candidate.native_id) ?? []).some(
                 (owner) =>
                   sameNativeIdentity(candidate, owner) &&
-                  owner.operation_root_thread_id !== batchOperationRootThreadId,
+                  (!eligibleThreadIds.has(owner.thread_id) ||
+                    owner.operation_root_thread_id !== batchOperationRootThreadId),
               ),
           ),
         );
@@ -953,7 +970,11 @@ const make = Effect.gen(function* () {
           WHERE attachment_id IS NOT NULL
         `;
         for (const owner of owners) {
-          const ownerRootThreadId = owner.operation_root_thread_id;
+          const ownerRootThreadId =
+            eligibleThreadIds.has(owner.thread_id) &&
+            owner.operation_root_thread_id === batchOperationRootThreadId
+              ? batchOperationRootThreadId
+              : undefined;
           for (const rootThreadId of attachmentRootsById.get(owner.attachment_id) ?? []) {
             if (ownerRootThreadId === rootThreadId) continue;
             const externalIds = externalAttachmentsByRoot.get(rootThreadId) ?? new Set<string>();
@@ -977,7 +998,11 @@ const make = Effect.gen(function* () {
           const parsedAttachmentIds = dynamicToolAttachmentIds(owner.thread_id, owner.payload_json);
           for (const attachmentId of parsedAttachmentIds) {
             if (!attachmentRootsById.has(attachmentId)) continue;
-            const ownerRootThreadId = owner.operation_root_thread_id;
+            const ownerRootThreadId =
+              eligibleThreadIds.has(owner.thread_id) &&
+              owner.operation_root_thread_id === batchOperationRootThreadId
+                ? batchOperationRootThreadId
+                : undefined;
             for (const rootThreadId of attachmentRootsById.get(attachmentId) ?? []) {
               if (ownerRootThreadId === rootThreadId) continue;
               const externalIds = externalAttachmentsByRoot.get(rootThreadId) ?? new Set<string>();
@@ -1014,11 +1039,23 @@ const make = Effect.gen(function* () {
         if (rootThreadId === undefined) continue;
         closures[index] = {
           ...closure,
-          contextTransfers: [...(contextTransfersByRoot.get(rootThreadId)?.values() ?? [])],
-          contextHandoffs: [...(contextHandoffsByRoot.get(rootThreadId)?.values() ?? [])],
+          contextTransfers: [
+            ...(
+              contextTransfersByRoot.get(rootThreadId) ??
+              contextTransfersByRoot.get(batchOperationRootThreadId) ??
+              new Map()
+            ).values(),
+          ],
+          contextHandoffs: [
+            ...(
+              contextHandoffsByRoot.get(rootThreadId) ??
+              contextHandoffsByRoot.get(batchOperationRootThreadId) ??
+              new Map()
+            ).values(),
+          ],
           messages: safeMessagesByRoot.get(rootThreadId) ?? [],
           nativeBindings: unsharedNativeBindingsByRoot.get(rootThreadId) ?? [],
-          providerSessionIds: unsharedProviderSessionIdsByRoot.get(rootThreadId) ?? [],
+          providerSessionIds: allProviderSessionIds,
         };
       }
 
@@ -1125,6 +1162,39 @@ const make = Effect.gen(function* () {
           }
           if (row.source_exists === 0) addBlocker(row.target_thread_id, "unknown_dependency");
           if (row.target_exists === 0) addBlocker(row.source_thread_id, "unknown_dependency");
+        }
+
+        const recursiveForkRows = yield* sql<{ readonly source_thread_id: string }>`
+          WITH RECURSIVE fork_readers(source_thread_id, reader_thread_id) AS (
+            SELECT
+              source.thread_id,
+              reader.thread_id
+            FROM orchestration_v2_projection_threads AS source
+            INNER JOIN orchestration_v2_projection_threads AS reader
+              ON json_extract(reader.payload_json, '$.forkedFrom.threadId') = source.thread_id
+            WHERE source.thread_id IN ${sql.in(candidateIdChunk)}
+              AND json_extract(reader.payload_json, '$.lineage.relationshipToParent') = 'fork'
+              AND json_extract(reader.payload_json, '$.forkedFrom.type') = 'run'
+            UNION
+            SELECT
+              fork_readers.source_thread_id,
+              reader.thread_id
+            FROM fork_readers
+            INNER JOIN orchestration_v2_projection_threads AS reader
+              ON json_extract(reader.payload_json, '$.forkedFrom.threadId') = fork_readers.reader_thread_id
+            WHERE json_extract(reader.payload_json, '$.lineage.relationshipToParent') = 'fork'
+              AND json_extract(reader.payload_json, '$.forkedFrom.type') = 'run'
+          )
+          SELECT DISTINCT fork_readers.source_thread_id
+          FROM fork_readers
+          INNER JOIN orchestration_v2_projection_threads AS reader
+            ON reader.thread_id = fork_readers.reader_thread_id
+          WHERE reader.deleted_at IS NULL
+        `;
+        for (const row of recursiveForkRows) {
+          if (candidateIdSet.has(row.source_thread_id)) {
+            addBlocker(row.source_thread_id, "surviving_fork");
+          }
         }
 
         const referenceRows = yield* sql<ThreadReferenceRow>`
@@ -1974,30 +2044,17 @@ const make = Effect.gen(function* () {
         }
       } while (sweepDeletedRowCount > 0);
 
-      const finalProviderSessionIds = [
-        ...new Set(reclaimableClosures.flatMap((closure) => closure.providerSessionIds)),
-      ];
-      const reclaimableOperationRootIds = [
-        ...new Set(reclaimableClosures.map((closure) => closure.operationRootThreadId)),
+      const reclaimedProviderSessionIds = [
+        ...new Set(deletionChunks.flatMap((closure) => closure.providerSessionIds)),
       ];
       for (const providerSessionIdChunk of chunksOf(
-        finalProviderSessionIds,
+        reclaimedProviderSessionIds,
         THREAD_DATA_RECLAMATION_BATCH_SIZE,
       )) {
         const providerSessions = yield* sql.withTransaction(
           sql<{ readonly provider_session_id: string }>`
             DELETE FROM orchestration_v2_projection_provider_sessions AS session
             WHERE session.provider_session_id IN ${sql.in(providerSessionIdChunk)}
-              AND (
-                session.thread_id IS NULL
-                OR EXISTS (
-                  SELECT 1
-                  FROM orchestration_v2_thread_deletions AS deletion
-                  WHERE deletion.thread_id = session.thread_id
-                    AND deletion.scope = 't3_only'
-                    AND deletion.operation_root_thread_id IN ${sql.in(reclaimableOperationRootIds)}
-                )
-              )
               AND NOT EXISTS (
                 SELECT 1
                 FROM orchestration_v2_projection_provider_session_bindings AS binding
@@ -2128,6 +2185,20 @@ const make = Effect.gen(function* () {
 
       const rootIds = roots.map((row) => row.operation_root_thread_id);
       for (const operationRootThreadId of rootIds) {
+        const eligibleThreadIds = new Set<string>();
+        let eligibilityAfterThreadId = "";
+        while (true) {
+          const candidates = yield* selectCandidateChunk(
+            input,
+            operationRootThreadId,
+            eligibilityAfterThreadId,
+          );
+          for (const candidate of candidates) eligibleThreadIds.add(candidate.thread_id);
+          if (candidates.length === 0 || candidates.length < THREAD_DATA_RECLAMATION_BATCH_SIZE)
+            break;
+          eligibilityAfterThreadId = candidates.at(-1)!.thread_id;
+        }
+
         let afterThreadId = "";
         let rootBlocked = false;
 
@@ -2139,7 +2210,7 @@ const make = Effect.gen(function* () {
           );
           if (candidates.length === 0) break;
 
-          const preview = yield* reclaimCandidateBatch(input, candidates, false);
+          const preview = yield* reclaimCandidateBatch(input, candidates, false, eligibleThreadIds);
           if (preview.skippedThreads.length > 0) {
             skippedThreads.push(...preview.skippedThreads);
             rootBlocked = true;
@@ -2160,7 +2231,7 @@ const make = Effect.gen(function* () {
           );
           if (candidates.length === 0) break;
 
-          const summary = yield* reclaimCandidateBatch(input, candidates);
+          const summary = yield* reclaimCandidateBatch(input, candidates, true, eligibleThreadIds);
           reclaimedThreadCount += summary.reclaimedThreadCount;
           skippedThreads.push(...summary.skippedThreads);
           deletedEventCount += summary.deletedEventCount;

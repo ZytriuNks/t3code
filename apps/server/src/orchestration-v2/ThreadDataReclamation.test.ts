@@ -1157,6 +1157,153 @@ it.effect("reclaims thread-scoped orchestration metadata", () =>
   }).pipe(Effect.provide(layerTest)),
 );
 
+it.effect("blocks a candidate when its operation root has an ineligible deleted member", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const rootThreadId = "thread:ineligible-root";
+    const memberThreadId = "thread:ineligible-member";
+    const commandId = `delete:${rootThreadId}`;
+    const providerSessionId = "provider-session:ineligible";
+    const providerThreadId = `provider-thread:${memberThreadId}`;
+    const runId = `run:${memberThreadId}`;
+    const sharedAttachmentId = "attachment:ineligible-shared";
+
+    yield* seedDeletedThread({ threadId: rootThreadId, commandId });
+    yield* seedDeletedThread({
+      threadId: memberThreadId,
+      operationRootThreadId: rootThreadId,
+      commandId: `delete:${memberThreadId}`,
+      insertReceipt: false,
+    });
+    yield* seedRun({ threadId: memberThreadId, runId, status: "running" });
+    yield* seedLifecycleCleanup({ threadId: memberThreadId, status: "pending" });
+    yield* sql`
+      INSERT INTO orchestration_v2_projection_provider_sessions (
+        provider_session_id, thread_id, provider, status, model, updated_at,
+        payload_json, driver, provider_instance_id
+      ) VALUES (
+        ${providerSessionId}, ${rootThreadId}, 'codex', 'idle', NULL, ${at}, '{}', 'codex', 'codex'
+      )
+    `;
+    yield* sql`
+      INSERT INTO orchestration_v2_projection_provider_session_bindings (
+        provider_session_id, thread_id
+      ) VALUES (${providerSessionId}, ${rootThreadId}), (${providerSessionId}, ${memberThreadId})
+    `;
+    yield* sql`
+      INSERT INTO orchestration_v2_projection_provider_threads (
+        provider_thread_id, thread_id, owner_node_id, provider, provider_session_id,
+        status, first_run_ordinal, last_run_ordinal, updated_at, payload_json,
+        driver, provider_instance_id
+      ) VALUES (
+        ${providerThreadId}, ${memberThreadId}, NULL, 'codex', ${providerSessionId},
+        'completed', 1, 1, ${at}, '{}', 'codex', 'codex'
+      )
+    `;
+    for (const [bindingKey, threadId, providerThreadIdForBinding] of [
+      ["native:ineligible-root", rootThreadId, "provider-thread:root"],
+      ["native:ineligible-member", memberThreadId, providerThreadId],
+    ] as const) {
+      yield* sql`
+        INSERT INTO orchestration_v2_native_session_bindings (
+          binding_key, thread_id, provider_thread_id, provider_instance_id, driver,
+          native_id, storage_type, canonical_root, canonical_file, bound_at, payload_json
+        ) VALUES (
+          ${bindingKey}, ${threadId}, ${providerThreadIdForBinding}, 'codex', 'codex',
+          'native:ineligible-shared', 'resolved', '/sessions', 'ineligible.jsonl', ${at}, '{}'
+        )
+      `;
+    }
+    for (const [messageId, threadId] of [
+      [`message:${rootThreadId}`, rootThreadId],
+      [`message:${memberThreadId}`, memberThreadId],
+    ] as const) {
+      yield* sql`
+        INSERT INTO orchestration_v2_projection_messages (
+          message_id, thread_id, run_id, node_id, role, streaming,
+          created_at, updated_at, payload_json
+        ) VALUES (
+          ${messageId}, ${threadId}, NULL, NULL, 'user', 0, ${at}, ${at},
+          ${JSON.stringify({ attachments: [{ id: sharedAttachmentId }] })}
+        )
+      `;
+    }
+    yield* sql`
+      INSERT INTO orchestration_v2_projection_context_transfers (
+        context_transfer_id, source_thread_id, target_thread_id, target_run_id,
+        type, status, source_provider, target_provider, updated_at,
+        source_provider_instance_id, target_provider_instance_id, payload_json
+      ) VALUES (
+        'transfer:ineligible', ${rootThreadId}, ${memberThreadId}, ${runId},
+        'fork', 'completed', 'codex', 'codex', ${at}, 'codex', 'codex', '{}'
+      )
+    `;
+    yield* sql`
+      INSERT INTO orchestration_v2_projection_context_handoffs (
+        context_handoff_id, thread_id, target_run_id, to_provider_thread_id,
+        strategy, status, updated_at, payload_json
+      ) VALUES (
+        'handoff:ineligible', ${rootThreadId}, ${runId}, ${providerThreadId},
+        'reuse', 'completed', ${at}, '{}'
+      )
+    `;
+
+    const before = yield* snapshotRows();
+    const result = yield* reclaim();
+    const after = yield* snapshotRows();
+
+    assert.deepEqual(after, before);
+    assert.equal(result.reclaimedThreadCount, 0);
+    expectBlockers(result, rootThreadId, ["shared_attachment", "unknown_dependency"]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("recursively blocks a fork source through a deleted intermediate fork", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const sourceThreadId = "thread:fork:recursive-source";
+    const intermediateThreadId = "thread:fork:recursive-intermediate";
+    const grandchildThreadId = "thread:fork:recursive-grandchild";
+
+    yield* seedDeletedThread({ threadId: sourceThreadId });
+    yield* sql`
+      INSERT INTO orchestration_v2_projection_messages (
+        message_id, thread_id, run_id, node_id, role, streaming,
+        created_at, updated_at, payload_json
+      ) VALUES (
+        'message:fork:recursive-source', ${sourceThreadId}, NULL, NULL, 'user', 0,
+        ${at}, ${at}, '{}'
+      )
+    `;
+    yield* seedDeletedThread({
+      threadId: intermediateThreadId,
+      parentThreadId: sourceThreadId,
+      relationshipToParent: "fork",
+      rootThreadId: sourceThreadId,
+      forkedFrom: { type: "run", threadId: sourceThreadId, runId: "run:recursive-source" },
+    });
+    yield* seedThread({
+      threadId: grandchildThreadId,
+      state: "active",
+      parentThreadId: intermediateThreadId,
+      relationshipToParent: "fork",
+      forkedFrom: {
+        type: "run",
+        threadId: intermediateThreadId,
+        runId: "run:recursive-intermediate",
+      },
+    });
+
+    const before = yield* snapshotRows();
+    const result = yield* reclaim();
+    const after = yield* snapshotRows();
+
+    assert.deepEqual(after, before);
+    assert.equal(result.reclaimedThreadCount, 0);
+    expectBlockers(result, sourceThreadId, ["surviving_fork"]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect("reclaims dependent rows while preserving deletion anchors and the thread shell", () =>
   Effect.gen(function* () {
     const threadId = "thread:reclaim:data";
