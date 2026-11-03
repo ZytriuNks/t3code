@@ -114,6 +114,7 @@ interface InternalContextTransferRow {
 interface InternalContextHandoffRow {
   readonly context_handoff_id: string;
   readonly thread_id: string;
+  readonly target_thread_ids: ReadonlyArray<string>;
 }
 
 interface ReclaimableMessageRow {
@@ -647,6 +648,8 @@ const make = Effect.gen(function* () {
             ON target_provider_deletion.thread_id = target_provider_thread.thread_id
             AND target_provider_deletion.scope = 't3_only'
           WHERE handoff.thread_id IN ${sql.in(candidateIdChunk)}
+            OR target_run.thread_id IN ${sql.in(candidateIdChunk)}
+            OR target_provider_thread.thread_id IN ${sql.in(candidateIdChunk)}
           ORDER BY handoff.context_handoff_id ASC
         `;
         for (const handoff of handoffRows) {
@@ -664,6 +667,13 @@ const make = Effect.gen(function* () {
             byId.set(handoff.context_handoff_id, {
               context_handoff_id: handoff.context_handoff_id,
               thread_id: handoff.thread_id,
+              target_thread_ids: [
+                ...new Set(
+                  [handoff.target_run_thread_id, handoff.target_provider_thread_id].filter(
+                    (threadId): threadId is string => threadId !== null,
+                  ),
+                ),
+              ],
             });
             contextHandoffsByRoot.set(batchOperationRootThreadId, byId);
           } else if (candidateIdSet.has(handoff.thread_id)) {
@@ -1399,11 +1409,15 @@ const make = Effect.gen(function* () {
             subagentRows: closure.subagentRows.filter((row) =>
               chunkThreadIds.has(row.child_thread_id),
             ),
-            contextTransfers: closure.contextTransfers.filter((row) =>
-              chunkThreadIds.has(row.source_thread_id),
+            contextTransfers: closure.contextTransfers.filter(
+              (row) =>
+                chunkThreadIds.has(row.source_thread_id) ||
+                chunkThreadIds.has(row.target_thread_id),
             ),
-            contextHandoffs: closure.contextHandoffs.filter((row) =>
-              chunkThreadIds.has(row.thread_id),
+            contextHandoffs: closure.contextHandoffs.filter(
+              (row) =>
+                chunkThreadIds.has(row.thread_id) ||
+                row.target_thread_ids.some((threadId) => chunkThreadIds.has(threadId)),
             ),
             messages: closure.messages.filter((row) => chunkThreadIds.has(row.thread_id)),
             nativeBindings: closure.nativeBindings.filter((row) =>

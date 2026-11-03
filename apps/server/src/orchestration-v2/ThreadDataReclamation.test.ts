@@ -1637,6 +1637,102 @@ it.effect(
     }).pipe(Effect.provide(layerTest)),
 );
 
+it.effect(
+  "recovers cross-batch transfers and handoffs after the target batch removes projections",
+  () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const rootThreadId = "thread:cross-batch:root";
+      const targetThreadId = "thread:cross-batch:000";
+      const sourceThreadId = "thread:cross-batch:050";
+      const deleteCommandId = `delete:${rootThreadId}`;
+      const targetRunId = `run:${targetThreadId}`;
+      const targetProviderThreadId = `provider-thread:${targetThreadId}`;
+      const childCount = ThreadDataReclamation.THREAD_DATA_RECLAMATION_BATCH_SIZE + 1;
+
+      for (let index = 0; index < childCount; index++) {
+        const threadId = `thread:cross-batch:${String(index).padStart(3, "0")}`;
+        yield* seedDeletedThread({
+          threadId,
+          parentThreadId: rootThreadId,
+          relationshipToParent: "subagent",
+          rootThreadId,
+          operationRootThreadId: rootThreadId,
+          commandId: deleteCommandId,
+          insertReceipt: false,
+        });
+        yield* seedSubagentOwnership({ parentThreadId: rootThreadId, childThreadId: threadId });
+      }
+      yield* seedDeletedThread({ threadId: rootThreadId, commandId: deleteCommandId });
+      yield* seedRun({ threadId: targetThreadId, runId: targetRunId, status: "completed" });
+      yield* sql`
+      INSERT INTO orchestration_v2_projection_provider_threads (
+        provider_thread_id, thread_id, owner_node_id, provider, provider_session_id,
+        status, first_run_ordinal, last_run_ordinal, updated_at, payload_json,
+        driver, provider_instance_id
+      ) VALUES (
+        ${targetProviderThreadId}, ${targetThreadId}, NULL, 'codex', NULL,
+        'completed', 1, 1, ${at}, '{}', 'codex', 'codex'
+      )
+    `;
+      yield* sql`
+      INSERT INTO orchestration_v2_projection_messages (
+        message_id, thread_id, run_id, node_id, role, streaming,
+        created_at, updated_at, payload_json
+      ) VALUES (
+        'message:cross-batch:target', ${targetThreadId}, NULL, NULL, 'user', 0,
+        ${at}, ${at}, '{}'
+      )
+    `;
+      yield* sql`
+      INSERT INTO orchestration_v2_projection_context_transfers (
+        context_transfer_id, source_thread_id, target_thread_id, target_run_id,
+        type, status, source_provider, target_provider, updated_at,
+        source_provider_instance_id, target_provider_instance_id, payload_json
+      ) VALUES (
+        'transfer:cross-batch', ${sourceThreadId}, ${targetThreadId}, ${targetRunId},
+        'fork', 'completed', 'codex', 'codex', ${at}, 'codex', 'codex', '{}'
+      )
+    `;
+      yield* sql`
+      INSERT INTO orchestration_v2_projection_context_handoffs (
+        context_handoff_id, thread_id, target_run_id, to_provider_thread_id,
+        strategy, status, updated_at, payload_json
+      ) VALUES (
+        'handoff:cross-batch', ${sourceThreadId}, ${targetRunId}, ${targetProviderThreadId},
+        'reuse', 'completed', ${at}, '{}'
+      )
+    `;
+      yield* sql`
+      CREATE TRIGGER remove_cross_batch_target_projections
+      AFTER DELETE ON orchestration_v2_projection_messages
+      WHEN OLD.thread_id = 'thread:cross-batch:000'
+      BEGIN
+        DELETE FROM orchestration_v2_projection_provider_threads WHERE thread_id = 'thread:cross-batch:000';
+        DELETE FROM orchestration_v2_projection_runs WHERE thread_id = 'thread:cross-batch:000';
+      END
+    `;
+
+      const result = yield* reclaim();
+
+      assert.equal(result.reclaimedThreadCount, childCount + 1);
+      assert.deepEqual(
+        yield* sql`
+        SELECT context_transfer_id FROM orchestration_v2_projection_context_transfers
+        WHERE context_transfer_id = 'transfer:cross-batch'
+      `,
+        [],
+      );
+      assert.deepEqual(
+        yield* sql`
+        SELECT context_handoff_id FROM orchestration_v2_projection_context_handoffs
+        WHERE context_handoff_id = 'handoff:cross-batch'
+      `,
+        [],
+      );
+    }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect("reclaims a large subagent closure in ordered bounded chunks and resumes", () =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
