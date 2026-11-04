@@ -802,6 +802,12 @@ export const layer: Layer.Layer<
               return yield* eventSink
                 .write({
                   lifecycleGuard: input.lifecycleGuard,
+                  ...(input.event.type === "provider_turn.updated" &&
+                  ["completed", "interrupted", "failed", "cancelled"].includes(
+                    input.event.providerTurn.status,
+                  )
+                    ? { restartTerminalSessionId: input.providerSessionId }
+                    : {}),
                   guardPendingUserInputCancellations: true,
                   ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
                   events,
