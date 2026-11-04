@@ -191,6 +191,7 @@ interface TestProviderRuntimeState {
   readonly closeCount: number;
   readonly interruptCount: number;
   readonly resumeCount: number;
+  readonly runtimeRequestResponses: ReadonlyArray<ProviderAdapter.ProviderAdapterV2RuntimeRequestResponseInput>;
   readonly unloadedNativeThreadIds: ReadonlyArray<string>;
   readonly eventQueues: ReadonlyMap<
     string,
@@ -203,6 +204,7 @@ const emptyState: TestProviderRuntimeState = {
   closeCount: 0,
   interruptCount: 0,
   resumeCount: 0,
+  runtimeRequestResponses: [],
   unloadedNativeThreadIds: [],
   eventQueues: new Map(),
 };
@@ -481,7 +483,11 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
                 })),
               ),
             ),
-          respondToRuntimeRequest: () => Effect.void,
+          respondToRuntimeRequest: (response) =>
+            Ref.update(state, (current) => ({
+              ...current,
+              runtimeRequestResponses: [...current.runtimeRequestResponses, response],
+            })),
           readThreadSnapshot: () => unimplemented("readThreadSnapshot unused in test"),
           rollbackThread: () => unimplemented("rollbackThread unused in test"),
           forkThread: () => unimplemented("forkThread unused in test"),
@@ -4859,6 +4865,318 @@ it.effect(
         assert.isTrue(yield* manager.isLive(providerSessionId));
       }).pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 60000 })));
     }),
+);
+
+it.effect(
+  "ProviderSessionManagerV2 routes committed runtime request responses through the effect worker and service",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      yield* Effect.gen(function* () {
+        const sink = yield* EventSink.EventSinkV2;
+        const ids = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const service = yield* RuntimeRequestService.RuntimeRequestServiceV2;
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("runtime-response:committed");
+        const providerSessionId = yield* ids.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        yield* sink.write({
+          events: [yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now })],
+        });
+        yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+        const pending = yield* makePendingRuntimeRequestEvents({
+          idAllocator: ids,
+          threadId,
+          providerSessionId,
+          providerThread: makeProviderThread({
+            idAllocator: ids,
+            threadId,
+            providerSessionId,
+            now,
+          }),
+          now,
+        });
+        yield* sink.write({ events: pending.events });
+        const response = {
+          threadId,
+          providerSessionId,
+          requestId: pending.requestId,
+          decision: "accept" as const,
+        };
+        assert.equal(
+          (yield* service.respond(response).pipe(Effect.flip)).reason,
+          "request-not-ready",
+        );
+        assert.isEmpty((yield* Ref.get(state)).runtimeRequestResponses);
+        const request = (yield* projections.getRuntimeRequest(threadId, pending.requestId))!;
+        const effectId = "runtime-response:committed";
+        yield* sink.writeWithEffects({
+          events: [
+            {
+              id: yield* ids.allocate.event({ threadId }),
+              type: "runtime-request.updated",
+              threadId,
+              occurredAt: now,
+              payload: { ...request, status: "resolved", decision: "accept", resolvedAt: now },
+            },
+          ],
+          effects: [
+            {
+              id: effectId,
+              commandId: CommandId.make("command:runtime-response"),
+              threadId,
+              request: {
+                type: "runtime-request.respond",
+                providerSessionId,
+                requestId: pending.requestId,
+                decision: "accept",
+              },
+            },
+          ],
+        });
+        assert.equal(
+          (yield* projections.getRuntimeRequest(threadId, pending.requestId))?.status,
+          "resolved",
+        );
+        assert.isEmpty((yield* Ref.get(state)).runtimeRequestResponses);
+        const layerResponseWorker = EffectWorker.layerWithOptions({
+          workerId: "runtime-response-worker",
+          maxAttempts: 1,
+        }).pipe(
+          Layer.provide(
+            EffectWorker.layerExecutor.pipe(
+              Layer.provide(
+                Layer.mergeAll(
+                  ServerSettings.layerTest(),
+                  Layer.mock(RunFinalizationService.RunFinalizationService)({}),
+                  Layer.mock(ProviderThreadLifecycleService.ProviderThreadLifecycleService)({}),
+                  Layer.mock(CheckpointRollbackService.CheckpointRollbackServiceV2)({}),
+                  Layer.mock(ProviderTurnControlService.ProviderTurnControlServiceV2)({}),
+                  Layer.mock(ProviderTurnStartService.ProviderTurnStartServiceV2)({}),
+                  Layer.mock(ThreadTitleRegenerationService.ThreadTitleRegenerationService)({}),
+                  Layer.mock(ThreadManagementService.ThreadManagementService)({}),
+                ),
+              ),
+            ),
+          ),
+        );
+        yield* Effect.gen(function* () {
+          const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+          assert.equal(yield* worker.drain(), 1);
+        }).pipe(Effect.provide(layerResponseWorker));
+        const receipt = yield* outbox.get(effectId);
+        assert.isTrue(Option.isSome(receipt));
+        if (Option.isSome(receipt)) {
+          assert.equal(receipt.value.status, "succeeded");
+          assert.equal(receipt.value.attemptCount, 1);
+        }
+        assert.deepEqual((yield* Ref.get(state)).runtimeRequestResponses, [
+          { requestId: pending.requestId, decision: "accept" },
+        ]);
+      }).pipe(
+        Effect.provide(
+          RuntimeRequestService.layer.pipe(
+            Layer.provideMerge(layerTest({ state, idleTimeoutMs: 1000 })),
+          ),
+        ),
+      );
+    }),
+);
+
+it.effect.each([
+  "pending",
+  "expired",
+  "not-resumable",
+  "wrong-session",
+  "wrong-request",
+  "unattached-thread",
+  "released-runtime",
+  "retired-attachment",
+  "stale-revision",
+  "stale-source",
+] as const)("ProviderSessionManagerV2 rejects runtime request responses from %s", (boundary) =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    yield* Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const service = yield* RuntimeRequestService.RuntimeRequestServiceV2;
+      const now = yield* DateTime.now;
+      const ownerId = ThreadId.make("runtime-response:owner");
+      const threadId = ThreadId.make("runtime-response:boundary");
+      const otherId = ThreadId.make("runtime-response:other");
+      const owner = yield* makeThreadCreatedEvent({ idAllocator: ids, threadId: ownerId, now });
+      const created = yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now });
+      yield* sink.write({
+        events: [
+          owner,
+          {
+            ...created,
+            payload: {
+              ...created.payload,
+              projectId: owner.payload.projectId,
+              lineage: {
+                parentThreadId: ownerId,
+                relationshipToParent: "subagent",
+                rootThreadId: ownerId,
+              },
+            },
+          },
+          yield* makeThreadCreatedEvent({ idAllocator: ids, threadId: otherId, now }),
+        ],
+      });
+      const providerSessionId = yield* ids.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      });
+      const runtime = yield* manager.open({
+        threadId,
+        providerSessionId,
+        modelSelection,
+        runtimePolicy,
+      });
+      const requestThreadId = boundary === "unattached-thread" ? otherId : threadId;
+      const pending = yield* makePendingRuntimeRequestEvents({
+        idAllocator: ids,
+        threadId: requestThreadId,
+        providerSessionId,
+        providerThread: makeProviderThread({
+          idAllocator: ids,
+          threadId: requestThreadId,
+          providerSessionId,
+          now,
+        }),
+        now,
+      });
+      yield* sink.write({ events: pending.events });
+      const request = (yield* projections.getRuntimeRequest(requestThreadId, pending.requestId))!;
+      yield* sink.write({
+        events: [
+          {
+            id: yield* ids.allocate.event({ threadId: requestThreadId }),
+            type: "runtime-request.updated",
+            threadId: requestThreadId,
+            occurredAt: now,
+            payload: {
+              ...request,
+              status:
+                boundary === "pending"
+                  ? "pending"
+                  : boundary === "expired"
+                    ? "expired"
+                    : "resolved",
+              responseCapability:
+                boundary === "not-resumable"
+                  ? { type: "not_resumable", reason: "Fixture request cannot resume." }
+                  : {
+                      type: "live",
+                      providerSessionId:
+                        boundary === "wrong-session"
+                          ? ProviderSessionId.make("other-session")
+                          : providerSessionId,
+                    },
+              resolvedAt: boundary === "pending" ? null : now,
+            },
+          },
+        ],
+      });
+      if (boundary === "stale-revision" || boundary === "stale-source") {
+        const target = boundary === "stale-source" ? owner : created;
+        for (const lifecycleRevision of [1, 2]) {
+          yield* sink.write({
+            events: [
+              {
+                ...target,
+                id: yield* ids.allocate.event({ threadId: target.threadId }),
+                type: lifecycleRevision === 1 ? "thread.archived" : "thread.unarchived",
+                payload: {
+                  ...target.payload,
+                  lifecycleRevision,
+                  archivedAt: lifecycleRevision === 1 ? now : null,
+                },
+              },
+            ],
+          });
+        }
+        assert.equal(
+          (yield* projections.getThreadShell(threadId))?.lifecycleRevision,
+          boundary === "stale-source" ? 0 : 2,
+        );
+      }
+      if (boundary === "retired-attachment") {
+        yield* sink.write({
+          events: [
+            {
+              id: yield* ids.allocate.event({ threadId }),
+              type: "provider-thread.updated",
+              threadId,
+              occurredAt: now,
+              payload: makeProviderThread({ idAllocator: ids, threadId, providerSessionId, now }),
+            },
+          ],
+        });
+        yield* manager.open({
+          threadId: otherId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        yield* manager.detach({ threadId, providerSessionId, retirementRevision: 0 });
+        assert.isTrue(yield* manager.isLive(providerSessionId));
+      }
+      if (boundary === "released-runtime") {
+        yield* manager.release({ providerSessionId, reason: "manual_shutdown" });
+        assert.isTrue(Option.isNone(yield* manager.get(providerSessionId)));
+        assert.equal(
+          (yield* service
+            .respond({
+              threadId,
+              providerSessionId,
+              requestId: pending.requestId,
+              decision: "accept",
+            })
+            .pipe(Effect.flip)).reason,
+          "provider-session-not-active",
+        );
+      }
+      const response = {
+        requestId:
+          boundary === "wrong-request"
+            ? yield* ids.allocate.runtimeRequest({
+                driver: CODEX_DRIVER,
+                nativeRequestId: "unknown-approval",
+              })
+            : pending.requestId,
+        decision: "accept" as const,
+      };
+      const rejected = yield* runtime.respondToRuntimeRequest(response).pipe(Effect.exit);
+      assert.isTrue(Exit.isFailure(rejected));
+      if (Exit.isFailure(rejected)) {
+        assert.include(
+          Cause.pretty(rejected.cause),
+          boundary === "stale-revision" ||
+            boundary === "stale-source" ||
+            boundary === "retired-attachment"
+            ? "ProviderSessionStaleBindingError"
+            : "Unknown runtime request source.",
+        );
+      }
+      assert.isEmpty((yield* Ref.get(state)).runtimeRequestResponses);
+    }).pipe(
+      Effect.provide(
+        RuntimeRequestService.layer.pipe(
+          Layer.provideMerge(layerTest({ state, idleTimeoutMs: 1000 })),
+        ),
+      ),
+    );
+  }),
 );
 
 it.effect("ProviderSessionManagerV2 persists session-scoped runtime requests without a run", () =>

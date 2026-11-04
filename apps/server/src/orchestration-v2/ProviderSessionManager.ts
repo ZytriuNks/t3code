@@ -2294,7 +2294,7 @@ export const layerWithOptions = (
                     projectionStore.getRuntimeRequest(threadId, input.requestId),
                   );
                   if (
-                    request?.status === "pending" &&
+                    request?.status === "resolved" &&
                     request.responseCapability.type === "live" &&
                     request.responseCapability.providerSessionId === providerSessionId
                   )
