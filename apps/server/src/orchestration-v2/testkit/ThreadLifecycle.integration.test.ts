@@ -377,6 +377,7 @@ const makeRealPiProviderInstance = Effect.fn("test.makeRealPiProviderInstance")(
   readonly pauseClose: Ref.Ref<boolean>;
   readonly closeEntered: Deferred.Deferred<void>;
   readonly closeRelease: Deferred.Deferred<void>;
+  readonly closeCompleted: Deferred.Deferred<void>;
 }) {
   const requests: Array<Record<string, unknown>> = [];
   const deleteCalls: Array<ProviderAdapter.ProviderAdapterV2DeleteNativeThreadInput> = [];
@@ -490,6 +491,11 @@ const makeRealPiProviderInstance = Effect.fn("test.makeRealPiProviderInstance")(
   const realDeleteNativeThread = adapter.deleteNativeThread;
   const observedAdapter = {
     ...adapter,
+    openSession: (openInput: ProviderAdapter.ProviderAdapterV2OpenSessionInput) =>
+      Effect.gen(function* () {
+        yield* Effect.addFinalizer(() => Deferred.succeed(input.closeCompleted, undefined));
+        return yield* adapter.openSession(openInput);
+      }),
     ...(realDeleteNativeThread === undefined
       ? {}
       : {
@@ -618,6 +624,7 @@ it.effect(
         const providerSessionId = ProviderSessionId.make("task8:pi-session");
         const detachEntered = yield* Deferred.make<void>();
         const detachRelease = yield* Deferred.make<void>();
+        const closeCompleted = yield* Deferred.make<void>();
         const pauseDetach = yield* Ref.make(false);
         const baseProvider = makeProvider();
         const pi = yield* makeRealPiProviderInstance({
@@ -626,6 +633,7 @@ it.effect(
           pauseClose: pauseDetach,
           closeEntered: detachEntered,
           closeRelease: detachRelease,
+          closeCompleted,
         });
         const provider = makeProvider([pi.instance]);
         const runtime = makeRuntime(SqlitePersistence.layerMemory, provider);
@@ -641,6 +649,13 @@ it.effect(
           const bindings = yield* NativeSessionBindings.NativeSessionBindings;
           const sql = yield* SqlClient.SqlClient;
           const projects = yield* ProjectStore.ProjectStoreV2;
+          const exhaustRetries = (label: string) =>
+            Effect.gen(function* () {
+              for (const attempt of [2, 3, 4, 5]) {
+                yield* TestClock.adjust(Duration.seconds(30));
+                assert.isAbove(yield* worker.drain(), 0, `${label} attempt ${attempt}`);
+              }
+            });
           yield* projects.apply({
             sequence: 0,
             eventId: EventId.make("task8:pi-project"),
@@ -709,6 +724,7 @@ it.effect(
           yield* firstRuntime.resumeThread({ threadId, providerThread: nativeThread });
           assert.equal(nativeThread.nativeThreadRef?.nativeId, sessionFile);
 
+          yield* Ref.set(pauseDetach, true);
           const archiveCommandId = CommandId.make("task8:pi-archive");
           yield* orchestrator.dispatch({
             type: "thread.archive",
@@ -730,15 +746,21 @@ it.effect(
             archiveEffects.filter((effect) => effect.request.type === "provider-thread.delete"),
           );
           assert.isTrue(yield* fs.exists(sessionFile));
-          assert.isAbove(yield* worker.drain(), 0);
+          const archiveDraining = yield* worker.drain().pipe(Effect.forkScoped);
+          yield* Deferred.await(detachEntered);
+          yield* TestClock.adjust("30 seconds");
+          assert.isAbove(yield* Fiber.join(archiveDraining), 0);
+          yield* exhaustRetries("archive detach");
           const completedArchiveDetach = Option.getOrThrow(yield* outbox.get(archiveDetach!.id));
           assert.equal(
             completedArchiveDetach.status,
-            "succeeded",
+            "failed",
             completedArchiveDetach.lastError ?? undefined,
           );
           assert.isFalse(yield* sessions.isLive(providerSessionId));
           assert.isTrue(yield* fs.exists(sessionFile));
+          assert.isEmpty(pi.deleteCalls);
+          assert.isFalse(yield* Deferred.isDone(closeCompleted));
 
           // Direct lifecycle commands reject subagent targets. Promotion makes the later
           // child-root operations legal while preserving the parent-root retirement receipt.
@@ -765,38 +787,10 @@ it.effect(
             commandId: CommandId.make("task8:pi-unarchive"),
             threadId,
           });
-          const resumedProviderSessionId = ProviderSessionId.make("task8:pi-session-resumed");
-          const resumedNativeThread = {
-            ...nativeThread,
-            providerSessionId: resumedProviderSessionId,
-          };
-          const resumedLifecycleGuard = yield* orchestrator.resolveLifecycleSource(threadId);
-          const resumedRuntime = yield* sessions.open({
-            threadId,
-            providerSessionId: resumedProviderSessionId,
-            modelSelection: piModelSelection,
-            runtimePolicy,
-          });
-          yield* sink.write({
-            lifecycleGuard: resumedLifecycleGuard,
-            events: [
-              {
-                id: EventId.make("task8:pi-native-thread-resumed"),
-                type: "provider-thread.updated",
-                threadId,
-                occurredAt: now,
-                payload: resumedNativeThread,
-              },
-            ],
-          });
-          yield* resumedRuntime.resumeThread({ threadId, providerThread: resumedNativeThread });
-          assert.isTrue(pi.requests.some((record) => record["type"] === "switch_session"));
           assert.isFalse(yield* sessions.isLive(providerSessionId));
-          assert.isTrue(yield* sessions.isLive(resumedProviderSessionId));
           assert.isTrue(yield* fs.exists(sessionFile));
 
-          yield* Ref.set(pauseDetach, true);
-          const deleteCommandId = CommandId.make("task8:pi-delete");
+          const deleteCommandId = CommandId.make("task8:pi-delete-before-close");
           const deletedCommand = yield* orchestrator.dispatch({
             type: "thread.delete",
             commandId: deleteCommandId,
@@ -838,17 +832,60 @@ it.effect(
             deletedLifecycleSource.sourceToken,
           );
 
-          const draining = yield* worker.drain().pipe(Effect.forkScoped);
-          yield* Deferred.await(detachEntered);
-          assert.isFalse(yield* sessions.isLive(resumedProviderSessionId));
+          assert.isAbove(yield* worker.drain(), 0);
+          yield* exhaustRetries("delete before close");
+          const failedReplacement = Option.getOrThrow(yield* outbox.get(replacementDetach!.id));
+          assert.equal(
+            failedReplacement.status,
+            "failed",
+            failedReplacement.lastError ?? undefined,
+          );
+          const failedDelete = Option.getOrThrow(yield* outbox.get(deleteEffect.id));
+          assert.equal(failedDelete.status, "pending", failedDelete.lastError ?? undefined);
           assert.isTrue(yield* fs.exists(sessionFile));
           assert.isEmpty(pi.deleteCalls);
-          yield* Deferred.succeed(detachRelease, undefined);
-          assert.isAbove(yield* Fiber.join(draining), 0);
+          assert.isFalse(yield* Deferred.isDone(closeCompleted));
 
-          const completedDelete = Option.getOrThrow(yield* outbox.get(deleteEffect.id));
+          yield* Deferred.succeed(detachRelease, undefined);
+          yield* Deferred.await(closeCompleted);
+
+          const retryDeleteCommandId = CommandId.make("task8:pi-delete-after-close");
+          yield* orchestrator.dispatch({
+            type: "thread.delete",
+            commandId: retryDeleteCommandId,
+            threadId,
+          });
+          const retryEffects = yield* outbox.listByCommandId(retryDeleteCommandId);
+          const completedReplacement = retryEffects.find(
+            (effect) =>
+              effect.request.type === "provider-session.detach" &&
+              effect.request.providerSessionId === providerSessionId,
+          );
+          const retryDeleteEffect = retryEffects.find(
+            (effect) => effect.request.type === "provider-thread.delete",
+          );
+          assert.isDefined(completedReplacement);
+          assert.isDefined(retryDeleteEffect);
+          assert.notEqual(completedReplacement!.id, replacementDetach!.id);
+          assert.notEqual(retryDeleteEffect!.id, deleteEffect.id);
+          assert.isAbove(yield* worker.drain(), 0);
+
+          const completedRetirement = Option.getOrThrow(
+            yield* outbox.get(completedReplacement!.id),
+          );
+          assert.equal(
+            completedRetirement.status,
+            "succeeded",
+            completedRetirement.lastError ?? undefined,
+          );
+          const completedDelete = Option.getOrThrow(yield* outbox.get(retryDeleteEffect!.id));
           assert.equal(completedDelete.status, "succeeded", JSON.stringify(completedDelete));
-          assert.isFalse(yield* sessions.isLive(resumedProviderSessionId));
+          assert.equal(Option.getOrThrow(yield* outbox.get(archiveDetach!.id)).status, "failed");
+          assert.equal(
+            Option.getOrThrow(yield* outbox.get(replacementDetach!.id)).status,
+            "failed",
+          );
+          assert.isFalse(yield* sessions.isLive(providerSessionId));
           assert.isFalse(yield* fs.exists(sessionFile));
           assert.lengthOf(pi.deleteCalls, 1);
           assert.equal(yield* fs.readFileString(siblingFile), "keep this session");
@@ -878,9 +915,9 @@ it.effect(
           yield* outbox.enqueue([
             {
               id: "task8:pi-delete-recovered",
-              commandId: deleteCommandId,
+              commandId: retryDeleteCommandId,
               threadId,
-              request: deleteEffect.request,
+              request: retryDeleteEffect!.request,
             },
           ]);
           const crashedClaim = yield* outbox.claimNext({

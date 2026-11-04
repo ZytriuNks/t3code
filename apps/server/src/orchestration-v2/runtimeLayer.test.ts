@@ -6930,7 +6930,9 @@ it.effect("lifecycle archive retries a failed retirement receipt with a new inte
       });
       const retained = yield* outbox.attachmentRetirements(threadId);
       assert.lengthOf(retained, 2);
-      assert.equal(retained[0]?.effectId, retirement.effectId);
+      const retainedOriginal = retained.find((item) => item.effectId === retirement.effectId);
+      assert.isDefined(retainedOriginal);
+      assert.equal(retainedOriginal?.status, "failed");
       const retry = retained.find((item) => item.effectId !== retirement.effectId);
       assert.isDefined(retry);
       assert.equal(retry?.status, "pending");
@@ -6941,6 +6943,17 @@ it.effect("lifecycle archive retries a failed retirement receipt with a new inte
         ).length,
         1,
       );
+      assert.isAbove(yield* worker.drain(), 0);
+      for (const attempt of [2, 3, 4, 5]) {
+        yield* TestClock.adjust("30 seconds");
+        assert.isAbove(yield* worker.drain(), 0, `replacement attempt ${attempt}`);
+      }
+      const completed = yield* outbox.attachmentRetirements(threadId);
+      assert.equal(
+        completed.find((item) => item.effectId === retirement.effectId)?.status,
+        "failed",
+      );
+      assert.equal(completed.find((item) => item.effectId === retry?.effectId)?.status, "failed");
     }).pipe(Effect.ensuring(Deferred.succeed(finish, undefined)), Effect.provide(layerTest));
   }),
 );

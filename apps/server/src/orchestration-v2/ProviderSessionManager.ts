@@ -286,6 +286,20 @@ function sessionKey(providerSessionId: ProviderSessionId): string {
   return String(providerSessionId);
 }
 
+function confirmedSessionRetirementKey(input: {
+  readonly providerSessionId: ProviderSessionId;
+  readonly threadId: ThreadId;
+  readonly lifecycleRevision: number;
+  readonly sourceToken: string;
+}): string {
+  return JSON.stringify([
+    input.providerSessionId,
+    input.threadId,
+    input.lifecycleRevision,
+    input.sourceToken,
+  ]);
+}
+
 function sessionScopedRuntimeRequestThreadId(
   event: ProviderAdapter.ProviderAdapterV2Event,
 ): ThreadId | undefined {
@@ -434,6 +448,9 @@ export const layerWithOptions = (
           }),
       );
       const sessions = yield* Ref.make(new Map<string, LiveSessionEntry>());
+      // This proof is intentionally process-local: after restart only a durable succeeded
+      // receipt can prove retirement. Generic runtimes never write it.
+      const confirmedSessionRetirements = yield* Ref.make<ReadonlySet<string>>(new Set());
       const sourceFor = (entry: LiveSessionEntry, threadId: ThreadId) => {
         if (entry.retiredThreadIds.has(threadId)) return undefined;
         return entry.lifecycleByThread.get(threadId);
@@ -1174,8 +1191,10 @@ export const layerWithOptions = (
       const closeScopeWithin = Effect.fn("ProviderSessionManager.closeScopeWithin")(function* (
         scope: Scope.Closeable,
         annotations: { readonly providerSessionId?: ProviderSessionId; readonly reason: string },
+        onSuccess: Effect.Effect<void> = Effect.void,
       ) {
         const closeFiber = yield* Scope.close(scope, Exit.void).pipe(
+          Effect.andThen(onSuccess.pipe(Effect.uninterruptible)),
           Effect.exit,
           Effect.forkDetach({ startImmediately: true }),
         );
@@ -1210,6 +1229,7 @@ export const layerWithOptions = (
         readonly reason: ProviderSessionReleaseReason;
         readonly detail?: string;
         readonly detachedThreadId?: ThreadId;
+        readonly confirmedRetirement?: ThreadLifecycleGuard.LifecycleSource;
         readonly cancelIdleFiber?: boolean;
         readonly onlyIfIdleGeneration?: number;
         readonly gracefulSubscribers?: boolean;
@@ -1241,10 +1261,26 @@ export const layerWithOptions = (
                       input.detail ?? `Provider session released: ${input.reason}.`,
                     );
                   }
-                  const closeExit = yield* closeScopeWithin(entry.scope, {
-                    providerSessionId: input.providerSessionId,
-                    reason: input.reason,
-                  });
+                  const confirmedRetirement = input.confirmedRetirement;
+                  const closeExit = yield* closeScopeWithin(
+                    entry.scope,
+                    {
+                      providerSessionId: input.providerSessionId,
+                      reason: input.reason,
+                    },
+                    confirmedRetirement === undefined
+                      ? Effect.void
+                      : Ref.update(confirmedSessionRetirements, (current) =>
+                          new Set(current).add(
+                            confirmedSessionRetirementKey({
+                              providerSessionId: input.providerSessionId,
+                              threadId: confirmedRetirement.threadId,
+                              lifecycleRevision: confirmedRetirement.lifecycleRevision,
+                              sourceToken: confirmedRetirement.sourceToken,
+                            }),
+                          ),
+                        ),
+                  );
                   const records = {
                     entry,
                     reason: input.reason,
@@ -2863,6 +2899,7 @@ export const layerWithOptions = (
                       return;
                     }
                     const receipts = yield* outbox.attachmentRetirements(input.threadId);
+                    const confirmedInThisProcess = yield* Ref.get(confirmedSessionRetirements);
                     if (
                       sources.length > 0 &&
                       sources.every(
@@ -2873,13 +2910,21 @@ export const layerWithOptions = (
                             input.retirementRevision === source.lifecycleRevision) &&
                           (input.retirementSourceToken === undefined ||
                             input.retirementSourceToken === source.sourceToken) &&
-                          receipts.some(
+                          (receipts.some(
                             (receipt) =>
                               receipt.status === "succeeded" &&
                               receipt.providerSessionId === input.providerSessionId &&
                               receipt.retirementRevision === source.lifecycleRevision &&
                               receipt.retirementSourceToken === source.sourceToken,
-                          ),
+                          ) ||
+                            confirmedInThisProcess.has(
+                              confirmedSessionRetirementKey({
+                                providerSessionId: input.providerSessionId,
+                                threadId: input.threadId,
+                                lifecycleRevision: source.lifecycleRevision,
+                                sourceToken: source.sourceToken,
+                              }),
+                            )),
                       )
                     )
                       return;
@@ -2968,11 +3013,17 @@ export const layerWithOptions = (
                   ) {
                     // Single-thread providers retire the native attachment by confirmed process exit,
                     // not by inventing a thread-unload command in their native protocol.
+                    const confirmedRetirement =
+                      input.retirementRevision !== undefined &&
+                      input.retirementSourceToken !== undefined
+                        ? source
+                        : undefined;
                     yield* releaseEntry({
                       providerSessionId: input.providerSessionId,
                       reason: "manual_shutdown",
                       ...(input.detail === undefined ? {} : { detail: input.detail }),
                       detachedThreadId: input.threadId,
+                      ...(confirmedRetirement === undefined ? {} : { confirmedRetirement }),
                     });
                     return;
                   }

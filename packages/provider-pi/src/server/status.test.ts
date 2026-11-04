@@ -5,6 +5,7 @@ import * as NodePath from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import * as Cause from "effect/Cause";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
@@ -88,22 +89,32 @@ const piDiscoverySpawner = (inventory: unknown) =>
         }
       }),
     );
-    return ChildProcessSpawner.make((command) => {
-      const isVersionProbe =
-        ChildProcess.isStandardCommand(command) &&
-        (command.args.includes("--version") || command.command.includes("--version"));
-      return Effect.succeed(
-        isVersionProbe
-          ? processHandle({ stdout: "pi 0.84.3\n" })
-          : ChildProcessSpawner.makeHandle({
-              ...processHandle({}),
-              exitCode: Effect.never,
-              isRunning: Effect.succeed(true),
-              stdin,
-              stdout: Stream.fromQueue(stdout),
-            }),
-      );
-    });
+    return ChildProcessSpawner.make((command) =>
+      Effect.gen(function* () {
+        const isVersionProbe =
+          ChildProcess.isStandardCommand(command) &&
+          (command.args.includes("--version") || command.command.includes("--version"));
+        if (isVersionProbe) return processHandle({ stdout: "pi 0.84.3\n" });
+        if (ChildProcess.isStandardCommand(command) && command.command === "taskkill") {
+          return processHandle({});
+        }
+        const processExit = yield* Deferred.make<ChildProcessSpawner.ExitCode>();
+        return ChildProcessSpawner.makeHandle({
+          ...processHandle({}),
+          // Scope close interrupts the exit watcher, completing this spawn for its finalizer.
+          exitCode: Deferred.await(processExit).pipe(
+            Effect.onInterrupt(() =>
+              Deferred.succeed(processExit, ChildProcessSpawner.ExitCode(0)),
+            ),
+          ),
+          isRunning: Deferred.isDone(processExit).pipe(Effect.map((done) => !done)),
+          kill: () =>
+            Deferred.succeed(processExit, ChildProcessSpawner.ExitCode(0)).pipe(Effect.asVoid),
+          stdin,
+          stdout: Stream.fromQueue(stdout),
+        });
+      }),
+    );
   });
 
 const settings = {
