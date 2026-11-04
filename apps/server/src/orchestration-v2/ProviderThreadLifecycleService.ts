@@ -288,6 +288,124 @@ const make = Effect.gen(function* () {
       if (yield* sessions.isLive(id))
         return yield* new ProviderThreadLifecycleError({ reason: "runtime" });
     }
+    // A succeeded detach receipt is proof only for the immutable attachment
+    // source that produced it.  Matching by thread/session alone would allow
+    // an unrelated command (or a replay from another lifecycle incarnation)
+    // to authorize native deletion.
+    const expectedRetirements = new Map<
+      string,
+      Array<{
+        readonly threadId: string;
+        readonly lifecycleRevision: number;
+        readonly sourceToken: string | null;
+      }>
+    >();
+    for (const threadId of targetIds) {
+      const sources = yield* projections
+        .getProviderAttachmentSources(threadId)
+        .pipe(
+          Effect.mapError(
+            (cause) => new ProviderThreadLifecycleError({ reason: "persistence", cause }),
+          ),
+        );
+      for (const source of sources) {
+        const key = String(source.providerSessionId);
+        const existing = expectedRetirements.get(key) ?? [];
+        if (
+          !existing.some(
+            (candidate) =>
+              candidate.threadId === threadId &&
+              candidate.lifecycleRevision === (source.lifecycleRevision ?? 0) &&
+              candidate.sourceToken === source.sourceToken,
+          )
+        )
+          expectedRetirements.set(key, [
+            ...existing,
+            {
+              threadId,
+              lifecycleRevision: source.lifecycleRevision ?? 0,
+              sourceToken: source.sourceToken,
+            },
+          ]);
+      }
+    }
+    const retirementRows = yield* sql<{
+      readonly thread_id: string;
+      readonly command_id: string;
+      readonly status: string;
+      readonly provider_session_id: string | null;
+      readonly retirement_revision: number | null;
+      readonly retirement_source_token: string | null;
+      readonly lifecycle_command_id: string | null;
+      readonly lifecycle_root_thread_id: string | null;
+    }>`
+      SELECT thread_id, command_id, status,
+        json_extract(payload_json, '$.providerSessionId') AS provider_session_id,
+        json_extract(payload_json, '$.retirementRevision') AS retirement_revision,
+        json_extract(payload_json, '$.retirementSourceToken') AS retirement_source_token,
+        json_extract(payload_json, '$.lifecycle.commandId') AS lifecycle_command_id,
+        json_extract(payload_json, '$.lifecycle.rootThreadId') AS lifecycle_root_thread_id
+      FROM orchestration_v2_effect_outbox
+      WHERE effect_type = 'provider-session.detach'
+        AND ${sql.in("thread_id", targetIds)}
+        AND json_extract(payload_json, '$.lifecycle.commandId') = command_id
+        AND json_extract(payload_json, '$.lifecycle.rootThreadId') = ${lifecycle.rootThreadId}
+        AND json_type(payload_json, '$.retirementRevision') IS NOT NULL
+    `.pipe(
+      Effect.mapError(
+        (cause) => new ProviderThreadLifecycleError({ reason: "persistence", cause }),
+      ),
+    );
+    const receiptsBySession = new Map<
+      string,
+      ReadonlyArray<{
+        readonly status: string;
+        readonly threadId: string;
+        readonly providerSessionId: string;
+        readonly retirementRevision: number;
+        readonly retirementSourceToken: string | null;
+      }>
+    >();
+    for (const row of retirementRows) {
+      if (
+        row.provider_session_id === null ||
+        row.retirement_revision === null ||
+        row.retirement_source_token === null ||
+        row.command_id !== row.lifecycle_command_id ||
+        row.lifecycle_root_thread_id !== lifecycle.rootThreadId
+      )
+        continue;
+      const key = row.provider_session_id;
+      receiptsBySession.set(key, [
+        ...(receiptsBySession.get(key) ?? []),
+        {
+          status: row.status,
+          threadId: row.thread_id,
+          providerSessionId: row.provider_session_id,
+          retirementRevision: row.retirement_revision,
+          retirementSourceToken: row.retirement_source_token,
+        },
+      ]);
+    }
+    if (
+      associatedSessions.some((providerSessionId) => {
+        const expected = expectedRetirements.get(String(providerSessionId));
+        if (expected === undefined || expected.length === 0) return true;
+        const receipts = receiptsBySession.get(String(providerSessionId)) ?? [];
+        return expected.some(
+          (source) =>
+            !receipts.some(
+              (receipt) =>
+                receipt.status === "succeeded" &&
+                receipt.threadId === source.threadId &&
+                receipt.providerSessionId === String(providerSessionId) &&
+                receipt.retirementRevision === source.lifecycleRevision &&
+                receipt.retirementSourceToken === source.sourceToken,
+            ),
+        );
+      })
+    )
+      return yield* new ProviderThreadLifecycleError({ reason: "runtime" });
     const adapter = yield* adapters
       .get(request.providerInstanceId)
       .pipe(

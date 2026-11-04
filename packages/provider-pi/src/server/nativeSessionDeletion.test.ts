@@ -96,6 +96,43 @@ it.effect("treats an already absent file as success", () =>
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
+it.effect("treats a missing canonical root as an already absent session", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const root = yield* fs.makeTempDirectory({ prefix: "t3-pi-delete-" });
+    const canonicalRoot = yield* fs.realPath(root);
+    yield* fs.remove(root, { recursive: true });
+
+    yield* runDelete(
+      makeProviderThread({
+        type: "resolved",
+        canonicalRoot,
+        canonicalFile: path.join(canonicalRoot, "session.jsonl"),
+      }),
+    );
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("treats a missing canonical parent as an already absent session", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pi-delete-" });
+    const canonicalRoot = yield* fs.realPath(root);
+    const missingParent = path.join(canonicalRoot, "sessions");
+
+    yield* runDelete(
+      makeProviderThread({
+        type: "resolved",
+        canonicalRoot,
+        canonicalFile: path.join(missingParent, "session.jsonl"),
+      }),
+    );
+    expect(yield* fs.exists(root)).toBe(true);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
 it.effect("rejects a directory target without recursive removal", () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;

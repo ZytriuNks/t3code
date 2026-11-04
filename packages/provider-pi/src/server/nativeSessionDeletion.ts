@@ -62,16 +62,27 @@ export const deletePiNativeSessionFile = Effect.fn("deletePiNativeSessionFile")(
   const resolveCanonicalPath = (candidate: string, expected: string) =>
     fileSystem.realPath(candidate).pipe(
       Effect.map((actual) => isCanonicalPath(actual, expected)),
-      Effect.catchIf(
-        () => true,
-        (error) => Effect.fail(deleteError("filesystem_failure", error)),
-        (error) => Effect.fail(deleteError("filesystem_failure", error)),
+      Effect.catch((error) =>
+        isNotFound(error)
+          ? fileSystem.readLink(candidate).pipe(
+              // A broken redirect is still a redirect.  Do not turn it into
+              // an idempotent missing-directory success.
+              Effect.as(false),
+              Effect.catch((linkError) =>
+                isNotFound(linkError)
+                  ? Effect.succeed("missing" as const)
+                  : Effect.fail(deleteError("filesystem_failure", linkError)),
+              ),
+            )
+          : Effect.fail(deleteError("filesystem_failure", error)),
       ),
     );
   const rootIsCanonical = yield* resolveCanonicalPath(canonicalRoot, canonicalRoot);
+  if (rootIsCanonical === "missing") return;
   if (!rootIsCanonical) return yield* deleteError("path_boundary");
   const parent = path.dirname(canonicalFile);
   const parentIsCanonical = yield* resolveCanonicalPath(parent, parent);
+  if (parentIsCanonical === "missing") return;
   if (!parentIsCanonical) return yield* deleteError("path_boundary");
 
   const recoverFilesystemFailure = (error: unknown) =>
@@ -90,6 +101,7 @@ export const deletePiNativeSessionFile = Effect.fn("deletePiNativeSessionFile")(
     return yield* deleteError("non_regular_target");
   }
   const targetIsCanonical = yield* resolveCanonicalPath(canonicalFile, canonicalFile);
+  if (targetIsCanonical === "missing") return;
   if (!targetIsCanonical) return yield* deleteError("path_boundary");
 
   yield* fileSystem

@@ -20,6 +20,7 @@ import {
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
@@ -57,6 +58,9 @@ const layerTest = Layer.mergeAll(
   IdAllocator.layer,
   McpProviderSessions.layer,
   TestProviderHost.layer().pipe(Layer.provide(NodeServices.layer)),
+  // Keep the fake PID harmless while exercising the production Windows
+  // tree-kill path and its child-exit confirmation.
+  Layer.succeed(HostProcess.Platform, "win32"),
 );
 
 const decodeUserInputQuestions = Schema.decodeUnknownSync(
@@ -215,6 +219,7 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
   let models: ReadonlyArray<unknown> = [];
   let isStreaming: boolean | null = null;
   let stdinBuffer = "";
+  let activeProcessExit: Deferred.Deferred<ChildProcessSpawner.ExitCode> | null = null;
 
   const emit = (record: PiRpcRecord, chunkBytes?: number) =>
     Effect.gen(function* () {
@@ -317,18 +322,38 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
     env: {},
   };
   const spawner = ChildProcessSpawner.make((command) =>
-    Effect.sync(() => {
+    Effect.gen(function* () {
+      if (ChildProcess.isStandardCommand(command) && command.command === "taskkill") {
+        if (activeProcessExit !== null)
+          yield* Deferred.succeed(activeProcessExit, ChildProcessSpawner.ExitCode(0));
+        return ChildProcessSpawner.makeHandle({
+          pid: ChildProcessSpawner.ProcessId(FAKE_PID),
+          exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(0)),
+          isRunning: Effect.succeed(false),
+          kill: () => Effect.void,
+          unref: Effect.succeed(Effect.void),
+          stdin: Sink.drain,
+          stdout: Stream.empty,
+          stderr: Stream.empty,
+          all: Stream.empty,
+          getInputFd: () => Sink.drain,
+          getOutputFd: () => Stream.empty,
+        });
+      }
       if (ChildProcess.isStandardCommand(command)) {
         lastSpawn = {
           args: command.args,
           env: command.options.env ?? {},
         };
       }
+      const processExit = yield* Deferred.make<ChildProcessSpawner.ExitCode>();
+      activeProcessExit = processExit;
       return ChildProcessSpawner.makeHandle({
-        pid: ChildProcessSpawner.ProcessId(FAKE_PID),
-        exitCode: Effect.never,
-        isRunning: Effect.succeed(true),
-        kill: () => Effect.void,
+        pid: ChildProcessSpawner.ProcessId(process.pid),
+        exitCode: Deferred.await(processExit),
+        isRunning: Deferred.isDone(processExit).pipe(Effect.map((done) => !done)),
+        kill: () =>
+          Deferred.succeed(processExit, ChildProcessSpawner.ExitCode(0)).pipe(Effect.asVoid),
         unref: Effect.succeed(Effect.void),
         stdin: Sink.forEach(handleStdinChunk),
         stdout: Stream.fromQueue(stdout),
@@ -406,14 +431,25 @@ const makeAdapter = Effect.fnUntraced(function* (
   forkFake?: FakePi,
   continuationRequests?: PiAdapterV2Options["continuationRequests"],
 ) {
+  let forkProcessActive = false;
   const spawner =
     forkFake === undefined
       ? fake.spawner
-      : ChildProcessSpawner.make((command) =>
-          ChildProcess.isStandardCommand(command) && command.args.includes("--fork")
-            ? forkFake.spawner.spawn(command)
-            : fake.spawner.spawn(command),
-        );
+      : ChildProcessSpawner.make((command) => {
+          if (ChildProcess.isStandardCommand(command) && command.args.includes("--fork")) {
+            forkProcessActive = true;
+            return forkFake.spawner.spawn(command);
+          }
+          if (
+            forkProcessActive &&
+            ChildProcess.isStandardCommand(command) &&
+            command.command === "taskkill"
+          ) {
+            forkProcessActive = false;
+            return forkFake.spawner.spawn(command);
+          }
+          return fake.spawner.spawn(command);
+        });
   if (continuationRequests !== undefined) {
     return yield* PiAdapterV2Driver.create({
       instanceId: PI_INSTANCE_ID,
@@ -4118,13 +4154,31 @@ describe("PiRpc framing", () => {
   it.effect("reassembles records across chunk boundaries and strips CR", () =>
     Effect.gen(function* () {
       const stdout = yield* Queue.unbounded<Uint8Array>();
-      const spawner = ChildProcessSpawner.make(() =>
-        Effect.succeed(
-          ChildProcessSpawner.makeHandle({
-            pid: ChildProcessSpawner.ProcessId(FAKE_PID),
-            exitCode: Effect.never,
-            isRunning: Effect.succeed(true),
-            kill: () => Effect.void,
+      const processExit = yield* Deferred.make<ChildProcessSpawner.ExitCode>();
+      const spawner = ChildProcessSpawner.make((command) =>
+        Effect.gen(function* () {
+          if (ChildProcess.isStandardCommand(command) && command.command === "taskkill") {
+            yield* Deferred.succeed(processExit, ChildProcessSpawner.ExitCode(0));
+            return ChildProcessSpawner.makeHandle({
+              pid: ChildProcessSpawner.ProcessId(FAKE_PID),
+              exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(0)),
+              isRunning: Effect.succeed(false),
+              kill: () => Effect.void,
+              unref: Effect.succeed(Effect.void),
+              stdin: Sink.drain,
+              stdout: Stream.empty,
+              stderr: Stream.empty,
+              all: Stream.empty,
+              getInputFd: () => Sink.drain,
+              getOutputFd: () => Stream.empty,
+            });
+          }
+          return ChildProcessSpawner.makeHandle({
+            pid: ChildProcessSpawner.ProcessId(process.pid),
+            exitCode: Deferred.await(processExit),
+            isRunning: Deferred.isDone(processExit).pipe(Effect.map((done) => !done)),
+            kill: () =>
+              Deferred.succeed(processExit, ChildProcessSpawner.ExitCode(0)).pipe(Effect.asVoid),
             unref: Effect.succeed(Effect.void),
             stdin: Sink.drain,
             stdout: Stream.fromQueue(stdout),
@@ -4132,8 +4186,8 @@ describe("PiRpc framing", () => {
             all: Stream.empty,
             getInputFd: () => Sink.drain,
             getOutputFd: () => Stream.empty,
-          }),
-        ),
+          });
+        }),
       );
       const connection = yield* makePiRpcConnection({
         command: "pi",
@@ -4159,7 +4213,11 @@ describe("PiRpc framing", () => {
       const third = yield* Queue.take(connection.events);
       assert.equal(third["type"], "queue_update");
       assert.equal((yield* Queue.take(connection.events))["type"], "after_oversized");
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(NodeServices.layer),
+      Effect.provideService(HostProcess.Platform, "win32"),
+    ),
   );
 });
 

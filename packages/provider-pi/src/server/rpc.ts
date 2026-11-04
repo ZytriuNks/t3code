@@ -244,7 +244,15 @@ export const makePiRpcConnection = Effect.fnUntraced(function* (options: PiRpcSp
   // Registered before any further setup: an interrupt or failure between the
   // spawn and the rest of this constructor would otherwise leak a detached
   // pi process with no finalizer to reap it.
-  yield* Scope.addFinalizer(scope, terminateProcess.pipe(Effect.ignore, Effect.uninterruptible));
+  yield* Scope.addFinalizer(
+    scope,
+    terminateProcess.pipe(
+      Effect.andThen(child.exitCode),
+      Effect.asVoid,
+      Effect.orDie,
+      Effect.uninterruptible,
+    ),
+  );
 
   const pendingRequests = new Map<string, PendingPiRequest>();
   const events = yield* Queue.unbounded<PiRpcRecord, PiRpcError>();

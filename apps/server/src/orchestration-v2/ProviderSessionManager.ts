@@ -2961,6 +2961,21 @@ export const layerWithOptions = (
                       });
                     return;
                   }
+                  if (
+                    !currentEntry.supportsMultipleProviderThreads &&
+                    currentEntry.runtime.supportsConfirmedSessionRetirement === true &&
+                    ![...currentEntry.attachedThreadIds].some((id) => id !== input.threadId)
+                  ) {
+                    // Single-thread providers retire the native attachment by confirmed process exit,
+                    // not by inventing a thread-unload command in their native protocol.
+                    yield* releaseEntry({
+                      providerSessionId: input.providerSessionId,
+                      reason: "manual_shutdown",
+                      ...(input.detail === undefined ? {} : { detail: input.detail }),
+                      detachedThreadId: input.threadId,
+                    });
+                    return;
+                  }
                   const unload = currentEntry.runtime.unloadThread;
                   if (
                     currentEntry.runtime.supportsConfirmedThreadRetirement !== true ||

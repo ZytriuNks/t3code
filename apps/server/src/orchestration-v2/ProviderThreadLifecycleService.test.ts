@@ -150,6 +150,15 @@ const seedBinding = Effect.fn("test.seedPiBinding")(function* (
     readonly deletionSession?: boolean;
     readonly nativeId?: string | null;
     readonly instanceId?: ProviderInstanceId;
+    readonly retirementStatus?: "succeeded" | "pending" | "failed";
+    readonly retirementReceipt?: boolean;
+    readonly retirementRevision?: number;
+    readonly retirementSourceToken?: string | null;
+    readonly retirementSessionId?: ProviderSessionId;
+    readonly retirementThreadId?: ThreadId;
+    readonly retirementCommandId?: CommandId;
+    readonly retirementPayloadCommandId?: CommandId;
+    readonly retirementRootThreadId?: ThreadId;
   } = {},
 ) {
   const sql = yield* SqlClient.SqlClient;
@@ -174,6 +183,32 @@ const seedBinding = Effect.fn("test.seedPiBinding")(function* (
       bound_at: timestamp,
     })}`;
   }
+  if (input.retirementReceipt === false) return;
+  const retirementStatus = input.retirementStatus ?? "succeeded";
+  const retirementCommandId = input.retirementCommandId ?? commandId;
+  const retirementRootThreadId = input.retirementRootThreadId ?? root;
+  yield* sql`INSERT INTO orchestration_v2_effect_outbox (
+    effect_id, command_id, thread_id, effect_type, payload_json, status,
+    available_at, created_at, updated_at, completed_at
+  ) VALUES (
+    ${`retirement:${data.thread_id}:${data.provider_thread_id}`},
+    ${retirementCommandId}, ${input.retirementThreadId ?? data.thread_id}, 'provider-session.detach',
+    ${JSON.stringify({
+      type: "provider-session.detach",
+      providerSessionId: input.retirementSessionId ?? sessionId,
+      retirementRevision: input.retirementRevision ?? 1,
+      ...(input.retirementSourceToken === null
+        ? {}
+        : { retirementSourceToken: input.retirementSourceToken ?? "captured-source" }),
+      lifecycle: {
+        commandId: input.retirementPayloadCommandId ?? retirementCommandId,
+        rootThreadId: retirementRootThreadId,
+        revision: 1,
+      },
+    })},
+    ${retirementStatus}, ${timestamp}, ${timestamp}, ${timestamp},
+    ${retirementStatus === "succeeded" ? timestamp : null}
+  ) ON CONFLICT(effect_id) DO UPDATE SET status = excluded.status`;
 });
 
 const seedProvider = Effect.fn("test.seedPiProviderThread")(function* (
@@ -215,6 +250,14 @@ function testLayer(
   const dependencies = Layer.mergeAll(
     Layer.mock(ProjectionStore.ProjectionStoreV2)({
       getThread: () => Effect.succeed(appThread(input.revision)),
+      getProviderAttachmentSources: () =>
+        Effect.succeed([
+          {
+            providerSessionId: sessionId,
+            lifecycleRevision: 1,
+            sourceToken: "captured-source",
+          },
+        ]),
     }),
     Layer.mock(ThreadLifecycleGuard.ThreadLifecycleGuard)({
       check: (request) =>
@@ -282,6 +325,47 @@ function testLayer(
     ),
   };
 }
+
+it.effect("does not delete while the exact Pi retirement receipt is unconfirmed", () => {
+  const fixture = testLayer();
+  return Effect.gen(function* () {
+    yield* seedThread();
+    yield* seedBinding({ retirementStatus: "failed" });
+    yield* seedProvider();
+    const service = yield* ProviderThreadLifecycleService.ProviderThreadLifecycleService;
+    const result = yield* Effect.result(service.delete(deletionEffect()));
+    assert.isTrue(Result.isFailure(result));
+    if (Result.isFailure(result)) assert.equal(result.failure.reason, "runtime");
+    assert.isEmpty(fixture.calls);
+  }).pipe(Effect.provide(fixture.layer));
+});
+
+it.effect.each([
+  { name: "missing receipt", retirementReceipt: false as const },
+  { name: "wrong revision", retirementRevision: 2 },
+  { name: "wrong source", retirementSourceToken: "other-source" },
+  { name: "wrong session", retirementSessionId: ProviderSessionId.make("other-session") },
+  { name: "wrong thread", retirementThreadId: outside },
+  {
+    name: "inconsistent command provenance",
+    retirementPayloadCommandId: CommandId.make("other-command"),
+  },
+  { name: "wrong lifecycle root", retirementRootThreadId: outside },
+  { name: "wrong status", retirementStatus: "pending" as const },
+])("fails closed for an unrelated or unsettled retirement receipt: $name", (input) => {
+  const fixture = testLayer();
+  return Effect.gen(function* () {
+    yield* seedThread();
+    const { name: _name, ...receipt } = input;
+    yield* seedBinding(receipt);
+    yield* seedProvider();
+    const service = yield* ProviderThreadLifecycleService.ProviderThreadLifecycleService;
+    const result = yield* Effect.result(service.delete(deletionEffect()));
+    assert.isTrue(Result.isFailure(result));
+    if (Result.isFailure(result)) assert.equal(result.failure.reason, "runtime");
+    assert.isEmpty(fixture.calls);
+  }).pipe(Effect.provide(fixture.layer));
+});
 
 it.effect(
   "deletes an exclusive persisted Pi identity through its original instance without opening a runtime",

@@ -21,7 +21,15 @@ import {
 } from "@t3tools/contracts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
-import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import { PiAdapterV2Driver } from "@t3tools/provider-pi/server";
+import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
+import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as Cause from "effect/Cause";
+import * as ChildProcess from "effect/process/ChildProcess";
+import * as Schema from "effect/Schema";
+import * as Sink from "effect/Sink";
+import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -82,6 +90,10 @@ const driver = ProviderDriverKind.make("codex");
 const modelSelection = { instanceId, model: "gpt-5.4" };
 const now = DateTime.makeUnsafe("2026-10-28T00:00:00.000Z");
 const sharedSessionId = ProviderSessionId.make("task8:shared");
+const decodePiRpcRecord = Schema.decodeSync(
+  Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
+);
+const encodePiRpcRecord = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const runtimePolicy = {
   runtimeMode: "full-access",
   interactionMode: "default",
@@ -359,6 +371,149 @@ const makePiProviderInstance = (input: {
   };
 };
 
+const makeRealPiProviderInstance = Effect.fn("test.makeRealPiProviderInstance")(function* (input: {
+  readonly base: ProviderInstance;
+  readonly sessionFile: string;
+  readonly pauseClose: Ref.Ref<boolean>;
+  readonly closeEntered: Deferred.Deferred<void>;
+  readonly closeRelease: Deferred.Deferred<void>;
+}) {
+  const requests: Array<Record<string, unknown>> = [];
+  const deleteCalls: Array<ProviderAdapter.ProviderAdapterV2DeleteNativeThreadInput> = [];
+  let piExit: Deferred.Deferred<ChildProcessSpawner.ExitCode> | null = null;
+  const spawner = ChildProcessSpawner.make((command) =>
+    Effect.gen(function* () {
+      if (ChildProcess.isStandardCommand(command) && command.command === "taskkill") {
+        if (yield* Ref.get(input.pauseClose)) {
+          yield* Deferred.succeed(input.closeEntered, undefined);
+          yield* Deferred.await(input.closeRelease);
+        }
+        if (piExit !== null) yield* Deferred.succeed(piExit, ChildProcessSpawner.ExitCode(0));
+        return ChildProcessSpawner.makeHandle({
+          pid: ChildProcessSpawner.ProcessId(999_999_998),
+          exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(0)),
+          isRunning: Effect.succeed(false),
+          kill: () => Effect.void,
+          unref: Effect.succeed(Effect.void),
+          stdin: Sink.drain,
+          stdout: Stream.empty,
+          stderr: Stream.empty,
+          all: Stream.empty,
+          getInputFd: () => Sink.drain,
+          getOutputFd: () => Stream.empty,
+        });
+      }
+      const stdout = yield* Queue.unbounded<Uint8Array, Cause.Done>();
+      const exited = yield* Deferred.make<ChildProcessSpawner.ExitCode>();
+      piExit = exited;
+      let buffer = "";
+      return ChildProcessSpawner.makeHandle({
+        // The transport probes the pid before issuing the Windows tree
+        // termination command; use this test process as a live sentinel.
+        pid: ChildProcessSpawner.ProcessId(process.pid),
+        exitCode: Deferred.await(exited),
+        isRunning: Deferred.isDone(exited).pipe(Effect.map((done) => !done)),
+        kill: () => Deferred.succeed(exited, ChildProcessSpawner.ExitCode(0)).pipe(Effect.asVoid),
+        unref: Effect.succeed(Effect.void),
+        stdin: Sink.forEach((chunk: Uint8Array) =>
+          Effect.gen(function* () {
+            buffer += new TextDecoder().decode(chunk);
+            while (buffer.includes("\n")) {
+              const newline = buffer.indexOf("\n");
+              const record = decodePiRpcRecord(buffer.slice(0, newline));
+              buffer = buffer.slice(newline + 1);
+              requests.push(record);
+              const type = record["type"];
+              if (
+                ![
+                  "get_state",
+                  "get_available_models",
+                  "get_commands",
+                  "switch_session",
+                  "get_entries",
+                  "get_messages",
+                ].includes(String(type))
+              )
+                return yield* Effect.die(`Unexpected Pi RPC command: ${String(type)}`);
+              const data =
+                type === "get_state"
+                  ? {
+                      sessionFile: input.sessionFile,
+                      isStreaming: false,
+                      model: { provider: "test", id: "model" },
+                      thinkingLevel: "off",
+                    }
+                  : type === "get_available_models"
+                    ? { models: [] }
+                    : type === "get_entries"
+                      ? { entries: [], leafId: null }
+                      : type === "get_messages"
+                        ? { messages: [] }
+                        : type === "get_commands"
+                          ? { commands: [] }
+                          : { cancelled: false };
+              yield* Queue.offer(
+                stdout,
+                new TextEncoder().encode(
+                  `${encodePiRpcRecord({ type: "response", id: record["id"], command: type, success: true, data })}\n`,
+                ),
+              );
+            }
+          }),
+        ),
+        stdout: Stream.fromQueue(stdout),
+        stderr: Stream.empty,
+        all: Stream.empty,
+        getInputFd: () => Sink.drain,
+        getOutputFd: () => Stream.empty,
+      });
+    }),
+  );
+  const instanceId = ProviderInstanceId.make("task8-pi");
+  const adapter = yield* PiAdapterV2Driver.create({
+    instanceId,
+    enabled: true,
+    displayName: undefined,
+    environment: [],
+    config: { enabled: true, binaryPath: "pi", launchArgs: "", customModels: [] },
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        Layer.succeed(HostProcess.Platform, "win32"),
+        TestProviderHost.layer(),
+        McpProviderSessions.layer,
+        IdAllocator.layer,
+      ),
+    ),
+  );
+  const realDeleteNativeThread = adapter.deleteNativeThread;
+  const observedAdapter = {
+    ...adapter,
+    ...(realDeleteNativeThread === undefined
+      ? {}
+      : {
+          deleteNativeThread: (
+            deleteInput: ProviderAdapter.ProviderAdapterV2DeleteNativeThreadInput,
+          ) =>
+            Effect.gen(function* () {
+              deleteCalls.push(deleteInput);
+              yield* realDeleteNativeThread(deleteInput);
+            }),
+        }),
+  } satisfies ProviderAdapter.ProviderAdapterV2["Service"];
+  return {
+    requests,
+    deleteCalls,
+    instance: {
+      ...input.base,
+      instanceId,
+      driverKind: ProviderDriverKind.make("pi"),
+      orchestrationAdapter: observedAdapter,
+    } satisfies ProviderInstance,
+  };
+});
+
 const makeRuntime = <E, R>(
   database: Layer.Layer<SqlClient.SqlClient, E, R>,
   provider: ReturnType<typeof makeProvider>,
@@ -455,34 +610,21 @@ it.effect(
         const siblingFile = path.join(root, "sibling.jsonl");
         yield* fs.writeFileString(sessionFile, "isolated Pi transcript");
         yield* fs.writeFileString(siblingFile, "keep this session");
-        const nativeStorage: NativeSessionStorage = {
-          type: "resolved",
-          canonicalRoot: yield* fs.realPath(root),
-          canonicalFile: yield* fs.realPath(sessionFile),
-        };
         const threadId = ThreadId.make("task8:pi-thread");
         const piInstanceId = ProviderInstanceId.make("task8-pi");
         const piDriver = ProviderDriverKind.make("pi");
-        const piModelSelection = { instanceId: piInstanceId, model: "pi-fixture" };
+        const piModelSelection = { instanceId: piInstanceId, model: "default" };
         const providerSessionId = ProviderSessionId.make("task8:pi-session");
         const detachEntered = yield* Deferred.make<void>();
         const detachRelease = yield* Deferred.make<void>();
         const pauseDetach = yield* Ref.make(false);
-        const resumed: Array<ThreadId> = [];
-        const deleted: Array<ProviderThreadId> = [];
-        const unloaded: Array<ProviderThreadId> = [];
         const baseProvider = makeProvider();
-        const pi = makePiProviderInstance({
+        const pi = yield* makeRealPiProviderInstance({
           base: baseProvider.instance,
-          nativeStorage,
-          removeNativeFile: (filePath) =>
-            fs.remove(filePath, { force: true }).pipe(Effect.asVoid, Effect.orDie),
-          pauseDetach,
-          detachEntered,
-          detachRelease,
-          resumed,
-          deleted,
-          unloaded,
+          sessionFile,
+          pauseClose: pauseDetach,
+          closeEntered: detachEntered,
+          closeRelease: detachRelease,
         });
         const provider = makeProvider([pi.instance]);
         const runtime = makeRuntime(SqlitePersistence.layerMemory, provider);
@@ -520,13 +662,18 @@ it.effect(
             },
           });
           yield* create(threadId, piModelSelection);
-          const nativeThread = pi.makeNativeThread(threadId, providerSessionId);
           const firstRuntime = yield* sessions.open({
             threadId,
             providerSessionId,
             modelSelection: piModelSelection,
             runtimePolicy,
           });
+          const nativeThread = yield* firstRuntime.ensureThread({
+            threadId,
+            modelSelection: piModelSelection,
+            runtimePolicy,
+          });
+          assert.isUndefined(firstRuntime.unloadThread);
           yield* sink.write({
             lifecycleGuard: yield* orchestrator.resolveLifecycleSource(threadId),
             events: [
@@ -540,7 +687,7 @@ it.effect(
             ],
           });
           yield* firstRuntime.resumeThread({ threadId, providerThread: nativeThread });
-          assert.deepEqual(resumed, [threadId]);
+          assert.equal(nativeThread.nativeThreadRef?.nativeId, sessionFile);
 
           const archiveCommandId = CommandId.make("task8:pi-archive");
           yield* orchestrator.dispatch({
@@ -564,7 +711,6 @@ it.effect(
             "succeeded",
             completedArchiveDetach.lastError ?? undefined,
           );
-          assert.deepEqual(unloaded, [nativeThread.id]);
           assert.isFalse(yield* sessions.isLive(providerSessionId));
           assert.isTrue(yield* fs.exists(sessionFile));
 
@@ -574,7 +720,10 @@ it.effect(
             threadId,
           });
           const resumedProviderSessionId = ProviderSessionId.make("task8:pi-session-resumed");
-          const resumedNativeThread = pi.makeNativeThread(threadId, resumedProviderSessionId);
+          const resumedNativeThread = {
+            ...nativeThread,
+            providerSessionId: resumedProviderSessionId,
+          };
           const resumedLifecycleGuard = yield* orchestrator.resolveLifecycleSource(threadId);
           const resumedRuntime = yield* sessions.open({
             threadId,
@@ -595,7 +744,7 @@ it.effect(
             ],
           });
           yield* resumedRuntime.resumeThread({ threadId, providerThread: resumedNativeThread });
-          assert.deepEqual(resumed, [threadId, threadId]);
+          assert.isTrue(pi.requests.some((record) => record["type"] === "switch_session"));
           assert.isFalse(yield* sessions.isLive(providerSessionId));
           assert.isTrue(yield* sessions.isLive(resumedProviderSessionId));
           assert.isTrue(yield* fs.exists(sessionFile));
@@ -638,17 +787,17 @@ it.effect(
 
           const draining = yield* worker.drain().pipe(Effect.forkScoped);
           yield* Deferred.await(detachEntered);
-          assert.isTrue(yield* sessions.isLive(resumedProviderSessionId));
-          assert.isEmpty(deleted);
+          assert.isFalse(yield* sessions.isLive(resumedProviderSessionId));
           assert.isTrue(yield* fs.exists(sessionFile));
+          assert.isEmpty(pi.deleteCalls);
           yield* Deferred.succeed(detachRelease, undefined);
           assert.isAbove(yield* Fiber.join(draining), 0);
 
           const completedDelete = Option.getOrThrow(yield* outbox.get(deleteEffect.id));
           assert.equal(completedDelete.status, "succeeded", JSON.stringify(completedDelete));
           assert.isFalse(yield* sessions.isLive(resumedProviderSessionId));
-          assert.deepEqual(deleted, [resumedNativeThread.id]);
           assert.isFalse(yield* fs.exists(sessionFile));
+          assert.lengthOf(pi.deleteCalls, 1);
           assert.equal(yield* fs.readFileString(siblingFile), "keep this session");
           const deletion = Option.getOrThrow(yield* records.get(threadId));
           assert.equal(deletion.scope, "t3_only");
@@ -666,8 +815,8 @@ it.effect(
             yield* bindings.checkImport({
               driver: piDriver,
               providerInstanceId: piInstanceId,
-              nativeId: "task8:pi-native-session",
-              storage: nativeStorage,
+              nativeId: nativeThread.nativeThreadRef!.nativeId,
+              storage: nativeThread.nativeStorage!,
             }),
             "deleted",
           );
@@ -695,7 +844,6 @@ it.effect(
 
           const restartedCount = yield* worker.drain();
           assert.equal(restartedCount, 1);
-          assert.deepEqual(deleted, [resumedNativeThread.id, resumedNativeThread.id]);
           assert.isFalse(yield* fs.exists(sessionFile));
           assert.equal(yield* fs.readFileString(siblingFile), "keep this session");
           assert.isTrue(Option.isSome(yield* records.get(threadId)));
