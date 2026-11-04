@@ -240,10 +240,14 @@ export interface EffectOutboxV2Shape {
   readonly attachmentRetirements: (threadId: ThreadId) => Effect.Effect<
     ReadonlyArray<{
       readonly effectId: string;
+      readonly commandId: string;
+      readonly threadId: string;
       readonly status: string;
       readonly providerSessionId: string;
       readonly retirementRevision: number;
       readonly retirementSourceToken: string | null;
+      readonly lifecycleCommandId: string | null;
+      readonly lifecycleRootThreadId: string | null;
     }>,
     EffectOutboxError
   >;
@@ -425,15 +429,21 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
       attachmentRetirements: (threadId) =>
         sql<{
           readonly effectId: string;
+          readonly commandId: string;
+          readonly threadId: string;
           readonly status: string;
           readonly providerSessionId: string;
           readonly retirementRevision: number;
           readonly retirementSourceToken: string | null;
+          readonly lifecycleCommandId: string | null;
+          readonly lifecycleRootThreadId: string | null;
         }>`
-        SELECT effect_id AS effectId, status,
+        SELECT effect_id AS effectId, command_id AS commandId, thread_id AS threadId, status,
           json_extract(payload_json, '$.providerSessionId') AS providerSessionId,
           json_extract(payload_json, '$.retirementRevision') AS retirementRevision,
-          json_extract(payload_json, '$.retirementSourceToken') AS retirementSourceToken
+          json_extract(payload_json, '$.retirementSourceToken') AS retirementSourceToken,
+          json_extract(payload_json, '$.lifecycle.commandId') AS lifecycleCommandId,
+          json_extract(payload_json, '$.lifecycle.rootThreadId') AS lifecycleRootThreadId
         FROM orchestration_v2_effect_outbox
         WHERE thread_id = ${threadId} AND effect_type = 'provider-session.detach'
           AND json_type(payload_json, '$.retirementRevision') IS NOT NULL

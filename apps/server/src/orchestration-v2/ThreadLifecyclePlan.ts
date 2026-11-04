@@ -657,9 +657,15 @@ const make = Effect.gen(function* () {
         if (
           receipts.some(
             (r) =>
+              r.status === "succeeded" &&
+              r.threadId === threadId &&
               r.providerSessionId === source.providerSessionId &&
               r.retirementRevision === (source.lifecycleRevision ?? 0) &&
-              r.retirementSourceToken === source.sourceToken,
+              source.sourceToken !== null &&
+              r.retirementSourceToken === source.sourceToken &&
+              r.lifecycleRootThreadId === command.threadId &&
+              r.lifecycleCommandId !== null &&
+              r.lifecycleCommandId === r.commandId,
           )
         )
           continue;

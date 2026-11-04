@@ -113,6 +113,40 @@ it.effect(
     }).pipe(Effect.provide(layerTest)),
 );
 
+it.effect("attachment retirement query returns exact lifecycle receipt provenance", () =>
+  Effect.gen(function* () {
+    const outbox = yield* EffectOutbox.EffectOutboxV2;
+    const providerSessionId = ProviderSessionId.make("retirement-provenance");
+    yield* outbox.enqueue([
+      {
+        id: "retirement-provenance",
+        commandId,
+        threadId: R,
+        request: {
+          type: "provider-session.detach",
+          providerSessionId,
+          retirementRevision: 3,
+          retirementSourceToken: "retirement-source",
+          lifecycle,
+        },
+      },
+    ]);
+    assert.deepEqual(yield* outbox.attachmentRetirements(R), [
+      {
+        effectId: "retirement-provenance",
+        commandId,
+        threadId: R,
+        status: "pending",
+        providerSessionId,
+        retirementRevision: 3,
+        retirementSourceToken: "retirement-source",
+        lifecycleCommandId: commandId,
+        lifecycleRootThreadId: R,
+      },
+    ]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect(
   "lifecycle prune preserves exact and legacy detach receipts plus cancelled cleanup barriers",
   () =>

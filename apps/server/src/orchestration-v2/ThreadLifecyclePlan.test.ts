@@ -588,6 +588,94 @@ it.effect.each([
     ),
 );
 
+const exactRetirementReceipt = {
+  effectId: "prior-archive-retirement",
+  commandId: "prior-archive",
+  threadId,
+  status: "succeeded",
+  providerSessionId: ProviderSessionId.make("prior-session"),
+  retirementRevision: 0,
+  retirementSourceToken: "prior-source",
+  lifecycleCommandId: "prior-archive",
+  lifecycleRootThreadId: threadId,
+} as const;
+
+it.effect.each([
+  { name: "reuses an exact succeeded archive receipt", receipt: exactRetirementReceipt, count: 0 },
+  {
+    name: "replans a pending receipt",
+    receipt: { ...exactRetirementReceipt, status: "pending" },
+    count: 1,
+  },
+  {
+    name: "replans a failed receipt",
+    receipt: { ...exactRetirementReceipt, status: "failed" },
+    count: 1,
+  },
+  {
+    name: "replans a receipt from another operation root",
+    receipt: { ...exactRetirementReceipt, lifecycleRootThreadId: "other-root" },
+    count: 1,
+  },
+  {
+    name: "replans malformed command provenance",
+    receipt: { ...exactRetirementReceipt, lifecycleCommandId: "other-command" },
+    count: 1,
+  },
+] as const)("$name", ({ receipt, count }) => {
+  const member = makeProjection();
+  const layer = ThreadLifecyclePlan.layer.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        Layer.mock(ThreadOwnership.ThreadOwnership)({
+          resolveScope: () =>
+            Effect.succeed({
+              rootThreadId: threadId,
+              members: [
+                {
+                  id: threadId,
+                  projectId: member.thread.projectId,
+                  lineage: member.thread.lineage,
+                  archivedAt: member.thread.archivedAt,
+                  deletedAt: member.thread.deletedAt,
+                },
+              ],
+            }),
+        }),
+        Layer.mock(ProjectionStore.ProjectionStoreV2)({
+          getThreadRecords: () => Effect.succeed(member),
+          getThreadAttachmentIds: () => Effect.succeed([]),
+          getProviderAttachmentSources: () =>
+            Effect.succeed([
+              {
+                providerSessionId: exactRetirementReceipt.providerSessionId,
+                lifecycleRevision: 0,
+                sourceToken: exactRetirementReceipt.retirementSourceToken,
+              },
+            ]),
+        }),
+        Layer.mock(EffectOutbox.EffectOutboxV2)({
+          attachmentRetirements: () => Effect.succeed([receipt]),
+        }),
+        IdAllocator.layer,
+        SqlitePersistence.layerMemory,
+      ),
+    ),
+  );
+  return Effect.gen(function* () {
+    const planner = yield* ThreadLifecyclePlan.ThreadLifecyclePlanner;
+    const plan = yield* planner.plan(command);
+    const detaches = plan.effects.filter(
+      (effect) => effect.request.type === "provider-session.detach",
+    );
+    assert.lengthOf(detaches, count);
+    if (count === 1) {
+      assert.equal(detaches[0]?.commandId, command.commandId);
+      assert.nestedPropertyVal(detaches[0]!.request, "lifecycle.rootThreadId", threadId);
+    }
+  }).pipe(Effect.provide(layer));
+});
+
 it.effect("a newer lifecycle plan cancels pending native Pi deletion at the root", () =>
   Effect.gen(function* () {
     const member = { ...makeProjection(), providerThreads: [makePiThread()] };

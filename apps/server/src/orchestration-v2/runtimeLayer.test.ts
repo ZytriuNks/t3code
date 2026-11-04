@@ -6746,7 +6746,7 @@ it.effect.each([false, true])(
     }).pipe(Effect.provide(layerTest)),
 );
 
-it.effect("lifecycle archive after a close timeout keeps the real retirement worker blocked", () =>
+it.effect("lifecycle archive retries a failed retirement receipt with a new intent", () =>
   Effect.gen(function* () {
     const closing = yield* Deferred.make<void>();
     const finish = yield* Deferred.make<void>();
@@ -6900,6 +6900,17 @@ it.effect("lifecycle archive after a close timeout keeps the real retirement wor
       const receipt = yield* outbox.get(retirement.effectId);
       assert.isTrue(Option.isSome(receipt));
       if (Option.isSome(receipt)) assert.notEqual(receipt.value.status, "succeeded");
+      yield* TestClock.adjust("30 seconds");
+      const failedClaim = Option.getOrThrow(
+        yield* outbox.claimNext({ workerId: "failed-retirement", leaseDurationMs: 1000 }),
+      );
+      assert.equal(failedClaim.id, retirement.effectId);
+      yield* outbox.fail({
+        effectId: retirement.effectId,
+        workerId: "failed-retirement",
+        error: "Confirmed retirement did not complete.",
+      });
+      assert.equal(Option.getOrThrow(yield* outbox.get(retirement.effectId)).status, "failed");
       assert.equal(
         (yield* sessions.open(activate).pipe(Effect.flip))._tag,
         "ProviderSessionStaleBindingError",
@@ -6911,15 +6922,25 @@ it.effect("lifecycle archive after a close timeout keeps the real retirement wor
         "ProviderSessionStaleBindingError",
       );
       assert.equal(opened, 1);
+      const retryCommandId = CommandId.make(`${threadId}:archive-again`);
       yield* orchestrator.dispatch({
         type: "thread.archive",
-        commandId: CommandId.make(`${threadId}:archive-again`),
+        commandId: retryCommandId,
         threadId,
       });
       const retained = yield* outbox.attachmentRetirements(threadId);
-      assert.lengthOf(retained, 1);
+      assert.lengthOf(retained, 2);
       assert.equal(retained[0]?.effectId, retirement.effectId);
-      assert.equal(retained[0]?.retirementSourceToken, source.sourceToken);
+      const retry = retained.find((item) => item.effectId !== retirement.effectId);
+      assert.isDefined(retry);
+      assert.equal(retry?.status, "pending");
+      assert.equal(retry?.retirementSourceToken, source.sourceToken);
+      assert.equal(
+        (yield* outbox.listByCommandId(retryCommandId)).filter(
+          (effect) => effect.request.type === "provider-session.detach",
+        ).length,
+        1,
+      );
     }).pipe(Effect.ensuring(Deferred.succeed(finish, undefined)), Effect.provide(layerTest));
   }),
 );

@@ -597,7 +597,7 @@ const dispatch = Effect.fn("task8.message")(function* (threadId: ThreadId, suffi
 });
 
 it.effect(
-  "archives and resumes an isolated Pi session before delete drains detach and recovers its outbox effect",
+  "re-retires a child Pi session after parent archive before delete drains and recovers its outbox effect",
   () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -610,6 +610,7 @@ it.effect(
         const siblingFile = path.join(root, "sibling.jsonl");
         yield* fs.writeFileString(sessionFile, "isolated Pi transcript");
         yield* fs.writeFileString(siblingFile, "keep this session");
+        const parentThreadId = ThreadId.make("task8:pi-parent");
         const threadId = ThreadId.make("task8:pi-thread");
         const piInstanceId = ProviderInstanceId.make("task8-pi");
         const piDriver = ProviderDriverKind.make("pi");
@@ -661,7 +662,26 @@ it.effect(
               updatedAt: DateTime.formatIso(now),
             },
           });
+          yield* create(parentThreadId, piModelSelection);
           yield* create(threadId, piModelSelection);
+          yield* sink.write({
+            events: [
+              {
+                id: EventId.make("task8:pi-thread-lineage"),
+                type: "thread.metadata-updated",
+                threadId,
+                occurredAt: now,
+                payload: {
+                  ...(yield* store.getThread(threadId)),
+                  lineage: {
+                    parentThreadId,
+                    relationshipToParent: "subagent",
+                    rootThreadId: parentThreadId,
+                  },
+                },
+              },
+            ],
+          });
           const firstRuntime = yield* sessions.open({
             threadId,
             providerSessionId,
@@ -693,13 +713,19 @@ it.effect(
           yield* orchestrator.dispatch({
             type: "thread.archive",
             commandId: archiveCommandId,
-            threadId,
+            threadId: parentThreadId,
           });
           const archiveEffects = yield* outbox.listByCommandId(archiveCommandId);
           const archiveDetach = archiveEffects.find(
-            (effect) => effect.request.type === "provider-session.detach",
+            (effect) =>
+              effect.threadId === threadId && effect.request.type === "provider-session.detach",
           );
           assert.isDefined(archiveDetach);
+          assert.nestedPropertyVal(
+            archiveDetach!.request,
+            "lifecycle.rootThreadId",
+            parentThreadId,
+          );
           assert.isEmpty(
             archiveEffects.filter((effect) => effect.request.type === "provider-thread.delete"),
           );
@@ -714,6 +740,26 @@ it.effect(
           assert.isFalse(yield* sessions.isLive(providerSessionId));
           assert.isTrue(yield* fs.exists(sessionFile));
 
+          // Direct lifecycle commands reject subagent targets. Promotion makes the later
+          // child-root operations legal while preserving the parent-root retirement receipt.
+          yield* sink.write({
+            events: [
+              {
+                id: EventId.make("task8:pi-thread-promoted"),
+                type: "thread.metadata-updated",
+                threadId,
+                occurredAt: now,
+                payload: {
+                  ...(yield* store.getThread(threadId)),
+                  lineage: {
+                    parentThreadId: null,
+                    relationshipToParent: null,
+                    rootThreadId: threadId,
+                  },
+                },
+              },
+            ],
+          });
           yield* orchestrator.dispatch({
             type: "thread.unarchive",
             commandId: CommandId.make("task8:pi-unarchive"),
@@ -762,6 +808,13 @@ it.effect(
             ),
           );
           const effects = yield* outbox.listByCommandId(deleteCommandId);
+          const replacementDetach = effects.find(
+            (effect) =>
+              effect.request.type === "provider-session.detach" &&
+              effect.request.providerSessionId === providerSessionId,
+          );
+          assert.isDefined(replacementDetach);
+          assert.nestedPropertyVal(replacementDetach!.request, "lifecycle.rootThreadId", threadId);
           const detachIndex = effects.findIndex(
             (effect) => effect.request.type === "provider-session.detach",
           );
@@ -847,7 +900,10 @@ it.effect(
           assert.isFalse(yield* fs.exists(sessionFile));
           assert.equal(yield* fs.readFileString(siblingFile), "keep this session");
           assert.isTrue(Option.isSome(yield* records.get(threadId)));
-        }).pipe(Effect.provide(Layer.fresh(runtime)));
+        }).pipe(
+          Effect.ensuring(Deferred.succeed(detachRelease, undefined)),
+          Effect.provide(Layer.fresh(runtime)),
+        );
       }).pipe(
         Effect.provide(
           ServerConfig.layerTest(process.cwd(), { prefix: "task8-pi-lifecycle-" }).pipe(
