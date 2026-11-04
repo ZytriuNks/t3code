@@ -29,6 +29,7 @@ import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { continueRestartedRun } from "./RestartContinuation.ts";
 import * as ThreadLifecycleGuard from "./ThreadLifecycleGuard.ts";
+import * as ProviderThreadLifecycleService from "./ProviderThreadLifecycleService.ts";
 
 export class OrchestrationEffectExecutionError extends Schema.TaggedError<OrchestrationEffectExecutionError>()(
   "OrchestrationEffectExecutionError",
@@ -61,7 +62,10 @@ export interface OrchestrationEffectExecutorV2Shape {
   readonly execute: (
     effect: EffectOutbox.OrchestrationEffectV2,
     options?: { readonly willRetry: boolean; readonly lifecycleCleanup?: boolean },
-  ) => Effect.Effect<void, OrchestrationEffectExecutionError>;
+  ) => Effect.Effect<
+    void,
+    OrchestrationEffectExecutionError | ProviderThreadLifecycleService.ProviderThreadLifecycleError
+  >;
 }
 
 export class OrchestrationEffectExecutorV2 extends Context.Service<
@@ -73,6 +77,7 @@ export const layerExecutor: Layer.Layer<
   OrchestrationEffectExecutorV2,
   never,
   | ProviderSessionManager.ProviderSessionManagerV2
+  | ProviderThreadLifecycleService.ProviderThreadLifecycleService
   | RunFinalizationService.RunFinalizationService
   | CheckpointRollbackService.CheckpointRollbackServiceV2
   | ProviderTurnControlService.ProviderTurnControlServiceV2
@@ -88,6 +93,7 @@ export const layerExecutor: Layer.Layer<
     const resourceCleanup = yield* ResourceCleanupService.ResourceCleanupService;
     const checkpointRollback = yield* CheckpointRollbackService.CheckpointRollbackServiceV2;
     const providerSessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
+    const providerThreads = yield* ProviderThreadLifecycleService.ProviderThreadLifecycleService;
     const providerTurnControl = yield* ProviderTurnControlService.ProviderTurnControlServiceV2;
     const providerTurnStart = yield* ProviderTurnStartService.ProviderTurnStartServiceV2;
     const runtimeRequests = yield* RuntimeRequestService.RuntimeRequestServiceV2;
@@ -99,6 +105,8 @@ export const layerExecutor: Layer.Layer<
       execute: (effect, options) => {
         const willRetry = options?.willRetry ?? false;
         switch (effect.request.type) {
+          case "provider-thread.delete":
+            return providerThreads.delete({ ...effect, request: effect.request });
           case "provider-runtime.continue": {
             const sourceRunId = effect.request.sourceRunId;
             return continueRestartedRun({ threadId: effect.threadId, sourceRunId }).pipe(
@@ -799,7 +807,14 @@ export const layerWithOptions = (
             }).pipe(Effect.onError((cause) => recoverPostSuccessSettlement(effect, cause)));
           }
 
-          const error = Cause.pretty(exit.cause);
+          const deletionFailure = Cause.findErrorOption(exit.cause);
+          const error =
+            effect.request.type === "provider-thread.delete"
+              ? Option.isSome(deletionFailure) &&
+                deletionFailure.value._tag === "ProviderThreadLifecycleError"
+                ? deletionFailure.value.message
+                : "Provider thread deletion failed."
+              : Cause.pretty(exit.cause);
           const nonRetryable = isNonRetryableProviderTurnControlFailure(effect.request.type, error);
           yield* Effect.logWarning("Orchestration effect execution failed", {
             effectId: effect.id,

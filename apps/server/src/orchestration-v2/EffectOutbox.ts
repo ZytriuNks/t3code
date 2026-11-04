@@ -3,8 +3,10 @@ import {
   CheckpointScopeId,
   CommandId,
   MessageId,
+  NativeSessionStorage,
   NodeId,
   ProviderSessionId,
+  ProviderInstanceId,
   RunAttemptId,
   ProviderApprovalDecision,
   ProviderUserInputAnswers,
@@ -28,13 +30,25 @@ import * as SqlClient from "effect/sql/SqlClient";
 
 import { forkParked } from "../serverActivation.ts";
 
-const LifecycleCleanup = Schema.Struct({
+export const LifecycleCleanup = Schema.Struct({
   commandId: CommandId,
   rootThreadId: ThreadId,
   revision: Schema.Number,
+  sourceToken: Schema.optional(Schema.String),
 });
+export type LifecycleCleanup = typeof LifecycleCleanup.Type;
 
 export const OrchestrationEffectRequestV2 = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("provider-thread.delete"),
+    driver: Schema.Literal("pi"),
+    providerInstanceId: ProviderInstanceId,
+    providerThreadId: ProviderThreadId,
+    threadIds: Schema.Array(ThreadId),
+    nativeId: Schema.NullOr(Schema.String),
+    nativeStorage: NativeSessionStorage,
+    lifecycle: LifecycleCleanup,
+  }),
   Schema.Struct({
     type: Schema.Literal("provider-runtime.continue"),
     sourceRunId: RunId,
@@ -140,6 +154,7 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
 export type OrchestrationEffectRequestV2 = typeof OrchestrationEffectRequestV2.Type;
 
 export const REPLAY_SAFE_EFFECT_TYPES_AFTER_PROCESS_LOSS = [
+  "provider-thread.delete",
   "provider-runtime.continue",
   "provider-session.detach",
   "provider-thread.rollback",
@@ -500,7 +515,7 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
             SELECT cleanup.* FROM orchestration_v2_effect_outbox cleanup
             WHERE ${sql.in("cleanup.thread_id", threadIds)}
               AND cleanup.status <> 'succeeded'
-              AND cleanup.effect_type IN ('provider-session.detach', 'terminal.cleanup',
+              AND cleanup.effect_type IN ('provider-thread.delete', 'provider-session.detach', 'terminal.cleanup',
                 'preview.cleanup', 'scheduled-tasks.cleanup', 'scheduled-tasks.suspend', 'attachment.cleanup')
               AND (json_type(cleanup.payload_json, '$.lifecycle') = 'object'
                 OR EXISTS (

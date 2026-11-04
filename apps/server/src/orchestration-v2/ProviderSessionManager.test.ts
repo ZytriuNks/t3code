@@ -49,6 +49,7 @@ import * as ProviderRuntimeRecoveryService from "./ProviderRuntimeRecoveryServic
 import * as EventStore from "./EventStore.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
 import * as EffectWorker from "./EffectWorker.ts";
+import * as ProviderThreadLifecycleService from "./ProviderThreadLifecycleService.ts";
 import * as RunFinalizationService from "./RunFinalizationService.ts";
 import * as CheckpointRollbackService from "./CheckpointRollbackService.ts";
 import * as ProviderTurnControlService from "./ProviderTurnControlService.ts";
@@ -643,6 +644,7 @@ const layerRetirementWorker = EffectWorker.layerWithOptions({
         Layer.mergeAll(
           ServerSettings.layerTest(),
           Layer.mock(RunFinalizationService.RunFinalizationService)({}),
+          Layer.mock(ProviderThreadLifecycleService.ProviderThreadLifecycleService)({}),
           Layer.mock(CheckpointRollbackService.CheckpointRollbackServiceV2)({}),
           Layer.mock(ProviderTurnControlService.ProviderTurnControlServiceV2)({}),
           Layer.mock(ProviderTurnStartService.ProviderTurnStartServiceV2)({}),

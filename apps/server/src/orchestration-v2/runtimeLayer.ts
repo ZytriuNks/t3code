@@ -41,6 +41,7 @@ import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import * as ThreadOwnership from "./ThreadOwnership.ts";
 import * as ThreadLifecycleGuard from "./ThreadLifecycleGuard.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
+import * as ProviderThreadLifecycleService from "./ProviderThreadLifecycleService.ts";
 import * as CommandOutputHub from "./CommandOutputHub.ts";
 import * as ProviderRuntimeRecoveryService from "./ProviderRuntimeRecoveryService.ts";
 import * as ProviderSwitchService from "./ProviderSwitchService.ts";
@@ -330,6 +331,16 @@ const layerEffectExecutorProvided = EffectWorker.layerExecutor.pipe(
       layerRunFinalizationServiceProvided,
       layerCheckpointRollbackServiceProvided,
       layerProviderSessionManagerProvided,
+      ProviderThreadLifecycleService.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            ProjectionStore.layer,
+            ThreadLifecycleGuard.layer,
+            layerProviderSessionManagerProvided,
+            layerProviderAdapterRegistryProvided,
+          ),
+        ),
+      ),
       layerProviderTurnControlServiceProvided,
       layerProviderTurnStartServiceProvided,
       layerRuntimeRequestServiceProvided,

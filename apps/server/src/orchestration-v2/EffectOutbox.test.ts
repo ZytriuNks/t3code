@@ -1,5 +1,11 @@
 import { assert, it } from "@effect/vitest";
-import { CommandId, ProviderSessionId, ThreadId } from "@t3tools/contracts";
+import {
+  CommandId,
+  ProviderInstanceId,
+  ProviderSessionId,
+  ProviderThreadId,
+  ThreadId,
+} from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -16,6 +22,47 @@ const F = ThreadId.make("task6:F");
 const commandId = CommandId.make("task6:archive");
 const lifecycle = { commandId, rootThreadId: R, revision: 1 };
 const layerTest = EffectOutbox.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMemory));
+
+for (const nativeStorage of [
+  {
+    type: "resolved",
+    canonicalRoot: "/isolated/sessions",
+    canonicalFile: "/isolated/sessions/test.jsonl",
+  },
+  { type: "unresolved", reason: "legacy_missing_locator" },
+] as const) {
+  it.effect(
+    `Pi delete ${nativeStorage.type} round-trips, remains cleanup, and recovers after process loss`,
+    () =>
+      Effect.gen(function* () {
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const request = {
+          type: "provider-thread.delete" as const,
+          driver: "pi" as const,
+          providerInstanceId: ProviderInstanceId.make("pi-original"),
+          providerThreadId: ProviderThreadId.make("pi-thread"),
+          threadIds: [R],
+          nativeId: nativeStorage.type === "resolved" ? "native-id" : null,
+          nativeStorage,
+          lifecycle: { ...lifecycle, sourceToken: "persisted-source" },
+        };
+        yield* outbox.enqueue([{ id: "pi-delete", commandId, threadId: R, request }]);
+        assert.deepEqual(Option.getOrThrow(yield* outbox.get("pi-delete")).request, request);
+        assert.lengthOf(yield* outbox.listLifecycleCleanup([R]), 1);
+        yield* outbox.claimNext({ workerId: "old", leaseDurationMs: 1000 });
+        assert.deepEqual(yield* outbox.reconcileAfterProcessLoss, { requeued: 1, cancelled: 0 });
+        const recovered = Option.getOrThrow(yield* outbox.get("pi-delete"));
+        assert.equal(recovered.status, "pending");
+        assert.equal(recovered.attemptCount, 1);
+        assert.deepEqual(recovered.request, request);
+        yield* outbox.claimNext({ workerId: "new", leaseDurationMs: 1000 });
+        yield* outbox.fail({ effectId: "pi-delete", workerId: "new", error: "blocked" });
+        yield* TestClock.adjust("8 days");
+        assert.equal(yield* outbox.pruneSettled, 0);
+        assert.equal((yield* outbox.listLifecycleCleanup([R]))[0]?.status, "failed");
+      }).pipe(Effect.provide(layerTest)),
+  );
+}
 
 const legacyReceipt = Effect.fn("test.legacyArchiveReceipt")(function* () {
   const sql = yield* SqlClient.SqlClient;

@@ -4,6 +4,7 @@ import {
   CheckpointScopeId,
   CommandId,
   NodeId,
+  ProviderInstanceId,
   ProviderSessionId,
   ProviderThreadId,
   ProviderTurnId,
@@ -34,6 +35,9 @@ import * as ThreadTitleRegenerationService from "./ThreadTitleRegenerationServic
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as ResourceCleanupService from "./ResourceCleanupService.ts";
+import * as ProviderThreadLifecycleService from "./ProviderThreadLifecycleService.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as TestClock from "effect/testing/TestClock";
 
 const threadId = ThreadId.make("thread:effect-worker-restart");
 const oldSessionId = ProviderSessionId.make("provider-session:effect-worker-restart:old");
@@ -84,9 +88,13 @@ function layerExecutorFor(input: {
   readonly continueAfterRestart?: boolean;
   readonly interrupt?: ProviderTurnControlService.ProviderTurnControlServiceV2Shape["interrupt"];
   readonly rollback?: CheckpointRollbackService.CheckpointRollbackServiceV2Shape["execute"];
+  readonly deleteNativeThread?: ProviderThreadLifecycleService.ProviderThreadLifecycleService["Service"]["delete"];
 }) {
   const record = (event: string) => Ref.update(input.events, (events) => [...events, event]);
   const layerDependencies = Layer.mergeAll(
+    Layer.succeed(ProviderThreadLifecycleService.ProviderThreadLifecycleService, {
+      delete: input.deleteNativeThread ?? (() => Effect.void),
+    }),
     Layer.succeed(
       ProviderTurnControlService.ProviderTurnControlServiceV2,
       ProviderTurnControlService.ProviderTurnControlServiceV2.of({
@@ -162,6 +170,74 @@ function layerExecutorFor(input: {
         ),
       ),
     ),
+  );
+}
+
+for (const blocked of [false, true]) {
+  it.effect(
+    `Pi delete worker ${blocked ? "retries then fails cleanup" : "succeeds stale cleanup"}`,
+    () =>
+      Effect.gen(function* () {
+        const events = yield* Ref.make<ReadonlyArray<string>>([]);
+        const lifecycleError = new ProviderThreadLifecycleService.ProviderThreadLifecycleError({
+          reason: "adapter",
+          cause: "private-path-and-config",
+        });
+        const executorLayer = layerExecutorFor({
+          events,
+          deleteNativeThread: () =>
+            Ref.update(events, (current) => [...current, "delete"]).pipe(
+              Effect.andThen(blocked ? Effect.fail(lifecycleError) : Effect.void),
+            ),
+        });
+        const outboxLayer = EffectOutbox.layer.pipe(Layer.provide(SqlitePersistence.layerMemory));
+        const workerLayer = EffectWorker.layerWithOptions({ maxAttempts: 2 }).pipe(
+          Layer.provideMerge(Layer.merge(executorLayer, outboxLayer)),
+        );
+        yield* Effect.gen(function* () {
+          const outbox = yield* EffectOutbox.EffectOutboxV2;
+          const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+          yield* outbox.enqueue([
+            {
+              id: "pi-delete",
+              commandId: CommandId.make("delete"),
+              threadId,
+              request: {
+                type: "provider-thread.delete",
+                driver: "pi",
+                providerInstanceId: ProviderInstanceId.make("pi-original"),
+                providerThreadId,
+                threadIds: [threadId],
+                nativeId: null,
+                nativeStorage: { type: "unresolved", reason: "unavailable" },
+                lifecycle: {
+                  commandId: CommandId.make("delete"),
+                  rootThreadId: threadId,
+                  revision: 1,
+                },
+              },
+            },
+          ]);
+          assert.equal(yield* worker.drain(), 1);
+          const first = Option.getOrThrow(yield* outbox.get("pi-delete"));
+          assert.equal(first.status, blocked ? "pending" : "succeeded");
+          if (blocked) {
+            assert.notInclude(first.lastError!, "private-path-and-config");
+            const executor = yield* EffectWorker.OrchestrationEffectExecutorV2;
+            const exit = yield* Effect.exit(executor.execute(first));
+            assert.isTrue(Exit.isFailure(exit));
+            if (Exit.isFailure(exit))
+              assert.strictEqual(
+                Option.getOrThrow(Cause.findErrorOption(exit.cause)),
+                lifecycleError,
+              );
+            yield* TestClock.adjust("100 millis");
+            assert.equal(yield* worker.drain(), 1);
+            assert.equal(Option.getOrThrow(yield* outbox.get("pi-delete")).status, "failed");
+            assert.lengthOf(yield* outbox.listLifecycleCleanup([threadId]), 1);
+          } else assert.deepEqual(yield* outbox.listLifecycleCleanup([threadId]), []);
+        }).pipe(Effect.provide(workerLayer));
+      }),
   );
 }
 

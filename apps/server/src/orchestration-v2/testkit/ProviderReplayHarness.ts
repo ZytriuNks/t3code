@@ -29,6 +29,7 @@ import * as CommandReceiptStore from "../CommandReceiptStore.ts";
 import * as ContextHandoffService from "../ContextHandoffService.ts";
 import * as EffectOutbox from "../EffectOutbox.ts";
 import * as EffectWorker from "../EffectWorker.ts";
+import * as ProviderThreadLifecycleService from "../ProviderThreadLifecycleService.ts";
 import * as EventSink from "../EventSink.ts";
 import * as EventStore from "../EventStore.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
@@ -498,6 +499,12 @@ export function layerWithRegistry<Error>(
     Layer.provide(
       Layer.mergeAll(
         layerRunFinalizationServiceProvided,
+        ProviderThreadLifecycleService.layer.pipe(
+          Layer.provide(ThreadLifecycleGuard.layer),
+          Layer.provide(
+            Layer.mergeAll(layerStores, layerProviderSessionManagerProvided, layerProvidedRegistry),
+          ),
+        ),
         layerCheckpointRollbackServiceProvided,
         layerProviderSessionManagerProvided,
         layerProviderTurnControlServiceProvided,
