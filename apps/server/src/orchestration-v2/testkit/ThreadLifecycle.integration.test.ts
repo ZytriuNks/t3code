@@ -25,6 +25,7 @@ import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAda
 import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -702,6 +703,285 @@ it.effect(
       }).pipe(
         Effect.provide(
           ServerConfig.layerTest(process.cwd(), { prefix: "task8-pi-lifecycle-" }).pipe(
+            Layer.provideMerge(NodeServices.layer),
+          ),
+        ),
+      ),
+    ),
+);
+
+it.effect(
+  "keeps a shared Pi file after failed cleanup and retries through a new T3 delete command",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(DateTime.toEpochMillis(now));
+        const config = yield* ServerConfig.ServerConfig;
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pi-shared-delete-" });
+        const sessionFile = path.join(root, "shared-session.jsonl");
+        const sessionContents = "shared Pi transcript remains byte-for-byte intact";
+        yield* fs.writeFileString(sessionFile, sessionContents);
+        const nativeStorage: NativeSessionStorage = {
+          type: "resolved",
+          canonicalRoot: yield* fs.realPath(root),
+          canonicalFile: yield* fs.realPath(sessionFile),
+        };
+        const threadId = ThreadId.make("task8:pi-shared-delete-thread");
+        const outsideOwnerId = ThreadId.make("task8:pi-shared-delete-owner");
+        const piInstanceId = ProviderInstanceId.make("task8-pi");
+        const piDriver = ProviderDriverKind.make("pi");
+        const piModelSelection = { instanceId: piInstanceId, model: "pi-fixture" };
+        const providerSessionId = ProviderSessionId.make("task8:pi-shared-session");
+        const outsideSessionId = ProviderSessionId.make("task8:pi-shared-owner-session");
+        const detachEntered = yield* Deferred.make<void>();
+        const detachRelease = yield* Deferred.make<void>();
+        const pauseDetach = yield* Ref.make(false);
+        const resumed: Array<ThreadId> = [];
+        const deleted: Array<ProviderThreadId> = [];
+        const unloaded: Array<ProviderThreadId> = [];
+        const baseProvider = makeProvider();
+        const pi = makePiProviderInstance({
+          base: baseProvider.instance,
+          nativeStorage,
+          removeNativeFile: (filePath) =>
+            fs.remove(filePath, { force: true }).pipe(Effect.asVoid, Effect.orDie),
+          pauseDetach,
+          detachEntered,
+          detachRelease,
+          resumed,
+          deleted,
+          unloaded,
+        });
+        const provider = makeProvider([pi.instance]);
+        const runtime = makeRuntime(SqlitePersistence.layerMemory, provider);
+
+        yield* Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const sink = yield* EventSink.EventSinkV2;
+          const store = yield* ProjectionStore.ProjectionStoreV2;
+          const outbox = yield* EffectOutbox.EffectOutboxV2;
+          const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+          const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
+          const resources = yield* ThreadLifecycleResources.ThreadLifecycleResources;
+          const records = yield* ThreadDeletionRecords.ThreadDeletionRecords;
+          const bindings = yield* NativeSessionBindings.NativeSessionBindings;
+          const sql = yield* SqlClient.SqlClient;
+          const projects = yield* ProjectStore.ProjectStoreV2;
+          yield* projects.apply({
+            sequence: 0,
+            eventId: EventId.make("task8:pi-shared-project"),
+            aggregateKind: "project",
+            aggregateId: projectId,
+            occurredAt: DateTime.formatIso(now),
+            commandId: null,
+            causationEventId: null,
+            correlationId: null,
+            metadata: {},
+            type: "project.created",
+            payload: {
+              projectId,
+              title: "Shared Pi deletion fixture",
+              workspaceRoot: config.cwd,
+              defaultModelSelection: null,
+              scripts: [],
+              createdAt: DateTime.formatIso(now),
+              updatedAt: DateTime.formatIso(now),
+            },
+          });
+          yield* create(threadId, piModelSelection);
+          yield* create(outsideOwnerId, piModelSelection);
+          const providerThread = pi.makeNativeThread(threadId, providerSessionId);
+          const outsideProviderThread: OrchestrationV2ProviderThread = {
+            ...pi.makeNativeThread(outsideOwnerId, outsideSessionId),
+            id: ProviderThreadId.make("task8:pi-shared-owner-native-thread"),
+          };
+          const runtimeSession = yield* sessions.open({
+            threadId,
+            providerSessionId,
+            modelSelection: piModelSelection,
+            runtimePolicy,
+          });
+          yield* sink.write({
+            lifecycleGuard: yield* orchestrator.resolveLifecycleSource(threadId),
+            events: [
+              {
+                id: EventId.make("task8:pi-shared-native-thread"),
+                type: "provider-thread.updated",
+                threadId,
+                occurredAt: now,
+                payload: providerThread,
+              },
+            ],
+          });
+          yield* runtimeSession.resumeThread({ threadId, providerThread });
+          yield* sink.write({
+            lifecycleGuard: yield* orchestrator.resolveLifecycleSource(outsideOwnerId),
+            events: [
+              {
+                id: EventId.make("task8:pi-shared-owner-native-thread"),
+                type: "provider-thread.updated",
+                threadId: outsideOwnerId,
+                occurredAt: now,
+                payload: outsideProviderThread,
+              },
+            ],
+          });
+          assert.isTrue(yield* fs.exists(sessionFile));
+          assert.deepEqual(yield* fs.readFileString(sessionFile), sessionContents);
+          assert.deepEqual(
+            yield* sql<{ readonly count: number }>`
+              SELECT COUNT(*) AS count FROM orchestration_v2_native_session_bindings
+              WHERE thread_id = ${outsideOwnerId} AND canonical_file = ${nativeStorage.canonicalFile}
+            `,
+            [{ count: 1 }],
+          );
+          assert.deepEqual(
+            yield* sql<{ readonly count: number }>`
+              SELECT COUNT(*) AS count FROM orchestration_v2_projection_provider_threads
+              WHERE thread_id = ${outsideOwnerId}
+                AND json_extract(payload_json, '$.nativeStorage.canonicalFile') = ${nativeStorage.canonicalFile}
+            `,
+            [{ count: 1 }],
+          );
+
+          const firstDeleteCommandId = CommandId.make("task8:pi-shared-delete-first");
+          const firstDeleteCommand = yield* orchestrator.dispatch({
+            type: "thread.delete",
+            commandId: firstDeleteCommandId,
+            threadId,
+          });
+          assert.isTrue(
+            firstDeleteCommand.storedEvents.some(
+              (row) => row.event.type === "thread.deleted" && row.event.threadId === threadId,
+            ),
+          );
+          const firstEffects = yield* outbox.listByCommandId(firstDeleteCommandId);
+          const firstDeleteEffect = firstEffects.find(
+            (effect) => effect.request.type === "provider-thread.delete",
+          );
+          assert.isDefined(firstDeleteEffect);
+          assert.isAbove(yield* worker.drain(), 0);
+          for (const attempt of [2, 3, 4, 5]) {
+            yield* TestClock.adjust(Duration.seconds(30));
+            assert.isAbove(yield* worker.drain(), 0, `delete attempt ${attempt}`);
+          }
+          const failedDelete = Option.getOrThrow(yield* outbox.get(firstDeleteEffect!.id));
+          assert.equal(failedDelete.status, "failed", failedDelete.lastError ?? undefined);
+          assert.equal(failedDelete.attemptCount, 5);
+          assert.include(failedDelete.lastError ?? "", "reference");
+          assert.deepEqual(yield* resources.getCleanupStatus(firstDeleteCommandId), {
+            pendingCount: 0,
+            failedCount: 1,
+          });
+          assert.isFalse(yield* sessions.isLive(providerSessionId));
+          assert.isEmpty(deleted);
+          assert.isTrue(yield* fs.exists(sessionFile));
+          assert.deepEqual(yield* fs.readFileString(sessionFile), sessionContents);
+          assert.isNotNull((yield* store.getThread(threadId)).deletedAt);
+          assert.isTrue(Option.isSome(yield* records.get(threadId)));
+          assert.equal(
+            yield* bindings.checkImport({
+              driver: piDriver,
+              providerInstanceId: piInstanceId,
+              nativeId: "task8:pi-native-session",
+              storage: nativeStorage,
+            }),
+            "deleted",
+          );
+          assert.deepEqual(
+            yield* sql<{ readonly count: number }>`
+              SELECT COUNT(*) AS count FROM orchestration_v2_thread_deletion_sessions
+              WHERE thread_id = ${threadId}
+            `,
+            [{ count: 1 }],
+          );
+
+          // The shared reference is a temporary test dependency; clear only its active fixture rows.
+          yield* sql`DELETE FROM orchestration_v2_native_session_bindings
+            WHERE thread_id = ${outsideOwnerId}`;
+          yield* sql`DELETE FROM orchestration_v2_projection_provider_threads
+            WHERE thread_id = ${outsideOwnerId}`;
+
+          const retryCommandId = CommandId.make("task8:pi-shared-delete-retry");
+          const retryCommand = yield* orchestrator.dispatch({
+            type: "thread.delete",
+            commandId: retryCommandId,
+            threadId,
+          });
+          assert.isTrue(
+            retryCommand.storedEvents.some(
+              (row) => row.event.type === "thread.deleted" && row.event.threadId === threadId,
+            ),
+          );
+          const retryEffects = yield* outbox.listByCommandId(retryCommandId);
+          const retryDeleteEffect = retryEffects.find(
+            (effect) => effect.request.type === "provider-thread.delete",
+          );
+          assert.isDefined(retryDeleteEffect);
+          assert.notEqual(retryDeleteEffect!.id, firstDeleteEffect!.id);
+          assert.isAbove(yield* worker.drain(), 0);
+          const completedRetry = Option.getOrThrow(yield* outbox.get(retryDeleteEffect!.id));
+          assert.equal(completedRetry.status, "succeeded", completedRetry.lastError ?? undefined);
+          assert.deepEqual(deleted, [providerThread.id]);
+          assert.isFalse(yield* fs.exists(sessionFile));
+          assert.deepEqual(yield* resources.getCleanupStatus(retryCommandId), {
+            pendingCount: 0,
+            failedCount: 0,
+          });
+          assert.isNotNull((yield* store.getThread(threadId)).deletedAt);
+          assert.isTrue(Option.isSome(yield* records.get(threadId)));
+          assert.equal(
+            yield* bindings.checkImport({
+              driver: piDriver,
+              providerInstanceId: piInstanceId,
+              nativeId: "task8:pi-native-session",
+              storage: nativeStorage,
+            }),
+            "deleted",
+          );
+          assert.deepEqual(
+            yield* sql<{ readonly count: number }>`
+              SELECT COUNT(*) AS count FROM orchestration_v2_thread_deletion_sessions
+              WHERE thread_id = ${threadId}
+            `,
+            [{ count: 1 }],
+          );
+
+          const absentDeleteCommandId = CommandId.make("task8:pi-shared-delete-absent");
+          yield* orchestrator.dispatch({
+            type: "thread.delete",
+            commandId: absentDeleteCommandId,
+            threadId,
+          });
+          const absentEffects = yield* outbox.listByCommandId(absentDeleteCommandId);
+          const absentDeleteEffect = absentEffects.find(
+            (effect) => effect.request.type === "provider-thread.delete",
+          );
+          assert.isDefined(absentDeleteEffect);
+          assert.notEqual(absentDeleteEffect!.id, retryDeleteEffect!.id);
+          assert.isAbove(yield* worker.drain(), 0);
+          const completedAbsentDelete = Option.getOrThrow(
+            yield* outbox.get(absentDeleteEffect!.id),
+          );
+          assert.equal(
+            completedAbsentDelete.status,
+            "succeeded",
+            completedAbsentDelete.lastError ?? undefined,
+          );
+          assert.deepEqual(deleted, [providerThread.id, providerThread.id]);
+          assert.isFalse(yield* fs.exists(sessionFile));
+          assert.deepEqual(yield* resources.getCleanupStatus(absentDeleteCommandId), {
+            pendingCount: 0,
+            failedCount: 0,
+          });
+          assert.isNotNull((yield* store.getThread(threadId)).deletedAt);
+          assert.isTrue(Option.isSome(yield* records.get(threadId)));
+        }).pipe(Effect.provide(Layer.fresh(runtime)));
+      }).pipe(
+        Effect.provide(
+          ServerConfig.layerTest(process.cwd(), { prefix: "task8-pi-shared-delete-" }).pipe(
             Layer.provideMerge(NodeServices.layer),
           ),
         ),
