@@ -1,15 +1,18 @@
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
+  EventId,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderSessionId,
   ProviderThreadId,
   ThreadId,
+  type NativeSessionBinding,
   type NativeSessionStorage,
   type OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -23,6 +26,8 @@ import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ProviderThreadLifecycleService from "./ProviderThreadLifecycleService.ts";
+import { emptyProjection } from "./ProjectionStore.ts";
+import { planThreadLifecycle } from "./ThreadLifecyclePlan.ts";
 import * as ThreadLifecycleGuard from "./ThreadLifecycleGuard.ts";
 
 const root = ThreadId.make("pi-delete:root");
@@ -525,6 +530,167 @@ it.effect(
       yield* service.delete(deletionEffect({ threadIds: [root, child] }));
       assert.lengthOf(fixture.calls, 1);
     }).pipe(Effect.provide(fixture.layer));
+  },
+);
+
+const groupedIdentityCases = [
+  { name: "pending-source", nativeId: null, blocked: true },
+  { name: "pending-base", nativeId: "native-A", blocked: true },
+  { name: "pending-resolution", nativeId: null, blocked: true },
+  { name: "unresolved-binding", nativeId: null, blocked: true },
+  { name: "unresolved-deletion-session", nativeId: null, blocked: true },
+  { name: "unresolved-provider", nativeId: null, blocked: true },
+  { name: "unknown-provider-owner", nativeId: null, blocked: true },
+  { name: "unknown-provider-instance", nativeId: null, blocked: true },
+  { name: "unknown-provider-driver", nativeId: null, blocked: true },
+  { name: "exclusive-file", nativeId: null, blocked: false },
+  { name: "disjoint-root", nativeId: null, blocked: false },
+] as const;
+
+it.effect.each(groupedIdentityCases)(
+  "planner-to-executor preserves safety for non-representative native identity: $name",
+  ({ name, nativeId, blocked }) => {
+    const fixture = testLayer({
+      sourceToken: ThreadLifecycleGuard.lifecycleSourceForPath([{ id: root, lifecycleRevision: 1 }])
+        .sourceToken,
+    });
+    return Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const aliasProviderId = ProviderThreadId.make(`${providerThreadId}:B`);
+      const bindings: ReadonlyArray<NativeSessionBinding> = [
+        {
+          threadId: root,
+          providerThreadId,
+          providerInstanceId: instanceId,
+          driver: ProviderDriverKind.make("pi"),
+          nativeId,
+          storage,
+          boundAt: timestamp,
+        },
+        {
+          threadId: child,
+          providerThreadId: aliasProviderId,
+          providerInstanceId: instanceId,
+          driver: ProviderDriverKind.make("pi"),
+          nativeId: "native-B",
+          storage,
+          boundAt: timestamp,
+        },
+      ];
+      const members = bindings.map((binding) =>
+        emptyProjection({
+          id: EventId.make(`created:${binding.threadId}`),
+          type: "thread.created",
+          threadId: binding.threadId,
+          occurredAt: now,
+          payload: {
+            ...shell(0),
+            id: binding.threadId,
+            deletedAt: null,
+            lastVisitedAt: null,
+            lineage: {
+              parentThreadId: binding.threadId === root ? null : root,
+              relationshipToParent: binding.threadId === root ? null : "subagent",
+              rootThreadId: root,
+            },
+          },
+        }),
+      );
+      const plan = yield* planThreadLifecycle({
+        command: { type: "thread.delete", commandId, threadId: root },
+        operationRootThreadId: root,
+        members,
+        bindings,
+        attachmentIdsByThread: new Map(),
+        now,
+        idAllocator: yield* IdAllocator.IdAllocatorV2,
+      });
+      const deletions = plan.effects.filter(
+        (effect) => effect.request.type === "provider-thread.delete",
+      );
+      assert.lengthOf(deletions, 1);
+      const deletion = deletions[0]!;
+      assert.equal(deletion.request.type, "provider-thread.delete");
+      if (deletion.request.type !== "provider-thread.delete")
+        return assert.fail("Missing planned deletion");
+      assert.equal(deletion.request.nativeId, nativeId);
+      assert.sameMembers([...deletion.request.threadIds], [root, child]);
+      yield* seedThread();
+      yield* seedThread(child, root);
+      yield* seedBinding({ nativeId });
+      yield* seedBinding({
+        threadId: child,
+        providerThreadId: aliasProviderId,
+        nativeId: "native-B",
+      });
+      if (name.startsWith("pending-")) {
+        yield* seedThread(outside, null, false);
+        const point =
+          name === "pending-source"
+            ? "sourcePoint"
+            : name === "pending-base"
+              ? "basePoint"
+              : "resolution";
+        yield* sql`INSERT INTO orchestration_v2_projection_context_transfers
+          (context_transfer_id, source_thread_id, target_thread_id, type, status, updated_at, payload_json)
+          VALUES ('alias-transfer', ${outside}, ${outside}, 'fork', 'pending', ${timestamp},
+            json_object(${point}, json_object('providerThreadRef', json_object('driver', 'pi', 'nativeId', 'native-B'))))`;
+      }
+      if (["unresolved-binding", "unresolved-deletion-session", "disjoint-root"].includes(name)) {
+        yield* seedThread(outside, null, name === "unresolved-deletion-session");
+        yield* seedBinding({
+          threadId: outside,
+          providerThreadId: ProviderThreadId.make("outside-native-B"),
+          nativeId: "native-B",
+          deletionSession: name === "unresolved-deletion-session",
+          storage:
+            name === "disjoint-root"
+              ? { type: "resolved", canonicalRoot: "/other", canonicalFile: "/other/B.jsonl" }
+              : { type: "unresolved", reason: "unavailable" },
+        });
+      }
+      if (name === "unresolved-provider") {
+        const id = ProviderThreadId.make("unresolved-native-B");
+        yield* seedProvider(outside, id, { type: "unresolved", reason: "unavailable" });
+        yield* sql`UPDATE orchestration_v2_projection_provider_threads
+          SET payload_json = json_set(payload_json, '$.nativeThreadRef.nativeId', 'native-B')
+          WHERE provider_thread_id = ${id}`;
+      }
+      if (name === "unknown-provider-owner") {
+        yield* seedProvider(null, aliasProviderId, null);
+        yield* sql`UPDATE orchestration_v2_projection_provider_threads
+          SET payload_json = json_set(payload_json, '$.nativeThreadRef', NULL)
+          WHERE provider_thread_id = ${aliasProviderId}`;
+      }
+      if (name === "unknown-provider-instance") {
+        yield* seedProvider(child, aliasProviderId);
+        yield* sql`UPDATE orchestration_v2_projection_provider_threads
+          SET provider_instance_id = NULL WHERE provider_thread_id = ${aliasProviderId}`;
+      }
+      if (name === "unknown-provider-driver") {
+        const id = ProviderThreadId.make("unknown-driver-native-B");
+        yield* seedProvider(outside, id);
+        yield* sql`UPDATE orchestration_v2_projection_provider_threads
+          SET driver = NULL, payload_json = json_set(payload_json, '$.nativeThreadRef', NULL)
+          WHERE provider_thread_id = ${id}`;
+      }
+      const service = yield* ProviderThreadLifecycleService.ProviderThreadLifecycleService;
+      const result = yield* Effect.result(
+        service.delete({
+          ...deletionEffect(),
+          ...deletion,
+          availableAt: timestamp,
+          request: deletion.request,
+        }),
+      );
+      assert.lengthOf(fixture.calls, blocked ? 0 : 1);
+      if (blocked) {
+        assert.isTrue(Result.isFailure(result));
+        if (Result.isFailure(result)) assert.equal(result.failure.reason, "reference");
+      } else {
+        assert.isTrue(Result.isSuccess(result));
+      }
+    }).pipe(Effect.provide(Layer.merge(fixture.layer, IdAllocator.layer)));
   },
 );
 

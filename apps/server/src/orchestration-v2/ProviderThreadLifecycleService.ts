@@ -137,38 +137,49 @@ const make = Effect.gen(function* () {
         readonly thread_id: string | null;
         readonly provider_thread_id: string;
         readonly provider_instance_id: string | null;
+        readonly driver: string | null;
         readonly native_id: string | null;
         readonly storage_type: string | null;
         readonly canonical_root: string | null;
         readonly canonical_file: string | null;
         readonly provider_session_id: string | null;
       }>`
-        WITH identities AS (
-          SELECT thread_id, provider_thread_id, provider_instance_id, native_id, storage_type,
+        WITH RECURSIVE identities AS (
+          SELECT thread_id, provider_thread_id, provider_instance_id, driver, native_id, storage_type,
             canonical_root, canonical_file, NULL AS provider_session_id
           FROM orchestration_v2_native_session_bindings WHERE driver = 'pi'
           UNION ALL
-          SELECT thread_id, provider_thread_id, provider_instance_id, native_id, storage_type,
+          SELECT thread_id, provider_thread_id, provider_instance_id, driver, native_id, storage_type,
             canonical_root, canonical_file, NULL
           FROM orchestration_v2_thread_deletion_sessions WHERE driver = 'pi'
           UNION ALL
-          SELECT thread_id, provider_thread_id, provider_instance_id,
+          SELECT thread_id, provider_thread_id, provider_instance_id, driver,
             json_extract(payload_json, '$.nativeThreadRef.nativeId'),
             json_extract(payload_json, '$.nativeStorage.type'),
             json_extract(payload_json, '$.nativeStorage.canonicalRoot'),
             json_extract(payload_json, '$.nativeStorage.canonicalFile'), provider_session_id
-          FROM orchestration_v2_projection_provider_threads WHERE driver = 'pi'
+          FROM orchestration_v2_projection_provider_threads WHERE driver = 'pi' OR driver IS NULL
+        ), related_identities AS (
+          SELECT * FROM identities WHERE provider_thread_id = ${request.providerThreadId}
+            OR canonical_file = ${storage.canonicalFile}
+          UNION
+          SELECT candidate.* FROM identities candidate JOIN related_identities related
+            ON candidate.provider_thread_id = related.provider_thread_id
+              OR (candidate.canonical_file <> '' AND candidate.canonical_file = related.canonical_file)
+              OR (candidate.native_id = related.native_id AND trim(candidate.native_id) <> '' AND (
+                coalesce(candidate.storage_type, 'unresolved') <> 'resolved'
+                OR coalesce(related.storage_type, 'unresolved') <> 'resolved'
+                OR candidate.canonical_root = related.canonical_root
+              ))
         )
-        SELECT * FROM identities WHERE provider_thread_id = ${request.providerThreadId}
-          OR canonical_file = ${storage.canonicalFile}
-          OR (native_id = ${request.nativeId} AND
-            (coalesce(storage_type, 'unresolved') <> 'resolved' OR canonical_root = ${storage.canonicalRoot}))
+        SELECT * FROM related_identities
       `;
       if (
         !references.some(
           (row) =>
             row.provider_thread_id === request.providerThreadId &&
             row.provider_instance_id === request.providerInstanceId &&
+            row.driver === "pi" &&
             row.native_id === request.nativeId &&
             row.storage_type === "resolved" &&
             row.canonical_root === storage.canonicalRoot &&
@@ -184,6 +195,7 @@ const make = Effect.gen(function* () {
             row.thread_id === null ||
             !targets.has(row.thread_id) ||
             row.provider_instance_id === null ||
+            row.driver !== "pi" ||
             row.storage_type !== "resolved" ||
             !row.canonical_root ||
             !row.canonical_file,
@@ -237,6 +249,14 @@ const make = Effect.gen(function* () {
       )
         return yield* new ProviderThreadLifecycleError({ reason: "reference" });
 
+      // The planner's single routing identity does not enumerate every alias of the canonical file.
+      const nativeIds = [
+        ...new Set(
+          references.flatMap((row) =>
+            row.native_id !== null && row.native_id.trim() !== "" ? [row.native_id] : [],
+          ),
+        ),
+      ];
       const transfers = yield* sql`
         SELECT 1 FROM orchestration_v2_projection_context_transfers
         WHERE status = 'pending' AND (
@@ -244,11 +264,11 @@ const make = Effect.gen(function* () {
           OR json_extract(payload_json, '$.sourcePoint.threadId') IN ${sql.in(targetIds)}
           OR json_extract(payload_json, '$.basePoint.threadId') IN ${sql.in(targetIds)}
           OR (json_extract(payload_json, '$.sourcePoint.providerThreadRef.driver') = 'pi'
-            AND json_extract(payload_json, '$.sourcePoint.providerThreadRef.nativeId') = ${request.nativeId})
+            AND json_extract(payload_json, '$.sourcePoint.providerThreadRef.nativeId') IN ${sql.in(nativeIds)})
           OR (json_extract(payload_json, '$.basePoint.providerThreadRef.driver') = 'pi'
-            AND json_extract(payload_json, '$.basePoint.providerThreadRef.nativeId') = ${request.nativeId})
+            AND json_extract(payload_json, '$.basePoint.providerThreadRef.nativeId') IN ${sql.in(nativeIds)})
           OR (json_extract(payload_json, '$.resolution.providerThreadRef.driver') = 'pi'
-            AND json_extract(payload_json, '$.resolution.providerThreadRef.nativeId') = ${request.nativeId})
+            AND json_extract(payload_json, '$.resolution.providerThreadRef.nativeId') IN ${sql.in(nativeIds)})
         ) LIMIT 1
       `;
       if (transfers.length > 0)
