@@ -9,15 +9,22 @@ import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- Pure hashing gives canonical deletion groups stable outbox ids without filesystem access.
+import * as NodeCrypto from "node:crypto";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as EffectOutbox from "./EffectOutbox.ts";
 import * as NativeSessionBindings from "./NativeSessionBindings.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ThreadOwnership from "./ThreadOwnership.ts";
 import * as ThreadLifecycleResources from "./ThreadLifecycleResources.ts";
+import { lifecycleSourceForPath } from "./ThreadLifecycleGuard.ts";
 import { withPullRequestWatch } from "./pullRequestWatch.ts";
 
 type PendingOrchestrationEffectV2 = EffectOutbox.PendingOrchestrationEffectV2;
+const encodeIdentityKey = Schema.encodeSync(
+  Schema.fromJsonString(Schema.Array(Schema.NullOr(Schema.String))),
+);
 export type LifecycleThreadRecords = Pick<
   OrchestrationV2ThreadProjection,
   | "thread"
@@ -51,6 +58,7 @@ const lifecycleCancelledEffectTypes = [
   "provider-runtime.continue",
   "runtime-request.respond",
   "provider-thread.rollback",
+  "provider-thread.delete",
   "thread-title.generate",
 ] as const;
 
@@ -410,21 +418,120 @@ export const planThreadLifecycle = Effect.fn("ThreadLifecyclePlan.planThreadLife
         }
       }
     }
-    return {
-      events,
-      effects: effects.map((effect) => ({
-        ...effect,
-        request: {
-          ...effect.request,
-          lifecycle: {
-            commandId: input.command.commandId,
-            rootThreadId: input.operationRootThreadId,
-            revision: revisions.get(effect.threadId)!,
-          },
+    const markedEffects: Array<PendingOrchestrationEffectV2> = effects.map((effect) => ({
+      ...effect,
+      request: {
+        ...effect.request,
+        lifecycle: {
+          commandId: input.command.commandId,
+          rootThreadId: input.operationRootThreadId,
+          revision: revisions.get(effect.threadId)!,
         },
-      })),
-      cancelUnsettledEffectsByThread,
-    };
+      },
+    }));
+    if (input.command.type === "thread.delete") {
+      const memberIds = new Set(input.members.map((member) => member.thread.id));
+      const identities = [
+        ...input.bindings
+          .filter((binding) => memberIds.has(binding.threadId))
+          .map((binding) => ({ ...binding, priority: 0 })),
+        ...input.members.flatMap((member) =>
+          member.providerThreads
+            .filter((thread) => thread.appThreadId === member.thread.id)
+            .map((thread) => ({
+              threadId: member.thread.id,
+              providerThreadId: thread.id,
+              providerInstanceId: thread.providerInstanceId,
+              driver: thread.driver,
+              nativeId: thread.nativeThreadRef?.nativeId ?? null,
+              storage: thread.nativeStorage ?? {
+                type: "unresolved" as const,
+                reason: "legacy_missing_locator" as const,
+              },
+              priority: 1,
+            })),
+        ),
+      ]
+        .filter(
+          (identity) =>
+            identity.driver === "pi" &&
+            (identity.nativeId !== null ||
+              (identity.storage.type === "resolved" &&
+                identity.storage.canonicalFile !== undefined)),
+        )
+        .map((identity) => ({
+          identity,
+          sortKey: encodeIdentityKey([
+            String(identity.priority),
+            identity.providerInstanceId,
+            identity.storage.type === "resolved" ? identity.storage.canonicalRoot : null,
+            identity.storage.type === "resolved"
+              ? (identity.storage.canonicalFile ?? null)
+              : identity.storage.reason,
+            identity.providerThreadId,
+            identity.nativeId,
+            identity.threadId,
+          ]),
+        }))
+        .sort((left, right) =>
+          left.sortKey < right.sortKey ? -1 : left.sortKey > right.sortKey ? 1 : 0,
+        );
+      const groups = new Map<
+        string,
+        {
+          readonly identity: (typeof identities)[number]["identity"];
+          readonly threadIds: Set<ThreadId>;
+        }
+      >();
+      for (const { identity } of identities) {
+        // A canonical file can be shared across saved instances; the executor validates all references.
+        const key = encodeIdentityKey(
+          identity.storage.type === "resolved" && identity.storage.canonicalFile !== undefined
+            ? ["file", identity.storage.canonicalFile]
+            : [
+                "identity",
+                identity.providerInstanceId,
+                identity.providerThreadId,
+                identity.nativeId,
+                identity.storage.type,
+                identity.storage.type === "resolved" ? identity.storage.canonicalRoot : null,
+                identity.storage.type === "unresolved" ? identity.storage.reason : null,
+              ],
+        );
+        const group = groups.get(key);
+        if (group === undefined)
+          groups.set(key, { identity, threadIds: new Set([identity.threadId]) });
+        else group.threadIds.add(identity.threadId);
+      }
+      const rootRevision = revisions.get(input.operationRootThreadId)!;
+      const lifecycle = {
+        commandId: input.command.commandId,
+        rootThreadId: input.operationRootThreadId,
+        revision: rootRevision,
+        sourceToken: lifecycleSourceForPath([
+          { id: input.operationRootThreadId, lifecycleRevision: rootRevision },
+        ]).sourceToken,
+      };
+      for (const [key, group] of groups) {
+        const identity = group.identity;
+        markedEffects.push({
+          id: `effect:${input.command.commandId}:${input.operationRootThreadId}:provider-thread.delete:${NodeCrypto.createHash("sha256").update(key).digest("hex")}`,
+          commandId: input.command.commandId,
+          threadId: input.operationRootThreadId,
+          request: {
+            type: "provider-thread.delete",
+            driver: "pi",
+            providerInstanceId: identity.providerInstanceId,
+            providerThreadId: identity.providerThreadId,
+            threadIds: [...group.threadIds].sort(),
+            nativeId: identity.nativeId,
+            nativeStorage: identity.storage,
+            lifecycle,
+          },
+        });
+      }
+    }
+    return { events, effects: markedEffects, cancelUnsettledEffectsByThread };
   },
 );
 
@@ -481,21 +588,29 @@ const make = Effect.gen(function* () {
                 turnItems: [],
               })),
             )
-          : store.getThreadRecords(
-              member.id,
-              [
-                "runs",
-                "attempts",
-                "nodes",
-                "runtimeRequests",
-                "subagents",
-                "providerSessions",
+          : Effect.gen(function* () {
+              const records = yield* store.getThreadRecords(
+                member.id,
+                [
+                  "runs",
+                  "attempts",
+                  "nodes",
+                  "runtimeRequests",
+                  "subagents",
+                  "providerSessions",
+                  "providerThreads",
+                  "providerTurns",
+                  "turnItems",
+                ],
+                { lifecycleOnly: true },
+              );
+              if (command.type !== "thread.delete") return records;
+              // The live-work slice omits closed legacy Pi identities that have no saved binding yet.
+              const { providerThreads } = yield* store.getThreadRecords(member.id, [
                 "providerThreads",
-                "providerTurns",
-                "turnItems",
-              ],
-              { lifecycleOnly: true },
-            ),
+              ]);
+              return { ...records, providerThreads };
+            }),
     );
     const attachmentIdsByThread = new Map<ThreadId, ReadonlyArray<string>>();
     if (command.type === "thread.delete") {
@@ -522,7 +637,9 @@ const make = Effect.gen(function* () {
       idAllocator,
     });
     if (command.type === "thread.unarchive") return planned;
-    const effects = [...planned.effects];
+    const effects = planned.effects.filter(
+      (effect) => effect.request.type !== "provider-thread.delete",
+    );
     const events = [...planned.events];
     for (const member of members) {
       const threadId = member.thread.id;
@@ -594,7 +711,14 @@ const make = Effect.gen(function* () {
           });
       }
     }
-    return { ...planned, events, effects };
+    return {
+      ...planned,
+      events,
+      effects: [
+        ...effects,
+        ...planned.effects.filter((effect) => effect.request.type === "provider-thread.delete"),
+      ],
+    };
   });
   return ThreadLifecyclePlanner.of({ plan });
 });

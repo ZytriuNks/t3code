@@ -3,7 +3,9 @@ import {
   CommandId,
   EventId,
   MessageId,
+  type NativeSessionBinding,
   NodeId,
+  type OrchestrationV2ProviderThread,
   type OrchestrationV2Run,
   type OrchestrationV2ThreadProjection,
   ProjectId,
@@ -18,11 +20,20 @@ import {
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as SqlClient from "effect/sql/SqlClient";
 
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as EffectOutbox from "./EffectOutbox.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import * as ProjectionStore from "./ProjectionStore.ts";
 import { applyToProjection, emptyProjection } from "./ProjectionStore.ts";
-import { planThreadLifecycle } from "./ThreadLifecyclePlan.ts";
+import * as ThreadLifecyclePlan from "./ThreadLifecyclePlan.ts";
+import * as ThreadOwnership from "./ThreadOwnership.ts";
+
+const planThreadLifecycle = ThreadLifecyclePlan.planThreadLifecycle;
 
 const threadId = ThreadId.make("thread:delete-plan");
 const providerInstanceId = ProviderInstanceId.make("codex");
@@ -133,6 +144,488 @@ function makeProjection(): OrchestrationV2ThreadProjection {
     })),
   };
 }
+
+const piInstanceId = ProviderInstanceId.make("pi-saved");
+const piStorage = {
+  type: "resolved",
+  canonicalRoot: "/isolated-pi/sessions",
+  canonicalFile: "/isolated-pi/sessions/session.jsonl",
+} as const;
+
+function makePiThread(
+  overrides: Partial<OrchestrationV2ProviderThread> = {},
+): OrchestrationV2ProviderThread {
+  return {
+    id: ProviderThreadId.make("pi-provider-thread"),
+    driver: ProviderDriverKind.make("pi"),
+    providerInstanceId: piInstanceId,
+    providerSessionId: null,
+    appThreadId: threadId,
+    ownerNodeId: null,
+    nativeThreadRef: {
+      driver: ProviderDriverKind.make("pi"),
+      nativeId: "pi-native-session",
+      strength: "strong",
+    },
+    nativeStorage: piStorage,
+    nativeConversationHeadRef: null,
+    status: "closed",
+    firstRunOrdinal: null,
+    lastRunOrdinal: null,
+    handoffIds: [],
+    forkedFrom: null,
+    createdAt,
+    updatedAt: createdAt,
+    ...overrides,
+  };
+}
+
+function makeBinding(overrides: Partial<NativeSessionBinding> = {}): NativeSessionBinding {
+  return {
+    threadId,
+    providerThreadId: ProviderThreadId.make("pi-historical-thread"),
+    providerInstanceId: piInstanceId,
+    driver: ProviderDriverKind.make("pi"),
+    nativeId: "pi-historical-session",
+    storage: piStorage,
+    boundAt: DateTime.formatIso(createdAt),
+    ...overrides,
+  };
+}
+
+it.effect("plans a root-scoped Pi deletion from saved identity after switching models", () =>
+  Effect.gen(function* () {
+    const member = makeProjection();
+    const piThread = makePiThread();
+    const plan = yield* planThreadLifecycle({
+      command,
+      operationRootThreadId: threadId,
+      members: [{ ...member, providerThreads: [piThread] }],
+      bindings: [],
+      attachmentIdsByThread: new Map(),
+      now: deletedAt,
+      idAllocator: yield* IdAllocator.IdAllocatorV2,
+    });
+    const deletes = plan.effects.filter(
+      (effect) => effect.request.type === "provider-thread.delete",
+    );
+    assert.lengthOf(deletes, 1);
+    assert.equal(deletes[0]!.threadId, threadId);
+    assert.equal(deletes[0]!.commandId, command.commandId);
+    assert.include(deletes[0]!.id, `${command.commandId}:${threadId}:provider-thread.delete:`);
+    assert.deepEqual(deletes[0]!.request, {
+      type: "provider-thread.delete",
+      driver: "pi",
+      providerInstanceId: piInstanceId,
+      providerThreadId: piThread.id,
+      threadIds: [threadId],
+      nativeId: "pi-native-session",
+      nativeStorage: piStorage,
+      lifecycle: {
+        commandId: command.commandId,
+        rootThreadId: threadId,
+        revision: 1,
+        sourceToken: "c987e085db672112c54ad2f29b90eace007b7b83c720888fda3225ab8811104e",
+      },
+    });
+    assert.equal(plan.effects.at(-1)?.request.type, "provider-thread.delete");
+  }).pipe(Effect.provide(IdAllocator.layer)),
+);
+
+it.effect.each(["archive", "unarchive"] as const)(
+  "%s never plans native Pi deletion",
+  (operation) =>
+    Effect.gen(function* () {
+      const member = makeProjection();
+      const piThread = makePiThread();
+      const plan = yield* planThreadLifecycle({
+        command: { ...command, type: `thread.${operation}` },
+        operationRootThreadId: threadId,
+        members: [
+          {
+            ...member,
+            thread: { ...member.thread, archivedAt: operation === "unarchive" ? createdAt : null },
+            providerThreads: [piThread],
+          },
+        ],
+        bindings: [makeBinding()],
+        attachmentIdsByThread: new Map(),
+        now: deletedAt,
+        idAllocator: yield* IdAllocator.IdAllocatorV2,
+      });
+      assert.deepEqual(
+        plan.effects.map((effect) => effect.request.type),
+        operation === "archive"
+          ? ["scheduled-tasks.suspend", "terminal.cleanup", "preview.cleanup"]
+          : [],
+      );
+      assert.isFalse(plan.events.some((event) => event.type === "provider-thread.updated"));
+      assert.deepEqual(piThread.nativeStorage, piStorage);
+    }).pipe(Effect.provide(IdAllocator.layer)),
+);
+
+it.effect.each(["codex", "claude"])("does not delete native %s threads", (driverKind) =>
+  Effect.gen(function* () {
+    const member = makeProjection();
+    const plan = yield* planThreadLifecycle({
+      command,
+      operationRootThreadId: threadId,
+      members: [
+        {
+          ...member,
+          providerThreads: [makePiThread({ driver: ProviderDriverKind.make(driverKind) })],
+        },
+      ],
+      bindings: [makeBinding({ driver: ProviderDriverKind.make(driverKind) })],
+      attachmentIdsByThread: new Map(),
+      now: deletedAt,
+      idAllocator: yield* IdAllocator.IdAllocatorV2,
+    });
+    assert.isFalse(plan.effects.some((effect) => effect.request.type === "provider-thread.delete"));
+  }).pipe(Effect.provide(IdAllocator.layer)),
+);
+
+it.effect.each([piInstanceId, ProviderInstanceId.make("pi-other-instance")])(
+  "deduplicates one canonical file across members and saved instance %s",
+  (secondInstanceId) =>
+    Effect.gen(function* () {
+      const childId = ThreadId.make("pi-child");
+      const base = makeProjection();
+      const members = [
+        {
+          ...base,
+          thread: { ...base.thread, lifecycleRevision: 4 },
+          providerThreads: [makePiThread()],
+        },
+        {
+          ...base,
+          thread: {
+            ...base.thread,
+            id: childId,
+            lifecycleRevision: 10,
+            lineage: {
+              parentThreadId: threadId,
+              relationshipToParent: "subagent" as const,
+              rootThreadId: threadId,
+            },
+          },
+          providerThreads: [
+            makePiThread({
+              id: ProviderThreadId.make("pi-child-provider-thread"),
+              appThreadId: childId,
+              providerInstanceId: secondInstanceId,
+            }),
+          ],
+        },
+      ];
+      const bindings = members.map((member) =>
+        makeBinding({
+          threadId: member.thread.id,
+          providerThreadId: member.providerThreads[0]!.id,
+          providerInstanceId: member.providerThreads[0]!.providerInstanceId,
+          nativeId: "pi-native-session",
+        }),
+      );
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const input = {
+        command,
+        operationRootThreadId: threadId,
+        members,
+        bindings,
+        attachmentIdsByThread: new Map(),
+        now: deletedAt,
+        idAllocator,
+      };
+      const plan = yield* planThreadLifecycle(input);
+      const reordered = yield* planThreadLifecycle({
+        ...input,
+        members: members.toReversed(),
+        bindings: bindings.toReversed(),
+      });
+      const deletes = plan.effects.filter(
+        (effect) => effect.request.type === "provider-thread.delete",
+      );
+      assert.lengthOf(deletes, 1);
+      assert.deepEqual(
+        deletes,
+        reordered.effects.filter((effect) => effect.request.type === "provider-thread.delete"),
+      );
+      const effect = deletes[0]!;
+      assert.equal(effect.threadId, threadId);
+      if (effect.request.type !== "provider-thread.delete")
+        return assert.fail("Missing Pi deletion");
+      assert.sameMembers([...effect.request.threadIds], [threadId, childId]);
+      assert.equal(effect.request.lifecycle.revision, 5);
+      assert.equal(
+        effect.request.lifecycle.sourceToken,
+        "2827917a4728c056bdbe8edf4957c8459b323fa9de5ea78e88d26170ae06d5b8",
+      );
+      assert.equal(new Set(plan.effects.map((item) => item.id)).size, plan.effects.length);
+    }).pipe(Effect.provide(IdAllocator.layer)),
+);
+
+it.effect("prefers saved binding provenance over a changed provider thread instance", () =>
+  Effect.gen(function* () {
+    const binding = makeBinding({ providerThreadId: ProviderThreadId.make("pi-provider-thread") });
+    const plan = yield* planThreadLifecycle({
+      command,
+      operationRootThreadId: threadId,
+      members: [
+        {
+          ...makeProjection(),
+          providerThreads: [
+            makePiThread({ providerInstanceId: ProviderInstanceId.make("pi-changed-instance") }),
+          ],
+        },
+      ],
+      bindings: [binding],
+      attachmentIdsByThread: new Map(),
+      now: deletedAt,
+      idAllocator: yield* IdAllocator.IdAllocatorV2,
+    });
+    const deletes = plan.effects.filter(
+      (effect) => effect.request.type === "provider-thread.delete",
+    );
+    assert.lengthOf(deletes, 1);
+    assert.deepPropertyVal(deletes[0]!.request, "providerInstanceId", piInstanceId);
+    assert.deepPropertyVal(deletes[0]!.request, "nativeId", binding.nativeId);
+  }).pipe(Effect.provide(IdAllocator.layer)),
+);
+
+it.effect("plans historical native bindings even without provider thread projections", () =>
+  Effect.gen(function* () {
+    const first = makeBinding();
+    const second = makeBinding({
+      storage: { ...piStorage, canonicalFile: "/isolated-pi/sessions/second.jsonl" },
+    });
+    const plan = yield* planThreadLifecycle({
+      command,
+      operationRootThreadId: threadId,
+      members: [makeProjection()],
+      bindings: [first, first, second, makeBinding({ threadId: ThreadId.make("foreign") })],
+      attachmentIdsByThread: new Map(),
+      now: deletedAt,
+      idAllocator: yield* IdAllocator.IdAllocatorV2,
+    });
+    const deletes = plan.effects.filter(
+      (effect) => effect.request.type === "provider-thread.delete",
+    );
+    assert.lengthOf(deletes, 2);
+    assert.equal(new Set(deletes.map((effect) => effect.id)).size, 2);
+    assert.sameDeepMembers(
+      deletes.map((effect) => {
+        if (effect.request.type !== "provider-thread.delete")
+          return assert.fail("Missing Pi deletion");
+        assert.equal(effect.request.providerInstanceId, piInstanceId);
+        assert.equal(effect.request.providerThreadId, first.providerThreadId);
+        assert.deepEqual(effect.request.threadIds, [threadId]);
+        return effect.request.nativeStorage;
+      }),
+      [first.storage, second.storage],
+    );
+  }).pipe(Effect.provide(IdAllocator.layer)),
+);
+
+it.effect.each([
+  { type: "unresolved", reason: "unavailable" },
+  { type: "unresolved", reason: "legacy_missing_locator" },
+  undefined,
+] as const)("preserves unresolved Pi identity as a blocked deletion intent (%j)", (storage) =>
+  Effect.gen(function* () {
+    const plan = yield* planThreadLifecycle({
+      command,
+      operationRootThreadId: threadId,
+      members: [
+        { ...makeProjection(), providerThreads: [makePiThread({ nativeStorage: storage })] },
+      ],
+      bindings: [],
+      attachmentIdsByThread: new Map(),
+      now: deletedAt,
+      idAllocator: yield* IdAllocator.IdAllocatorV2,
+    });
+    const deletes = plan.effects.filter(
+      (effect) => effect.request.type === "provider-thread.delete",
+    );
+    assert.lengthOf(deletes, 1);
+    assert.deepPropertyVal(deletes[0]!.request, "nativeId", "pi-native-session");
+    assert.deepPropertyVal(
+      deletes[0]!.request,
+      "nativeStorage",
+      storage ?? { type: "unresolved", reason: "legacy_missing_locator" },
+    );
+  }).pipe(Effect.provide(IdAllocator.layer)),
+);
+
+it.effect.each([
+  null,
+  { driver: ProviderDriverKind.make("pi"), nativeId: null, strength: "strong" as const },
+])("does not plan deletion without any native identity (%j)", (nativeThreadRef) =>
+  Effect.gen(function* () {
+    const plan = yield* planThreadLifecycle({
+      command,
+      operationRootThreadId: threadId,
+      members: [
+        {
+          ...makeProjection(),
+          providerThreads: [
+            makePiThread({
+              nativeThreadRef,
+              nativeStorage: { type: "unresolved", reason: "legacy_missing_locator" },
+            }),
+          ],
+        },
+      ],
+      bindings: [
+        makeBinding({
+          nativeId: null,
+          storage: { type: "unresolved", reason: "legacy_missing_locator" },
+        }),
+      ],
+      attachmentIdsByThread: new Map(),
+      now: deletedAt,
+      idAllocator: yield* IdAllocator.IdAllocatorV2,
+    });
+    assert.isFalse(plan.effects.some((effect) => effect.request.type === "provider-thread.delete"));
+  }).pipe(Effect.provide(IdAllocator.layer)),
+);
+
+it.effect("retains canonical-file identity when Pi has no native session id", () =>
+  Effect.gen(function* () {
+    const plan = yield* planThreadLifecycle({
+      command,
+      operationRootThreadId: threadId,
+      members: [
+        { ...makeProjection(), providerThreads: [makePiThread({ nativeThreadRef: null })] },
+      ],
+      bindings: [],
+      attachmentIdsByThread: new Map(),
+      now: deletedAt,
+      idAllocator: yield* IdAllocator.IdAllocatorV2,
+    });
+    const deletes = plan.effects.filter(
+      (effect) => effect.request.type === "provider-thread.delete",
+    );
+    assert.lengthOf(deletes, 1);
+    assert.deepPropertyVal(deletes[0]!.request, "nativeId", null);
+    assert.deepPropertyVal(deletes[0]!.request, "nativeStorage", piStorage);
+  }).pipe(Effect.provide(IdAllocator.layer)),
+);
+
+it.effect("ignores provider threads borrowed from outside the operation", () =>
+  Effect.gen(function* () {
+    const plan = yield* planThreadLifecycle({
+      command,
+      operationRootThreadId: threadId,
+      members: [
+        {
+          ...makeProjection(),
+          providerThreads: [
+            makePiThread({ appThreadId: null }),
+            makePiThread({ appThreadId: ThreadId.make("foreign") }),
+          ],
+        },
+      ],
+      bindings: [makeBinding({ threadId: ThreadId.make("foreign") })],
+      attachmentIdsByThread: new Map(),
+      now: deletedAt,
+      idAllocator: yield* IdAllocator.IdAllocatorV2,
+    });
+    assert.isFalse(plan.effects.some((effect) => effect.request.type === "provider-thread.delete"));
+  }).pipe(Effect.provide(IdAllocator.layer)),
+);
+
+it.effect.each([
+  ["memory", ProjectionStore.layerMemory],
+  ["sql", ProjectionStore.layer],
+] as const)(
+  "keeps closed legacy Pi identity and retires sessions before deletion (%s)",
+  ([, storeLayer]) =>
+    Effect.gen(function* () {
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const member = makeProjection();
+      yield* store.apply({
+        id: EventId.make("pi-service-created"),
+        type: "thread.created",
+        threadId,
+        occurredAt: createdAt,
+        payload: member.thread,
+      });
+      yield* store.apply({
+        id: EventId.make("pi-service-provider-thread"),
+        type: "provider-thread.updated",
+        threadId,
+        occurredAt: createdAt,
+        payload: makePiThread({
+          providerSessionId: ProviderSessionId.make("pi-historical-session"),
+        }),
+      });
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`DELETE FROM orchestration_v2_native_session_bindings`;
+      const planner = yield* ThreadLifecyclePlan.ThreadLifecyclePlanner;
+      const plan = yield* planner.plan(command);
+      assert.deepEqual(
+        plan.effects.map((effect) => effect.request.type),
+        [
+          "scheduled-tasks.cleanup",
+          "terminal.cleanup",
+          "preview.cleanup",
+          "provider-session.detach",
+          "provider-thread.delete",
+        ],
+      );
+      const deletion = plan.effects.at(-1)!;
+      assert.equal(deletion.threadId, threadId);
+      assert.deepPropertyVal(deletion.request, "threadIds", [threadId]);
+      assert.nestedPropertyVal(deletion.request, "lifecycle.revision", 1);
+    }).pipe(
+      Effect.provide(
+        ThreadLifecyclePlan.layer.pipe(
+          Layer.provideMerge(ThreadOwnership.layer),
+          Layer.provideMerge(Layer.mergeAll(storeLayer, IdAllocator.layer, EffectOutbox.layer)),
+          Layer.provideMerge(SqlitePersistence.layerMemory),
+        ),
+      ),
+    ),
+);
+
+it.effect("a newer lifecycle plan cancels pending native Pi deletion at the root", () =>
+  Effect.gen(function* () {
+    const member = { ...makeProjection(), providerThreads: [makePiThread()] };
+    const idAllocator = yield* IdAllocator.IdAllocatorV2;
+    const input = {
+      command,
+      operationRootThreadId: threadId,
+      members: [member],
+      bindings: [],
+      attachmentIdsByThread: new Map(),
+      now: deletedAt,
+      idAllocator,
+    };
+    const original = yield* planThreadLifecycle(input);
+    const deletion = original.effects.find(
+      (effect) => effect.request.type === "provider-thread.delete",
+    );
+    assert.isDefined(deletion);
+    const outbox = yield* EffectOutbox.EffectOutboxV2;
+    yield* outbox.enqueue([deletion!]);
+    const newer = yield* planThreadLifecycle({
+      ...input,
+      command: { ...command, commandId: CommandId.make("newer-archive"), type: "thread.archive" },
+    });
+    const cancelled = yield* Effect.forEach(newer.cancelUnsettledEffectsByThread, (cancellation) =>
+      outbox.cancelUnsettled(cancellation),
+    );
+    assert.deepEqual(cancelled.flat(), [deletion!.id]);
+    assert.equal(Option.getOrThrow(yield* outbox.get(deletion!.id)).status, "cancelled");
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        IdAllocator.layer,
+        EffectOutbox.layer.pipe(Layer.provide(SqlitePersistence.layerMemory)),
+      ),
+    ),
+  ),
+);
 
 it.effect(
   "lifecycle archive suspends schedules and marks each cleanup without duplicating effects",
@@ -268,6 +761,7 @@ it.effect.each(["delete", "archive", "unarchive"] as const)(
                 "provider-runtime.continue",
                 "runtime-request.respond",
                 "provider-thread.rollback",
+                "provider-thread.delete",
                 "thread-title.generate",
               ] as const,
           ),
