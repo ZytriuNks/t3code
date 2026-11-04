@@ -5709,6 +5709,76 @@ it.effect.each(["failed", "succeeded", "unsupported", "legacy-failed"] as const)
     }),
 );
 
+it.effect("detach retires the native thread before a last provider session stops", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    yield* Effect.gen(function* () {
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const sink = yield* EventSink.EventSinkV2;
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("task6:detach-live");
+      const providerSessionId = ProviderSessionId.make("task6:detach-live-session");
+      const lifecycleGuard = yield* ThreadLifecycleGuard.ThreadLifecycleGuard;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      yield* sink.write({
+        events: [yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now })],
+      });
+      const runtime = yield* manager.open({
+        threadId,
+        providerSessionId,
+        modelSelection,
+        runtimePolicy,
+      });
+      yield* sink.write({
+        events: [
+          {
+            id: yield* ids.allocate.event({ threadId }),
+            type: "provider-thread.updated",
+            threadId,
+            occurredAt: now,
+            payload: makeProviderThread({ idAllocator: ids, threadId, providerSessionId, now }),
+          },
+        ],
+      });
+      yield* runtime.resumeThread({
+        threadId,
+        providerThread: makeProviderThread({ idAllocator: ids, threadId, providerSessionId, now }),
+      });
+      assert.lengthOf(
+        (yield* projections.getThreadRecords(threadId, ["providerThreads"])).providerThreads,
+        1,
+      );
+
+      assert.isTrue(yield* manager.isLive(providerSessionId));
+      const source = yield* lifecycleGuard.resolveLifecycleSource(threadId);
+      yield* manager.detach({
+        threadId,
+        providerSessionId,
+        lifecycle: {
+          commandId: CommandId.make("task6:detach-live"),
+          rootThreadId: threadId,
+          revision: 1,
+        },
+        retirementRevision: source.lifecycleRevision,
+        retirementSourceToken: source.sourceToken,
+      });
+
+      assert.deepEqual((yield* Ref.get(state)).unloadedNativeThreadIds, ["native-thread"]);
+      assert.equal((yield* Ref.get(state)).closeCount, 1);
+      assert.isFalse(yield* manager.isLive(providerSessionId));
+    }).pipe(
+      Effect.provide(
+        layerTest({
+          state,
+          idleTimeoutMs: 60000,
+          capabilities: ExclusiveCapabilities,
+        }),
+      ),
+    );
+  }),
+);
+
 it.effect("lifecycle deletes a thread during startup and closes only that exact new session", () =>
   Effect.gen(function* () {
     const state = yield* Ref.make(emptyState);

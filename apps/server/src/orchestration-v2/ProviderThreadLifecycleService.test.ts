@@ -10,6 +10,7 @@ import {
   ThreadId,
   type NativeSessionBinding,
   type NativeSessionStorage,
+  type OrchestrationV2AppThread,
   type OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
@@ -115,6 +116,10 @@ function shell(revision = 1): OrchestrationV2ThreadShell {
   };
 }
 
+function appThread(revision = 1): OrchestrationV2AppThread {
+  return { ...shell(revision), lastVisitedAt: null };
+}
+
 const seedThread = Effect.fn("test.seedDeletedPiThread")(function* (
   id: ThreadId = root,
   parent: ThreadId | null = null,
@@ -209,7 +214,7 @@ function testLayer(
   > = [];
   const dependencies = Layer.mergeAll(
     Layer.mock(ProjectionStore.ProjectionStoreV2)({
-      getThreadShell: () => Effect.succeed(shell(input.revision)),
+      getThread: () => Effect.succeed(appThread(input.revision)),
     }),
     Layer.mock(ThreadLifecycleGuard.ThreadLifecycleGuard)({
       check: (request) =>

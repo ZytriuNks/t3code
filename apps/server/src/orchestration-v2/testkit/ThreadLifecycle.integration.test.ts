@@ -15,7 +15,9 @@ import {
   ThreadId,
   TurnItemId,
   type OrchestrationV2DomainEvent,
+  type NativeSessionStorage,
   type OrchestrationV2ProviderThread,
+  type OrchestrationV2ProviderSession,
 } from "@t3tools/contracts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
@@ -32,6 +34,8 @@ import * as TestClock from "effect/testing/TestClock";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 import * as Queue from "effect/Queue";
+import * as Ref from "effect/Ref";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import * as CheckpointStore from "../../checkpointing/CheckpointStore.ts";
 import * as ServerConfig from "../../config.ts";
@@ -106,7 +110,7 @@ const nativeThread = (
 });
 
 // External services are fakes; commands, ownership, commits, recovery and worker are real.
-const makeProvider = () => {
+const makeProvider = (additionalInstances: ReadonlyArray<ProviderInstance> = []) => {
   const closed: Array<ProviderSessionId> = [];
   const unloaded: Array<ThreadId> = [];
   const resumed: Array<ThreadId> = [];
@@ -212,15 +216,18 @@ const makeProvider = () => {
     orchestrationAdapter: adapter,
     textGeneration: {} as ProviderInstance["textGeneration"],
   };
+  const instances = [instance, ...additionalInstances];
   return {
     closed,
     unloaded,
     resumed,
     forked,
     started,
+    instance,
     registry: Layer.succeed(ProviderInstanceRegistry.ProviderInstanceRegistry, {
-      getInstance: (id) => Effect.succeed(id === instanceId ? instance : undefined),
-      listInstances: Effect.succeed([instance]),
+      getInstance: (id) =>
+        Effect.succeed(instances.find((candidate) => candidate.instanceId === id)),
+      listInstances: Effect.succeed(instances),
       listUnavailable: Effect.succeed([]),
       streamChanges: Stream.empty,
       subscribeChanges: Effect.never,
@@ -228,8 +235,131 @@ const makeProvider = () => {
   };
 };
 
-const makeRuntime = (
-  database: ReturnType<typeof SqlitePersistence.layerFromPath>,
+const makePiProviderInstance = (input: {
+  readonly base: ProviderInstance;
+  readonly nativeStorage: NativeSessionStorage;
+  readonly removeNativeFile: (filePath: string) => Effect.Effect<void>;
+  readonly pauseDetach: Ref.Ref<boolean>;
+  readonly detachEntered: Deferred.Deferred<void>;
+  readonly detachRelease: Deferred.Deferred<void>;
+  readonly resumed: Array<ThreadId>;
+  readonly deleted: Array<ProviderThreadId>;
+  readonly unloaded: Array<ProviderThreadId>;
+}) => {
+  const piInstanceId = ProviderInstanceId.make("task8-pi");
+  const piDriver = ProviderDriverKind.make("pi");
+  const capabilities = {
+    ...CodexProviderCapabilitiesV2,
+    sessions: {
+      ...CodexProviderCapabilitiesV2.sessions,
+      supportsMultipleProviderThreadsPerSession: false,
+    },
+  };
+  const makeNativeThread = (
+    threadId: ThreadId,
+    providerSessionId: ProviderSessionId,
+  ): OrchestrationV2ProviderThread => ({
+    id: ProviderThreadId.make("task8:pi-native-thread"),
+    driver: piDriver,
+    providerInstanceId: piInstanceId,
+    providerSessionId,
+    appThreadId: threadId,
+    ownerNodeId: null,
+    nativeThreadRef: { driver: piDriver, nativeId: "task8:pi-native-session", strength: "strong" },
+    nativeStorage: input.nativeStorage,
+    nativeConversationHeadRef: null,
+    status: "idle",
+    firstRunOrdinal: null,
+    lastRunOrdinal: null,
+    handoffIds: [],
+    forkedFrom: null,
+    createdAt: now,
+    updatedAt: now,
+  });
+  const adapter: ProviderAdapter.ProviderAdapterV2["Service"] = {
+    ...input.base.orchestrationAdapter,
+    instanceId: piInstanceId,
+    driver: piDriver,
+    getCapabilities: () => Effect.succeed(capabilities),
+    openSession: (sessionInput) =>
+      Effect.gen(function* () {
+        const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
+        const openedAt = yield* DateTime.now;
+        const providerSession: OrchestrationV2ProviderSession = {
+          id: sessionInput.providerSessionId,
+          driver: piDriver,
+          providerInstanceId: piInstanceId,
+          status: "ready",
+          cwd: process.cwd(),
+          model: sessionInput.modelSelection.model,
+          capabilities,
+          createdAt: openedAt,
+          updatedAt: openedAt,
+          lastError: null,
+        };
+        return {
+          instanceId: piInstanceId,
+          driver: piDriver,
+          providerSessionId: sessionInput.providerSessionId,
+          providerSession,
+          events: Stream.fromQueue(events),
+          supportsConfirmedThreadRetirement: true,
+          backgroundTasksEndWithProcess: true,
+          ensureThread: (request) =>
+            Effect.succeed(makeNativeThread(request.threadId, sessionInput.providerSessionId)),
+          resumeThread: (request) => {
+            if (
+              input.nativeStorage.type !== "resolved" ||
+              input.nativeStorage.canonicalFile === undefined
+            )
+              return Effect.die("Pi fixture session file was not available to resume.");
+            return Effect.sync(() => {
+              if (request.providerThread.appThreadId !== null)
+                input.resumed.push(request.providerThread.appThreadId);
+              return request.providerThread;
+            });
+          },
+          startTurn: () => Effect.void,
+          steerTurn: () => Effect.void,
+          interruptTurn: () => Effect.void,
+          unloadThread: ({ providerThread }) =>
+            Effect.gen(function* () {
+              input.unloaded.push(providerThread.id);
+              if (yield* Ref.get(input.pauseDetach)) {
+                yield* Deferred.succeed(input.detachEntered, undefined);
+                yield* Deferred.await(input.detachRelease);
+              }
+            }),
+          respondToRuntimeRequest: () => Effect.void,
+          readThreadSnapshot: () => Effect.die("unused Pi fixture snapshot"),
+          rollbackThread: () => Effect.die("unused Pi fixture rollback"),
+          forkThread: () => Effect.die("unused Pi fixture fork"),
+        };
+      }),
+    deleteNativeThread: ({ providerThread }) =>
+      Effect.gen(function* () {
+        input.deleted.push(providerThread.id);
+        const providerStorage = providerThread.nativeStorage;
+        if (providerStorage?.type !== "resolved" || providerStorage.canonicalFile === undefined)
+          return yield* Effect.die("Pi fixture deletion received no canonical file.");
+        yield* input.removeNativeFile(providerStorage.canonicalFile);
+      }),
+  };
+  return {
+    instance: {
+      ...input.base,
+      instanceId: piInstanceId,
+      driverKind: piDriver,
+      continuationIdentity: { driverKind: piDriver, continuationKey: "task8:fake-pi" },
+      displayName: "Task8 fake Pi provider",
+      orchestrationAdapter: adapter,
+    } satisfies ProviderInstance,
+    makeNativeThread,
+  };
+};
+
+const makeRuntime = <E, R>(
+  database: Layer.Layer<SqlClient.SqlClient, E, R>,
   provider: ReturnType<typeof makeProvider>,
 ) =>
   Layer.mergeAll(
@@ -263,7 +393,10 @@ const makeRuntime = (
     ),
   );
 
-const create = Effect.fn("task8.create")(function* (threadId: ThreadId) {
+const create = Effect.fn("task8.create")(function* (
+  threadId: ThreadId,
+  selectedModel = modelSelection,
+) {
   const orchestrator = yield* Orchestrator.OrchestratorV2;
   yield* orchestrator.dispatch({
     type: "thread.create",
@@ -271,7 +404,7 @@ const create = Effect.fn("task8.create")(function* (threadId: ThreadId) {
     threadId,
     projectId,
     title: threadId,
-    modelSelection,
+    modelSelection: selectedModel,
     runtimeMode: "full-access",
     interactionMode: "default",
     branch: null,
@@ -306,6 +439,275 @@ const dispatch = Effect.fn("task8.message")(function* (threadId: ThreadId, suffi
     creationSource: "web",
   });
 });
+
+it.effect(
+  "archives and resumes an isolated Pi session before delete drains detach and recovers its outbox effect",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(DateTime.toEpochMillis(now));
+        const config = yield* ServerConfig.ServerConfig;
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pi-lifecycle-" });
+        const sessionFile = path.join(root, "session.jsonl");
+        const siblingFile = path.join(root, "sibling.jsonl");
+        yield* fs.writeFileString(sessionFile, "isolated Pi transcript");
+        yield* fs.writeFileString(siblingFile, "keep this session");
+        const nativeStorage: NativeSessionStorage = {
+          type: "resolved",
+          canonicalRoot: yield* fs.realPath(root),
+          canonicalFile: yield* fs.realPath(sessionFile),
+        };
+        const threadId = ThreadId.make("task8:pi-thread");
+        const piInstanceId = ProviderInstanceId.make("task8-pi");
+        const piDriver = ProviderDriverKind.make("pi");
+        const piModelSelection = { instanceId: piInstanceId, model: "pi-fixture" };
+        const providerSessionId = ProviderSessionId.make("task8:pi-session");
+        const detachEntered = yield* Deferred.make<void>();
+        const detachRelease = yield* Deferred.make<void>();
+        const pauseDetach = yield* Ref.make(false);
+        const resumed: Array<ThreadId> = [];
+        const deleted: Array<ProviderThreadId> = [];
+        const unloaded: Array<ProviderThreadId> = [];
+        const baseProvider = makeProvider();
+        const pi = makePiProviderInstance({
+          base: baseProvider.instance,
+          nativeStorage,
+          removeNativeFile: (filePath) =>
+            fs.remove(filePath, { force: true }).pipe(Effect.asVoid, Effect.orDie),
+          pauseDetach,
+          detachEntered,
+          detachRelease,
+          resumed,
+          deleted,
+          unloaded,
+        });
+        const provider = makeProvider([pi.instance]);
+        const runtime = makeRuntime(SqlitePersistence.layerMemory, provider);
+
+        yield* Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const sink = yield* EventSink.EventSinkV2;
+          const store = yield* ProjectionStore.ProjectionStoreV2;
+          const outbox = yield* EffectOutbox.EffectOutboxV2;
+          const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+          const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
+          const records = yield* ThreadDeletionRecords.ThreadDeletionRecords;
+          const bindings = yield* NativeSessionBindings.NativeSessionBindings;
+          const sql = yield* SqlClient.SqlClient;
+          const projects = yield* ProjectStore.ProjectStoreV2;
+          yield* projects.apply({
+            sequence: 0,
+            eventId: EventId.make("task8:pi-project"),
+            aggregateKind: "project",
+            aggregateId: projectId,
+            occurredAt: DateTime.formatIso(now),
+            commandId: null,
+            causationEventId: null,
+            correlationId: null,
+            metadata: {},
+            type: "project.created",
+            payload: {
+              projectId,
+              title: "Pi lifecycle fixture",
+              workspaceRoot: config.cwd,
+              defaultModelSelection: null,
+              scripts: [],
+              createdAt: DateTime.formatIso(now),
+              updatedAt: DateTime.formatIso(now),
+            },
+          });
+          yield* create(threadId, piModelSelection);
+          const nativeThread = pi.makeNativeThread(threadId, providerSessionId);
+          const firstRuntime = yield* sessions.open({
+            threadId,
+            providerSessionId,
+            modelSelection: piModelSelection,
+            runtimePolicy,
+          });
+          yield* sink.write({
+            lifecycleGuard: yield* orchestrator.resolveLifecycleSource(threadId),
+            events: [
+              {
+                id: EventId.make("task8:pi-native-thread"),
+                type: "provider-thread.updated",
+                threadId,
+                occurredAt: now,
+                payload: nativeThread,
+              },
+            ],
+          });
+          yield* firstRuntime.resumeThread({ threadId, providerThread: nativeThread });
+          assert.deepEqual(resumed, [threadId]);
+
+          const archiveCommandId = CommandId.make("task8:pi-archive");
+          yield* orchestrator.dispatch({
+            type: "thread.archive",
+            commandId: archiveCommandId,
+            threadId,
+          });
+          const archiveEffects = yield* outbox.listByCommandId(archiveCommandId);
+          const archiveDetach = archiveEffects.find(
+            (effect) => effect.request.type === "provider-session.detach",
+          );
+          assert.isDefined(archiveDetach);
+          assert.isEmpty(
+            archiveEffects.filter((effect) => effect.request.type === "provider-thread.delete"),
+          );
+          assert.isTrue(yield* fs.exists(sessionFile));
+          assert.isAbove(yield* worker.drain(), 0);
+          const completedArchiveDetach = Option.getOrThrow(yield* outbox.get(archiveDetach!.id));
+          assert.equal(
+            completedArchiveDetach.status,
+            "succeeded",
+            completedArchiveDetach.lastError ?? undefined,
+          );
+          assert.deepEqual(unloaded, [nativeThread.id]);
+          assert.isFalse(yield* sessions.isLive(providerSessionId));
+          assert.isTrue(yield* fs.exists(sessionFile));
+
+          yield* orchestrator.dispatch({
+            type: "thread.unarchive",
+            commandId: CommandId.make("task8:pi-unarchive"),
+            threadId,
+          });
+          const resumedProviderSessionId = ProviderSessionId.make("task8:pi-session-resumed");
+          const resumedNativeThread = pi.makeNativeThread(threadId, resumedProviderSessionId);
+          const resumedLifecycleGuard = yield* orchestrator.resolveLifecycleSource(threadId);
+          const resumedRuntime = yield* sessions.open({
+            threadId,
+            providerSessionId: resumedProviderSessionId,
+            modelSelection: piModelSelection,
+            runtimePolicy,
+          });
+          yield* sink.write({
+            lifecycleGuard: resumedLifecycleGuard,
+            events: [
+              {
+                id: EventId.make("task8:pi-native-thread-resumed"),
+                type: "provider-thread.updated",
+                threadId,
+                occurredAt: now,
+                payload: resumedNativeThread,
+              },
+            ],
+          });
+          yield* resumedRuntime.resumeThread({ threadId, providerThread: resumedNativeThread });
+          assert.deepEqual(resumed, [threadId, threadId]);
+          assert.isFalse(yield* sessions.isLive(providerSessionId));
+          assert.isTrue(yield* sessions.isLive(resumedProviderSessionId));
+          assert.isTrue(yield* fs.exists(sessionFile));
+
+          yield* Ref.set(pauseDetach, true);
+          const deleteCommandId = CommandId.make("task8:pi-delete");
+          const deletedCommand = yield* orchestrator.dispatch({
+            type: "thread.delete",
+            commandId: deleteCommandId,
+            threadId,
+          });
+          assert.isTrue(
+            deletedCommand.storedEvents.some(
+              (row) => row.event.type === "thread.deleted" && row.event.threadId === threadId,
+            ),
+          );
+          const effects = yield* outbox.listByCommandId(deleteCommandId);
+          const detachIndex = effects.findIndex(
+            (effect) => effect.request.type === "provider-session.detach",
+          );
+          const deleteIndex = effects.findIndex(
+            (effect) => effect.request.type === "provider-thread.delete",
+          );
+          assert.isAtLeast(detachIndex, 0);
+          assert.isAtLeast(deleteIndex, 0);
+          assert.isBelow(detachIndex, deleteIndex);
+          const deleteEffect = effects[deleteIndex]!;
+          if (deleteEffect.request.type !== "provider-thread.delete")
+            return yield* Effect.die("The Pi deletion effect was not queued.");
+          assert.equal(deleteEffect.request.type, "provider-thread.delete");
+          const deletedLifecycleSource = yield* orchestrator.resolveLifecycleSource(threadId);
+          assert.equal(
+            deleteEffect.request.lifecycle.revision,
+            deletedLifecycleSource.lifecycleRevision,
+          );
+          assert.equal(
+            deleteEffect.request.lifecycle.sourceToken,
+            deletedLifecycleSource.sourceToken,
+          );
+
+          const draining = yield* worker.drain().pipe(Effect.forkScoped);
+          yield* Deferred.await(detachEntered);
+          assert.isTrue(yield* sessions.isLive(resumedProviderSessionId));
+          assert.isEmpty(deleted);
+          assert.isTrue(yield* fs.exists(sessionFile));
+          yield* Deferred.succeed(detachRelease, undefined);
+          assert.isAbove(yield* Fiber.join(draining), 0);
+
+          const completedDelete = Option.getOrThrow(yield* outbox.get(deleteEffect.id));
+          assert.equal(completedDelete.status, "succeeded", JSON.stringify(completedDelete));
+          assert.isFalse(yield* sessions.isLive(resumedProviderSessionId));
+          assert.deepEqual(deleted, [resumedNativeThread.id]);
+          assert.isFalse(yield* fs.exists(sessionFile));
+          assert.equal(yield* fs.readFileString(siblingFile), "keep this session");
+          const deletion = Option.getOrThrow(yield* records.get(threadId));
+          assert.equal(deletion.scope, "t3_only");
+          assert.lengthOf(deletion.sessions, 1);
+          assert.equal(deletion.sessions[0]?.driver, piDriver);
+          assert.equal(deletion.sessions[0]?.storage.type, "resolved");
+          assert.deepEqual(
+            yield* sql<{ readonly count: number }>`
+              SELECT COUNT(*) AS count FROM orchestration_v2_thread_deletion_sessions
+              WHERE thread_id = ${threadId}
+            `,
+            [{ count: 1 }],
+          );
+          assert.equal(
+            yield* bindings.checkImport({
+              driver: piDriver,
+              providerInstanceId: piInstanceId,
+              nativeId: "task8:pi-native-session",
+              storage: nativeStorage,
+            }),
+            "deleted",
+          );
+          assert.isNotNull((yield* store.getThread(threadId)).deletedAt);
+
+          yield* outbox.enqueue([
+            {
+              id: "task8:pi-delete-recovered",
+              commandId: deleteCommandId,
+              threadId,
+              request: deleteEffect.request,
+            },
+          ]);
+          const crashedClaim = yield* outbox.claimNext({
+            workerId: "task8:pi-worker-lost",
+            leaseDurationMs: 1000,
+          });
+          assert.isTrue(Option.isSome(crashedClaim));
+          if (Option.isSome(crashedClaim))
+            assert.equal(crashedClaim.value.request.type, "provider-thread.delete");
+          assert.deepEqual(yield* outbox.reconcileAfterProcessLoss, {
+            requeued: 1,
+            cancelled: 0,
+          });
+
+          const restartedCount = yield* worker.drain();
+          assert.equal(restartedCount, 1);
+          assert.deepEqual(deleted, [resumedNativeThread.id, resumedNativeThread.id]);
+          assert.isFalse(yield* fs.exists(sessionFile));
+          assert.equal(yield* fs.readFileString(siblingFile), "keep this session");
+          assert.isTrue(Option.isSome(yield* records.get(threadId)));
+        }).pipe(Effect.provide(Layer.fresh(runtime)));
+      }).pipe(
+        Effect.provide(
+          ServerConfig.layerTest(process.cwd(), { prefix: "task8-pi-lifecycle-" }).pipe(
+            Layer.provideMerge(NodeServices.layer),
+          ),
+        ),
+      ),
+    ),
+);
 
 it.effect(
   "replays archive, restore and delete of R/A/B through SQLite without reviving work or crossing forks",

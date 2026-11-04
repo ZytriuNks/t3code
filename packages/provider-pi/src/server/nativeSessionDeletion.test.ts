@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off - the symlink regression needs an explicit junction type on Windows.
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeFSP from "node:fs/promises";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import {
   ProviderDriverKind,
   ProviderInstanceId,
@@ -16,7 +17,6 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 import { expect, it } from "@effect/vitest";
-import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 
 import { deletePiNativeSessionFile } from "./nativeSessionDeletion.ts";
 import type { ProviderAdapterNativeThreadDeleteError } from "@t3tools/provider-core/server/ProviderAdapter";
@@ -204,12 +204,13 @@ it.effect("rejects unresolved storage and missing canonical file", () =>
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
-it.effect.skipIf(!symlinksSupported)(
+it.effect(
   "rejects a canonical parent redirected outside root without deleting the external file",
   () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
+      const hostPlatform = yield* HostProcess.Platform;
       const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pi-delete-" });
       const canonicalParent = path.join(root, "sessions");
       const savedParent = path.join(root, "sessions-saved");
@@ -223,11 +224,7 @@ it.effect.skipIf(!symlinksSupported)(
       const persistedCanonicalFile = yield* fs.realPath(canonicalFile);
       yield* fs.rename(canonicalParent, savedParent);
       yield* Effect.promise(() =>
-        NodeFSP.symlink(
-          outside,
-          canonicalParent,
-          process.platform === "win32" ? "junction" : "dir",
-        ),
+        NodeFSP.symlink(outside, canonicalParent, hostPlatform === "win32" ? "junction" : "dir"),
       );
 
       const error = yield* expectDeleteError(

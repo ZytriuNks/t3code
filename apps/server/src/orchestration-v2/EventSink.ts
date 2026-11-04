@@ -971,7 +971,6 @@ const layerBase: Layer.Layer<
             );
           }
           const outcomes = yield* applyStoredEvents(storedEvents);
-          yield* effectOutbox.enqueue(input.effects);
           const receipt: CommandReceiptStore.CommandReceiptV2 = {
             commandId: input.commandId,
             threadId: input.threadId,
@@ -1007,6 +1006,7 @@ const layerBase: Layer.Layer<
                 reason: target.reason,
               })),
             );
+          yield* effectOutbox.enqueue(input.effects);
           return { receipt, storedEvents, outcomes, committed: true as const, cancelledEffectIds };
         }),
         (result) =>

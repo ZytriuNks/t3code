@@ -3015,7 +3015,13 @@ export const layerWithOptions = (
                     yield* unload({ providerThread: thread, awaitRetirement: true });
                   }
                   if (!currentEntry.supportsMultipleProviderThreads) {
-                    yield* Scope.close(currentEntry.scope, Exit.void);
+                    yield* releaseEntry({
+                      providerSessionId: input.providerSessionId,
+                      reason: "manual_shutdown",
+                      ...(input.detail === undefined ? {} : { detail: input.detail }),
+                      detachedThreadId: input.threadId,
+                    });
+                    return;
                   }
                   yield* Ref.update(sessions, (current) => {
                     const entry = current.get(key);

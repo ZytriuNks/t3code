@@ -62,13 +62,12 @@ const make = Effect.gen(function* () {
     const request = effect.request;
     const lifecycle: EffectOutbox.LifecycleCleanup = request.lifecycle;
     const root = yield* projections
-      .getThreadShell(lifecycle.rootThreadId)
+      .getThread(lifecycle.rootThreadId)
       .pipe(
         Effect.mapError(
           (cause) => new ProviderThreadLifecycleError({ reason: "lifecycle", cause }),
         ),
       );
-    if (root === null) return;
     const guard = {
       threadId: lifecycle.rootThreadId,
       lifecycleRevision: lifecycle.revision,
