@@ -30,10 +30,18 @@ import * as NodePath from "node:path";
 const nativePlatform = Context.get(Context.empty(), HostProcess.Platform);
 const nativeArchitecture = Context.get(Context.empty(), HostProcess.Architecture);
 const isWindows = nativePlatform === "win32";
-const nativeTarget = AcpRegistrySupport.resolveAcpRegistryPlatformTarget(
-  nativePlatform,
-  nativeArchitecture,
-)!;
+const nativePlatformTargets = [
+  { platform: "darwin", architecture: "arm64", target: "darwin-aarch64" },
+  { platform: "darwin", architecture: "x64", target: "darwin-x86_64" },
+  { platform: "linux", architecture: "arm64", target: "linux-aarch64" },
+  { platform: "linux", architecture: "x64", target: "linux-x86_64" },
+  { platform: "win32", architecture: "arm64", target: "windows-aarch64" },
+  { platform: "win32", architecture: "x64", target: "windows-x86_64" },
+] as const;
+const nativeTarget = nativePlatformTargets.find(
+  ({ platform, architecture }) =>
+    platform === nativePlatform && architecture === nativeArchitecture,
+)!.target;
 const commandSuffix = isWindows ? ".CMD" : "";
 const pathStartsWith = (directory: string) =>
   expect.stringMatching(
@@ -1310,10 +1318,12 @@ describe("AcpRegistrySupport", () => {
     );
   });
 
-  it.effect.each(["linux", "win32"] as const)(
-    "requires a regular cached file and enforces %s executable semantics",
-    (platform) => {
-      const target = AcpRegistrySupport.resolveAcpRegistryPlatformTarget(platform, "x64")!;
+  it.effect.each([
+    { platform: "linux", target: "linux-x86_64" },
+    { platform: "win32", target: "windows-x86_64" },
+  ] as const)(
+    "requires a regular cached file and enforces $platform executable semantics",
+    ({ platform, target }) => {
       const agent = makeAgent({
         binary: { [target]: { archive: archiveUrl, cmd: "bin/example-agent" } },
       });
