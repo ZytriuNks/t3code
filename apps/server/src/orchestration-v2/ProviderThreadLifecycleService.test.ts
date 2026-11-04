@@ -306,34 +306,32 @@ it.effect(
   },
 );
 
-for (const input of [{ revision: 2 }, { staleGuard: true }, { sourceToken: "changed-source" }]) {
-  it.effect(
-    `stale lifecycle ${JSON.stringify(input)} succeeds before identity or adapter access`,
-    () => {
-      const fixture = testLayer(input);
-      return Effect.gen(function* () {
-        const service = yield* ProviderThreadLifecycleService.ProviderThreadLifecycleService;
-        yield* service.delete(
-          deletionEffect({
-            nativeStorage: { type: "unresolved", reason: "unavailable" },
-            ...(input.sourceToken
-              ? {
-                  lifecycle: {
-                    commandId,
-                    rootThreadId: root,
-                    revision: 1,
-                    sourceToken: "captured-source",
-                  },
-                }
-              : {}),
-          }),
-        );
-        assert.deepEqual(fixture.calls, []);
-        assert.deepEqual(fixture.lookups, []);
-      }).pipe(Effect.provide(fixture.layer));
-    },
-  );
-}
+it.effect.each([{ revision: 2 }, { staleGuard: true }, { sourceToken: "changed-source" }])(
+  "stale lifecycle %j succeeds before identity or adapter access",
+  (input) => {
+    const fixture = testLayer(input);
+    return Effect.gen(function* () {
+      const service = yield* ProviderThreadLifecycleService.ProviderThreadLifecycleService;
+      yield* service.delete(
+        deletionEffect({
+          nativeStorage: { type: "unresolved", reason: "unavailable" },
+          ...(input.sourceToken
+            ? {
+                lifecycle: {
+                  commandId,
+                  rootThreadId: root,
+                  revision: 1,
+                  sourceToken: "captured-source",
+                },
+              }
+            : {}),
+        }),
+      );
+      assert.deepEqual(fixture.calls, []);
+      assert.deepEqual(fixture.lookups, []);
+    }).pipe(Effect.provide(fixture.layer));
+  },
+);
 
 const blockers = [
   "unresolved",
@@ -361,89 +359,86 @@ const blockers = [
   "wrong-instance",
   "wrong-driver",
 ] as const;
-for (const blocker of blockers) {
-  it.effect(`blocks Pi deletion for ${blocker} with a bounded observable error`, () => {
-    const fixture = testLayer({
-      live: ["live-runtime", "session-only-runtime"].includes(blocker),
-      adapterFailure: blocker === "adapter-failure",
-      missingAdapterMethod: blocker === "missing-capability",
-      missingInstance: blocker === "missing-instance",
-      ...(blocker === "wrong-instance"
-        ? { adapterInstanceId: ProviderInstanceId.make("pi-different") }
-        : {}),
-      ...(blocker === "wrong-driver" ? { adapterDriver: "codex" } : {}),
-    });
-    return Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient;
-      yield* seedThread();
-      if (blocker !== "unknown") yield* seedBinding();
-      if (blocker === "orphan-session-binding")
-        yield* sql`INSERT INTO orchestration_v2_projection_provider_session_bindings
+it.effect.each(blockers)("blocks Pi deletion for %s with a bounded observable error", (blocker) => {
+  const fixture = testLayer({
+    live: ["live-runtime", "session-only-runtime"].includes(blocker),
+    adapterFailure: blocker === "adapter-failure",
+    missingAdapterMethod: blocker === "missing-capability",
+    missingInstance: blocker === "missing-instance",
+    ...(blocker === "wrong-instance"
+      ? { adapterInstanceId: ProviderInstanceId.make("pi-different") }
+      : {}),
+    ...(blocker === "wrong-driver" ? { adapterDriver: "codex" } : {}),
+  });
+  return Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* seedThread();
+    if (blocker !== "unknown") yield* seedBinding();
+    if (blocker === "orphan-session-binding")
+      yield* sql`INSERT INTO orchestration_v2_projection_provider_session_bindings
         (provider_session_id, thread_id) VALUES (${sessionId}, ${root})`;
-      if (blocker === "canonical-alias") {
-        yield* seedThread(outside, null, false);
-        yield* seedBinding({
-          threadId: outside,
-          providerThreadId: ProviderThreadId.make("outside-alias"),
-          nativeId: "different-native-id",
-          instanceId: ProviderInstanceId.make("pi-different"),
-        });
-      }
-      if (["live-runtime", "outside-session-binding"].includes(blocker)) yield* seedProvider();
-      if (["session-only-runtime", "outside-session-projection"].includes(blocker)) {
-        yield* sql`INSERT INTO orchestration_v2_projection_provider_sessions
+    if (blocker === "canonical-alias") {
+      yield* seedThread(outside, null, false);
+      yield* seedBinding({
+        threadId: outside,
+        providerThreadId: ProviderThreadId.make("outside-alias"),
+        nativeId: "different-native-id",
+        instanceId: ProviderInstanceId.make("pi-different"),
+      });
+    }
+    if (["live-runtime", "outside-session-binding"].includes(blocker)) yield* seedProvider();
+    if (["session-only-runtime", "outside-session-projection"].includes(blocker)) {
+      yield* sql`INSERT INTO orchestration_v2_projection_provider_sessions
           (provider_session_id, thread_id, provider, driver, provider_instance_id, status, updated_at, payload_json)
           VALUES (${sessionId}, ${blocker === "outside-session-projection" ? outside : root}, 'pi', 'pi', ${instanceId}, 'stopped', ${timestamp}, '{}')`;
-        yield* sql`INSERT INTO orchestration_v2_projection_provider_session_bindings
+      yield* sql`INSERT INTO orchestration_v2_projection_provider_session_bindings
           (provider_session_id, thread_id) VALUES (${sessionId}, ${root})`;
-      }
-      if (blocker === "unknown-session-peer") {
-        yield* seedProvider();
-        yield* seedProvider(null, ProviderThreadId.make("unknown-peer"), {
-          type: "resolved",
-          canonicalRoot: "/other",
-          canonicalFile: "/other/session.jsonl",
-        });
-        yield* sql`UPDATE orchestration_v2_projection_provider_threads SET payload_json = '{}'
+    }
+    if (blocker === "unknown-session-peer") {
+      yield* seedProvider();
+      yield* seedProvider(null, ProviderThreadId.make("unknown-peer"), {
+        type: "resolved",
+        canonicalRoot: "/other",
+        canonicalFile: "/other/session.jsonl",
+      });
+      yield* sql`UPDATE orchestration_v2_projection_provider_threads SET payload_json = '{}'
           WHERE provider_thread_id = 'unknown-peer'`;
-      }
-      if (
-        [
-          "outside-binding",
-          "outside-deletion-session",
-          "outside-provider",
-          "outside-session-binding",
-          "unresolved-reference",
-        ].includes(blocker)
-      ) {
-        yield* seedThread(outside, null, blocker === "outside-deletion-session");
-        if (blocker === "outside-provider")
-          yield* seedProvider(outside, ProviderThreadId.make("outside-provider"));
-        if (
-          ["outside-binding", "outside-deletion-session", "unresolved-reference"].includes(blocker)
-        )
-          yield* seedBinding({
-            threadId: outside,
-            providerThreadId: ProviderThreadId.make("outside-binding"),
-            deletionSession: blocker === "outside-deletion-session",
-            ...(blocker === "unresolved-reference"
-              ? { storage: { type: "unresolved", reason: "unavailable" } as const }
-              : {}),
-          });
-        if (blocker === "outside-session-binding")
-          yield* sql`INSERT INTO orchestration_v2_projection_provider_session_bindings
+    }
+    if (
+      [
+        "outside-binding",
+        "outside-deletion-session",
+        "outside-provider",
+        "outside-session-binding",
+        "unresolved-reference",
+      ].includes(blocker)
+    ) {
+      yield* seedThread(outside, null, blocker === "outside-deletion-session");
+      if (blocker === "outside-provider")
+        yield* seedProvider(outside, ProviderThreadId.make("outside-provider"));
+      if (["outside-binding", "outside-deletion-session", "unresolved-reference"].includes(blocker))
+        yield* seedBinding({
+          threadId: outside,
+          providerThreadId: ProviderThreadId.make("outside-binding"),
+          deletionSession: blocker === "outside-deletion-session",
+          ...(blocker === "unresolved-reference"
+            ? { storage: { type: "unresolved", reason: "unavailable" } as const }
+            : {}),
+        });
+      if (blocker === "outside-session-binding")
+        yield* sql`INSERT INTO orchestration_v2_projection_provider_session_bindings
           (provider_session_id, thread_id) VALUES (${sessionId}, ${outside})`;
-      }
-      if (blocker === "unknown-provider-owner") yield* seedProvider(null);
-      if (blocker === "live-target" || blocker === "fork-target")
-        yield* seedThread(
-          child,
-          root,
-          blocker !== "live-target",
-          blocker === "fork-target" ? "fork" : "subagent",
-        );
-      if (["pending-transfer", "pending-base-point", "pending-native-ref"].includes(blocker))
-        yield* sql`INSERT INTO orchestration_v2_projection_context_transfers
+    }
+    if (blocker === "unknown-provider-owner") yield* seedProvider(null);
+    if (blocker === "live-target" || blocker === "fork-target")
+      yield* seedThread(
+        child,
+        root,
+        blocker !== "live-target",
+        blocker === "fork-target" ? "fork" : "subagent",
+      );
+    if (["pending-transfer", "pending-base-point", "pending-native-ref"].includes(blocker))
+      yield* sql`INSERT INTO orchestration_v2_projection_context_transfers
         (context_transfer_id, source_thread_id, target_thread_id, type, status, updated_at, payload_json)
         VALUES ('transfer', ${blocker === "pending-transfer" ? root : outside}, ${outside}, 'fork', 'pending', ${timestamp},
           ${JSON.stringify(
@@ -457,56 +452,53 @@ for (const blocker of blockers) {
                   }
                 : {},
           )})`;
-      const service = yield* ProviderThreadLifecycleService.ProviderThreadLifecycleService;
-      const result = yield* Effect.result(
-        service.delete(
-          deletionEffect({
-            ...(blocker === "unresolved"
-              ? { nativeStorage: { type: "unresolved", reason: "unavailable" } as const }
-              : {}),
-            ...(["live-target", "fork-target"].includes(blocker)
-              ? { threadIds: [root, child] }
-              : {}),
-          }),
-        ),
+    const service = yield* ProviderThreadLifecycleService.ProviderThreadLifecycleService;
+    const result = yield* Effect.result(
+      service.delete(
+        deletionEffect({
+          ...(blocker === "unresolved"
+            ? { nativeStorage: { type: "unresolved", reason: "unavailable" } as const }
+            : {}),
+          ...(["live-target", "fork-target"].includes(blocker) ? { threadIds: [root, child] } : {}),
+        }),
+      ),
+    );
+    assert.isTrue(Result.isFailure(result));
+    if (Result.isFailure(result)) {
+      assert.equal(result.failure._tag, "ProviderThreadLifecycleError");
+      assert.equal(
+        result.failure.reason,
+        blocker === "unresolved"
+          ? "identity"
+          : blocker === "unknown"
+            ? "provenance"
+            : ["live-target", "fork-target"].includes(blocker)
+              ? "lifecycle"
+              : ["live-runtime", "session-only-runtime"].includes(blocker)
+                ? "runtime"
+                : [
+                      "missing-capability",
+                      "adapter-failure",
+                      "missing-instance",
+                      "wrong-instance",
+                      "wrong-driver",
+                    ].includes(blocker)
+                  ? "adapter"
+                  : blocker === "orphan-session-binding"
+                    ? "provenance"
+                    : "reference",
       );
-      assert.isTrue(Result.isFailure(result));
-      if (Result.isFailure(result)) {
-        assert.equal(result.failure._tag, "ProviderThreadLifecycleError");
-        assert.equal(
-          result.failure.reason,
-          blocker === "unresolved"
-            ? "identity"
-            : blocker === "unknown"
-              ? "provenance"
-              : ["live-target", "fork-target"].includes(blocker)
-                ? "lifecycle"
-                : ["live-runtime", "session-only-runtime"].includes(blocker)
-                  ? "runtime"
-                  : [
-                        "missing-capability",
-                        "adapter-failure",
-                        "missing-instance",
-                        "wrong-instance",
-                        "wrong-driver",
-                      ].includes(blocker)
-                    ? "adapter"
-                    : blocker === "orphan-session-binding"
-                      ? "provenance"
-                      : "reference",
+      assert.notInclude(result.failure.message, storage.canonicalRoot);
+      assert.notInclude(result.failure.message, "private-path-and-config");
+      if (blocker === "adapter-failure")
+        assert.instanceOf(
+          result.failure.cause,
+          ProviderAdapter.ProviderAdapterNativeThreadDeleteError,
         );
-        assert.notInclude(result.failure.message, storage.canonicalRoot);
-        assert.notInclude(result.failure.message, "private-path-and-config");
-        if (blocker === "adapter-failure")
-          assert.instanceOf(
-            result.failure.cause,
-            ProviderAdapter.ProviderAdapterNativeThreadDeleteError,
-          );
-      }
-      assert.lengthOf(fixture.calls, blocker === "adapter-failure" ? 1 : 0);
-    }).pipe(Effect.provide(fixture.layer));
-  });
-}
+    }
+    assert.lengthOf(fixture.calls, blocker === "adapter-failure" ? 1 : 0);
+  }).pipe(Effect.provide(fixture.layer));
+});
 
 it.effect("a resolved Pi file with a null native id still has a durable exclusive identity", () => {
   const fixture = testLayer();

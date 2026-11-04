@@ -173,73 +173,71 @@ function layerExecutorFor(input: {
   );
 }
 
-for (const blocked of [false, true]) {
-  it.effect(
-    `Pi delete worker ${blocked ? "retries then fails cleanup" : "succeeds stale cleanup"}`,
-    () =>
-      Effect.gen(function* () {
-        const events = yield* Ref.make<ReadonlyArray<string>>([]);
-        const lifecycleError = new ProviderThreadLifecycleService.ProviderThreadLifecycleError({
-          reason: "adapter",
-          cause: "private-path-and-config",
-        });
-        const executorLayer = layerExecutorFor({
-          events,
-          deleteNativeThread: () =>
-            Ref.update(events, (current) => [...current, "delete"]).pipe(
-              Effect.andThen(blocked ? Effect.fail(lifecycleError) : Effect.void),
-            ),
-        });
-        const outboxLayer = EffectOutbox.layer.pipe(Layer.provide(SqlitePersistence.layerMemory));
-        const workerLayer = EffectWorker.layerWithOptions({ maxAttempts: 2 }).pipe(
-          Layer.provideMerge(Layer.merge(executorLayer, outboxLayer)),
-        );
-        yield* Effect.gen(function* () {
-          const outbox = yield* EffectOutbox.EffectOutboxV2;
-          const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
-          yield* outbox.enqueue([
-            {
-              id: "pi-delete",
-              commandId: CommandId.make("delete"),
-              threadId,
-              request: {
-                type: "provider-thread.delete",
-                driver: "pi",
-                providerInstanceId: ProviderInstanceId.make("pi-original"),
-                providerThreadId,
-                threadIds: [threadId],
-                nativeId: null,
-                nativeStorage: { type: "unresolved", reason: "unavailable" },
-                lifecycle: {
-                  commandId: CommandId.make("delete"),
-                  rootThreadId: threadId,
-                  revision: 1,
-                },
+it.effect.each([false, true])(
+  "Pi delete worker blocked=%s preserves cleanup settlement",
+  (blocked) =>
+    Effect.gen(function* () {
+      const events = yield* Ref.make<ReadonlyArray<string>>([]);
+      const lifecycleError = new ProviderThreadLifecycleService.ProviderThreadLifecycleError({
+        reason: "adapter",
+        cause: "private-path-and-config",
+      });
+      const executorLayer = layerExecutorFor({
+        events,
+        deleteNativeThread: () =>
+          Ref.update(events, (current) => [...current, "delete"]).pipe(
+            Effect.andThen(blocked ? Effect.fail(lifecycleError) : Effect.void),
+          ),
+      });
+      const outboxLayer = EffectOutbox.layer.pipe(Layer.provide(SqlitePersistence.layerMemory));
+      const workerLayer = EffectWorker.layerWithOptions({ maxAttempts: 2 }).pipe(
+        Layer.provideMerge(Layer.merge(executorLayer, outboxLayer)),
+      );
+      yield* Effect.gen(function* () {
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        yield* outbox.enqueue([
+          {
+            id: "pi-delete",
+            commandId: CommandId.make("delete"),
+            threadId,
+            request: {
+              type: "provider-thread.delete",
+              driver: "pi",
+              providerInstanceId: ProviderInstanceId.make("pi-original"),
+              providerThreadId,
+              threadIds: [threadId],
+              nativeId: null,
+              nativeStorage: { type: "unresolved", reason: "unavailable" },
+              lifecycle: {
+                commandId: CommandId.make("delete"),
+                rootThreadId: threadId,
+                revision: 1,
               },
             },
-          ]);
+          },
+        ]);
+        assert.equal(yield* worker.drain(), 1);
+        const first = Option.getOrThrow(yield* outbox.get("pi-delete"));
+        assert.equal(first.status, blocked ? "pending" : "succeeded");
+        if (blocked) {
+          assert.notInclude(first.lastError!, "private-path-and-config");
+          const executor = yield* EffectWorker.OrchestrationEffectExecutorV2;
+          const exit = yield* Effect.exit(executor.execute(first));
+          assert.isTrue(Exit.isFailure(exit));
+          if (Exit.isFailure(exit))
+            assert.strictEqual(
+              Option.getOrThrow(Cause.findErrorOption(exit.cause)),
+              lifecycleError,
+            );
+          yield* TestClock.adjust("100 millis");
           assert.equal(yield* worker.drain(), 1);
-          const first = Option.getOrThrow(yield* outbox.get("pi-delete"));
-          assert.equal(first.status, blocked ? "pending" : "succeeded");
-          if (blocked) {
-            assert.notInclude(first.lastError!, "private-path-and-config");
-            const executor = yield* EffectWorker.OrchestrationEffectExecutorV2;
-            const exit = yield* Effect.exit(executor.execute(first));
-            assert.isTrue(Exit.isFailure(exit));
-            if (Exit.isFailure(exit))
-              assert.strictEqual(
-                Option.getOrThrow(Cause.findErrorOption(exit.cause)),
-                lifecycleError,
-              );
-            yield* TestClock.adjust("100 millis");
-            assert.equal(yield* worker.drain(), 1);
-            assert.equal(Option.getOrThrow(yield* outbox.get("pi-delete")).status, "failed");
-            assert.lengthOf(yield* outbox.listLifecycleCleanup([threadId]), 1);
-          } else assert.deepEqual(yield* outbox.listLifecycleCleanup([threadId]), []);
-        }).pipe(Effect.provide(workerLayer));
-      }),
-  );
-}
+          assert.equal(Option.getOrThrow(yield* outbox.get("pi-delete")).status, "failed");
+          assert.lengthOf(yield* outbox.listLifecycleCleanup([threadId]), 1);
+        } else assert.deepEqual(yield* outbox.listLifecycleCleanup([threadId]), []);
+      }).pipe(Effect.provide(workerLayer));
+    }),
+);
 
 it.effect("settles a stopped run when its adapter has already lost the native turn", () =>
   Effect.gen(function* () {
