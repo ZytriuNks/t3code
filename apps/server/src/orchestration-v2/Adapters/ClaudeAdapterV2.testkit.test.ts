@@ -130,20 +130,13 @@ function makeGatedReplaySession() {
   return { label, replayGate, runner, session };
 }
 
-const yieldToReplayStream = Effect.promise(
-  () =>
-    new Promise<void>((resolve) => {
-      setImmediate(resolve);
-    }),
-);
-
 describe("ClaudeAdapterV2 replay testkit", () => {
   it.effect("holds a labeled inbound frame until its replay gate is released", () =>
     Effect.gen(function* () {
       const { label, replayGate, runner, session } = makeGatedReplaySession();
       const streamFiber = yield* Stream.runDrain(session.messages).pipe(Effect.forkChild);
 
-      yield* yieldToReplayStream;
+      assert.isTrue(yield* Effect.promise(() => replayGate.waitForReached(label)));
       assert.isTrue(replayGate.hasReached(label));
       assert.isUndefined(streamFiber.pollUnsafe());
 
@@ -158,7 +151,7 @@ describe("ClaudeAdapterV2 replay testkit", () => {
       const { label, replayGate, session } = makeGatedReplaySession();
       const streamFiber = yield* Stream.runDrain(session.messages).pipe(Effect.forkChild);
 
-      yield* yieldToReplayStream;
+      assert.isTrue(yield* Effect.promise(() => replayGate.waitForReached(label)));
       assert.isTrue(replayGate.hasReached(label));
 
       yield* Fiber.interrupt(streamFiber);
@@ -176,6 +169,7 @@ describe("ClaudeAdapterV2 replay testkit", () => {
       } satisfies ClaudeAgentSdkQueryOptions;
       const label = "delayed-inbound";
       const replayGate = makeProviderReplayGate([label]);
+      const delayStarted = Promise.withResolvers<number>();
       const runner = makeReplayQueryRunner(
         {
           provider: CLAUDE_PROVIDER,
@@ -208,7 +202,7 @@ describe("ClaudeAdapterV2 replay testkit", () => {
             },
           ],
         },
-        { replayGate },
+        { replayGate, onInboundDelayStarted: delayStarted.resolve },
       );
       const session = runner.open({
         options,
@@ -222,10 +216,11 @@ describe("ClaudeAdapterV2 replay testkit", () => {
         Effect.forkChild,
       );
 
-      yield* yieldToReplayStream;
+      assert.isTrue(yield* Effect.promise(() => replayGate.waitForReached(label)));
       assert.isTrue(replayGate.hasReached(label));
       assert.isTrue(replayGate.release(label));
-      yield* yieldToReplayStream;
+      assert.equal(yield* Effect.promise(() => delayStarted.promise), 1);
+      assert.isUndefined(streamFiber.pollUnsafe());
 
       yield* Fiber.interrupt(streamFiber);
 
@@ -250,7 +245,7 @@ describe("ClaudeAdapterV2 replay testkit", () => {
         Effect.forkChild,
       );
 
-      yield* yieldToReplayStream;
+      assert.isTrue(yield* Effect.promise(() => replayGate.waitForReached(label)));
       assert.isTrue(replayGate.hasReached(label));
 
       const offerExit = yield* Effect.exit(
@@ -288,6 +283,7 @@ describe("ClaudeAdapterV2 replay testkit", () => {
       );
       const label = "permission_request";
       const replayGate = makeProviderReplayGate([label]);
+      const delayStarted = Promise.withResolvers<number>();
       const runner = makeReplayQueryRunner(
         {
           provider: CLAUDE_PROVIDER,
@@ -319,7 +315,7 @@ describe("ClaudeAdapterV2 replay testkit", () => {
             },
           ],
         },
-        { replayGate },
+        { replayGate, onInboundDelayStarted: delayStarted.resolve },
       );
       const session = runner.open({
         options: { ...stableOptions, canUseTool },
@@ -334,10 +330,11 @@ describe("ClaudeAdapterV2 replay testkit", () => {
         Effect.forkChild,
       );
 
-      yield* yieldToReplayStream;
+      assert.isTrue(yield* Effect.promise(() => replayGate.waitForReached(label)));
       assert.isTrue(replayGate.hasReached(label));
       assert.isTrue(replayGate.release(label));
-      yield* yieldToReplayStream;
+      assert.equal(yield* Effect.promise(() => delayStarted.promise), 1);
+      assert.isUndefined(streamFiber.pollUnsafe());
 
       const offerExit = yield* Effect.exit(
         session.offer(makeClaudeUserMessage({ text: "unexpected gated prompt" })),
@@ -355,6 +352,11 @@ describe("ClaudeAdapterV2 replay testkit", () => {
       }
       assert.deepEqual(emittedMessages, []);
       assert.equal(canUseTool.mock.calls.length, 0);
+      const failure = assert.throws(() => runner.assertComplete());
+      assert.isTrue(isClaudeReplayUnexpectedOutboundError(failure));
+      if (isClaudeReplayUnexpectedOutboundError(failure)) {
+        assert.equal(failure.cursor, 1);
+      }
     }),
   );
 
@@ -368,28 +370,32 @@ describe("ClaudeAdapterV2 replay testkit", () => {
       } satisfies ClaudeAgentSdkQueryOptions;
       const expectedMessage = makeClaudeUserMessage({ text: "expected prompt" });
       const actualMessage = makeClaudeUserMessage({ text: "unexpected prompt" });
-      const runner = makeReplayQueryRunner({
-        provider: CLAUDE_PROVIDER,
-        protocol: CLAUDE_AGENT_SDK_REPLAY_PROTOCOL,
-        version: "test",
-        scenario: "outbound-mismatch-wakes-stream",
-        entries: [
-          {
-            type: "expect_outbound",
-            frame: {
-              type: "query.open",
-              options,
+      const outboundWaitStarted = Promise.withResolvers<number>();
+      const runner = makeReplayQueryRunner(
+        {
+          provider: CLAUDE_PROVIDER,
+          protocol: CLAUDE_AGENT_SDK_REPLAY_PROTOCOL,
+          version: "test",
+          scenario: "outbound-mismatch-wakes-stream",
+          entries: [
+            {
+              type: "expect_outbound",
+              frame: {
+                type: "query.open",
+                options,
+              },
             },
-          },
-          {
-            type: "expect_outbound",
-            frame: {
-              type: "prompt.offer",
-              message: expectedMessage,
+            {
+              type: "expect_outbound",
+              frame: {
+                type: "prompt.offer",
+                message: expectedMessage,
+              },
             },
-          },
-        ],
-      });
+          ],
+        },
+        { onOutboundWaitStarted: outboundWaitStarted.resolve },
+      );
       const session = runner.open({
         options,
         threadId: ThreadId.make("thread-replay-mismatch"),
@@ -400,11 +406,13 @@ describe("ClaudeAdapterV2 replay testkit", () => {
         Effect.forkChild,
       );
 
-      yield* Effect.yieldNow;
+      assert.equal(yield* Effect.promise(() => outboundWaitStarted.promise), 1);
+      assert.isUndefined(streamFiber.pollUnsafe());
       const offerExit = yield* Effect.exit(session.offer(actualMessage));
       assert.isTrue(Exit.isFailure(offerExit));
 
-      yield* Effect.yieldNow;
+      const streamExit = yield* Fiber.join(streamFiber);
+      assert.isTrue(Exit.isFailure(streamExit));
       assert.isDefined(
         streamFiber.pollUnsafe(),
         "expected the replay stream to finish after the mismatch",
@@ -420,28 +428,32 @@ describe("ClaudeAdapterV2 replay testkit", () => {
         permissionMode: "default",
         sessionId: "session-replay-outbound-interrupt",
       } satisfies ClaudeAgentSdkQueryOptions;
-      const runner = makeReplayQueryRunner({
-        provider: CLAUDE_PROVIDER,
-        protocol: CLAUDE_AGENT_SDK_REPLAY_PROTOCOL,
-        version: "test",
-        scenario: "outbound-wait-interruption",
-        entries: [
-          {
-            type: "expect_outbound",
-            frame: {
-              type: "query.open",
-              options,
+      const outboundWaitStarted = Promise.withResolvers<number>();
+      const runner = makeReplayQueryRunner(
+        {
+          provider: CLAUDE_PROVIDER,
+          protocol: CLAUDE_AGENT_SDK_REPLAY_PROTOCOL,
+          version: "test",
+          scenario: "outbound-wait-interruption",
+          entries: [
+            {
+              type: "expect_outbound",
+              frame: {
+                type: "query.open",
+                options,
+              },
             },
-          },
-          {
-            type: "expect_outbound",
-            frame: {
-              type: "prompt.offer",
-              message: makeClaudeUserMessage({ text: "next prompt" }),
+            {
+              type: "expect_outbound",
+              frame: {
+                type: "prompt.offer",
+                message: makeClaudeUserMessage({ text: "next prompt" }),
+              },
             },
-          },
-        ],
-      });
+          ],
+        },
+        { onOutboundWaitStarted: outboundWaitStarted.resolve },
+      );
       const session = runner.open({
         options,
         threadId: ThreadId.make("thread-replay-outbound-interrupt"),
@@ -449,7 +461,7 @@ describe("ClaudeAdapterV2 replay testkit", () => {
       });
       const streamFiber = yield* Stream.runDrain(session.messages).pipe(Effect.forkChild);
 
-      yield* yieldToReplayStream;
+      assert.equal(yield* Effect.promise(() => outboundWaitStarted.promise), 1);
       assert.isUndefined(streamFiber.pollUnsafe());
 
       yield* Fiber.interrupt(streamFiber);
