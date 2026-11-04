@@ -74,27 +74,3 @@ export const BrowserImportResult = Schema.Struct({
   skippedDomains: Schema.Array(Schema.String),
 });
 export type BrowserImportResult = typeof BrowserImportResult.Type;
-
-const BROWSER_IMPORT_UNAVAILABLE_COPY: Readonly<Record<BrowserImportUnavailableReason, string>> = {
-  notInstalled: "Not installed on this machine.",
-  needsKeychainApproval: "Needs Keychain access to read its cookies.",
-  keychainItemMissing:
-    "No encryption key in your Keychain — sign in to that browser once, then retry.",
-  needsFullDiskAccess:
-    "Give T3 Code Full Disk Access in System Settings → Privacy & Security, then retry.",
-  browserRunning: "Quit the browser first so its cookie database can be read.",
-  unsupportedPlatform: "Importing from this browser isn't possible on this platform.",
-};
-
-export const BROWSER_IMPORT_FAILURE_COPY: Readonly<Record<BrowserImportFailureReason, string>> = {
-  ...BROWSER_IMPORT_UNAVAILABLE_COPY,
-  keychainUnavailable:
-    "The system keyring could not be accessed. Make sure your desktop keyring is running and unlocked, then retry.",
-  unknownSource: "That browser is no longer available to import from.",
-  unknownSourceProfile: "That browser profile no longer exists.",
-  sessionUnavailable: "The target profile could not be opened.",
-  profileNotSaved: "The cookies were imported, but the new profile couldn't be saved. Try again.",
-  profileLimitReached:
-    "You've reached the profile limit. Delete a profile or import into an existing one.",
-  readFailed: "The browser's cookie database could not be read.",
-};

@@ -14,7 +14,7 @@ export function skillInlineMatches(text: string, skills: ReadonlyArray<InlineSki
   }));
 }
 
-export function SkillInlineText(props: { text: string; skills: ReadonlyArray<InlineSkill> }) {
+function SkillInlineText(props: { text: string; skills: ReadonlyArray<InlineSkill> }) {
   const nodes: ReactNode[] = [];
   let cursor = 0;
 

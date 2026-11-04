@@ -76,7 +76,7 @@ export interface ConnectionStatusCopy {
   readonly reconnectingTitle: string;
 }
 
-export const DEFAULT_CONNECTION_STATUS_COPY: ConnectionStatusCopy = {
+const DEFAULT_CONNECTION_STATUS_COPY: ConnectionStatusCopy = {
   available: "Available",
   offline: "Offline",
   connecting: "Connecting...",

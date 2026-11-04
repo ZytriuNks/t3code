@@ -4,7 +4,7 @@ import { cloneElement, createRef, type ComponentProps, type ReactElement } from 
 import { expect, vi } from "vite-plus/test";
 import { act, render } from "../../../test/render";
 import { MessagesTimeline } from "./MessagesTimeline";
-export const ACTIVE_THREAD_ENVIRONMENT_ID = EnvironmentId.make("environment-local");
+const ACTIVE_THREAD_ENVIRONMENT_ID = EnvironmentId.make("environment-local");
 export const MESSAGE_CREATED_AT = "2026-03-17T19:12:28.000Z";
 export function buildProps() {
   return {

@@ -104,7 +104,7 @@ export interface DesktopUpdateCopy {
   readonly installConfirmation: (version: string | null) => string;
 }
 
-export const DESKTOP_UPDATE_COPY_DEFAULTS: DesktopUpdateCopy = {
+const DESKTOP_UPDATE_COPY_DEFAULTS: DesktopUpdateCopy = {
   notAppliedTooltip: (version) => `Update ${version} did not apply. Click to retry.`,
   availableTooltip: (version) => `Update ${version ?? "available"} ready to download`,
   downloadingTooltip: (percent) =>

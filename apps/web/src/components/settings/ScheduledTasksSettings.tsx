@@ -313,7 +313,7 @@ export function scheduleLabel(schedule: ScheduledTaskSchedule, t: SettingsTransl
   return t("settings.scheduledTasks.schedule.atTime", { days, time: schedule.timeOfDay });
 }
 
-export function relativeLabel(
+function relativeLabel(
   value: string | null,
   nowMs: number,
   t: SettingsTranslator = (key, values) => translate("en", key, values),
