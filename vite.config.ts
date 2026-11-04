@@ -6,6 +6,7 @@ const DOM_TEST_ENVIRONMENT_ALLOWLIST: Array<string> = [];
 
 const TEST_EXCLUDE = [
   "**/.repos/**",
+  "**/.claude/worktrees/**",
   "**/.t3/**",
   "**/node_modules/**",
   "**/dist/**",
