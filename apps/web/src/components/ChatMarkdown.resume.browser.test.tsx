@@ -372,7 +372,6 @@ async function setup() {
     } as unknown as LegendListRef;
     return {
       isWorking: true,
-      activeTurnInProgress: true,
       listRef,
       latestRun: { runId, status: "running" as const, startedAt: createdAt, completedAt: null },
       turnDiffSummaries: [],
@@ -382,11 +381,9 @@ async function setup() {
       onOpenTurnDiff() {},
       onOpenThread() {},
       onForkFromRun: async () => {},
-      onRollbackCheckpoint() {},
       supportsConversationRollback: false,
       onRevertToTurnCount() {},
       isRevertingCheckpoint: false,
-      openingVideoAttachmentId: null,
       onImageExpand() {},
       activeThreadEnvironmentId: EnvironmentId.make("environment-local"),
       markdownCwd: undefined,
@@ -788,7 +785,7 @@ describe("runtime boundary through MessagesTimeline and ChatMarkdown", () => {
           {...props}
           timelineEntries={[]}
           textPlayback={null}
-          citationHistoryLoading
+          threadDetailLoading
         />,
       ),
     );
@@ -799,7 +796,7 @@ describe("runtime boundary through MessagesTimeline and ChatMarkdown", () => {
           {...props}
           timelineEntries={[timelineEntry(history + "LIVE")]}
           textPlayback={playback(history)}
-          citationHistoryLoading={false}
+          threadDetailLoading={false}
         />,
       ),
     );
@@ -2020,8 +2017,7 @@ describe("round 2 thread display handoff", () => {
     async (strict) => {
       await using fixture = await setup();
       const { page, timelineEntry, playback, timelineProps, hiddenText, screen } = fixture;
-      const { resolveThreadSwitchTimeline, isPaintOnlyThreadTimeline } =
-        await import("./ChatView.logic");
+      const { resolveThreadSwitchTimeline } = await import("./ChatView.logic");
       const firstKey = "environment-local:r2-held-first";
       const nextKey = "environment-local:r2-held-next";
       const firstEntries = [timelineEntry("OLD THREAD")];
@@ -2037,22 +2033,17 @@ describe("round 2 thread display handoff", () => {
           activeThreadKey: activeKey,
           nextEntries: entries,
           rememberedForActive: [],
-          lastReady: { threadKey: firstKey, entries: firstEntries },
         });
-        const paintOnly = isPaintOnlyThreadTimeline(displayed.displayThreadKey, activeKey);
         const timeline = (
           <MessagesTimeline
             {...base}
             textPlaybackNavigation={{ threadKey: activeKey, entries }}
-            routeThreadKey={displayed.displayThreadKey!}
-            displayThreadKey={displayed.displayThreadKey!}
-            timelineEntries={displayed.entries}
+            routeThreadKey={activeKey}
+            timelineEntries={displayed}
             textPlayback={metadata}
-            paintOnly={paintOnly}
-            smoothStreaming={!paintOnly}
-            isWorking={!paintOnly}
-            activeTurnInProgress={!paintOnly}
-            citationHistoryLoading={loading}
+            smoothStreaming
+            isWorking
+            threadDetailLoading={loading}
           />
         );
         return act(() => screen.rerender(strict ? <StrictMode>{timeline}</StrictMode> : timeline));

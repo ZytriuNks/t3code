@@ -17,7 +17,13 @@ it("routes current server and root tests while excluding nested Claude worktree 
   try {
     write("package.json", JSON.stringify({ private: true, type: "module" }));
     const config = NodePath.join(cwd, "vite.config.ts");
-    write("vite.config.ts", NodeFS.readFileSync(NodePath.join(root, "vite.config.ts"), "utf8"));
+    for (const file of [
+      "vite.config.ts",
+      "infra/task-cache/src/remoteCache.ts",
+      "scripts/lib/cached-tests.ts",
+    ]) {
+      write(file, NodeFS.readFileSync(NodePath.join(root, file), "utf8"));
+    }
     const configUrl = NodeURL.pathToFileURL(config).href;
     for (const dir of [
       "apps/desktop",

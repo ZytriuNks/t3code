@@ -545,9 +545,7 @@ const makeRuntime = <E, R>(
     Layer.provide(
       Layer.mock(GitWorkflow.GitWorkflowService)({ pruneWorktrees: () => Effect.void }),
     ),
-    Layer.provide(
-      Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeed(Option.none()) }),
-    ),
+    Layer.provide(Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone })),
     Layer.provide(
       Layer.mock(SourceControlProviderRegistry.SourceControlProviderRegistry)({
         resolveLink: () => Effect.die("unused link"),
@@ -922,7 +920,6 @@ it.effect(
           ]);
           const crashedClaim = yield* outbox.claimNext({
             workerId: "task8:pi-worker-lost",
-            leaseDurationMs: 1000,
           });
           assert.isTrue(Option.isSome(crashedClaim));
           if (Option.isSome(crashedClaim))
@@ -1144,6 +1141,24 @@ it.effect(
             WHERE thread_id = ${outsideOwnerId}`;
           yield* sql`DELETE FROM orchestration_v2_projection_provider_threads
             WHERE thread_id = ${outsideOwnerId}`;
+
+          const sourcesBeforeReclaim = yield* store.getProviderAttachmentSources(threadId);
+          const receiptsBeforeReclaim = yield* outbox.attachmentRetirements(threadId);
+          const bindingsBeforeReclaim = yield* bindings.listForThreads([threadId]);
+          assert.isNotEmpty(sourcesBeforeReclaim);
+          assert.isNotEmpty(receiptsBeforeReclaim);
+          const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+          const reclamation = yield* maintenance.reclaimDeletedThreadData;
+          assert.equal(reclamation.reclaimedThreadCount, 0);
+          assert.deepEqual(reclamation.skippedThreads, [
+            { threadId, blockerCodes: ["lifecycle_cleanup"] },
+          ]);
+          assert.deepEqual(
+            yield* store.getProviderAttachmentSources(threadId),
+            sourcesBeforeReclaim,
+          );
+          assert.deepEqual(yield* outbox.attachmentRetirements(threadId), receiptsBeforeReclaim);
+          assert.deepEqual(yield* bindings.listForThreads([threadId]), bindingsBeforeReclaim);
 
           const retryCommandId = CommandId.make("task8:pi-shared-delete-retry");
           const retryCommand = yield* orchestrator.dispatch({

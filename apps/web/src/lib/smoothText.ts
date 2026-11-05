@@ -246,11 +246,10 @@ export function createSmoothText(
     const rate =
       arrivalRate(now) ||
       Math.max(BASE_GRAPHEMES_PER_SECOND, Number.isFinite(backlog) ? backlog : pendingCount());
-    // Hold enough text to bridge one provider gap. A fixed 80ms reserve
-    // emptied between the fragments of a slow, chunky provider, so playback
-    // stopped and restarted with every chunk. Longer silences are pauses, not
-    // jitter, and the glyph cap still bounds what a fast stream can leave
-    // queued when it ends.
+    // Hold enough text to bridge one provider gap. A fixed 80ms reserve emptied between the
+    // fragments of a slow, chunky provider and playback stopped and restarted with every chunk.
+    // Longer silences are pauses, not jitter, and the glyph cap still bounds what a fast stream
+    // can leave queued when it ends.
     const target = Math.max(
       1,
       Math.min(
@@ -263,14 +262,10 @@ export function createSmoothText(
           1_000,
       ),
     );
-    // The pool is the smoothing reserve, so hold it at the target instead of
-    // only following the source. Merely matching the arrival rate is neutral:
-    // once a burst drains the pool nothing rebuilds it, and every later batch
-    // then plays at full speed, which is what makes streamed text look chunky.
-    // The surplus term repays real debt quickly. The deficit term is capped
-    // twice over: it never slows playback by more than about a quarter, and a
-    // pool of only a few glyphs is not held back at all, since stretching it
-    // only delays text that is already due.
+    // The pool is the smoothing reserve, so hold it at the target instead of only following the
+    // source; matching the arrival rate is neutral and never rebuilds a drained pool. The surplus
+    // term repays real debt quickly. The deficit term never slows playback by more than about a
+    // quarter, and a pool of only a few glyphs is not held back at all.
     const ratio =
       backlog > target
         ? (backlog - target) / target

@@ -1,16 +1,13 @@
-import type {
-  ConversationStructure,
-  SmoothOutputMode,
-  SmoothOutputLineMode,
-} from "@t3tools/contracts";
 import type { ThreadTextPlaybackState } from "@t3tools/client-runtime/state/threads";
-import { type TimelineEntry } from "../../session-logic";
-
-import { type TimelineLatestRun } from "./MessagesTimeline.logic";
-
 import type { AppLanguage } from "../../i18n/locale";
-import type { WorktreeSetupSnapshot } from "@t3tools/contracts";
+import type { ToolCallDiffTarget } from "../../diffPanelStore";
 import {
+  type ConversationStructure,
+  type ProviderApprovalDecision,
+  type RuntimeRequestId,
+  type SmoothOutputLineMode,
+  type SmoothOutputMode,
+  type WorktreeSetupSnapshot,
   type EnvironmentId,
   type MessageId,
   type OrchestrationV2TurnItem,
@@ -19,17 +16,38 @@ import {
   type ServerProviderSkill,
   type RunId,
   ThreadId,
+  type TurnItemId,
 } from "@t3tools/contracts";
+import type { AsyncResult, Atom } from "effect/reactivity";
+import type { CommandOutputView } from "@t3tools/client-runtime/state/command-output";
 import type { WorkflowOpening } from "@t3tools/client-runtime/state/subagentRuntime";
-import { createContext, type MouseEvent } from "react";
+import { createContext, type MouseEvent, type ReactNode } from "react";
 import { type LegendListRef } from "@legendapp/list/react";
 import type { CodexArtifactTemplate } from "@t3tools/shared/codexArtifactTemplates";
+import type { PendingApproval, TimelineEntry } from "../../session-logic";
 import { type ChatFileAttachment } from "../../types";
 import { ExpandedImagePreview } from "./ExpandedImagePreview";
 import { type AssistantCitationTarget } from "./AssistantCitationSource";
-import { type MessagesTimelineRow, type WorkGroupScrollAnchor } from "./MessagesTimeline.logic";
+import {
+  type MessagesTimelineRow,
+  type TimelineLatestRun,
+  type WorkGroupScrollAnchor,
+} from "./MessagesTimeline.logic";
 import { type TimestampFormat } from "@t3tools/contracts/settings";
+import type { TurnItemDetailSource } from "../../state/queries";
 import { type HandoffTimelineRun } from "./V2LifecycleRow";
+
+/**
+ * Where an expanded row reads an item's detail and a command's output. The owner's rows read them
+ * from the environment; the guest page reads them through its own routes.
+ */
+export interface TurnItemSource {
+  readonly detail: TurnItemDetailSource;
+  readonly commandOutput: (target: {
+    readonly threadId: ThreadId;
+    readonly itemId: TurnItemId;
+  }) => Atom.Atom<AsyncResult.AsyncResult<CommandOutputView, unknown>>;
+}
 
 export interface TimelineRowSharedState {
   conversationStructure: ConversationStructure | undefined;
@@ -53,6 +71,12 @@ export interface TimelineRowSharedState {
     entries: ReadonlyArray<TimelineEntry>;
   } | null>;
   claimInitialSmoothText: (entryId: string, createdAt: string) => boolean;
+  pendingApprovals: ReadonlyMap<RuntimeRequestId, PendingApproval>;
+  respondingRequestIds: ReadonlyArray<RuntimeRequestId>;
+  canOperateThread: boolean;
+  onRespondToApproval:
+    | ((requestId: RuntimeRequestId, decision: ProviderApprovalDecision) => Promise<unknown>)
+    | undefined;
   citationRequest: AssistantCitationTarget | null;
   listRef: React.RefObject<LegendListRef | null>;
   timestampFormat: TimestampFormat;
@@ -62,7 +86,7 @@ export interface TimelineRowSharedState {
   markdownCwd: string | undefined;
   resolvedTheme: "light" | "dark";
   workspaceRoot: string | undefined;
-  skills: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
+  skills: ReadonlyArray<ServerProviderSkill>;
   runs: ReadonlyArray<HandoffTimelineRun>;
   activeThreadEnvironmentId: EnvironmentId;
   onRevertToTurnCount: (targetTurnCount: number, messageId: MessageId) => void;
@@ -73,17 +97,22 @@ export interface TimelineRowSharedState {
   findActive: boolean;
   onImageExpand: (preview: ExpandedImagePreview) => void;
   displayThreadKey?: string;
-  onOpenTurnDiff: (runId: RunId, filePath?: string) => void;
+  onOpenToolDiff: ((target: ToolCallDiffTarget) => void) | undefined;
+  /** Unset where there is no diff to open, so the timeline shows no "Open diff" button. */
+  onOpenTurnDiff: ((runId: RunId, filePath?: string) => void) | undefined;
+  /**
+   * Draws a published HTML visual. Unset, the row loads it from the environment; the guest page
+   * loads it through its own route.
+   */
+  renderHtmlRender: ((row: Extract<TimelineRow, { kind: "html-render" }>) => ReactNode) | undefined;
+  /** Unset, expanded rows read detail and command output from the environment. */
+  turnItemSource: TurnItemSource | undefined;
   onOpenThread: (threadId: OrchestrationV2TurnItem["threadId"]) => void;
   workflowOpening: WorkflowOpening | null;
-  onForkFromRun: (input: {
-    readonly sourceThreadId: ThreadId;
-    readonly runId: RunId;
-  }) => Promise<void>;
-  onRollbackCheckpoint: (input: {
-    readonly checkpointId: string;
-    readonly scopeId: string;
-  }) => void;
+  /** Absent hides "Fork from this response", as in the guest view. */
+  onForkFromRun:
+    | ((input: { readonly sourceThreadId: ThreadId; readonly runId: RunId }) => Promise<void>)
+    | undefined;
   onToggleTurnFold: (runId: RunId) => void;
   onToggleAttemptFold: (attemptId: RunAttemptId) => void;
   onFileOpen: (attachment: ChatFileAttachment) => void;
@@ -103,7 +132,6 @@ export interface TimelineRowActivityState {
   isWorking: boolean;
   isCompacting: boolean;
   isRevertingCheckpoint: boolean;
-  activeTurnInProgress: boolean;
   awaitingUser: boolean;
   isPreparingWorktree: boolean;
   latestRunId: RunId | null;

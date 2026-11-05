@@ -534,12 +534,9 @@ it.effect("ignores provider threads borrowed from outside the operation", () =>
   }).pipe(Effect.provide(IdAllocator.layer)),
 );
 
-it.effect.each([
-  ["memory", ProjectionStore.layerMemory],
-  ["sql", ProjectionStore.layer],
-] as const)(
-  "keeps closed legacy Pi identity and retires sessions before deletion (%s)",
-  ([, storeLayer]) =>
+it.effect(
+  "keeps closed legacy Pi identity and retires sessions before deletion with in-memory SQLite",
+  () =>
     Effect.gen(function* () {
       const store = yield* ProjectionStore.ProjectionStoreV2;
       const member = makeProjection();
@@ -581,7 +578,9 @@ it.effect.each([
       Effect.provide(
         ThreadLifecyclePlan.layer.pipe(
           Layer.provideMerge(ThreadOwnership.layer),
-          Layer.provideMerge(Layer.mergeAll(storeLayer, IdAllocator.layer, EffectOutbox.layer)),
+          Layer.provideMerge(
+            Layer.mergeAll(ProjectionStore.layer, IdAllocator.layer, EffectOutbox.layer),
+          ),
           Layer.provideMerge(SqlitePersistence.layerMemory),
         ),
       ),

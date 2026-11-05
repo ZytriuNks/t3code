@@ -42,6 +42,7 @@ export function TimelineLayoutCommit({
   const [commit, setCommit] = useState<(TimelineLayoutCommitRequest & { complete(): void }) | null>(
     null,
   );
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- publishes the layout commit requester through the shared ref while mounted and clears it on unmount
   useLayoutEffect(() => {
     requestRef.current = (request) =>
       setCommit({ ...request, complete: request.owner.capture(request.generation) });
@@ -49,6 +50,7 @@ export function TimelineLayoutCommit({
       requestRef.current = null;
     };
   }, [requestRef]);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- completes a pending layout commit for its owner after React commits the DOM it measures
   useLayoutEffect(() => {
     if (commit && commit.owner === layoutRef.current) commit.complete();
   }, [commit, layoutRef]);

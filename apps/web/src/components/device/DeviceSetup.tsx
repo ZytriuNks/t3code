@@ -3,7 +3,8 @@ import type { DevicePlatform, DeviceServiceState, EnvironmentId } from "@t3tools
 import { Check } from "lucide-react";
 import { Check as CheckGlyph, CircleAlert } from "lucide";
 import { AuthSettingsWriteScope } from "@t3tools/contracts";
-import { useEffect, useState } from "react";
+import { useAtomMount } from "@effect/atom-react";
+import { useState } from "react";
 
 import { Button } from "~/components/ui/button";
 import { DialogClose } from "~/components/ui/dialog";
@@ -11,7 +12,7 @@ import { MorphIcon } from "~/components/MorphIcon";
 import { WizardHeader, WizardPanel, WizardSteps, WizardFooter } from "~/components/ui/wizard";
 import { Spinner } from "~/components/ui/spinner";
 import { Switch } from "~/components/ui/switch";
-import { deviceEnvironment } from "~/state/device";
+import { deviceEnvironment, deviceHostProbeAtom, NO_DEVICE_PROBE_ATOM } from "~/state/device";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { readEnvironmentScope, useEnvironmentScope } from "~/state/session";
 import { cn } from "~/lib/utils";
@@ -53,7 +54,7 @@ function deviceHostDiagnostics(
   });
 }
 
-export function DeviceHostDiagnostics(props: {
+function DeviceHostDiagnostics(props: {
   readonly hosts: ReadonlyArray<Pick<DeviceServiceState["hosts"][number], "id" | "label">>;
   readonly hostStatuses: DeviceServiceState["hostStatuses"];
   readonly className?: string;
@@ -120,7 +121,7 @@ export function platformSetupStatus(
     ready: true,
     message:
       remoteHost?.kind === "eas"
-        ? `${remoteHost.label} starts iOS Simulators in the cloud with EAS Simulator.`
+        ? `${remoteHost.label} starts ${platform === "ios" ? "iOS Simulators" : "Android emulators"} in the cloud with EAS Simulator.`
         : platform === "ios"
           ? `Xcode and iOS Simulator are available${location}.`
           : `The Android SDK and Emulator are available${location}.`,
@@ -144,10 +145,7 @@ export function DeviceSetup(props: {
     (host) => host.kind === "local" && !host.platforms.some((platform) => platform.available),
   );
 
-  // Remote hosts report platforms only after a probe, like the Device panel's refresh on open.
-  useEffect(() => {
-    if (enabled) void list({ environmentId: props.environmentId, input: {} });
-  }, [enabled, list, props.environmentId]);
+  useAtomMount(enabled ? deviceHostProbeAtom(props.environmentId) : NO_DEVICE_PROBE_ATOM);
 
   const update = async (
     kind: NonNullable<typeof pending>,
@@ -376,7 +374,7 @@ export function AgentDeviceSetupStatus(props: {
   return null;
 }
 
-export function PlatformStatus(props: {
+function PlatformStatus(props: {
   readonly platform: string;
   readonly status: { readonly ready: boolean; readonly message: string };
   readonly compact?: boolean;

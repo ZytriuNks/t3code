@@ -5,8 +5,6 @@ import {
   resolveMarkdownFileLinkMeta,
   rewriteMarkdownFileUriHref,
   isUnsupportedMarkdownFileLink,
-  shouldOpenMarkdownFileLinkInBrowserByDefault,
-  shouldOpenMarkdownFileLinkInEditor,
 } from "./markdown-links";
 import {
   markdownFileCopyPaths,

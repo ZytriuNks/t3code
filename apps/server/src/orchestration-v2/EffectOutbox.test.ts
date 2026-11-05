@@ -48,13 +48,13 @@ it.effect.each([
       yield* outbox.enqueue([{ id: "pi-delete", commandId, threadId: R, request }]);
       assert.deepEqual(Option.getOrThrow(yield* outbox.get("pi-delete")).request, request);
       assert.lengthOf(yield* outbox.listLifecycleCleanup([R]), 1);
-      yield* outbox.claimNext({ workerId: "old", leaseDurationMs: 1000 });
+      yield* outbox.claimNext({ workerId: "old" });
       assert.deepEqual(yield* outbox.reconcileAfterProcessLoss, { requeued: 1, cancelled: 0 });
       const recovered = Option.getOrThrow(yield* outbox.get("pi-delete"));
       assert.equal(recovered.status, "pending");
       assert.equal(recovered.attemptCount, 1);
       assert.deepEqual(recovered.request, request);
-      yield* outbox.claimNext({ workerId: "new", leaseDurationMs: 1000 });
+      yield* outbox.claimNext({ workerId: "new" });
       yield* outbox.fail({ effectId: "pi-delete", workerId: "new", error: "blocked" });
       yield* TestClock.adjust("8 days");
       assert.equal(yield* outbox.pruneSettled, 0);
@@ -69,6 +69,46 @@ const legacyReceipt = Effect.fn("test.legacyArchiveReceipt")(function* () {
     (command_id, aggregate_kind, aggregate_id, command_type, accepted_at, result_sequence, status, error)
     VALUES ('task6:legacy', 'thread', ${R}, 'thread.archive', ${now}, 0, 'accepted', NULL)`;
 });
+
+it.effect("retains native delete completion proof beside cancelled lifecycle work", () =>
+  Effect.gen(function* () {
+    const outbox = yield* EffectOutbox.EffectOutboxV2;
+    const request = {
+      type: "provider-thread.delete" as const,
+      driver: "pi" as const,
+      providerInstanceId: ProviderInstanceId.make("pi-original"),
+      providerThreadId: ProviderThreadId.make("pi-thread"),
+      threadIds: [R],
+      nativeId: "native-id",
+      nativeStorage: {
+        type: "resolved" as const,
+        canonicalRoot: "/isolated/sessions",
+        canonicalFile: "/isolated/sessions/test.jsonl",
+      },
+      lifecycle: { ...lifecycle, sourceToken: "persisted-source" },
+    };
+    yield* outbox.enqueue([{ id: "cancelled-delete", commandId, threadId: R, request }]);
+    yield* outbox.cancelUnsettled({
+      threadId: R,
+      effectTypes: ["provider-thread.delete"],
+      reason: "replacement cleanup",
+    });
+    yield* outbox.enqueue([
+      { id: "completed-delete", commandId, threadId: R, request },
+      { id: "ordinary", commandId, threadId: R, request: { type: "terminal.cleanup" } },
+    ]);
+    for (const id of ["completed-delete", "ordinary"]) {
+      assert.equal(Option.getOrThrow(yield* outbox.claimNext({ workerId: "worker" })).id, id);
+      yield* outbox.succeed({ effectId: id, workerId: "worker" });
+    }
+    yield* TestClock.adjust("8 days");
+
+    assert.equal(yield* outbox.pruneSettled, 1);
+    assert.equal(Option.getOrThrow(yield* outbox.get("cancelled-delete")).status, "cancelled");
+    assert.equal(Option.getOrThrow(yield* outbox.get("completed-delete")).status, "succeeded");
+    assert.isTrue(Option.isNone(yield* outbox.get("ordinary")));
+  }).pipe(Effect.provide(layerTest)),
+);
 
 it.effect(
   "lifecycle cleanup query is thread scoped and distinguishes model-switch detach from legacy archive",
@@ -105,8 +145,7 @@ it.effect(
         ["legacy", "marked"],
       );
       assert.deepEqual(yield* outbox.listLifecycleCleanup([]), []);
-      for (let count = 0; count < 4; count++)
-        yield* outbox.claimNext({ workerId: "task6:worker", leaseDurationMs: 1000 });
+      for (let count = 0; count < 4; count++) yield* outbox.claimNext({ workerId: "task6:worker" });
       assert.isTrue(
         (yield* outbox.listLifecycleCleanup([R])).some((effect) => effect.status === "running"),
       );
@@ -193,7 +232,6 @@ it.effect(
       for (let count = 0; count < 4; count++) {
         const claimed = yield* outbox.claimNext({
           workerId: "task6:worker",
-          leaseDurationMs: 1000,
         });
         assert.isTrue(Option.isSome(claimed));
         if (Option.isSome(claimed))
@@ -223,7 +261,6 @@ it.effect(
       ]);
       const claim = yield* outbox.claimNext({
         workerId: "task6:old-process",
-        leaseDurationMs: 1000,
       });
       assert.isTrue(Option.isSome(claim));
       assert.deepEqual(yield* outbox.reconcileAfterProcessLoss, { requeued: 1, cancelled: 0 });
@@ -234,7 +271,6 @@ it.effect(
       assert.deepPropertyVal(recovered.request, "lifecycle", lifecycle);
       const replay = yield* outbox.claimNext({
         workerId: "task6:new-process",
-        leaseDurationMs: 1000,
       });
       assert.isTrue(Option.isSome(replay));
       yield* outbox.succeed({ effectId: "suspend", workerId: "task6:new-process" });

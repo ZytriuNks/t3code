@@ -50,6 +50,21 @@ vi.mock("react-native", async () => {
     Platform: { OS: "ios", select: (options: Record<string, unknown>) => options.ios },
   };
 });
+vi.mock("@effect/atom-react", async () => {
+  const { AsyncResult } = await import("effect/reactivity");
+  return { useAtomValue: () => AsyncResult.success({}), useAtomSet: () => () => undefined };
+});
+vi.mock("../../state/preferences", () => ({
+  mobilePreferencesAtom: {},
+  updateMobilePreferencesAtom: {},
+}));
+vi.mock("../../state/environments", () => ({ useEnvironments: () => ({ environments: [] }) }));
+vi.mock("../threads/thread-settings-options", () => ({ RUNTIME_MODE_CHOICES: [] }));
+vi.mock("../../components/ui/Button", () => ({ Button: () => null }));
+vi.mock("./components/AutoSettleDaysField", () => ({ AutoSettleDaysField: () => null }));
+vi.mock("./components/SourceControlSignInSection", () => ({
+  SourceControlSignInSection: () => null,
+}));
 vi.mock("react-native-safe-area-context", () => ({
   useSafeAreaInsets: () => ({ top: 0, bottom: 0, left: 0, right: 0 }),
 }));
@@ -130,10 +145,10 @@ vi.mock("./components/SettingsSection", async () => {
       ),
   };
 });
-vi.mock("./components/SettingsChoiceRow", async () => {
+vi.mock("../../components/ui/ListChoiceRow", async () => {
   const { createElement } = await import("react");
   return {
-    SettingsChoiceRow: (props: {
+    ListChoiceRow: (props: {
       readonly label: string;
       readonly description?: string;
       readonly selected: boolean;
@@ -219,9 +234,10 @@ vi.mock("./components/BranchNamingSettings", async () => {
 });
 
 import {
-  SettingsEnvironmentAgentBehaviorRouteScreen,
   SettingsEnvironmentMaintenanceRouteScreen,
   SettingsEnvironmentSourceControlRouteScreen,
+  SettingsThreadsRouteScreen,
+  SettingsWorktreesRouteScreen,
 } from "./SettingsServerControlsRouteScreen";
 
 function settingsTarget(
@@ -231,10 +247,15 @@ function settingsTarget(
   return {
     environmentId,
     label: `env-${environmentId}`,
+    connection: { phase: "connected" },
     serverConfig: {
       settings: { ...DEFAULT_SERVER_SETTINGS, ...settings },
       environment: {
-        capabilities: { projectSettingsOverrides: true, threadRestartContinuation: true },
+        capabilities: {
+          projectSettingsOverrides: true,
+          threadRestartContinuation: true,
+          threadAutoSettlement: true,
+        },
       },
     },
   } as SettingsTarget;
@@ -287,13 +308,15 @@ async function press(label: string) {
   await act(async () => candidate!.click());
 }
 
-describe("agent behavior page", () => {
+describe("threads page response and layout settings", () => {
   it("offers realtime and smooth output next to the finished-turn modes", async () => {
     state.filter.selectedTargets = [settingsTarget(serverId)];
-    await renderScreen(<SettingsEnvironmentAgentBehaviorRouteScreen />);
-    const labels = [...container.querySelectorAll("[data-choice]")].map((row) =>
-      row.getAttribute("data-choice"),
-    );
+    await renderScreen(<SettingsThreadsRouteScreen />);
+    const labels = [
+      ...container.querySelectorAll(
+        '[data-section="Response streaming"] [data-choice], [data-section="Conversation structure"] [data-choice]',
+      ),
+    ].map((row) => row.getAttribute("data-choice"));
     expect(labels).toEqual([
       "After the turn",
       "Finished paragraphs",
@@ -306,7 +329,7 @@ describe("agent behavior page", () => {
 
   it("writes smooth output with the restructured layout it needs", async () => {
     state.filter.selectedTargets = [settingsTarget(serverId)];
-    await renderScreen(<SettingsEnvironmentAgentBehaviorRouteScreen />);
+    await renderScreen(<SettingsThreadsRouteScreen />);
     await press("Smooth output");
     expect(state.updateSettings.mock.calls).toEqual([
       [
@@ -327,7 +350,7 @@ describe("agent behavior page", () => {
         responseStreamingMode: "smooth",
       }),
     ];
-    await renderScreen(<SettingsEnvironmentAgentBehaviorRouteScreen />);
+    await renderScreen(<SettingsThreadsRouteScreen />);
     await press("Current layout");
     expect(state.updateSettings.mock.calls).toEqual([
       [
@@ -343,7 +366,7 @@ describe("agent behavior page", () => {
     state.filter.selectedTargets = [settingsTarget(serverId), settingsTarget(laptopId)];
     state.filter.projectGroups = [projectGroup];
     state.filter.selectedProjectKey = projectGroup.key;
-    await renderScreen(<SettingsEnvironmentAgentBehaviorRouteScreen />);
+    await renderScreen(<SettingsThreadsRouteScreen />);
     await press("Smooth output");
     expect(state.updateSettings.mock.calls).toEqual([
       [
@@ -402,7 +425,7 @@ describe("agent behavior page", () => {
       },
     ];
     state.filter.selectedProjectKey = "single";
-    await renderScreen(<SettingsEnvironmentAgentBehaviorRouteScreen />);
+    await renderScreen(<SettingsThreadsRouteScreen />);
     expect(container.querySelector('[data-overrides="true"]')).not.toBeNull();
     await press("Use defaults");
     expect(state.updateSettings.mock.calls).toEqual([
@@ -431,14 +454,14 @@ describe("agent behavior page", () => {
       },
     ];
     state.filter.selectedProjectKey = "single";
-    await renderScreen(<SettingsEnvironmentAgentBehaviorRouteScreen />);
+    await renderScreen(<SettingsThreadsRouteScreen />);
     expect(container.querySelector('[data-overrides="true"]')).not.toBeNull();
   });
 
   it("disables the choices without the settings write scope", async () => {
     state.writable = new Set();
     state.filter.selectedTargets = [settingsTarget(serverId)];
-    await renderScreen(<SettingsEnvironmentAgentBehaviorRouteScreen />);
+    await renderScreen(<SettingsThreadsRouteScreen />);
     const realtime = button("Real-time output");
     expect(realtime?.disabled).toBe(true);
     await act(async () => realtime!.click());
@@ -455,11 +478,18 @@ describe("agent behavior page", () => {
 });
 
 describe("source control page", () => {
-  it("keeps the upstream branch naming and agent credit controls", async () => {
+  it("keeps the agent credit controls", async () => {
     state.filter.selectedTargets = [settingsTarget(serverId)];
     await renderScreen(<SettingsEnvironmentSourceControlRouteScreen />);
-    expect(container.textContent).toContain("Branch naming settings");
     expect(button("Remove agent credits when merging")).toBeDefined();
+  });
+});
+
+describe("worktrees page", () => {
+  it("keeps the upstream branch naming and start-from-remote controls", async () => {
+    state.filter.selectedTargets = [settingsTarget(serverId)];
+    await renderScreen(<SettingsWorktreesRouteScreen />);
+    expect(container.textContent).toContain("Branch naming settings");
     expect(button("Start from remote")).toBeDefined();
   });
 });

@@ -186,7 +186,7 @@ it.effect.each(["failed", "cancelled"] as const)(
           reason: "fixture cancellation",
         });
       else {
-        yield* outbox.claimNext({ workerId: "task6:failed", leaseDurationMs: 1000 });
+        yield* outbox.claimNext({ workerId: "task6:failed" });
         yield* outbox.fail({
           effectId: "task6:terminal-cleanup",
           workerId: "task6:failed",
@@ -477,7 +477,7 @@ it.effect(
       const outbox = yield* EffectOutbox.EffectOutboxV2;
       assert.equal((yield* manager.open({ threadId: R }).pipe(Effect.result))._tag, "Failure");
       assert.lengthOf((yield* manager.list({ threadId: R })).sessions, 0);
-      yield* outbox.claimNext({ workerId: "task6:preview", leaseDurationMs: 1000 });
+      yield* outbox.claimNext({ workerId: "task6:preview" });
       yield* outbox.succeed({ effectId: "task6:terminal-cleanup", workerId: "task6:preview" });
       yield* manager.open({ threadId: R });
       assert.lengthOf((yield* manager.list({ threadId: R })).sessions, 1);
@@ -559,12 +559,22 @@ it.effect(
       assert.include(killed, 900001);
       assert.equal(
         (yield* manager
-          .restart({ threadId: R, terminalId: "task6-terminal", cwd: baseDir, cols: 80, rows: 24 })
+          .attachStream(
+            {
+              threadId: R,
+              terminalId: "task6-terminal",
+              cwd: baseDir,
+              cols: 80,
+              rows: 24,
+              restartIfNotRunning: true,
+            },
+            () => Effect.void,
+          )
           .pipe(Effect.result))._tag,
         "Failure",
       );
       const outbox = yield* EffectOutbox.EffectOutboxV2;
-      yield* outbox.claimNext({ workerId: "task6:terminal", leaseDurationMs: 1000 });
+      yield* outbox.claimNext({ workerId: "task6:terminal" });
       yield* outbox.succeed({ effectId: "task6:terminal-cleanup", workerId: "task6:terminal" });
       yield* resources.assertCanCreate(R);
       const snapshot = yield* manager.open({

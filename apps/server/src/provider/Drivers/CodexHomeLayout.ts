@@ -30,9 +30,11 @@ const KNOWN_SHARED_DIRECTORIES = [
   "cache",
   "logs",
   "mcp-oauth-locks",
+  "thread-writer-locks",
 ] as const;
 
-const PRIVATE_ENTRY_NAMES = new Set(["auth.json", "models_cache.json"]);
+// auth.lock guards the shadow home's private auth.json.
+const PRIVATE_ENTRY_NAMES = new Set(["auth.json", "auth.lock", "models_cache.json"]);
 // Finder maintains metadata separately for each directory, including shadow homes.
 const SHADOW_LOCAL_ENTRY_NAMES = new Set([
   "log",
@@ -41,9 +43,12 @@ const SHADOW_LOCAL_ENTRY_NAMES = new Set([
   ".DS_Store",
   ".t3-shared-links",
 ]);
-// Codex creates these runtime locks itself when it starts in a shadow home before the shared
-// home has one. They guard shared state, so a local copy is replaced with the shared link.
-const REPLACEABLE_SHARED_RUNTIME_ENTRIES = new Set(["mcp-oauth-locks", ".sqlite-maintenance.lock"]);
+// Shadow homes may create local runtime locks first; replace them with shared links because they guard shared state.
+const REPLACEABLE_SHARED_RUNTIME_ENTRIES = new Set([
+  "mcp-oauth-locks",
+  "thread-writer-locks",
+  ".sqlite-maintenance.lock",
+]);
 
 function resolveHomePath(path: Path.Path, home: string, value: string | undefined): string {
   const expanded =
@@ -304,6 +309,30 @@ const ensureSymlink = Effect.fn("CodexHomeLayout.ensureSymlink")(function* (inpu
       });
     }
 
+    if (input.entryName === "thread-writer-locks") {
+      const lockNames = yield* input.fileSystem.readDirectory(link).pipe(
+        Effect.catchTags({
+          PlatformError: (cause) =>
+            new CodexShadowHomeFileSystemError({
+              sharedHomePath: input.sharedHomePath,
+              effectiveHomePath: input.effectiveHomePath,
+              operation: "readDirectory",
+              path: link,
+              entryName: input.entryName,
+              cause,
+            }),
+        }),
+      );
+      // Codex deletes a thread lock on release, so one that is left may still guard a live
+      // writer. Keep the local directory until a later setup finds none.
+      if (lockNames.some((name) => name.endsWith(".lock") && name !== ".coordination.lock")) {
+        return yield* Effect.logWarning(
+          "Codex shadow home still has thread writer locks; it will share them on a later setup.",
+          { path: link },
+        );
+      }
+    }
+
     yield* input.fileSystem.remove(link, { recursive: true }).pipe(
       Effect.catchTags({
         PlatformError: (cause) =>
@@ -377,11 +406,10 @@ const ensureWindowsHardLink = Effect.fn("CodexHomeLayout.ensureWindowsHardLink")
         catch: (cause) =>
           new CodexShadowHomeFileSystemError({ ...input, operation: "stat", path: file, cause }),
       });
-    const record = (value: typeof WindowsHardLinkIdentity.Type) =>
-      Effect.gen(function* () {
-        yield* fs.makeDirectory(path.dirname(marker), { recursive: true });
-        yield* fs.writeFileString(marker, yield* encodeWindowsHardLinkIdentity(value));
-      });
+    const record = Effect.fn("record")(function* (value: typeof WindowsHardLinkIdentity.Type) {
+      yield* fs.makeDirectory(path.dirname(marker), { recursive: true });
+      yield* fs.writeFileString(marker, yield* encodeWindowsHardLinkIdentity(value));
+    });
     const targetIdentity = yield* identity(input.target);
     if (input.state._tag === "NotSymlink") {
       const linkedInfo = yield* identity(input.link);

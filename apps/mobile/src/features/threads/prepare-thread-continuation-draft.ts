@@ -1,7 +1,9 @@
 import type { ScopedProjectRef, ScopedThreadRef } from "@t3tools/contracts";
-import { formatComposerContextReference } from "@t3tools/shared/composerContextReferences";
+import {
+  formatComposerContextReference,
+  threadContextRecord,
+} from "@t3tools/shared/composerContextReferences";
 
-import { threadComposerContext } from "../../lib/composerContext";
 import {
   createNewTaskDraft,
   insertComposerDraftContext,
@@ -23,7 +25,7 @@ export async function prepareThreadContinuationDraft(
   }
   await waitForComposerDraftsLoaded();
   if (!input.canContinue()) return null;
-  const record = threadComposerContext(input.sourceThread, input.sourceTitle);
+  const record = threadContextRecord(input.sourceThread, input.sourceTitle);
   const draftId = createNewTaskDraft(input.project);
   insertComposerDraftContext(draftId, {
     text: formatComposerContextReference(record),

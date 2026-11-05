@@ -22,7 +22,7 @@ export function resolveSubagentModelInfo(input: {
     ? resolveProviderInstanceDisplayName(provider)
     : driver
       ? (PROVIDER_DISPLAY_NAMES[driver] ?? driver)
-      : (instanceId ?? "—");
+      : (instanceId ?? "-");
   const model = modelSelection?.model ?? subagent?.model;
   const catalogModel = provider?.models.find((candidate) => candidate.slug === model);
   const options = modelSelection?.options ?? [];
@@ -47,7 +47,7 @@ export function resolveSubagentModelInfo(input: {
   const serviceTier = options.find((option) => option.id === "serviceTier")?.value;
   return {
     providerLabel,
-    modelLabel: catalogModel?.name ?? model ?? "—",
+    modelLabel: catalogModel?.name ?? model ?? "-",
     effortLabel,
     fast:
       typeof fastMode === "boolean"

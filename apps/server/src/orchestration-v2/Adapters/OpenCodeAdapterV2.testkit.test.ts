@@ -109,32 +109,34 @@ describe("OpenCodeAdapterV2 replay testkit", () => {
     }),
   );
 
-  for (const [name, recordedId, actualId] of [
-    ["rebinding an existing recorded ID", "recorded-user", "another-generated-user"],
-    [
-      "reusing one generated ID for distinct recorded users",
-      "another-recorded-user",
-      "generated-user",
-    ],
-  ] as const) {
-    it.effect(`rejects ${name}`, () =>
-      Effect.gen(function* () {
-        const controller = new OpenCodeReplayController({
-          ...metadata,
-          scenario: "conflicting-message-identity",
-          entries: [
-            { type: "expect_outbound", frame: promptFrame("recorded-user") },
-            { type: "expect_outbound", frame: promptFrame(recordedId) },
-          ],
-        });
-        yield* Effect.promise(() => controller.expectOutbound(promptFrame("generated-user")));
-        const error = yield* Effect.tryPromise(() =>
-          controller.expectOutbound(promptFrame(actualId)),
-        ).pipe(Effect.flip);
-        assert.instanceOf(error.cause, OpenCodeReplayMismatchError);
-      }),
-    );
-  }
+  it.effect.each([
+    {
+      name: "rebinding an existing recorded ID",
+      recordedId: "recorded-user",
+      actualId: "another-generated-user",
+    },
+    {
+      name: "reusing one generated ID for distinct recorded users",
+      recordedId: "another-recorded-user",
+      actualId: "generated-user",
+    },
+  ])("rejects $name", ({ recordedId, actualId }) =>
+    Effect.gen(function* () {
+      const controller = new OpenCodeReplayController({
+        ...metadata,
+        scenario: "conflicting-message-identity",
+        entries: [
+          { type: "expect_outbound", frame: promptFrame("recorded-user") },
+          { type: "expect_outbound", frame: promptFrame(recordedId) },
+        ],
+      });
+      yield* Effect.promise(() => controller.expectOutbound(promptFrame("generated-user")));
+      const error = yield* Effect.tryPromise(() =>
+        controller.expectOutbound(promptFrame(actualId)),
+      ).pipe(Effect.flip);
+      assert.instanceOf(error.cause, OpenCodeReplayMismatchError);
+    }),
+  );
 
   it.effect("stops an event stream when abort races with listener registration", () =>
     Effect.gen(function* () {

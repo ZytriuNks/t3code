@@ -72,7 +72,6 @@ describe("streaming Mermaid with native browser geometry", () => {
             {...props}
             textPlayback={null}
             isWorking
-            activeTurnInProgress
             timelineEntries={[{ ...entry, message: { ...entry.message, runId, streaming: true } }]}
             latestRun={{
               runId,

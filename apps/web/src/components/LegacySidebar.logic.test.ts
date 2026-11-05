@@ -52,6 +52,8 @@ function project(
     memberProjects: [member],
     memberProjectRefs: [scopeProjectRef(environmentId, member.id)],
     remoteEnvironmentLabels: [],
+    pinned: false,
+    archived: false,
   };
 }
 

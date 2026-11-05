@@ -1,5 +1,5 @@
 import { EnvironmentId, ProjectId, ThreadId, type T3ProjectFileScript } from "@t3tools/contracts";
-import type { ReactNode } from "react";
+import type { ComponentProps, ReactNode } from "react";
 import { AsyncResult, Atom } from "effect/reactivity";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { page } from "vite-plus/test/browser";
@@ -26,7 +26,9 @@ vi.mock("./ThreadDetailsCard", () => ({
   ThreadDetailsCard: ({ children }: { children: (density: "full") => ReactNode }) =>
     children("full"),
 }));
-import { ThreadDetailsPanel, type ThreadDetailsPanelProps } from "./ThreadDetailsPanel";
+import { ThreadDetailsPanel } from "./ThreadDetailsPanel";
+
+type ThreadDetailsPanelProps = ComponentProps<typeof ThreadDetailsPanel>;
 
 function setup() {
   testState.useT3ProjectFileScripts.mockReset().mockReturnValue([]);
@@ -40,7 +42,6 @@ function setup() {
     isServerThread: true,
     anchor: { current: null },
     handle: PopoverCreateHandle(),
-    onPresentationChange: vi.fn(),
     activeProjectName: undefined,
     activeProjectScripts: undefined,
     preferredScriptId: null,
@@ -62,6 +63,7 @@ function setup() {
     onAddProjectScript: vi.fn().mockResolvedValue(AsyncResult.success(undefined)),
     onUpdateProjectScript: vi.fn().mockResolvedValue(AsyncResult.success(undefined)),
     onDeleteProjectScript: vi.fn().mockResolvedValue(AsyncResult.success(undefined)),
+    usage: { providerInstanceId: null, providers: [], sources: [], contextWindow: null },
   } satisfies ThreadDetailsPanelProps;
   return {
     props,

@@ -9,6 +9,8 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { makeCodexManagedClientV2 } from "./CodexManagedClientV2.ts";
 
+const decodeCodexSettings = Schema.decodeEffect(CodexSettings);
+
 it.effect(
   "rotates the managed process before a turn, rebinds handlers and resumes its native thread",
   () =>
@@ -33,8 +35,8 @@ it.effect(
       };
       const registrations: string[] = [];
       const scope = yield* Scope.make();
-      const settings = yield* Schema.decodeEffect(CodexSettings)({});
-      const managedSettings = yield* Schema.decodeEffect(CodexSettings)({
+      const settings = yield* decodeCodexSettings({});
+      const managedSettings = yield* decodeCodexSettings({
         binaryPath: "managed-codex",
       });
       const managed = yield* makeCodexManagedClientV2({

@@ -76,10 +76,18 @@ vi.mock("../cloud/CloudEnvironmentConnectList", () => ({
   CloudEnvironmentConnectRows: () => null,
 }));
 vi.mock("./LoadBalancingSettings", () => ({ LoadBalancingSettings: () => null }));
-vi.mock("./GitHubRoutingSettings", () => ({ GitHubRoutingSettings: () => null }));
+vi.mock("./PullRequestRoutingSettings", () => ({ PullRequestRoutingSettings: () => null }));
 vi.mock("./LocalEnvironmentSetting", () => ({ LocalEnvironmentSetting: () => null }));
 vi.mock("./SessionPermissions", () => ({ SessionPermissions: () => null }));
 import { ConnectionsSettings } from "./ConnectionsSettings";
+
+// The page is split into two views; the test covers both.
+const connectionsPages = (
+  <>
+    <ConnectionsSettings view="access" />
+    <ConnectionsSettings view="environments" />
+  </>
+);
 
 describe("Connections settings language switching", () => {
   it("updates the connection page and open pairing dialog when the language changes", async () => {
@@ -87,7 +95,7 @@ describe("Connections settings language switching", () => {
     using _updates = vi
       .spyOn(serverEnvironment, "updateStateAtom")
       .mockReturnValue(Atom.make({ status: "idle" }));
-    await using screen = await render(<ConnectionsSettings />);
+    await using screen = await render(connectionsPages);
     await expect.element(screen.getByText("Version", { exact: true })).toBeVisible();
     await expect
       .element(screen.getByRole("heading", { name: "Environments", exact: true }))
@@ -104,7 +112,7 @@ describe("Connections settings language switching", () => {
       .element(page.getByRole("heading", { name: "Create pairing link", exact: true }))
       .toBeVisible();
     state.language = "zh-CN";
-    await screen.rerender(<ConnectionsSettings />);
+    await screen.rerender(connectionsPages);
     await expect
       .element(page.getByRole("heading", { name: "创建配对链接", exact: true }))
       .toBeVisible();

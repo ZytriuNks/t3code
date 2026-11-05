@@ -34,6 +34,8 @@ class FakeElement {
   className = "";
   disabled = false;
   focused = false;
+  focusVisible = false;
+  tabIndex = 0;
   type = "";
   private textValue = "";
   private readonly listeners = new Map<string, FakeListener[]>();
@@ -89,6 +91,17 @@ class FakeElement {
     }
     return true;
   }
+
+  matches(selector: string) {
+    if (selector === ":focus-visible") return this.focusVisible;
+    return selector.split(",").some((part) => part.trim() === this.tagName);
+  }
+
+  click() {
+    this.dispatchEvent(new FakeDomEvent("click"));
+  }
+
+  scrollIntoView() {}
 
   focus() {
     const fakeDocument = document as unknown as FakeDocument;
@@ -213,6 +226,11 @@ function findButton(label: string): FakeElement | undefined {
     .find((button) => button.textContent.includes(label));
 }
 
+// Menus handle keys on the document, not on their rows.
+function pressKey(key: string) {
+  (document as unknown as FakeDocument).dispatchEvent(new KeyboardEvent("keydown", { key }));
+}
+
 beforeEach(() => {
   setHideUnavailableContextMenuItems(false);
   vi.stubGlobal("document", new FakeDocument());
@@ -220,6 +238,8 @@ beforeEach(() => {
   vi.stubGlobal("window", {
     innerWidth: 1280,
     innerHeight: 800,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
   });
   vi.stubGlobal("requestAnimationFrame", (callback: (time: number) => void) => {
     callback(0);
@@ -297,11 +317,11 @@ describe("showContextMenuFallback", () => {
       renameButton?.focus();
       removeButton?.dispatchEvent(new MouseEvent("mouseleave"));
       expect(removeButton?.style.background).toBe("transparent");
-      renameButton?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown" }));
+      pressKey("ArrowDown");
       expect(removeButton?.style.background).toBe(
         "color-mix(in srgb, var(--destructive) 30%, transparent)",
       );
-      removeButton?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+      pressKey("Enter");
       await expect(selectionPromise).resolves.toBe(id);
     },
   );
@@ -354,7 +374,9 @@ describe("showContextMenuFallback", () => {
     (document as unknown as FakeDocument).dispatchEvent(event);
     expect(event.defaultPrevented).toBe(true);
     expect(findButton("Copy")).toBeDefined();
-    findButton("Copy")?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+    pressKey("ArrowDown");
+    expect(findButton("Copy")?.focused).toBe(true);
+    pressKey("Enter");
     await expect(selectionPromise).resolves.toBe("copy");
   });
 
@@ -366,11 +388,15 @@ describe("showContextMenuFallback", () => {
 
     const renameButton = findButton("Rename");
     const deleteButton = findButton("Delete");
-    expect(renameButton?.focused).toBe(true);
+    // A pointer-opened menu starts on the menu itself; keys move focus to its rows.
+    expect((document as unknown as FakeDocument).body.children[0]?.focused).toBe(true);
+    expect(renameButton?.focused).toBe(false);
 
-    renameButton?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown" }));
+    pressKey("ArrowDown");
+    expect(renameButton?.focused).toBe(true);
+    pressKey("ArrowDown");
     expect(deleteButton?.focused).toBe(true);
-    deleteButton?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+    pressKey("Enter");
 
     await expect(selectionPromise).resolves.toBe("delete");
   });
@@ -614,7 +640,7 @@ describe("desktop editing menu", () => {
     bridge.receive(request);
     expect(findButton("Cut")?.disabled).toBe(true);
     expect(findButton("Copy")?.textContent).toBe("CopyCtrl+C");
-    findButton("Copy")?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+    pressKey("Enter");
     await expect(bridge.completed).resolves.toEqual({ requestId: "native:1", itemId: "copy" });
     expect(input.focused).toBe(true);
     bridge.unsubscribe?.();
@@ -626,7 +652,8 @@ describe("desktop editing menu", () => {
     bridge.receive(request);
     await expect(bridge.completed).resolves.toEqual({ requestId: "native:1", itemId: null });
     expect(findButton("Copy")).toBeUndefined();
-    findButton("Rename thread")?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+    pressKey("ArrowDown");
+    pressKey("Enter");
     await expect(appSelection).resolves.toBe("rename");
     bridge.unsubscribe?.();
   });

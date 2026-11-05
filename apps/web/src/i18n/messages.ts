@@ -436,14 +436,15 @@ export const EN_MESSAGES = {
   "settings.general.version.install": "Install",
   "settings.general.version.updateTrack": "Update track",
   "settings.general.version.updateTrackDescription":
-    "Use stable releases or nightly builds. Switch back anytime.",
+    "Switches this app and every connected machine whose database the target release supports.",
+  "settings.general.version.machinesOffTrackOne": "1 machine still runs {channel}.",
+  "settings.general.version.machinesOffTrackOther": "{count} machines still run {channel}.",
+  "settings.general.version.reviewTrackSwitch": "Review",
   "settings.general.version.updateTrackAriaLabel": "Update track",
   "settings.general.version.stable": "Stable",
   "settings.general.version.nightly": "Nightly",
   "settings.general.version.latest": "Latest",
   "settings.general.version.hostedTrackDescription": "Switches the hosted app release channel.",
-  "settings.general.version.channelChangeFailed": "Could not change update track",
-  "settings.general.version.channelChangeFailedDescription": "Update track change failed.",
   "settings.general.version.downloadFailed": "Could not download update",
   "settings.general.version.downloadFailedDescription": "Download failed.",
   "settings.general.version.confirmFailed": "Could not confirm update",
@@ -544,13 +545,13 @@ export const EN_MESSAGES = {
     "Shows context window usage as a circular indicator in the composer.",
   "settings.appearance.sidebar.title": "Sidebar",
   "settings.appearance.sidebar.option.default": "Default",
-  "settings.appearance.sidebar.option.legacy": "Legacy",
+  "settings.appearance.sidebar.option.legacy": "Sectioned sidebar",
   "settings.appearance.sidebar.description":
-    "Choose the default flat list or the legacy per-project thread tree.",
+    "Choose the default flat list or the sectioned sidebar with Pinned, Projects and No project sections.",
   "settings.appearance.sidebarProjectGuides.description":
     "Show indentation guides for conversations and drafts in Pinned, Projects and No project. Turn off to remove the guides and indentation.",
   "settings.appearance.sidebarThreadStatusDots.description":
-    "Show dim gray dots for idle threads and colored dots for other statuses in the legacy sidebar. Choose whether to show status text such as Working.",
+    "Show dim gray dots for idle threads and colored dots for other statuses in the sectioned sidebar. Choose whether to show status text such as Working.",
   "settings.appearance.sidebarThreadStatusDots.off": "Off",
   "settings.appearance.sidebarThreadStatusDots.labels": "Dots and status text",
   "settings.appearance.sidebarThreadStatusDots.dots": "Dots only",
@@ -608,10 +609,9 @@ export const EN_MESSAGES = {
     "Use thinner grayscale text smoothing instead of the macOS default.",
   "settings.appearance.fontSmoothing.resetLabel": "font smoothing",
   "settings.appearance.wordWrap.description":
-    "Wrap long lines in code blocks, tables, diffs, and file previews by default.",
+    "Wrap long lines in code blocks, diffs, and file previews by default.",
   "settings.appearance.wordWrap.resetLabel": "word wrapping",
-  "settings.appearance.wordWrap.ariaLabel":
-    "Wrap code, tables, diffs, and file previews by default",
+  "settings.appearance.wordWrap.ariaLabel": "Wrap code, diffs, and file previews by default",
   "settings.appearance.fontPicker.searchPlaceholder": "Search fonts…",
   "settings.appearance.fontPicker.empty": "No fonts found.",
   "settings.appearance.fontPicker.defaultBadge": "default",
@@ -1098,10 +1098,10 @@ export const EN_MESSAGES = {
     "composer meter usage tokens circle old",
   "settings.search.item.legacy-sidebar.title": "Sidebar style",
   "settings.search.item.legacy-sidebar.keywords":
-    "sidebar style default legacy project thread tree old flat list",
+    "sidebar style default sectioned sections pinned project thread tree legacy old flat list",
   "settings.search.item.legacy-sidebar-project-guides.title": "Indentation guides",
   "settings.search.item.legacy-sidebar-project-guides.keywords":
-    "project guides vertical lines thread tree indentation indent left align legacy sidebar pinned no project drafts",
+    "project guides vertical lines thread tree indentation indent left align sectioned sidebar pinned no project drafts",
   "settings.search.item.legacy-sidebar-thread-status-dots.title": "Thread status dots",
   "settings.search.item.legacy-sidebar-thread-status-dots.keywords":
     "thread status dots idle gray working completed indicator",
@@ -1244,7 +1244,7 @@ export const EN_MESSAGES = {
   "settings.search.clear": "Clear settings search",
   "settings.search.empty": "No settings found",
   "settings.search.results": "Settings search results",
-  "settings.search.requiresLegacySidebar": "Only available with the legacy sidebar",
+  "settings.search.requiresLegacySidebar": "Only available with the sectioned sidebar",
   "settings.section.project": "Project",
   "settings.section.general": "General",
   "settings.section.appearance": "Appearance",
@@ -1326,12 +1326,12 @@ export const EN_MESSAGES = {
     "Held for up to 24 hours while this environment is offline. ",
   "settings.scheduledTasks.webhook.forwardedLive":
     "Forwarded live. Requests fail while this environment is offline. ",
-  "settings.scheduledTasks.webhook.changeConnections": "Change in Connections",
+  "settings.scheduledTasks.webhook.changeConnections": "Change in Sharing & access",
   "settings.scheduledTasks.webhook.invalidFilter": "Invalid filter",
   "settings.scheduledTasks.webhook.secretRequired": "Signing secret is required",
   "settings.scheduledTasks.webhook.enterSecret": "Enter the signature header and secret.",
   "settings.scheduledTasks.webhook.description":
-    "Run a prompt automatically — on an interval, at a fixed time, or when a webhook is called.",
+    "Run a prompt automatically on an interval, at a fixed time, or when a webhook is called.",
   "settings.scheduledTasks.webhook.promptHint":
     "Each request runs the prompt. Use {{body.path}}, {{headers.name}}, {{query.name}}, {{body}} or {{request}} in the prompt; only what it names reaches the agent.",
   "settings.scheduledTasks.webhook.ageLimit": "Skip requests older than",
@@ -1406,7 +1406,7 @@ export const EN_MESSAGES = {
   "settings.scheduledTasks.dialog.title.edit": "Edit task",
   "settings.scheduledTasks.dialog.title.create": "New task",
   "settings.scheduledTasks.dialog.description":
-    "Run a prompt automatically — on an interval or at a fixed time.",
+    "Run a prompt automatically, on an interval or at a fixed time.",
   "settings.scheduledTasks.dialog.cancel": "Cancel",
   "settings.scheduledTasks.dialog.editingTaskMissing": "This scheduled task no longer exists.",
   "settings.scheduledTasks.dialog.reconnectRequired": "Reconnect this environment before saving.",
@@ -1473,8 +1473,21 @@ export const EN_MESSAGES = {
   "settings.scheduledTasks.relative.withPaused": " · paused",
   "settings.section.sourceControl": "Source Control",
   "settings.section.storage": "Storage",
-  "settings.section.connections": "Connections",
+  "settings.section.connections": "Environments",
   "settings.section.archive": "Archive",
+  "settings.section.chat": "Chat",
+  "settings.section.diffs": "Diffs & pull requests",
+  "settings.section.threads": "Threads",
+  "settings.section.browser": "Browser",
+  "settings.section.devices": "Devices",
+  "settings.section.worktrees": "Worktrees",
+  "settings.section.access": "Sharing & access",
+  "settings.section.maintenance": "Maintenance",
+  "settings.section.labs": "Labs",
+  "settings.section.about": "About",
+  "settings.nav.agents": "Agents",
+  "settings.nav.code": "Code",
+  "settings.nav.connections": "Connections",
   "settings.keybindings.search": "Search keybindings",
   "settings.keybindings.when": "When",
   "settings.keybindings.always": "Always",
@@ -1756,7 +1769,7 @@ export const EN_MESSAGES = {
   "settings.providers.cursorAccountDescription":
     "Using CURSOR_API_KEY. Remove it from this provider's environment to use browser sign-in.",
   "settings.providers.healthPolicy":
-    "This interval is configured here, then the shared Background activity policy decides whether provider probes may run when the timer fires. Custom intervals appear as Advanced in General settings.",
+    "This interval is configured here, then the shared Background activity policy decides whether provider probes may run when the timer fires. Custom intervals appear as Advanced in Maintenance settings.",
   "settings.providers.healthResetLabel": "provider health check interval",
   "settings.providers.healthDecrease": "Decrease provider health check interval",
   "settings.providers.healthInput": "Provider health check interval in seconds",
@@ -1802,7 +1815,7 @@ export const EN_MESSAGES = {
   "settings.providers.version.updateAvailable": "Update available",
   "settings.providers.version.installVersion": "{label}: install {version}.",
   "settings.providers.version.installLatest": "{label}: install the latest provider version.",
-  "settings.providers.version.viewDetails": "{title} - view details",
+  "settings.providers.version.viewDetails": "{title}, view details",
   "settings.providers.card.updating": "Updating",
   "settings.providers.card.installVersion": "Install {version}",
   "settings.providers.card.updateNow": "Update now",
@@ -2015,7 +2028,7 @@ export const EN_MESSAGES = {
     "Update the selected environments to use storage cleanup, or choose a machine that supports it.",
   "navigation.back": "Back",
   "navigation.settings": "Settings",
-  "navigation.pullRequests": "Pull Requests",
+  "navigation.pullRequests": "Pull requests",
   "navigation.usage": "Usage",
   "toolbar.environment.runOn": "Run on",
   "toolbar.environment.autoBalance": "Auto balance",
@@ -2053,6 +2066,7 @@ export const EN_MESSAGES = {
   "toolbar.branch.startFromOriginDescription":
     "Uses the latest commit of the base branch’s tracked remote branch, even if its name differs. Otherwise uses the same-named branch on origin. Uses your local branch if that remote branch is missing.",
   "diff.scope.workingTree": "Working tree",
+  "diff.scope.toolCall": "Tool call",
   "diff.scope.branchChanges": "Branch changes",
   "diff.scope.latestTurn": "Latest turn",
   "diff.scope.turns": "Turn",
@@ -2082,8 +2096,8 @@ export const EN_MESSAGES = {
     "Add feedback to refine the plan, or leave this blank to implement it",
   "settings.general.workingShelf.description":
     "Fold working and monitoring threads into a Working section. They return to the top of the inbox when they need you.",
-  "settings.general.workingShelf.label": "Working section (beta)",
-  "settings.search.item.working-shelf.title": "Working section (beta)",
+  "settings.general.workingShelf.label": "Working section",
+  "settings.search.item.working-shelf.title": "Working section",
   "settings.search.item.working-shelf.terms":
     "hide fold running monitoring threads inbox sidebar shelf",
   "sidebar.workingShelf": "Working",
@@ -2295,7 +2309,7 @@ export const EN_MESSAGES = {
     "Clipboard copy is unavailable here. Open or manually copy this full pairing URL on the device you want to connect.",
   "settings.connections.clipboardCodeHint":
     "Clipboard copy is unavailable here. Manually copy this code into another client.",
-  "settings.connections.pairingQrTitle": "Pairing link — scan to open on another device",
+  "settings.connections.pairingQrTitle": "Pairing link. Scan to open on another device",
   "settings.connections.done": "Done",
   "settings.connections.copyCode": "Copy code",
   "settings.connections.copyLink": "Copy link",
@@ -2564,7 +2578,9 @@ export const EN_MESSAGES = {
   "settings.connections.openInFileManager": "Open in {fileManager}",
   "terminal.accessible.input": "Terminal input",
   "terminal.accessible.scrollback": "Terminal scrollback",
-  "settings.integrations.section.browser": "Browser",
+  "settings.integrations.section.browser": "Browsing",
+  "settings.integrations.section.browserAgentAccess": "Agent access",
+  "settings.integrations.section.browserRecordings": "Recordings",
   "settings.integrations.viewport.description":
     "Tab size for you and agents. Fill fits the panel; other sizes show the device toolbar.",
   "settings.integrations.viewport.ariaLabel": "Default browser viewport",
@@ -2750,7 +2766,7 @@ export const EN_MESSAGES = {
   "settings.sourceControl.discovery.toggleDetails": "Toggle {label} details",
   "settings.sourceControl.discovery.availability": "{label} availability",
   "settings.sourceControl.fetchInterval.policy":
-    "This interval is configured for Git only. The shared Background activity policy still decides whether Git refreshes may run when the timer fires. Custom intervals appear as Advanced in General settings.",
+    "This interval is configured for Git only. The shared Background activity policy still decides whether Git refreshes may run when the timer fires. Custom intervals appear as Advanced in Maintenance settings.",
   "settings.sourceControl.fetchInterval.label": "fetch interval",
   "settings.sourceControl.fetchInterval.description":
     "Refresh remote branches in the background. Set to 0 to avoid automatic Git prompts.",
@@ -2760,7 +2776,7 @@ export const EN_MESSAGES = {
   "settings.sourceControl.fetchInterval.seconds": "seconds",
   "settings.sourceControl.section.serverEnvironment": "Server environment",
   "settings.sourceControl.section.versionControl": "Version Control",
-  "settings.sourceControl.section.providers": "Source Control Providers",
+  "settings.sourceControl.section.providers": "Source control providers",
   "settings.sourceControl.discovery.scanFailed": "Could not scan the server environment",
   "settings.sourceControl.discovery.nothingDetected": "Nothing detected yet",
   "settings.sourceControl.discovery.emptyDescription":
@@ -2838,7 +2854,7 @@ export const EN_MESSAGES = {
   "settings.browserImport.quit.recheck": "I've quit it",
   "settings.browserImport.fullDisk.title": "Let T3 Code read {source}'s cookies",
   "settings.browserImport.fullDisk.description":
-    "To import cookies from {source}, T3 Code needs Full Disk Access. Turn it on in System Settings, then come back to finish the import — you can revoke it again once the import is done.",
+    "To import cookies from {source}, T3 Code needs Full Disk Access. Turn it on in System Settings, then come back to finish the import. You can revoke it again once the import is done.",
   "settings.browserImport.fullDisk.accessTitle": "Full Disk Access",
   "settings.browserImport.fullDisk.accessDescription": "Read {source}'s cookies for this import.",
   "settings.browserImport.fullDisk.stillRequired":
@@ -2870,7 +2886,7 @@ export const EN_MESSAGES = {
   "settings.browserImport.failure.needsKeychainApproval":
     "Needs Keychain access to read its cookies.",
   "settings.browserImport.failure.keychainItemMissing":
-    "No encryption key in your Keychain — sign in to that browser once, then retry.",
+    "No encryption key in your Keychain. Sign in to that browser once, then retry.",
   "settings.browserImport.failure.needsFullDiskAccess":
     "Give T3 Code Full Disk Access in System Settings → Privacy & Security, then retry.",
   "settings.browserImport.failure.browserRunning":
@@ -3295,14 +3311,16 @@ export const ZH_CN_MESSAGES = {
   "settings.general.version.download": "下载",
   "settings.general.version.install": "安装",
   "settings.general.version.updateTrack": "更新通道",
-  "settings.general.version.updateTrackDescription": "使用稳定版或每夜版构建。随时可以切回。",
+  "settings.general.version.updateTrackDescription":
+    "切换此应用以及所有已连接、且数据库受目标版本支持的设备。",
+  "settings.general.version.machinesOffTrackOne": "仍有 1 台设备运行{channel}。",
+  "settings.general.version.machinesOffTrackOther": "仍有 {count} 台设备运行{channel}。",
+  "settings.general.version.reviewTrackSwitch": "查看",
   "settings.general.version.updateTrackAriaLabel": "更新通道",
   "settings.general.version.stable": "稳定版",
   "settings.general.version.nightly": "每夜版",
   "settings.general.version.latest": "最新版",
   "settings.general.version.hostedTrackDescription": "切换托管应用的发布通道。",
-  "settings.general.version.channelChangeFailed": "无法更改更新通道",
-  "settings.general.version.channelChangeFailedDescription": "更新通道更改失败。",
   "settings.general.version.downloadFailed": "无法下载更新",
   "settings.general.version.downloadFailedDescription": "下载失败。",
   "settings.general.version.confirmFailed": "无法确认更新",
@@ -3390,12 +3408,13 @@ export const ZH_CN_MESSAGES = {
     "在输入区以环形指示器显示上下文窗口用量。",
   "settings.appearance.sidebar.title": "侧栏",
   "settings.appearance.sidebar.option.default": "默认",
-  "settings.appearance.sidebar.option.legacy": "旧版",
-  "settings.appearance.sidebar.description": "选择默认的扁平列表，或旧版按项目分组的对话树。",
+  "settings.appearance.sidebar.option.legacy": "分区侧栏",
+  "settings.appearance.sidebar.description":
+    "选择默认的扁平列表，或按置顶、项目和无项目分区显示的分区侧栏。",
   "settings.appearance.sidebarProjectGuides.description":
     "统一显示置顶、项目和无项目下对话与草稿的缩进竖线。关闭后，移除竖线并取消列表缩进。",
   "settings.appearance.sidebarThreadStatusDots.description":
-    "在旧版侧栏中为空闲对话显示深灰色圆点，其他状态沿用原有圆点颜色，可选择是否显示 Working 等状态文字。",
+    "在分区侧栏中为空闲对话显示深灰色圆点，其他状态沿用原有圆点颜色，可选择是否显示 Working 等状态文字。",
   "settings.appearance.sidebarThreadStatusDots.off": "关闭",
   "settings.appearance.sidebarThreadStatusDots.labels": "圆点与状态文字",
   "settings.appearance.sidebarThreadStatusDots.dots": "仅圆点",
@@ -3445,10 +3464,9 @@ export const ZH_CN_MESSAGES = {
   "settings.appearance.fontSmoothing.description":
     "使用更细的灰度文本平滑，替代 macOS 的默认效果。",
   "settings.appearance.fontSmoothing.resetLabel": "字体平滑",
-  "settings.appearance.wordWrap.description":
-    "默认在代码块、表格、差异和文件预览中折行显示过长的行。",
+  "settings.appearance.wordWrap.description": "默认在代码块、差异和文件预览中折行显示过长的行。",
   "settings.appearance.wordWrap.resetLabel": "自动换行",
-  "settings.appearance.wordWrap.ariaLabel": "默认在代码、表格、差异和文件预览中自动换行",
+  "settings.appearance.wordWrap.ariaLabel": "默认在代码、差异和文件预览中自动换行",
   "settings.appearance.fontPicker.searchPlaceholder": "搜索字体…",
   "settings.appearance.fontPicker.empty": "未找到字体。",
   "settings.appearance.fontPicker.defaultBadge": "默认",
@@ -3891,10 +3909,11 @@ export const ZH_CN_MESSAGES = {
   "settings.search.item.legacy-context-window-indicator.keywords":
     "输入区 指示器 用量 token 圆环 旧版",
   "settings.search.item.legacy-sidebar.title": "侧栏样式",
-  "settings.search.item.legacy-sidebar.keywords": "侧栏 样式 外观 默认 项目 线程 树 旧版 扁平列表",
+  "settings.search.item.legacy-sidebar.keywords":
+    "侧栏 样式 外观 默认 分区 分区侧栏 置顶 项目 线程 树 旧版 扁平列表",
   "settings.search.item.legacy-sidebar-project-guides.title": "缩进竖线",
   "settings.search.item.legacy-sidebar-project-guides.keywords":
-    "项目 竖线 引导线 对话 线程 树 缩进 左对齐 旧版 侧栏 置顶 无项目 草稿",
+    "项目 竖线 引导线 对话 线程 树 缩进 左对齐 分区侧栏 置顶 无项目 草稿",
   "settings.search.item.legacy-sidebar-thread-status-dots.title": "对话状态圆点",
   "settings.search.item.legacy-sidebar-thread-status-dots.keywords":
     "对话 线程 状态 圆点 空闲 灰色 运行 完成 指示器",
@@ -4030,7 +4049,7 @@ export const ZH_CN_MESSAGES = {
   "settings.search.clear": "清除设置搜索",
   "settings.search.empty": "未找到设置",
   "settings.search.results": "设置搜索结果",
-  "settings.search.requiresLegacySidebar": "仅适用于旧版侧栏",
+  "settings.search.requiresLegacySidebar": "仅适用于分区侧栏",
   "settings.section.project": "项目",
   "settings.section.general": "常规",
   "settings.section.appearance": "外观",
@@ -4107,7 +4126,7 @@ export const ZH_CN_MESSAGES = {
   "settings.scheduledTasks.webhook.rotate": "更换地址",
   "settings.scheduledTasks.webhook.heldOffline": "此环境离线时，请求最多保留 24 小时。",
   "settings.scheduledTasks.webhook.forwardedLive": "请求实时转发；此环境离线时，请求将失败。",
-  "settings.scheduledTasks.webhook.changeConnections": "在“连接”设置中更改",
+  "settings.scheduledTasks.webhook.changeConnections": "在“共享与访问”中更改",
   "settings.scheduledTasks.webhook.invalidFilter": "筛选条件无效",
   "settings.scheduledTasks.webhook.secretRequired": "需要签名密钥",
   "settings.scheduledTasks.webhook.enterSecret": "请输入签名请求头和密钥。",
@@ -4242,8 +4261,21 @@ export const ZH_CN_MESSAGES = {
   "settings.scheduledTasks.relative.withPaused": " · 已暂停",
   "settings.section.sourceControl": "源代码管理",
   "settings.section.storage": "存储",
-  "settings.section.connections": "连接",
+  "settings.section.connections": "环境",
   "settings.section.archive": "归档",
+  "settings.section.chat": "对话",
+  "settings.section.diffs": "差异与拉取请求",
+  "settings.section.threads": "线程",
+  "settings.section.browser": "浏览器",
+  "settings.section.devices": "设备",
+  "settings.section.worktrees": "工作树",
+  "settings.section.access": "共享与访问",
+  "settings.section.maintenance": "维护",
+  "settings.section.labs": "实验功能",
+  "settings.section.about": "关于",
+  "settings.nav.agents": "代理",
+  "settings.nav.code": "代码",
+  "settings.nav.connections": "连接",
   "settings.keybindings.search": "搜索快捷键",
   "settings.keybindings.when": "条件",
   "settings.keybindings.always": "始终",
@@ -4513,7 +4545,7 @@ export const ZH_CN_MESSAGES = {
   "settings.providers.cursorAccountDescription":
     "正在使用 CURSOR_API_KEY。若要通过浏览器登录，请从此提供商环境中移除该变量。",
   "settings.providers.healthPolicy":
-    "此间隔在此处配置；计时器触发时，共享的“后台活动”策略决定是否运行提供商检查。自定义间隔在常规设置中显示为“高级”。",
+    "此间隔在此处配置；计时器触发时，共享的“后台活动”策略决定是否运行提供商检查。自定义间隔在维护设置中显示为“高级”。",
   "settings.providers.healthResetLabel": "提供商健康检查间隔",
   "settings.providers.healthDecrease": "减少提供商健康检查间隔",
   "settings.providers.healthInput": "提供商健康检查间隔（秒）",
@@ -4556,7 +4588,7 @@ export const ZH_CN_MESSAGES = {
   "settings.providers.version.updateAvailable": "有可用更新",
   "settings.providers.version.installVersion": "{label}：安装 {version}。",
   "settings.providers.version.installLatest": "{label}：安装最新的提供商版本。",
-  "settings.providers.version.viewDetails": "{title} - 查看详情",
+  "settings.providers.version.viewDetails": "{title}，查看详情",
   "settings.providers.card.updating": "正在更新",
   "settings.providers.card.installVersion": "安装 {version}",
   "settings.providers.card.updateNow": "立即更新",
@@ -4793,6 +4825,7 @@ export const ZH_CN_MESSAGES = {
   "toolbar.branch.startFromOriginDescription":
     "用 origin 上最新的同名分支创建工作树，而不是使用本地分支。",
   "diff.scope.workingTree": "工作区",
+  "diff.scope.toolCall": "工具调用",
   "diff.scope.branchChanges": "分支更改",
   "diff.scope.latestTurn": "最新轮次",
   "diff.scope.turns": "轮次",
@@ -4819,8 +4852,8 @@ export const ZH_CN_MESSAGES = {
   "composer.placeholder.planFollowUp": "添加反馈以完善计划；留空则直接执行计划",
   "settings.general.workingShelf.description":
     "将工作中和监控中的线程收进“工作中”分组；需要你处理时，它们会回到收件箱顶部。",
-  "settings.general.workingShelf.label": "工作中分组（测试版）",
-  "settings.search.item.working-shelf.title": "工作中分组（测试版）",
+  "settings.general.workingShelf.label": "工作中分组",
+  "settings.search.item.working-shelf.title": "工作中分组",
   "settings.search.item.working-shelf.terms": "隐藏 折叠 工作 监控 线程 收件箱 侧栏 分组",
   "sidebar.workingShelf": "工作中",
   "sidebar.pinned": "置顶",
@@ -5011,7 +5044,7 @@ export const ZH_CN_MESSAGES = {
     "此处无法使用剪贴板复制。请在要连接的设备上打开或手动复制此完整配对 URL。",
   "settings.connections.clipboardCodeHint":
     "此处无法使用剪贴板复制。请手动将此代码复制到另一个客户端。",
-  "settings.connections.pairingQrTitle": "配对链接 — 扫描以在另一台设备上打开",
+  "settings.connections.pairingQrTitle": "配对链接：扫描以在另一台设备上打开",
   "settings.connections.done": "完成",
   "settings.connections.copyCode": "复制代码",
   "settings.connections.copyLink": "复制链接",
@@ -5264,6 +5297,8 @@ export const ZH_CN_MESSAGES = {
   "terminal.accessible.input": "终端输入",
   "terminal.accessible.scrollback": "终端回滚区",
   "settings.integrations.section.browser": "浏览器",
+  "settings.integrations.section.browserAgentAccess": "代理访问",
+  "settings.integrations.section.browserRecordings": "录制",
   "settings.integrations.viewport.description":
     "你和代理使用的标签页尺寸。填充会适配面板，其他尺寸会显示设备工具栏。",
   "settings.integrations.viewport.ariaLabel": "默认浏览器视口",

@@ -152,6 +152,12 @@ foreach ($product in $products) {
     }
     $body = [Text.StringBuilder]::new()
     [void]$body.AppendLine('Function .onInit')
+    # The production hook emits StrRep for running-app messages; exercise it so -WX stays strict.
+    [void]$body.AppendLine('${T3StrRep} $0 "private path probe" "private" "fixture"')
+    [void]$body.AppendLine('${If} $0 != "fixture path probe"')
+    [void]$body.AppendLine('SetErrorLevel 3')
+    [void]$body.AppendLine('Quit')
+    [void]$body.AppendLine('${EndIf}')
     [void]$body.AppendLine('!ifndef INSTALL_MODE_PER_ALL_USERS')
     [void]$body.AppendLine('StrCpy $perUserInstallationFolder ""')
     [void]$body.AppendLine('!endif')

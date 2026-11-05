@@ -158,8 +158,9 @@ export const focusExistingWindowsFolder = Effect.fn("desktop.shell.focusExisting
         );
       });
     }).pipe(
-      Effect.catchCause((cause) =>
-        Cause.hasInterrupts(cause) ? Effect.failCause(cause) : Effect.succeed(false),
+      Effect.catchCauseIf(
+        (cause) => !Cause.hasInterrupts(cause),
+        () => Effect.succeed(false),
       ),
     );
   },

@@ -26,6 +26,7 @@ export function useChatTimelineSendMotion({
   onPosition(messageId: string, anchorIndex: number): () => void;
 }) {
   const onPositionRef = useRef(onPosition);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- keeps the ref read by the layout observer at the latest onPosition callback
   useLayoutEffect(() => {
     onPositionRef.current = onPosition;
   });
@@ -68,6 +69,7 @@ export function useChatTimelineSendMotion({
       onSettled,
     );
   };
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- subscribes to the send-motion target layout observer and unsubscribes on cleanup
   useLayoutEffect(
     () =>
       motion.observeTargetLayout((messageId, element) => {

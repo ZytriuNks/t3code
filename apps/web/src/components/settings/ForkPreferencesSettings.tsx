@@ -24,8 +24,10 @@ export function ForkSidebarPreferences() {
           <Select
             value={settings.legacySidebarEnabled ? "legacy" : "default"}
             onValueChange={(value) => {
-              if (value === "legacy" || value === "default")
-                update({ legacySidebarEnabled: value === "legacy" });
+              // The legacy and boring sidebars are exclusive; picking legacy turns boring off.
+              if (value === "legacy")
+                update({ legacySidebarEnabled: true, boringSidebarEnabled: false });
+              else if (value === "default") update({ legacySidebarEnabled: false });
             }}
           >
             <SelectTrigger
