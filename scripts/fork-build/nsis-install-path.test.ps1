@@ -18,6 +18,7 @@ $oneClick = [IO.File]::ReadAllText((Join-Path $NsisTemplatesPath 'oneClick.nsh')
 # Execute the production macros in their real .onInit order, without installer sections.
 $sequence = [regex]::Match($installer, '!insertmacro initMultiUser\s+!ifmacrodef customInit\s+!insertmacro customInit\s+!endif').Value
 if (-not $sequence) { throw 'Review the changed electron-builder initialization order before running this probe.' }
+$sequence = $sequence.Replace('!ifmacrodef customInit', ('StrCpy $ProbeNativePath "$INSTDIR"' + "`n!ifmacrodef customInit"))
 $installSection = $installer.Substring($installer.IndexOf('Section "install"'))
 if ($installSection -notmatch '!ifndef ONE_CLICK[\s\S]*!insertmacro setInstallModePerAllUsers') {
   throw 'Review the changed install-mode ordering before running this probe.'
@@ -85,6 +86,7 @@ OutFile "@EXE@"
 Var ProbeUser
 Var ProbeMachine
 Var ProbeOutput
+Var ProbeNativePath
 !macro ProbeReadRegStr OUTPUT ROOT KEY VALUE
   !if "${KEY}" != "Software\${APP_GUID}"
     !error "Unexpected registry key in path policy"
@@ -135,10 +137,10 @@ foreach ($product in $products) {
     $outputPath = Join-Path $fixtureRoot ($stem + '.txt')
     $sourcePath = Join-Path $fixtureRoot ($stem + '.nsi')
     $cases = @(
-      @{ Id = 'fresh'; User = ''; Machine = ''; Expected = $product.Default; Suffix = '\t3code' },
+      @{ Id = 'fresh'; User = ''; Machine = ''; Expected = $product.Default },
       @{ Id = 'custom'; User = $userPath; Machine = $machinePath },
       @{ Id = 'double-separators'; User = $userPath.Replace('\', '\\'); Machine = $machinePath.Replace('\', '\\') },
-      @{ Id = 'opposite-scope-only'; User = ''; Machine = ''; Expected = $product.Default; Suffix = '\t3code' }
+      @{ Id = 'opposite-scope-only'; User = ''; Machine = ''; Expected = $product.Default }
     )
     if ($mode -eq 'user') { $cases[3].Machine = $otherPath }
     else { $cases[3].User = $otherPath }
@@ -159,7 +161,7 @@ foreach ($product in $products) {
       [void]$body.AppendLine('StrCpy $ProbeUser "' + $case.User + '"')
       [void]$body.AppendLine('StrCpy $ProbeMachine "' + $case.Machine + '"')
       [void]$body.AppendLine($sequence)
-      [void]$body.AppendLine('FileWrite $ProbeOutput "' + $case.Id + '|$INSTDIR|$ProbeUser|$ProbeMachine$\r$\n"')
+      [void]$body.AppendLine('FileWrite $ProbeOutput "' + $case.Id + '|$INSTDIR|$ProbeUser|$ProbeMachine|$ProbeNativePath$\r$\n"')
     }
     [void]$body.AppendLine('FileClose $ProbeOutput')
     [void]$body.AppendLine('SetErrorLevel 0')
@@ -200,6 +202,7 @@ foreach ($product in $products) {
         $case = $cases[$index]
         $actual = $lines[$index].Split('|')
         $expected = $case.Expected
+        if ($case.ContainsKey('Expected') -and -not $expected) { $expected = $actual[4] }
         $registered = if ($mode -eq 'user') { $case.User } else { $case.Machine }
         if (-not $case.ContainsKey('Expected')) {
           $expected = $registered
@@ -208,7 +211,7 @@ foreach ($product in $products) {
           }
         }
         if ($override) { $expected = $override.Substring(3) }
-        $pathMatches = if ($expected) { $actual[1] -ceq $expected } else { $actual[1].EndsWith($case.Suffix) }
+        $pathMatches = $actual[1] -ceq $expected
         $expectedUser = $case.User
         $expectedMachine = $case.Machine
         if ($case.Id -eq 'double-separators' -and $product.Normalize) {
@@ -216,7 +219,7 @@ foreach ($product in $products) {
           else { $expectedMachine = $machinePath }
         }
         $registryMatches = $actual[2] -ceq $expectedUser -and $actual[3] -ceq $expectedMachine
-        $observations.Add([pscustomobject]@{ product = $product.Name; mode = $mode; case = $case.Id; override = $override; actual = $actual[1]; expected = $expected; expectedSuffix = $case.Suffix; pathMatches = $pathMatches; registryFixtureMatches = $registryMatches; passed = $pathMatches -and $registryMatches })
+        $observations.Add([pscustomobject]@{ product = $product.Name; mode = $mode; case = $case.Id; override = $override; nativePathBeforeHook = $actual[4]; actual = $actual[1]; expected = $expected; pathMatches = $pathMatches; registryFixtureMatches = $registryMatches; passed = $pathMatches -and $registryMatches })
       }
     }
   }
