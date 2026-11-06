@@ -8,6 +8,7 @@ import {
   CheckpointScopeId,
   MessageId,
   type ModelSelection,
+  type OrchestrationV2DomainEvent,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2TurnItem,
   type OrchestrationV2ThreadHistoryPage,
@@ -37,6 +38,9 @@ import * as SqlClient from "effect/sql/SqlClient";
 import { projectThreadAwarenessV2 } from "@t3tools/shared/agentAwareness";
 
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as NativeSessionBindings from "./NativeSessionBindings.ts";
+import * as EventStore from "./EventStore.ts";
+import * as ProjectionMaintenance from "./ProjectionMaintenance.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import {
@@ -59,6 +63,528 @@ const modelSelection = {
 const driver = ProviderDriverKind.make("codex");
 const providerInstanceId = modelSelection.instanceId;
 const encodeUnknownJsonString = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+
+const nativeOriginFixture = (at: DateTime.Utc) => {
+  const threadId = ThreadId.make("thread:native-origin");
+  const instanceId = ProviderInstanceId.make("pi-native-origin");
+  const providerId = ProviderThreadId.make("provider:native-origin");
+  const provider: OrchestrationV2ProviderThread = {
+    id: providerId,
+    driver: ProviderDriverKind.make("pi"),
+    providerInstanceId: instanceId,
+    providerSessionId: null,
+    appThreadId: threadId,
+    ownerNodeId: null,
+    nativeThreadRef: null,
+    nativeConversationHeadRef: null,
+    status: "not_loaded",
+    firstRunOrdinal: null,
+    lastRunOrdinal: null,
+    handoffIds: [],
+    forkedFrom: null,
+    createdAt: at,
+    updatedAt: at,
+    nativeSessionOrigin: { version: 1, state: "unstarted" },
+  };
+  const created: Extract<OrchestrationV2DomainEvent, { type: "thread.created" }> = {
+    id: EventId.make("event:native-origin:thread"),
+    type: "thread.created",
+    threadId,
+    occurredAt: at,
+    payload: {
+      createdBy: "user",
+      creationSource: "web",
+      id: threadId,
+      projectId: ProjectId.make("project:native-origin"),
+      title: "Native origin",
+      providerInstanceId: instanceId,
+      modelSelection: { instanceId, model: "fake" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      activeProviderThreadId: null,
+      lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
+      forkedFrom: null,
+      createdAt: at,
+      updatedAt: at,
+      archivedAt: null,
+      settledOverride: null,
+      settledAt: null,
+      lastVisitedAt: null,
+      deletedAt: null,
+    },
+  };
+  const update = (
+    payload = provider,
+  ): Extract<OrchestrationV2DomainEvent, { type: "provider-thread.updated" }> => ({
+    id: EventId.make("event:native-origin:provider"),
+    type: "provider-thread.updated",
+    threadId,
+    occurredAt: at,
+    payload,
+  });
+  const run: Extract<OrchestrationV2DomainEvent, { type: "run.updated" }> = {
+    id: EventId.make("event:native-origin:run"),
+    type: "run.updated",
+    threadId,
+    occurredAt: at,
+    payload: {
+      id: RunId.make("run:native-origin"),
+      threadId,
+      ordinal: 1,
+      providerInstanceId: instanceId,
+      modelSelection: { instanceId, model: "fake" },
+      providerThreadId: providerId,
+      userMessageId: MessageId.make("message:native-origin"),
+      rootNodeId: null,
+      activeAttemptId: null,
+      status: "queued",
+      requestedAt: at,
+      startedAt: null,
+      completedAt: null,
+      checkpointId: null,
+      contextHandoffId: null,
+    },
+  };
+  return { created, provider, update, run, threadId, instanceId, providerId };
+};
+
+it.effect.each([
+  "session",
+  "ordinal",
+  "last-ordinal",
+  "storage",
+  "native-id",
+  "native-head",
+  "fork",
+  "instance",
+  "preparing",
+  "starting",
+  "running",
+  "started",
+  "attempt",
+  "turn",
+  "node-turn",
+  "item-turn",
+] as const)("native origin monotonically folds $0 and ignores stale provider snapshots", (gate) =>
+  Effect.gen(function* () {
+    const store = yield* ProjectionStore.ProjectionStoreV2;
+    const at = yield* DateTime.now;
+    const f = nativeOriginFixture(at);
+    const turnId = ProviderTurnId.make("turn:native-origin");
+    const nodeId = NodeId.make("node:native-origin");
+    let event: OrchestrationV2DomainEvent;
+    switch (gate) {
+      case "session":
+        event = f.update({
+          ...f.provider,
+          providerSessionId: ProviderSessionId.make("session:native-origin"),
+        });
+        break;
+      case "ordinal":
+        event = f.update({ ...f.provider, firstRunOrdinal: 1 });
+        break;
+      case "last-ordinal":
+        event = f.update({ ...f.provider, lastRunOrdinal: 1 });
+        break;
+      case "storage":
+        event = f.update({
+          ...f.provider,
+          nativeStorage: {
+            type: "resolved",
+            canonicalRoot: "/fake",
+            canonicalFile: "/fake/session.jsonl",
+          },
+        });
+        break;
+      case "native-id":
+        event = f.update({
+          ...f.provider,
+          nativeThreadRef: { driver: f.provider.driver, strength: "strong", nativeId: "native" },
+        });
+        break;
+      case "native-head":
+        event = f.update({
+          ...f.provider,
+          nativeConversationHeadRef: {
+            driver: f.provider.driver,
+            strength: "strong",
+            nativeId: "native-head",
+          },
+        });
+        break;
+      case "fork":
+        event = f.update({
+          ...f.provider,
+          forkedFrom: { providerThreadId: ProviderThreadId.make("provider:parent") },
+        });
+        break;
+      case "instance":
+        event = f.update({
+          ...f.provider,
+          providerInstanceId: ProviderInstanceId.make("pi-replacement"),
+        });
+        break;
+      case "preparing":
+      case "starting":
+      case "running":
+        event = { ...f.run, payload: { ...f.run.payload, status: gate } };
+        break;
+      case "started":
+        event = { ...f.run, payload: { ...f.run.payload, status: "failed", startedAt: at } };
+        break;
+      case "attempt":
+        event = {
+          ...f.run,
+          type: "run-attempt.updated",
+          payload: {
+            id: RunAttemptId.make("attempt:native-origin"),
+            runId: f.run.payload.id,
+            attemptOrdinal: 1,
+            rootNodeId: nodeId,
+            providerInstanceId: f.instanceId,
+            providerThreadId: f.providerId,
+            providerTurnId: null,
+            reason: "initial",
+            status: "running",
+            startedAt: at,
+            completedAt: null,
+          },
+        };
+        break;
+      case "turn":
+        event = {
+          ...f.run,
+          type: "provider-turn.updated",
+          payload: {
+            id: turnId,
+            providerThreadId: f.providerId,
+            nodeId,
+            runAttemptId: null,
+            nativeTurnRef: null,
+            ordinal: 1,
+            status: "pending",
+            startedAt: null,
+            completedAt: null,
+          },
+        };
+        break;
+      case "node-turn":
+        event = {
+          ...f.run,
+          type: "node.updated",
+          payload: {
+            id: nodeId,
+            threadId: f.threadId,
+            runId: f.run.payload.id,
+            parentNodeId: null,
+            rootNodeId: nodeId,
+            kind: "root_turn",
+            status: "pending",
+            countsForRun: true,
+            providerThreadId: f.providerId,
+            providerTurnId: turnId,
+            nativeItemRef: null,
+            runtimeRequestId: null,
+            checkpointScopeId: null,
+            startedAt: null,
+            completedAt: null,
+          },
+        };
+        break;
+      case "item-turn":
+        event = {
+          ...f.run,
+          type: "turn-item.updated",
+          payload: {
+            id: TurnItemId.make("item:native-origin"),
+            threadId: f.threadId,
+            runId: f.run.payload.id,
+            nodeId,
+            providerThreadId: f.providerId,
+            providerTurnId: turnId,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: 1,
+            type: "assistant_message",
+            text: "fake",
+            messageId: MessageId.make("message:native-origin:item"),
+            streaming: false,
+            status: "running",
+            title: "",
+            startedAt: at,
+            completedAt: null,
+            updatedAt: at,
+          },
+        };
+        break;
+    }
+    let pure = ProjectionStore.emptyProjection(f.created);
+    for (const next of [f.created, f.update(), event, f.update()]) {
+      yield* store.apply(next);
+      pure = ProjectionStore.applyToProjection(pure, next);
+    }
+    assert.equal(pure.providerThreads[0]?.nativeSessionOrigin?.state, "may_exist");
+    assert.deepEqual(
+      (yield* store.getThreadProjection(f.threadId)).providerThreads[0]?.nativeSessionOrigin,
+      { version: 1, state: "may_exist" },
+    );
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect.each(["unknown", "unstarted"] as const)(
+  "native origin cannot be retrofitted and direct binding revokes %s",
+  (initial) =>
+    Effect.gen(function* () {
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const bindings = yield* NativeSessionBindings.NativeSessionBindings;
+      const f = nativeOriginFixture(yield* DateTime.now);
+      const { nativeSessionOrigin: _origin, ...legacy } = f.provider;
+      yield* store.apply(f.created);
+      yield* store.apply(f.update(initial === "unknown" ? legacy : f.provider));
+      yield* store.apply(f.update());
+      assert.equal(
+        (yield* store.getThreadProjection(f.threadId)).providerThreads[0]?.nativeSessionOrigin
+          ?.state ?? "unknown",
+        initial,
+      );
+      yield* bindings.applyProviderThread(f.update({ ...f.provider, firstRunOrdinal: 1 }));
+      yield* store.apply(f.update());
+      assert.equal(
+        (yield* store.getThreadProjection(f.threadId)).providerThreads[0]?.nativeSessionOrigin
+          ?.state,
+        "may_exist",
+      );
+    }).pipe(Effect.provide(NativeSessionBindings.layer.pipe(Layer.provideMerge(layerTest)))),
+);
+
+it.effect(
+  "native origin creation, gate rollback and exact session scope preserve unused placeholders",
+  () =>
+    Effect.gen(function* () {
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const sql = yield* SqlClient.SqlClient;
+      const at = yield* DateTime.now;
+      const f = nativeOriginFixture(at);
+      const sessionId = ProviderSessionId.make("session:other-native-origin");
+      const session: OrchestrationV2DomainEvent = {
+        ...f.created,
+        type: "provider-session.attached",
+        payload: {
+          id: sessionId,
+          driver: f.provider.driver,
+          providerInstanceId: f.instanceId,
+          status: "ready",
+          cwd: "/fake",
+          model: "fake",
+          capabilities: CodexProviderCapabilitiesV2,
+          createdAt: at,
+          updatedAt: at,
+          lastError: null,
+        },
+      };
+      const tracking: Extract<OrchestrationV2DomainEvent, { type: "node.updated" }> = {
+        ...f.created,
+        type: "node.updated",
+        payload: {
+          id: NodeId.make("node:native-tracking"),
+          threadId: f.threadId,
+          runId: f.run.payload.id,
+          parentNodeId: NodeId.make("node:parent"),
+          rootNodeId: NodeId.make("node:parent"),
+          kind: "subagent",
+          status: "running",
+          countsForRun: false,
+          providerThreadId: f.providerId,
+          providerTurnId: null,
+          nativeItemRef: null,
+          runtimeRequestId: null,
+          checkpointScopeId: null,
+          startedAt: at,
+          completedAt: null,
+        },
+      };
+      const error: Extract<OrchestrationV2DomainEvent, { type: "turn-item.updated" }> = {
+        ...f.created,
+        type: "turn-item.updated",
+        payload: {
+          id: TurnItemId.make("item:native-origin:error"),
+          threadId: f.threadId,
+          runId: f.run.payload.id,
+          nodeId: NodeId.make("node:native-origin:root"),
+          providerThreadId: f.providerId,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: 1,
+          type: "error",
+          status: "failed",
+          title: "Start failed",
+          startedAt: at,
+          completedAt: at,
+          updatedAt: at,
+          failure: {
+            class: "provider_error",
+            code: null,
+            message: "Fake pre-start failure",
+            retryable: false,
+          },
+        },
+      };
+      const events = [
+        f.created,
+        f.update(),
+        session,
+        tracking,
+        error,
+        { ...f.run, payload: { ...f.run.payload, status: "failed" as const, completedAt: at } },
+      ];
+      let pure = ProjectionStore.emptyProjection(f.created);
+      for (const event of events) {
+        yield* store.apply(event);
+        pure = ProjectionStore.applyToProjection(pure, event);
+      }
+      assert.equal(pure.providerThreads[0]?.nativeSessionOrigin?.state, "unstarted");
+      const state = () =>
+        store
+          .getThreadProjection(f.threadId)
+          .pipe(Effect.map((p) => p.providerThreads[0]?.nativeSessionOrigin?.state));
+      assert.equal(yield* state(), "unstarted");
+      const rollback = yield* sql
+        .withTransaction(
+          Effect.gen(function* () {
+            yield* store.apply(
+              f.update({ ...f.provider, providerSessionId: sessionId, firstRunOrdinal: 1 }),
+            );
+            assert.equal(yield* state(), "may_exist");
+            return yield* Effect.fail("injected gate rollback");
+          }),
+        )
+        .pipe(Effect.result);
+      assert.equal(rollback._tag, "Failure");
+      assert.equal(yield* state(), "unstarted");
+      yield* store.apply(
+        f.update({ ...f.provider, providerSessionId: sessionId, firstRunOrdinal: 1 }),
+      );
+      yield* store.apply(f.update());
+      assert.equal(yield* state(), "may_exist");
+    }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect.each(["unstarted", "may_exist", "unknown", "node-only", "item-only"] as const)(
+  "native origin survives real compaction and rebuild: %s",
+  (expected) =>
+    Effect.gen(function* () {
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const events = yield* EventStore.EventStoreV2;
+      const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+      const sql = yield* SqlClient.SqlClient;
+      const f = nativeOriginFixture(yield* DateTime.now);
+      const at = f.created.occurredAt;
+      const nodeId = NodeId.make("node:native-origin:compaction");
+      const isolatedFacts = [false, true, false].flatMap<OrchestrationV2DomainEvent>((gate) =>
+        expected === "node-only"
+          ? [
+              {
+                ...f.created,
+                type: "node.updated" as const,
+                payload: {
+                  id: nodeId,
+                  threadId: f.threadId,
+                  runId: null,
+                  parentNodeId: null,
+                  rootNodeId: nodeId,
+                  kind: "root_turn" as const,
+                  status: "pending" as const,
+                  countsForRun: true,
+                  providerThreadId: f.providerId,
+                  providerTurnId: null,
+                  nativeItemRef: null,
+                  runtimeRequestId: null,
+                  checkpointScopeId: null,
+                  startedAt: gate ? at : null,
+                  completedAt: null,
+                },
+              },
+            ]
+          : expected === "item-only"
+            ? [
+                {
+                  ...f.created,
+                  type: "turn-item.updated" as const,
+                  payload: {
+                    id: TurnItemId.make("item:native-origin:compaction"),
+                    threadId: f.threadId,
+                    runId: null,
+                    nodeId,
+                    providerThreadId: f.providerId,
+                    providerTurnId: null,
+                    nativeItemRef: gate
+                      ? {
+                          driver: f.provider.driver,
+                          strength: "strong" as const,
+                          nativeId: "native-item",
+                        }
+                      : null,
+                    parentItemId: null,
+                    ordinal: 1,
+                    type: "command_execution" as const,
+                    input: "fake",
+                    status: "pending" as const,
+                    title: "",
+                    startedAt: null,
+                    completedAt: null,
+                    updatedAt: at,
+                  },
+                },
+              ]
+            : [],
+      );
+      const expectedState =
+        expected === "node-only" || expected === "item-only" ? "may_exist" : expected;
+      const { nativeSessionOrigin: _origin, ...legacy } = f.provider;
+      const history: ReadonlyArray<OrchestrationV2DomainEvent> = [
+        f.created,
+        f.update(expected === "unknown" ? legacy : f.provider),
+        ...(expected === "may_exist" ? [f.update({ ...f.provider, firstRunOrdinal: 1 })] : []),
+        ...isolatedFacts,
+        f.update(),
+        f.update(),
+        ...["first", "middle", "last"].map((title) => ({
+          ...f.created,
+          type: "thread.metadata-updated" as const,
+          payload: { ...f.created.payload, title },
+        })),
+      ].map((event, index) => ({
+        ...event,
+        id: EventId.make(`event:native-origin:history:${index}`),
+      }));
+      for (const stored of yield* events.append({ events: history }))
+        yield* store.apply(stored.event);
+      assert.equal(
+        (yield* store.getThreadProjection(f.threadId)).providerThreads[0]?.nativeSessionOrigin
+          ?.state ?? "unknown",
+        expectedState,
+      );
+      assert.isAbove((yield* maintenance.compactEventStore()).deletedEventCount, 0);
+      assert.isTrue((yield* maintenance.rebuild).valid);
+      const provider = (yield* store.getThreadProjection(f.threadId)).providerThreads[0]!;
+      assert.equal(provider.nativeSessionOrigin?.state ?? "unknown", expectedState);
+      const pure = history.reduce(
+        ProjectionStore.applyToProjection,
+        ProjectionStore.emptyProjection(f.created),
+      );
+      assert.deepEqual(provider.nativeSessionOrigin, pure.providerThreads[0]?.nativeSessionOrigin);
+      assert.equal((yield* sql<{ readonly file: string }>`PRAGMA database_list`)[0]?.file, "");
+    }).pipe(
+      Effect.provide(
+        ProjectionMaintenance.layer.pipe(
+          Layer.provideMerge(EventStore.layer.pipe(Layer.provideMerge(layerTest))),
+        ),
+      ),
+    ),
+);
 
 const traceSqlStatements = () => {
   const statements: Array<string> = [];

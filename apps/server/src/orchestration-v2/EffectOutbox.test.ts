@@ -4,6 +4,9 @@ import {
   ProviderInstanceId,
   ProviderSessionId,
   ProviderThreadId,
+  ProviderTurnId,
+  RunAttemptId,
+  RunId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
@@ -22,6 +25,87 @@ const F = ThreadId.make("task6:F");
 const commandId = CommandId.make("task6:archive");
 const lifecycle = { commandId, rootThreadId: R, revision: 1 };
 const layerTest = EffectOutbox.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMemory));
+
+it.effect.each([
+  "provider-turn.start",
+  "provider-turn.restart",
+  "provider-runtime.continue",
+] as const)(
+  "Pi claim %s rejects an uncommitted gate and rolls back its lease and attempt",
+  (type) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const providerId = ProviderThreadId.make("provider:claim-gate");
+      const runId = RunId.make("run:claim-gate");
+      yield* sql`INSERT INTO orchestration_v2_projection_provider_threads
+      (provider_thread_id, thread_id, owner_node_id, provider, driver, provider_instance_id, provider_session_id,
+       status, first_run_ordinal, last_run_ordinal, updated_at, payload_json)
+      VALUES (${providerId}, ${R}, NULL, 'pi', 'pi', 'pi', NULL, 'not_loaded', NULL, NULL, '2026-11-06',
+        '{"nativeSessionOrigin":{"version":1,"state":"unstarted"}}')`;
+      yield* sql`INSERT INTO orchestration_v2_projection_runs
+      (run_id, thread_id, ordinal, provider, provider_instance_id, provider_thread_id, status, requested_at, completed_at, payload_json)
+      VALUES (${runId}, ${R}, 1, 'pi', 'pi', ${providerId}, 'queued', '2026-11-06', NULL, '{}')`;
+      yield* outbox.enqueue([
+        {
+          id: "gated-start",
+          commandId,
+          threadId: R,
+          request:
+            type === "provider-runtime.continue"
+              ? { type, sourceRunId: runId }
+              : type === "provider-turn.restart"
+                ? {
+                    type,
+                    runId,
+                    providerSessionId: ProviderSessionId.make("session:source"),
+                    providerThreadId: providerId,
+                    providerTurnId: ProviderTurnId.make("turn:source"),
+                    interruptedAttemptId: RunAttemptId.make("attempt:source"),
+                  }
+                : { type, runId },
+        },
+      ]);
+      const rejected = yield* Effect.result(outbox.claimNext({ workerId: "gate-worker" }));
+      assert.equal(rejected._tag, "Failure");
+      if (rejected._tag === "Failure") assert.equal(rejected.failure._tag, "EffectOutboxError");
+      const pending = Option.getOrThrow(yield* outbox.get("gated-start"));
+      assert.equal(pending.status, "pending");
+      assert.equal(pending.attemptCount, 0);
+      assert.isNull(pending.leaseOwner);
+      const rollback = yield* sql
+        .withTransaction(
+          Effect.gen(function* () {
+            yield* sql`UPDATE orchestration_v2_projection_provider_threads SET first_run_ordinal = 1,
+        payload_json = json_set(payload_json, '$.nativeSessionOrigin.state', 'may_exist') WHERE provider_thread_id = ${providerId}`;
+            yield* outbox.claimNext({ workerId: "gate-worker" });
+            return yield* Effect.fail("injected gate transaction rollback");
+          }),
+        )
+        .pipe(Effect.result);
+      assert.equal(rollback._tag, "Failure");
+      assert.equal(Option.getOrThrow(yield* outbox.get("gated-start")).attemptCount, 0);
+      yield* sql`UPDATE orchestration_v2_projection_provider_threads SET first_run_ordinal = 1,
+      payload_json = json_set(payload_json, '$.nativeSessionOrigin.state', 'may_exist') WHERE provider_thread_id = ${providerId}`;
+      assert.equal(
+        Option.getOrThrow(yield* outbox.claimNext({ workerId: "gate-worker" })).id,
+        "gated-start",
+      );
+      yield* outbox.cancelUnsettled({
+        threadId: R,
+        effectTypes: [type],
+        reason: "fixture deletion",
+      });
+      yield* TestClock.adjust("8 days");
+      assert.equal(yield* outbox.pruneSettled, 1);
+      assert.isTrue(Option.isNone(yield* outbox.get("gated-start")));
+      const rows = yield* sql<{
+        readonly state: string;
+      }>`SELECT json_extract(payload_json, '$.nativeSessionOrigin.state') AS state
+      FROM orchestration_v2_projection_provider_threads WHERE provider_thread_id = ${providerId}`;
+      assert.equal(rows[0]?.state, "may_exist");
+    }).pipe(Effect.provide(layerTest)),
+);
 
 it.effect.each([
   {
@@ -107,6 +191,24 @@ it.effect("retains native delete completion proof beside cancelled lifecycle wor
     assert.equal(Option.getOrThrow(yield* outbox.get("cancelled-delete")).status, "cancelled");
     assert.equal(Option.getOrThrow(yield* outbox.get("completed-delete")).status, "succeeded");
     assert.isTrue(Option.isNone(yield* outbox.get("ordinary")));
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("start claims without a provider binding retain the legacy fake behavior", () =>
+  Effect.gen(function* () {
+    const outbox = yield* EffectOutbox.EffectOutboxV2;
+    yield* outbox.enqueue([
+      {
+        id: "unbound-start",
+        commandId,
+        threadId: R,
+        request: { type: "provider-turn.start", runId: RunId.make("run:unbound-fake") },
+      },
+    ]);
+    assert.equal(
+      Option.getOrThrow(yield* outbox.claimNext({ workerId: "unbound-worker" })).id,
+      "unbound-start",
+    );
   }).pipe(Effect.provide(layerTest)),
 );
 

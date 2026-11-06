@@ -206,6 +206,34 @@ function makeBinding(overrides: Partial<NativeSessionBinding> = {}): NativeSessi
   };
 }
 
+const readReclaimableRows = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  return yield* Effect.forEach(
+    [
+      "orchestration_v2_projection_runs",
+      "orchestration_v2_projection_run_attempts",
+      "orchestration_v2_projection_nodes",
+      "orchestration_v2_projection_subagents",
+      "orchestration_v2_projection_runtime_requests",
+      "orchestration_v2_projection_provider_threads",
+      "orchestration_v2_projection_provider_turns",
+      "orchestration_v2_projection_provider_sessions",
+      "orchestration_v2_projection_provider_session_bindings",
+      "orchestration_v2_native_session_bindings",
+      "orchestration_v2_projection_turn_items",
+      "orchestration_v2_turn_item_positions",
+      "orchestration_v2_projection_messages",
+      "orchestration_v2_projection_context_handoffs",
+      "orchestration_v2_projection_context_transfers",
+      "orchestration_v2_projection_checkpoints",
+      "orchestration_v2_projection_checkpoint_scopes",
+      "orchestration_v2_projection_plans",
+    ],
+    (table) =>
+      Effect.map(sql.unsafe(`SELECT * FROM ${table} ORDER BY rowid`), (rows) => ({ table, rows })),
+  );
+});
+
 it.effect("plans a root-scoped Pi deletion from saved identity after switching models", () =>
   Effect.gen(function* () {
     const member = makeProjection();
@@ -703,10 +731,10 @@ it.effect.each([
   "rerouted-target-instance-switch",
   "rerouted-returned-to-pi",
   "rerouted-after-pi-start",
-  "failure-without-origin",
-  "failure-without-attempt-origin",
-  "failure-without-root-origin",
-  "failure-with-corrupt-origin",
+  "failure-without-provider-origin",
+  "failure-with-corrupt-origin-version",
+  "failure-with-corrupt-origin-state",
+  "failure-with-corrupt-origin-shape",
   "failure-after-starting-history",
   "failure-after-attempt-start-history",
   "started-attempt",
@@ -716,6 +744,8 @@ it.effect.each([
   "late-unresolved-identity",
   "late-resolved-identity",
   "identity-before-reclaim-transaction",
+  "explicit-origin-without-execution-history",
+  "non-pi-origin",
 ] as const)(
   "certifies only never-started queued Pi placeholders through deletion (%s)",
   (scenario) =>
@@ -736,6 +766,8 @@ it.effect.each([
           nativeThreadId: `pending:${runId}`,
         }),
         status: "not_loaded",
+        driver: scenario === "non-pi-origin" ? driver : ProviderDriverKind.make("pi"),
+        nativeSessionOrigin: { version: 1, state: "unstarted" },
         nativeThreadRef: null,
         nativeStorage:
           scenario === "missing-storage"
@@ -894,21 +926,24 @@ it.effect.each([
             },
           ],
         });
-        if (scenario === "failure-without-origin") {
+        if (scenario === "failure-without-provider-origin") {
           const sql = yield* SqlClient.SqlClient;
-          yield* sql`DELETE FROM orchestration_events WHERE event_type = 'run.created'`;
+          yield* sql`UPDATE orchestration_v2_projection_provider_threads
+            SET payload_json = json_remove(payload_json, '$.nativeSessionOrigin') WHERE provider_thread_id = ${pending.id}`;
+          yield* sql`UPDATE orchestration_events SET payload_json = json_remove(payload_json, '$.nativeSessionOrigin')
+            WHERE event_type = 'provider-thread.updated' AND json_extract(payload_json, '$.id') = ${pending.id}`;
         }
-        if (scenario === "failure-without-attempt-origin") {
+        if (
+          scenario === "failure-after-starting-history" ||
+          scenario === "failure-after-attempt-start-history"
+        ) {
           const sql = yield* SqlClient.SqlClient;
-          yield* sql`DELETE FROM orchestration_events WHERE event_type = 'run-attempt.created'`;
-        }
-        if (scenario === "failure-without-root-origin") {
-          const sql = yield* SqlClient.SqlClient;
-          yield* sql`DELETE FROM orchestration_events WHERE event_type = 'node.updated' AND json_extract(payload_json, '$.status') = 'pending'`;
-        }
-        if (scenario === "failure-with-corrupt-origin") {
-          const sql = yield* SqlClient.SqlClient;
-          yield* sql`UPDATE orchestration_events SET payload_json = json_remove(payload_json, '$.rootNodeId') WHERE event_type = 'run.created'`;
+          assert.deepEqual(
+            (yield* store.getThreadRecords(threadId, ["providerThreads"])).providerThreads[0]!
+              .nativeSessionOrigin,
+            { version: 1, state: "may_exist" },
+          );
+          yield* sql`DELETE FROM orchestration_events WHERE event_type IN ('run.created', 'run.updated', 'run-attempt.created', 'run-attempt.updated', 'node.updated')`;
         }
         if (scenario === "pre-start-failure-with-queued-run") {
           const secondRunId = allocator.derive.run({ threadId, ordinal: 3 });
@@ -1386,6 +1421,25 @@ it.effect.each([
         }
       }
       const plan = yield* planner.plan(command);
+      if (scenario.startsWith("failure-with-corrupt-origin-")) {
+        const sql = yield* SqlClient.SqlClient;
+        const corruptOrigin =
+          scenario === "failure-with-corrupt-origin-version"
+            ? { version: 2, state: "unstarted" }
+            : scenario === "failure-with-corrupt-origin-state"
+              ? { version: 1, state: "unknown" }
+              : "unstarted";
+        yield* sql`UPDATE orchestration_v2_projection_provider_threads
+            SET payload_json = json_set(payload_json, '$.nativeSessionOrigin', json(${JSON.stringify(corruptOrigin)}))
+            WHERE provider_thread_id = ${pending.id}`;
+        yield* sql`UPDATE orchestration_events
+            SET payload_json = json_set(payload_json, '$.nativeSessionOrigin', json(${JSON.stringify(corruptOrigin)}))
+            WHERE event_type = 'provider-thread.updated' AND json_extract(payload_json, '$.id') = ${pending.id}`;
+      }
+      if (scenario === "explicit-origin-without-execution-history") {
+        const sql = yield* SqlClient.SqlClient;
+        yield* sql`DELETE FROM orchestration_events WHERE event_type IN ('run.created', 'run.updated', 'run-attempt.created', 'run-attempt.updated', 'node.updated')`;
+      }
       const startId = "placeholder-start";
       if (scenario === "unclaimed-start" || scenario === "claimed-after-plan") {
         yield* outbox.enqueue([
@@ -1397,9 +1451,25 @@ it.effect.each([
           },
         ]);
         if (scenario === "claimed-after-plan") {
+          yield* sink.write({
+            events: [
+              {
+                id: EventId.make("placeholder-gate-before-claim"),
+                type: "run.updated",
+                threadId,
+                occurredAt: deletedAt,
+                payload: { ...run, status: "starting", queuePosition: null },
+              },
+            ],
+          });
           assert.equal(
             Option.getOrThrow(yield* outbox.claimNext({ workerId: "racing-start" })).id,
             startId,
+          );
+          assert.deepEqual(
+            (yield* store.getThreadRecords(threadId, ["providerThreads"])).providerThreads[0]!
+              .nativeSessionOrigin,
+            { version: 1, state: "may_exist" },
           );
         }
       }
@@ -1454,6 +1524,8 @@ it.effect.each([
         assert.equal(cancelled.attemptCount, scenario === "unclaimed-start" ? 0 : 1);
       }
       const allowed = [
+        "explicit-origin-without-execution-history",
+        "non-pi-origin",
         "missing-storage",
         "unresolved-storage",
         "unclaimed-start",
@@ -1470,9 +1542,10 @@ it.effect.each([
         "rerouted-target-running",
         "rerouted-target-switch",
         "rerouted-target-instance-switch",
+        "rerouted-returned-to-pi",
       ].includes(scenario);
       const certified =
-        allowed ||
+        (allowed && scenario !== "non-pi-origin") ||
         scenario.startsWith("late-") ||
         scenario === "identity-before-reclaim-transaction";
       const reclaim = (yield* ThreadDataReclamation.ThreadDataReclamation).reclaim;
@@ -1525,6 +1598,7 @@ it.effect.each([
         const sql = yield* SqlClient.SqlClient;
         assert.isEmpty(yield* sql`SELECT * FROM orchestration_v2_projection_provider_threads`);
         assert.isEmpty(yield* sql`SELECT * FROM orchestration_v2_projection_runs`);
+        for (const { table, rows } of yield* readReclaimableRows) assert.isEmpty(rows, table);
         const repeated = yield* reclaim(bounds);
         assert.deepEqual(repeated.skippedThreads, []);
         assert.equal(repeated.deletedProjectionRowCount, 0);
@@ -1536,15 +1610,14 @@ it.effect.each([
         assert.lengthOf((yield* store.getThreadRecords(threadId, ["runs"])).runs, 1);
       }
       if (certified) {
-        assert.nestedPropertyVal(first, "noNativeSessionProofs.0.providerThreadId", pending.id);
-        assert.nestedPropertyVal(first, "noNativeSessionProofs.0.source", "cancelled_queued_runs");
-        assert.deepEqual(
-          first.noNativeSessionProofs?.[0]?.runIds,
-          scenario === "pre-start-failure-with-queued-run" ||
-            scenario === "rerouted-with-queued-run"
-            ? [runId, allocator.derive.run({ threadId, ordinal: 3 })]
-            : [runId],
-        );
+        assert.deepEqual(first.noNativeSessionProofs, [
+          {
+            providerThreadId: pending.id,
+            providerInstanceId: piInstanceId,
+            source: "queued_provider_origin",
+            version: 1,
+          },
+        ]);
         const stored = committed.storedEvents.find((row) => row.event.type === "thread.deleted")!;
         assert.deepNestedPropertyVal(
           stored,
@@ -1939,6 +2012,7 @@ it.effect(
 it.effect.each([
   "same-root-pending",
   "same-root-held",
+  "same-root-original-queued-pi",
   "cross-batch-parent-reference",
   "cross-batch-parent-first",
   "cross-batch-parent-first-failure",
@@ -1951,17 +2025,20 @@ it.effect.each([
   "cross-batch-parent-first-child-terminal-reuse",
   "cross-batch-parent-first-child-terminal-switch-reuse",
   "cross-batch-parent-first-child-terminal-reuse-compacted",
-  "cross-batch-parent-first-child-terminal-reuse-missing-origin",
-  "cross-batch-parent-first-child-terminal-reuse-missing-attempt",
-  "cross-batch-parent-first-child-terminal-reuse-missing-provider-history",
-  "cross-batch-parent-first-child-restart-missing-origin",
-  "cross-batch-parent-first-child-resume-wrong-instance",
-  "cross-batch-parent-first-missing-spawn",
+  "cross-batch-parent-first-child-terminal-reuse-without-run-history",
+  "cross-batch-parent-first-child-terminal-reuse-without-attempt-history",
+  "cross-batch-parent-first-child-terminal-reuse-without-provider-history",
+  "cross-batch-parent-first-child-restart-without-run-history",
+  "cross-batch-parent-first-child-resume-stale-display-instance",
+  "cross-batch-parent-first-without-spawn",
   "cross-batch-parent-first-wrong-spawn-owner",
+  "cross-batch-parent-first-wrong-spawn-target",
   "parent-owner-restart",
   "parent-owner-restart-compacted",
   "parent-owner-restart-wrong-root",
-  "parent-owner-restart-missing-attempt",
+  "parent-owner-restart-without-old-attempt",
+  "missing-provider-origin",
+  "corrupt-provider-origin",
   "live-parent",
   "different-operation-root",
   "missing-task",
@@ -1969,7 +2046,7 @@ it.effect.each([
   "wrong-original-task",
   "wrong-task-child",
   "wrong-task-owner",
-  "wrong-task-instance",
+  "stale-task-display-instance",
   "extra-execution-node",
   "started-root",
   "native-binding",
@@ -2010,6 +2087,20 @@ it.effect.each([
       providerThreadId: ProviderThreadId.make("provider:a3-child-codex"),
       rootNodeId: NodeId.make("node:a3-child-original"),
       activeAttemptId: RunAttemptId.make("attempt:a3-child-original"),
+      ...(scenario === "same-root-original-queued-pi"
+        ? {
+            providerThreadId: allocator.derive.providerThread({
+              driver: ProviderDriverKind.make("pi"),
+              nativeThreadId: "pending:run:a3-child-original",
+            }),
+            providerInstanceId: piInstanceId,
+            modelSelection: { instanceId: piInstanceId, model: "test" },
+            status: "queued" as const,
+            queuePosition: 1,
+            startedAt: null,
+            completedAt: null,
+          }
+        : {}),
     };
     const activeRun = {
       ...originalRun,
@@ -2020,17 +2111,23 @@ it.effect.each([
       activeAttemptId: RunAttemptId.make("attempt:a3-child-active"),
       delegatedTaskId: NodeId.make("task:a3-active"),
       completedAt: null,
+      providerThreadId: ProviderThreadId.make("provider:a3-child-codex"),
+      providerInstanceId,
+      modelSelection,
+      queuePosition: null,
+      startedAt: createdAt,
     };
     const queuedId = allocator.derive.run({ threadId: childId, ordinal: 3 });
     const pending = makePiThread({
       id: allocator.derive.providerThread({
         driver: ProviderDriverKind.make("pi"),
-        nativeThreadId: `pending:${queuedId}`,
+        nativeThreadId: `pending:${scenario === "same-root-original-queued-pi" ? originalRun.id : queuedId}`,
       }),
       appThreadId: childId,
       nativeThreadRef: null,
       nativeStorage: { type: "unresolved", reason: "unavailable" },
       status: "not_loaded",
+      nativeSessionOrigin: { version: 1, state: "unstarted" },
     });
     const queued: OrchestrationV2Run = {
       ...base.runs[1]!,
@@ -2092,7 +2189,15 @@ it.effect.each([
         ],
       });
     }
-    for (const run of [owner, originalRun]) {
+    for (const run of [
+      owner,
+      {
+        ...originalRun,
+        providerThreadId: activeRun.providerThreadId,
+        providerInstanceId,
+        modelSelection,
+      },
+    ]) {
       yield* sink.write({
         events: [
           {
@@ -2128,7 +2233,7 @@ it.effect.each([
       ],
     });
     for (const run of [owner, originalRun, activeRun, queued]) {
-      const isQueued = run.id === queuedId;
+      const isQueued = run.status === "queued";
       yield* sink.write({
         events: [
           {
@@ -2178,7 +2283,7 @@ it.effect.each([
     assert.notProperty(originalRun, "delegatedTaskId");
     // 首次委派由 spawn transfer 关联；只有 follow-up 向 run 写入 delegatedTaskId。
     for (const run of [originalRun, activeRun, { ...queued, delegatedTaskId: followupTaskId }]) {
-      const isQueued = run.id === queuedId;
+      const isQueued = run.status === "queued";
       const task = {
         id: run.id === originalRun.id ? originalTaskId : run.delegatedTaskId!,
         threadId: parentId,
@@ -2247,7 +2352,7 @@ it.effect.each([
       });
     }
     for (const type of ["subagent_spawn", "subagent_result"] as const) {
-      if (type === "subagent_spawn" && scenario.endsWith("missing-spawn")) continue;
+      if (type === "subagent_spawn" && scenario.endsWith("without-spawn")) continue;
       const spawn = type === "subagent_spawn";
       yield* sink.write({
         events: [
@@ -2272,7 +2377,11 @@ it.effect.each([
               basePoint: null,
               sourceProviderInstanceId: providerInstanceId,
               targetProviderInstanceId: providerInstanceId,
-              targetRunId: spawn ? originalRun.id : owner.id,
+              targetRunId: spawn
+                ? scenario.endsWith("wrong-spawn-target")
+                  ? owner.id
+                  : originalRun.id
+                : owner.id,
               status: "consumed",
               resolution: null,
               createdBy: "system",
@@ -2689,25 +2798,25 @@ it.effect.each([
               yield* maintenance.compactEventStore();
               assert.isTrue((yield* maintenance.rebuild).valid);
             }).pipe(Effect.provide(ProjectionMaintenance.layer));
-          } else if (scenario.endsWith("missing-origin")) {
+          } else if (scenario.endsWith("without-run-history")) {
             yield* sql`DELETE FROM orchestration_events WHERE stream_id = ${childId}
               AND event_type IN ('run.created', 'run.updated') AND json_extract(payload_json, '$.id') = ${activeRun.id}
               AND json_extract(payload_json, '$.providerThreadId') = ${nextProviderId}`;
-          } else if (scenario.endsWith("missing-attempt")) {
+          } else if (scenario.endsWith("without-attempt-history")) {
             yield* sql`DELETE FROM orchestration_events WHERE stream_id = ${childId}
               AND event_type = 'run-attempt.created' AND json_extract(payload_json, '$.id') = ${nextAttempt}`;
-          } else if (scenario.endsWith("missing-provider-history")) {
+          } else if (scenario.endsWith("without-provider-history")) {
             yield* sql`DELETE FROM orchestration_events WHERE stream_id = ${childId}
               AND event_type = 'provider-thread.updated' AND json_extract(payload_json, '$.id') = ${nextProviderId}
               AND json_extract(payload_json, '$.providerInstanceId') = ${nextInstanceId}`;
           }
         }
       }
-      if (scenario.endsWith("missing-origin") && !scenario.includes("reuse")) {
+      if (scenario.endsWith("without-run-history") && !scenario.includes("reuse")) {
         yield* sql`DELETE FROM orchestration_events
           WHERE event_type IN ('run.created', 'run.updated') AND json_extract(payload_json, '$.id') = ${activeRun.id}
             AND json_extract(payload_json, '$.providerThreadId') = ${initialProvider.id}`;
-      } else if (scenario.endsWith("wrong-instance")) {
+      } else if (scenario.endsWith("stale-display-instance")) {
         yield* sql`UPDATE orchestration_v2_projection_subagents
           SET provider_instance_id = 'codex-a3-unrelated', payload_json = json_set(payload_json, '$.providerInstanceId', 'codex-a3-unrelated')
           WHERE subagent_id = ${activeRun.delegatedTaskId}`;
@@ -2799,7 +2908,7 @@ it.effect.each([
             },
           ],
         });
-      } else if (scenario === "parent-owner-restart-missing-attempt") {
+      } else if (scenario === "parent-owner-restart-without-old-attempt") {
         yield* sql`DELETE FROM orchestration_v2_projection_run_attempts WHERE attempt_id = ${initialAttempt.id}`;
       } else if (scenario === "parent-owner-restart-compacted") {
         yield* Effect.gen(function* () {
@@ -2810,7 +2919,7 @@ it.effect.each([
     if (scenario === "missing-task") {
       yield* sql`DELETE FROM orchestration_v2_projection_subagents WHERE subagent_id = ${followupTaskId}`;
     }
-    if (scenario.startsWith("wrong-task-")) {
+    if (scenario.startsWith("wrong-task-") || scenario === "stale-task-display-instance") {
       const task = (yield* store.getThreadRecords(parentId, ["subagents"])).subagents.find(
         (row) => row.id === followupTaskId,
       )!;
@@ -2839,6 +2948,13 @@ it.effect.each([
       )!;
       yield* sink.write({
         events: [
+          {
+            id: EventId.make("a3-executed-run"),
+            type: "run.updated",
+            threadId: childId,
+            occurredAt: createdAt,
+            payload: { ...queued, status: "starting", queuePosition: null, startedAt: createdAt },
+          },
           {
             id: EventId.make("a3-executed-node"),
             type: "node.updated",
@@ -2903,6 +3019,15 @@ it.effect.each([
     });
     assert.isNull((yield* store.getThread(childId)).deletedAt);
     assert.isNull((yield* store.getThread(parentId)).deletedAt);
+    if (scenario === "missing-provider-origin" || scenario === "corrupt-provider-origin") {
+      if (scenario === "missing-provider-origin") {
+        yield* sql`UPDATE orchestration_v2_projection_provider_threads
+          SET payload_json = json_remove(payload_json, '$.nativeSessionOrigin') WHERE provider_thread_id = ${pending.id}`;
+      } else {
+        yield* sql`UPDATE orchestration_v2_projection_provider_threads
+          SET payload_json = json_set(payload_json, '$.nativeSessionOrigin.version', 2) WHERE provider_thread_id = ${pending.id}`;
+      }
+    }
     const committed = yield* sink.commitCommand({
       ...plan,
       commandId: deletionCommand.commandId,
@@ -2953,24 +3078,23 @@ it.effect.each([
       cleanupEffects.push(...parentPlan.effects);
     }
     const first = Option.getOrThrow(yield* records.get(childId));
-    const certified =
-      [
-        "same-root-pending",
-        "same-root-held",
-        "cross-batch-parent-reference",
-        "parent-owner-restart",
-        "parent-owner-restart-compacted",
-        "live-parent",
-        "different-operation-root",
-        "late-native-identity",
-      ].includes(scenario) ||
-      scenario.startsWith("cross-batch") ||
-      scenario.includes("reuse");
+    const certified = ![
+      "native-binding",
+      "extra-execution-node",
+      "started-root",
+      "missing-provider-origin",
+      "corrupt-provider-origin",
+    ].includes(scenario);
     assert.equal(first.noNativeSessionProofs?.length ?? 0, certified ? 1 : 0);
     if (certified) {
-      assert.equal(first.noNativeSessionProofs![0]!.providerThreadId, pending.id);
-      assert.deepEqual(first.noNativeSessionProofs![0]!.runIds, [queuedId]);
-      assert.deepEqual(first.noNativeSessionProofs![0]!.attemptIds, [queued.activeAttemptId!]);
+      assert.deepEqual(first.noNativeSessionProofs, [
+        {
+          providerThreadId: pending.id,
+          providerInstanceId: piInstanceId,
+          source: "queued_provider_origin",
+          version: 1,
+        },
+      ]);
       assert.deepNestedPropertyVal(
         committed.storedEvents.find(
           (row) => row.event.type === "thread.deleted" && row.event.threadId === childId,
@@ -3013,68 +3137,57 @@ it.effect.each([
       receiptThroughRowId: Number.MAX_SAFE_INTEGER,
     };
     const reclaimer = yield* ThreadDataReclamation.ThreadDataReclamation;
+    const beforeReclamation = yield* readReclaimableRows;
     if (scenario === "cross-batch-parent-first-failure") {
       yield* sql`
         CREATE TRIGGER reject_a3_child_batch BEFORE DELETE ON orchestration_v2_projection_runs
         WHEN OLD.thread_id = 'thread:a3-zchild'
-        BEGIN SELECT RAISE(ABORT, 'injected A3 second-batch failure'); END
+        BEGIN SELECT RAISE(ABORT, 'injected A3 final-chunk failure'); END
       `;
       assert.isTrue(Exit.isFailure(yield* Effect.exit(reclaimer.reclaim(bounds))));
-      assert.isEmpty(
-        yield* sql`SELECT 1 FROM orchestration_v2_projection_runs WHERE thread_id = ${parentId}`,
-      );
-      assert.lengthOf(
-        yield* sql`SELECT 1 FROM orchestration_v2_projection_runs WHERE thread_id = ${childId}`,
-        3,
-      );
+      assert.deepEqual(yield* readReclaimableRows, beforeReclamation);
       yield* sql`DROP TRIGGER reject_a3_child_batch`;
     }
     const lateBarrier =
       scenario === "cross-batch-parent-first-late-binding" ||
       scenario === "cross-batch-parent-first-claimed-start";
     let injected = false;
+    let expectedRetainedRows = beforeReclamation;
     let reclaimEffect = Effect.gen(function* () {
       return yield* (yield* ThreadDataReclamation.ThreadDataReclamation).reclaim(bounds);
     });
     if (lateBarrier) {
-      let transactionDepth = 0;
       const withTransaction: typeof sql.withTransaction = (effect) =>
         Effect.gen(function* () {
-          transactionDepth++;
-          let result;
-          try {
-            result = yield* sql.withTransaction(effect);
-          } finally {
-            transactionDepth--;
-          }
-          if (transactionDepth === 0 && !injected) {
-            const parentRuns =
-              yield* sql`SELECT 1 FROM orchestration_v2_projection_runs WHERE thread_id = ${parentId}`;
-            const childRuns =
-              yield* sql`SELECT 1 FROM orchestration_v2_projection_runs WHERE thread_id = ${childId}`;
-            if (parentRuns.length === 0 && childRuns.length === 3) {
-              injected = true;
-              const barrierAt = "2026-09-04T00:00:00.000Z";
-              if (scenario === "cross-batch-parent-first-late-binding") {
-                yield* sql`
+          if (!injected) {
+            injected = true;
+            assert.deepEqual(
+              yield* readReclaimableRows.pipe(Effect.provideService(SqlClient.SqlClient, sql)),
+              beforeReclamation,
+            );
+            const barrierAt = "2026-09-04T00:00:00.000Z";
+            if (scenario === "cross-batch-parent-first-late-binding") {
+              yield* sql`
                 INSERT INTO orchestration_v2_native_session_bindings (
                   binding_key, thread_id, provider_thread_id, provider_instance_id, driver,
                   native_id, storage_type, canonical_root, canonical_file, bound_at, payload_json
                 ) VALUES ('a3:late-binding', ${childId}, ${pending.id}, ${piInstanceId}, 'pi',
                   NULL, 'unresolved', '', '', ${barrierAt}, '{}')
               `;
-              } else {
-                yield* sql`
+            } else {
+              yield* sql`
                 INSERT INTO orchestration_v2_effect_outbox (
                   effect_id, command_id, thread_id, effect_type, payload_json, status,
                   attempt_count, available_at, created_at, updated_at
                 ) VALUES ('a3:claimed-start', 'a3:claimed-start-command', ${childId}, 'provider-turn.start',
                   ${JSON.stringify({ runId: queuedId })}, 'cancelled', 1, ${barrierAt}, ${barrierAt}, ${barrierAt})
               `;
-              }
             }
+            expectedRetainedRows = yield* readReclaimableRows.pipe(
+              Effect.provideService(SqlClient.SqlClient, sql),
+            );
           }
-          return result;
+          return yield* sql.withTransaction(effect);
         });
       const intercepted = new Proxy(sql, {
         get(target, key, receiver) {
@@ -3092,43 +3205,11 @@ it.effect.each([
       );
     }
     const summary = yield* reclaimEffect;
-    if (scenario.endsWith("missing-spawn") || scenario.endsWith("wrong-spawn-owner")) {
-      assert.lengthOf(
-        yield* sql`SELECT 1 FROM orchestration_v2_projection_provider_threads WHERE provider_thread_id = ${originalRun.providerThreadId}`,
-        1,
-      );
-      assert.lengthOf(
-        yield* sql`SELECT 1 FROM orchestration_v2_projection_subagents WHERE subagent_id = ${originalTaskId}`,
-        1,
-      );
-      return;
-    }
-    if (scenario.includes("reuse-missing-")) {
-      assert.lengthOf(
-        yield* sql`SELECT 1 FROM orchestration_v2_projection_provider_threads WHERE provider_thread_id = 'provider:a3-child-restarted'`,
-        1,
-      );
-      assert.lengthOf(
-        yield* sql`SELECT 1 FROM orchestration_v2_projection_subagents WHERE subagent_id = ${activeRun.delegatedTaskId}`,
-        1,
-      );
-      return;
-    }
-    if (scenario.endsWith("missing-origin") || scenario.endsWith("wrong-instance")) {
-      assert.lengthOf(
-        yield* sql`SELECT 1 FROM orchestration_v2_projection_provider_threads WHERE provider_thread_id = ${activeRun.providerThreadId}`,
-        1,
-      );
-      assert.lengthOf(
-        yield* sql`SELECT 1 FROM orchestration_v2_projection_subagents WHERE subagent_id = ${activeRun.delegatedTaskId}`,
-        1,
-      );
-      return;
-    }
     const allowed =
       [
         "same-root-pending",
         "same-root-held",
+        "same-root-original-queued-pi",
         "cross-batch-parent-reference",
         "cross-batch-parent-first",
         "cross-batch-parent-first-failure",
@@ -3137,15 +3218,20 @@ it.effect.each([
         "cross-batch-parent-first-child-terminal-switch",
         "parent-owner-restart",
         "parent-owner-restart-compacted",
-      ].includes(scenario) ||
-      (scenario.includes("reuse") && !scenario.includes("reuse-missing-"));
-    assert.equal(summary.reclaimedThreadCount, lateBarrier ? 50 : allowed ? members.length : 0);
+        "parent-owner-restart-without-old-attempt",
+        "cross-batch-parent-first-child-restart-without-run-history",
+        "cross-batch-parent-first-child-resume-stale-display-instance",
+        "cross-batch-parent-first-without-spawn",
+        "stale-task-display-instance",
+      ].includes(scenario) || scenario.includes("reuse");
+    assert.equal(summary.reclaimedThreadCount, allowed ? members.length : 0);
     if (allowed) {
       assert.isEmpty(summary.skippedThreads);
       assert.isEmpty(yield* sql`SELECT * FROM orchestration_v2_projection_nodes`);
       assert.isEmpty(yield* sql`SELECT * FROM orchestration_v2_projection_subagents`);
       assert.isEmpty(yield* sql`SELECT * FROM orchestration_v2_projection_runs`);
       assert.isEmpty(yield* sql`SELECT * FROM orchestration_v2_projection_provider_threads`);
+      for (const { table, rows } of yield* readReclaimableRows) assert.isEmpty(rows, table);
       assert.equal(
         (yield* (yield* ThreadDataReclamation.ThreadDataReclamation).reclaim(bounds))
           .deletedProjectionRowCount,
@@ -3159,6 +3245,7 @@ it.effect.each([
           3,
         );
       }
+      assert.deepEqual(yield* readReclaimableRows, expectedRetainedRows);
       assert.isTrue(summary.skippedThreads.some((row) => row.threadId === childId));
       assert.lengthOf(
         yield* sql`SELECT 1 FROM orchestration_v2_projection_provider_threads WHERE provider_thread_id = ${pending.id}`,

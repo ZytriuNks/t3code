@@ -816,6 +816,7 @@ export const layer: Layer.Layer<
           lifecycleGuard,
           threadId: projection.thread.id,
           providerSessionId,
+          providerThreadId: providerThread.id,
           modelSelection: run.modelSelection,
           runtimePolicy: resolvedRuntimePolicy,
           ...(existingSessionProjection === undefined

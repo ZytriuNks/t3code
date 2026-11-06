@@ -162,17 +162,36 @@ const alternateProviderInstance = {
     instanceId: alternateInstanceId,
   },
 } satisfies ProviderInstance;
+const piProviderInstance = {
+  ...providerInstance,
+  instanceId: ProviderInstanceId.make("pi-saved"),
+  driverKind: ProviderDriverKind.make("pi"),
+  continuationIdentity: {
+    driverKind: ProviderDriverKind.make("pi"),
+    continuationKey: "pi:test",
+  },
+  displayName: "Pi test",
+  orchestrationAdapter: {
+    ...orchestrationAdapter,
+    instanceId: ProviderInstanceId.make("pi-saved"),
+    driver: ProviderDriverKind.make("pi"),
+  },
+} satisfies ProviderInstance;
 
 const layerTestProviderInstanceRegistry = Layer.succeed(
   ProviderInstanceRegistry.ProviderInstanceRegistry,
   {
     getInstance: (instanceId) =>
       Effect.succeed(
-        [providerInstance, alternateProviderInstance].find(
+        [providerInstance, alternateProviderInstance, piProviderInstance].find(
           (instance) => instanceId === instance.instanceId,
         ),
       ),
-    listInstances: Effect.succeed([providerInstance, alternateProviderInstance]),
+    listInstances: Effect.succeed([
+      providerInstance,
+      alternateProviderInstance,
+      piProviderInstance,
+    ]),
     listUnavailable: Effect.succeed([]),
     streamChanges: Stream.empty,
     subscribeChanges: Effect.never,
@@ -343,137 +362,113 @@ it.effect.each([
         createdBy: "user",
         creationSource: "web",
       });
-      const piInstanceId = ProviderInstanceId.make("pi-saved");
-      const driver = ProviderDriverKind.make("pi");
-      const runId = allocator.derive.run({ threadId, ordinal: 1 });
-      const providerThreadId = allocator.derive.providerThread({
-        driver,
-        nativeThreadId: `pending:${runId}`,
-      });
-      const attemptId = allocator.derive.runAttempt({ runId, attemptOrdinal: 1 });
-      const nodeId = allocator.derive.rootNode({ runId });
+      const piInstanceId = piProviderInstance.instanceId;
+      const activeProviderThreadId = ProviderThreadId.make("fix05:existing-codex-conversation");
       yield* sink.write({
         events: [
           {
-            id: EventId.make("fix03:placeholder"),
+            id: EventId.make("fix05:existing-conversation"),
             type: "provider-thread.updated",
             threadId,
             occurredAt: at,
             payload: {
-              id: providerThreadId,
-              driver,
-              providerInstanceId: piInstanceId,
-              providerSessionId: null,
+              id: activeProviderThreadId,
               appThreadId: threadId,
+              driver,
+              providerInstanceId: modelSelection.instanceId,
+              providerSessionId: null,
               ownerNodeId: null,
-              nativeThreadRef: null,
+              nativeThreadRef: { driver, nativeId: "fix05:codex-native", strength: "strong" },
+              nativeStorage: { type: "resolved", canonicalRoot: "/fix05/codex" },
               nativeConversationHeadRef: null,
-              status: "not_loaded",
-              firstRunOrdinal: null,
-              lastRunOrdinal: null,
+              firstRunOrdinal: 1,
+              lastRunOrdinal: 1,
               handoffIds: [],
               forkedFrom: null,
+              status: "not_loaded",
               createdAt: at,
               updatedAt: at,
             },
           },
           {
-            id: EventId.make("fix03:queued-run"),
-            type: "run.created",
+            id: EventId.make("fix05:select-existing-conversation"),
+            type: "thread.metadata-updated",
             threadId,
             occurredAt: at,
-            payload: {
-              id: runId,
-              threadId,
-              ordinal: 1,
-              providerInstanceId: piInstanceId,
-              modelSelection: { instanceId: piInstanceId, model: "test" },
-              providerThreadId,
-              userMessageId: MessageId.make("fix03:queued-message"),
-              rootNodeId: nodeId,
-              activeAttemptId: attemptId,
-              status: "queued",
-              queuePosition: 1,
-              requestedAt: at,
-              startedAt: null,
-              completedAt: null,
-              checkpointId: null,
-              contextHandoffId: null,
-            },
-          },
-          {
-            id: EventId.make("fix03:queued-attempt"),
-            type: "run-attempt.created",
-            threadId,
-            occurredAt: at,
-            payload: {
-              id: attemptId,
-              runId,
-              attemptOrdinal: 1,
-              rootNodeId: nodeId,
-              providerInstanceId: piInstanceId,
-              providerThreadId,
-              providerTurnId: null,
-              reason: "initial",
-              status: "pending",
-              startedAt: null,
-              completedAt: null,
-            },
-          },
-          {
-            id: EventId.make("fix03:queued-root"),
-            type: "node.updated",
-            threadId,
-            occurredAt: at,
-            payload: {
-              id: nodeId,
-              threadId,
-              runId,
-              parentNodeId: null,
-              rootNodeId: nodeId,
-              kind: "root_turn",
-              status: "pending",
-              countsForRun: true,
-              providerThreadId,
-              providerTurnId: null,
-              nativeItemRef: null,
-              runtimeRequestId: null,
-              checkpointScopeId: null,
-              startedAt: null,
-              completedAt: null,
-            },
-          },
-          {
-            id: EventId.make("fix04:queued-message"),
-            type: "message.updated",
-            threadId,
-            occurredAt: at,
-            payload: {
-              id: MessageId.make("fix03:queued-message"),
-              threadId,
-              runId,
-              nodeId,
-              role: "user",
-              text: "Queued message",
-              attachments: [],
-              streaming: false,
-              createdBy: "agent",
-              creationSource: action.startsWith("buffered-") ? "provider" : "server",
-              createdAt: at,
-              updatedAt: at,
-              ...(action.startsWith("buffered-") || action === "automatic-settle"
-                ? {
-                    notification: {
-                      source: { kind: "monitor" },
-                      outcome: "updated",
-                      summary: "Queued update",
-                    },
-                  }
-                : {}),
-            },
+            payload: { ...(yield* store.getThread(threadId)), activeProviderThreadId },
           },
         ],
       });
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make("fix05:prepare-active"),
+        threadId,
+        messageId: MessageId.make("fix05:active-message"),
+        text: "Prepare the active conversation",
+        attachments: [],
+        createdBy: "user",
+        creationSource: "web",
+        dispatchMode: { type: "defer_start" },
+      });
+      const queued = yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make("fix05:queue-pi"),
+        threadId,
+        messageId: MessageId.make("fix03:queued-message"),
+        text: "Queued message",
+        attachments: [],
+        modelSelection: { instanceId: piInstanceId, model: "test" },
+        createdBy: "agent",
+        creationSource: action.startsWith("buffered-") ? "provider" : "server",
+        dispatchMode: { type: "queue_after_active" },
+        ...(action.startsWith("buffered-") || action === "automatic-settle"
+          ? {
+              notification: {
+                source: { kind: "monitor" as const },
+                outcome: "updated" as const,
+                summary: "Queued update",
+              },
+            }
+          : {}),
+      });
+      const runId = allocator.derive.run({ threadId, ordinal: 2 });
+      const providerThreadId = allocator.derive.providerThread({
+        driver: piProviderInstance.driverKind,
+        nativeThreadId: `pending:${runId}`,
+      });
+      const sql = yield* SqlClient.SqlClient;
+      const persisted = yield* sql<{ readonly payload_json: string }>`
+        SELECT payload_json FROM orchestration_v2_projection_provider_threads
+        WHERE provider_thread_id = ${providerThreadId} AND thread_id = ${threadId}
+      `;
+      assert.lengthOf(persisted, 1);
+      assert.deepEqual(JSON.parse(persisted[0]!.payload_json).nativeSessionOrigin, {
+        version: 1,
+        state: "unstarted",
+      });
+      assert.deepNestedPropertyVal(
+        queued.storedEvents.find(
+          (row) =>
+            row.event.type === "provider-thread.updated" &&
+            row.event.payload.id === providerThreadId,
+        ),
+        "event.payload.nativeSessionOrigin",
+        { version: 1, state: "unstarted" },
+      );
+      if (!["stop", "buffered-stop", "interrupt-queued", "provider-switch"].includes(action)) {
+        yield* orchestrator.dispatch({
+          type: "prepared-run.fail",
+          commandId: CommandId.make("fix05:finish-active-preparation"),
+          threadId,
+          runId: allocator.derive.run({ threadId, ordinal: 1 }),
+          failure: {
+            class: "validation_error",
+            message: "Synthetic preparation failure",
+            code: null,
+            retryable: false,
+          },
+        });
+      }
       if (action === "queue-cancel") {
         const cancelled = yield* orchestrator.dispatch({
           type: "queued-run.cancel",
@@ -507,6 +502,11 @@ it.effect.each([
         );
       } else if (action === "provider-switch") {
         yield* orchestrator.dispatch({
+          type: "thread.stop",
+          commandId: CommandId.make("fix05:hold-before-switch"),
+          threadId,
+        });
+        yield* orchestrator.dispatch({
           type: "thread.model-selection.set",
           commandId: CommandId.make("fix04:select"),
           threadId,
@@ -523,7 +523,9 @@ it.effect.each([
           action === "shutdown" ? "shutdown" : "startup",
         );
       }
-      const afterAction = (yield* store.getThreadRecords(threadId, ["runs"])).runs[0]!;
+      const afterAction = (yield* store.getThreadRecords(threadId, ["runs"])).runs.find(
+        (run) => run.id === runId,
+      )!;
       assert.equal(
         afterAction.status,
         ["queue-cancel", "buffered-stop", "buffered-recovery", "automatic-settle"].includes(action)
@@ -549,21 +551,50 @@ it.effect.each([
         commandId: deleteId,
         threadId,
       });
+      const record = Option.getOrThrow(
+        yield* (yield* ThreadDeletionRecords.ThreadDeletionRecords).get(threadId),
+      );
+      assert.deepEqual(record.noNativeSessionProofs, [
+        {
+          providerThreadId,
+          providerInstanceId: piInstanceId,
+          source: "queued_provider_origin",
+          version: 1,
+        },
+      ]);
       for (const _effect of yield* outbox.listByCommandId(deleteId)) {
         const claimed = Option.getOrThrow(yield* outbox.claimNext({ workerId: "fix03:cleanup" }));
         assert.isTrue(yield* outbox.succeed({ effectId: claimed.id, workerId: "fix03:cleanup" }));
       }
       const summary = yield* (yield* ProjectionMaintenance.ProjectionMaintenanceV2)
         .reclaimDeletedThreadData;
-      assert.equal(summary.reclaimedThreadCount, 1);
+      assert.equal(summary.reclaimedThreadCount, 1, JSON.stringify(summary));
       assert.deepEqual(summary.skippedThreads, []);
       assert.isEmpty(
         (yield* store.getThreadRecords(threadId, ["providerThreads"])).providerThreads,
       );
-      const record = Option.getOrThrow(
-        yield* (yield* ThreadDeletionRecords.ThreadDeletionRecords).get(threadId),
-      );
-      assert.equal(record.noNativeSessionProofs?.[0]?.providerThreadId, providerThreadId);
+      for (const table of [
+        "orchestration_v2_projection_runs",
+        "orchestration_v2_projection_run_attempts",
+        "orchestration_v2_projection_nodes",
+        "orchestration_v2_projection_subagents",
+        "orchestration_v2_projection_runtime_requests",
+        "orchestration_v2_projection_provider_threads",
+        "orchestration_v2_projection_provider_turns",
+        "orchestration_v2_projection_provider_sessions",
+        "orchestration_v2_projection_provider_session_bindings",
+        "orchestration_v2_native_session_bindings",
+        "orchestration_v2_projection_turn_items",
+        "orchestration_v2_turn_item_positions",
+        "orchestration_v2_projection_messages",
+        "orchestration_v2_projection_context_handoffs",
+        "orchestration_v2_projection_context_transfers",
+        "orchestration_v2_projection_checkpoints",
+        "orchestration_v2_projection_checkpoint_scopes",
+        "orchestration_v2_projection_plans",
+      ]) {
+        assert.isEmpty(yield* sql.unsafe(`SELECT 1 FROM ${table} LIMIT 1`), table);
+      }
       const event = deleted.storedEvents.find((row) => row.event.type === "thread.deleted")!.event;
       assert.deepNestedPropertyVal(
         event,
@@ -575,7 +606,7 @@ it.effect.each([
         Layer.merge(
           layerTest,
           Layer.mergeAll(IdAllocator.layer, ThreadDeletionRecords.layer).pipe(
-            Layer.provide(SqlitePersistence.layerMemory),
+            Layer.provideMerge(SqlitePersistence.layerMemory),
           ),
         ),
       ),

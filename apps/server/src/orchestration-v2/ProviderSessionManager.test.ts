@@ -4,6 +4,7 @@ import { assert, it } from "@effect/vitest";
 import { AgentScope } from "@t3tools/shared/AgentScope";
 import {
   EnvironmentId,
+  CheckpointId,
   type ModelSelection,
   type OrchestrationV2AppThread,
   type OrchestrationV2DomainEvent,
@@ -16,6 +17,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderSessionId,
+  ProviderThreadId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -506,6 +508,7 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
 function layerTest(input: {
   readonly state: Ref.Ref<TestProviderRuntimeState>;
   readonly idleTimeoutMs: number;
+  readonly adapterLayer?: Layer.Layer<ProviderAdapterRegistry.ProviderAdapterRegistryV2>;
   readonly maxIdlePinMs?: number;
   readonly failEventStream?: boolean;
   readonly capabilities?: OrchestrationV2ProviderCapabilities;
@@ -549,7 +552,7 @@ function layerTest(input: {
           : input.failReleaseEventWrites
             ? layerFailingReleaseEventSink
             : layerTestEventSink;
-  const layerRegistry = Layer.unwrap(
+  const layerDefaultRegistry = Layer.unwrap(
     makeProviderAdapter(input.state, {
       failEventStream: input.failEventStream ?? false,
       ...(input.capabilities === undefined ? {} : { capabilities: input.capabilities }),
@@ -581,6 +584,7 @@ function layerTest(input: {
       ...(input.scopeClosed === undefined ? {} : { scopeClosed: input.scopeClosed }),
     }).pipe(Effect.map(ProviderAdapterRegistry.layerSingle)),
   );
+  const layerRegistry = input.adapterLayer ?? layerDefaultRegistry;
   const layerConfiguredMcpRegistry =
     input.pauseResolve === undefined
       ? layerTestMcpRegistry
@@ -928,6 +932,466 @@ function makePendingRuntimeRequestEvents(input: {
     return { events, providerEvents, requestId, nodeId };
   });
 }
+
+const nativeGateOperations = [
+  "open",
+  "reuse",
+  "ensure",
+  "ensure-new",
+  "resume",
+  "fork",
+  "rollback",
+  "start",
+] as const;
+type NativeGateOperation = (typeof nativeGateOperations)[number];
+const piGateSelection = {
+  instanceId: ProviderInstanceId.make("pi"),
+  model: "test-pi",
+} satisfies ModelSelection;
+const PI_DRIVER = ProviderDriverKind.make("pi");
+
+function testNativeGate(
+  operation: NativeGateOperation,
+  legacy?: "session" | "binding",
+  registryDrift = false,
+) {
+  return Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const rawCalls = yield* Ref.make<ReadonlyArray<string>>([]);
+    const rawFactories: string[] = [];
+    const registryDriver = yield* Ref.make(PI_DRIVER);
+    const expectedTarget = yield* Ref.make<OrchestrationV2ProviderThread | undefined>(undefined);
+    const adapterLayer = Layer.unwrap(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const record = (method: string, providerSessionId: ProviderSessionId) => {
+          rawFactories.push(method);
+          return Effect.gen(function* () {
+            yield* Ref.update(rawCalls, (calls) => [...calls, method]);
+            const target = yield* Ref.get(expectedTarget);
+            assert.isDefined(target);
+            const rows = yield* sql<{
+              readonly driver: string;
+              readonly thread_id: string;
+              readonly provider_instance_id: string;
+              readonly provider_session_id: string | null;
+              readonly origin: string | null;
+              readonly bindings: number;
+              readonly sessions: number;
+            }>`SELECT p.driver, p.thread_id, p.provider_instance_id, p.provider_session_id,
+              json_extract(p.payload_json, '$.nativeSessionOrigin.state') AS origin,
+              (SELECT count(*) FROM orchestration_v2_native_session_bindings b
+                WHERE b.provider_thread_id = p.provider_thread_id AND b.thread_id = p.thread_id
+                  AND b.driver = p.driver AND b.provider_instance_id = p.provider_instance_id) AS bindings,
+              (SELECT count(*) FROM orchestration_v2_projection_provider_session_bindings b
+                JOIN orchestration_v2_projection_provider_sessions s ON s.provider_session_id = b.provider_session_id
+                WHERE b.thread_id = p.thread_id AND b.provider_session_id = ${providerSessionId}
+                  AND s.driver = p.driver AND s.provider_instance_id = p.provider_instance_id) AS sessions
+            FROM orchestration_v2_projection_provider_threads p WHERE p.provider_thread_id = ${target.id}`.pipe(
+              Effect.orDie,
+            );
+            assert.equal(rows.length, 1);
+            const row = rows[0]!;
+            assert.equal(row.driver, PI_DRIVER);
+            assert.equal(row.thread_id, target.appThreadId);
+            assert.equal(row.provider_instance_id, piGateSelection.instanceId);
+            if (target.nativeSessionOrigin === undefined)
+              assert.include([null, "may_exist"], row.origin);
+            else assert.equal(row.origin, target.nativeSessionOrigin.state);
+            assert.isAbove(row.bindings, 0);
+            if (target.providerSessionId === null) {
+              assert.isNull(row.provider_session_id);
+              assert.isAbove(row.sessions, 0);
+            } else {
+              assert.equal(row.provider_session_id, providerSessionId);
+            }
+            return {
+              ...target,
+              nativeThreadRef: {
+                driver: PI_DRIVER,
+                nativeId: `new-native-${method}`,
+                strength: "strong" as const,
+              },
+            };
+          });
+        };
+        const adapter = ProviderAdapter.ProviderAdapterV2.of({
+          driver: PI_DRIVER,
+          instanceId: piGateSelection.instanceId,
+          getCapabilities: () => Effect.succeed(CodexCapabilities),
+          planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" }),
+          openSession: (input) =>
+            record("open", input.providerSessionId).pipe(
+              Effect.map(() => {
+                const target = DateTime.makeUnsafe("2026-11-06T00:00:00Z");
+                const runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime = {
+                  driver: PI_DRIVER,
+                  instanceId: piGateSelection.instanceId,
+                  providerSessionId: input.providerSessionId,
+                  providerSession: {
+                    ...makeProviderSession({
+                      providerSessionId: input.providerSessionId,
+                      now: target,
+                    }),
+                    driver: PI_DRIVER,
+                    providerInstanceId: piGateSelection.instanceId,
+                  },
+                  events: Stream.never,
+                  ensureThread: () => record("ensure", input.providerSessionId),
+                  resumeThread: () => record("resume", input.providerSessionId),
+                  forkThread: () =>
+                    record("fork", input.providerSessionId).pipe(
+                      Effect.map((thread) => ({
+                        ...thread,
+                        id: ProviderThreadId.make("pi:new-fork-native-id"),
+                      })),
+                    ),
+                  rollbackThread: () =>
+                    record("rollback", input.providerSessionId).pipe(
+                      Effect.map((providerThread) => ({
+                        providerThread,
+                        providerTurns: [],
+                        messages: [],
+                        runtimeRequests: [],
+                      })),
+                    ),
+                  startTurn: () => record("start", input.providerSessionId).pipe(Effect.asVoid),
+                  steerTurn: () => Effect.void,
+                  interruptTurn: () => Effect.void,
+                  respondToRuntimeRequest: () => Effect.void,
+                  readThreadSnapshot: () => unimplemented("snapshot unused in native gate test"),
+                };
+                return runtime;
+              }),
+            ),
+        });
+        return Layer.succeed(ProviderAdapterRegistry.ProviderAdapterRegistryV2, {
+          get: () => Ref.get(registryDriver).pipe(Effect.map((driver) => ({ ...adapter, driver }))),
+          list: () => Effect.succeed([piGateSelection.instanceId]),
+        });
+      }),
+    ).pipe(Layer.provide(layerTestDatabase), Layer.orDie);
+    yield* Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const projection = yield* ProjectionStore.ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("native-gate-target");
+      const ownerId = ThreadId.make("native-gate-owner");
+      const sourceId = ThreadId.make("native-gate-source");
+      const providerSessionId = ProviderSessionId.make("native-gate-runtime-session");
+      const target: OrchestrationV2ProviderThread = {
+        ...makeProviderThread({ idAllocator: ids, threadId, providerSessionId, now }),
+        id: ProviderThreadId.make("pi:native-gate-target"),
+        driver: PI_DRIVER,
+        providerInstanceId: piGateSelection.instanceId,
+        providerSessionId: null,
+        nativeThreadRef: null,
+        status: "not_loaded",
+        nativeSessionOrigin: { version: 1, state: "unstarted" },
+      };
+      const gated: OrchestrationV2ProviderThread = {
+        ...target,
+        providerSessionId,
+        firstRunOrdinal: 1,
+        lastRunOrdinal: 1,
+        nativeSessionOrigin: { version: 1, state: "may_exist" },
+      };
+      const owner: OrchestrationV2ProviderThread = {
+        ...gated,
+        id: ProviderThreadId.make("pi:native-gate-owner"),
+        appThreadId: ownerId,
+      };
+      const source: OrchestrationV2ProviderThread = {
+        ...gated,
+        id: ProviderThreadId.make("pi:native-gate-source"),
+        appThreadId: sourceId,
+        providerSessionId: ProviderSessionId.make("native-gate-different-source-session"),
+        nativeThreadRef: { driver: PI_DRIVER, nativeId: "source-native", strength: "strong" },
+      };
+      const persist = (provider: OrchestrationV2ProviderThread) =>
+        Effect.gen(function* () {
+          yield* eventSink.write({
+            events: [
+              {
+                id: yield* ids.allocate.event({ threadId }),
+                type: "provider-thread.updated",
+                threadId,
+                occurredAt: now,
+                payload: provider,
+              },
+            ],
+          });
+        });
+      const threads = [];
+      for (const provider of [owner, source, target]) {
+        const event = yield* makeThreadCreatedEvent({
+          idAllocator: ids,
+          threadId: provider.appThreadId!,
+          now,
+        });
+        threads.push({
+          ...event,
+          payload: {
+            ...event.payload,
+            providerInstanceId: piGateSelection.instanceId,
+            modelSelection: piGateSelection,
+            activeProviderThreadId: provider.id,
+          },
+        });
+      }
+      yield* eventSink.write({ events: threads });
+      yield* persist(owner);
+      yield* persist(source);
+      yield* persist(target);
+      let runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime | undefined;
+      if (operation !== "open") {
+        yield* Ref.set(expectedTarget, owner);
+        runtime = yield* manager.open({
+          threadId: ownerId,
+          providerThreadId: owner.id,
+          providerSessionId,
+          modelSelection: piGateSelection,
+          runtimePolicy,
+        });
+        assert.deepEqual(yield* Ref.get(rawCalls), ["open"]);
+        yield* Ref.set(rawCalls, []);
+        rawFactories.length = 0;
+      }
+      if (registryDrift) yield* Ref.set(registryDriver, CODEX_DRIVER);
+      const invoke = (provider: OrchestrationV2ProviderThread = gated) =>
+        Effect.gen(function* () {
+          if (operation === "open" || operation === "reuse")
+            return yield* manager.open({
+              threadId,
+              providerThreadId: provider.id,
+              providerSessionId,
+              modelSelection: piGateSelection,
+              runtimePolicy,
+            });
+          const active = (yield* manager.get(providerSessionId)).pipe(Option.getOrThrow);
+          assert.strictEqual(active, runtime);
+          switch (operation) {
+            case "ensure":
+            case "ensure-new":
+              return yield* active.ensureThread({
+                threadId,
+                providerSessionId,
+                existingProviderThread: provider,
+                modelSelection: piGateSelection,
+                runtimePolicy,
+                ...(operation === "ensure-new" ? { forceNewNativeThread: true } : {}),
+              });
+            case "resume":
+              return yield* active.resumeThread({
+                threadId,
+                providerThread: provider,
+                modelSelection: piGateSelection,
+                runtimePolicy,
+              });
+            case "fork":
+              return yield* active.forkThread({
+                targetThreadId: threadId,
+                sourceProviderThread: source,
+                modelSelection: piGateSelection,
+                runtimePolicy,
+              });
+            case "rollback":
+              return yield* active.rollbackThread({
+                providerThread: provider,
+                target: {
+                  type: "thread_start",
+                  checkpointId: CheckpointId.make("native-gate-checkpoint"),
+                  appRunOrdinal: 0,
+                },
+                providerThreadTurns: [],
+              });
+            case "start": {
+              const runId = ids.derive.run({ threadId, ordinal: 1 });
+              return yield* active.startTurn({
+                appThread: yield* projection.getThread(threadId),
+                threadId,
+                runId,
+                runOrdinal: 1,
+                providerTurnOrdinal: 1,
+                attemptId: ids.derive.runAttempt({ runId, attemptOrdinal: 1 }),
+                rootNodeId: ids.derive.rootNode({ runId }),
+                providerThread: provider,
+                message: {
+                  createdBy: "user",
+                  creationSource: "web",
+                  messageId: yield* ids.allocate.message({ threadId, ordinal: 1 }),
+                  text: "gate test",
+                  attachments: [],
+                },
+                modelSelection: piGateSelection,
+                runtimePolicy,
+              });
+            }
+          }
+        });
+      const blocked = (action: ReturnType<typeof invoke>) =>
+        Effect.gen(function* () {
+          const exit = yield* Effect.exit(action);
+          assert.isTrue(Exit.isFailure(exit));
+          if (Exit.isFailure(exit)) {
+            const hasGateError = (error: unknown): boolean =>
+              error instanceof Error &&
+              (error.name === "NativeSessionGateError" || hasGateError(error.cause));
+            assert.isTrue(hasGateError(Cause.squash(exit.cause)));
+          }
+        });
+      yield* Ref.set(expectedTarget, gated);
+      if (legacy === undefined) {
+        const decoy = { ...gated, id: ProviderThreadId.make("pi:native-gate-other-legacy") };
+        yield* persist(decoy);
+        yield* sql`UPDATE orchestration_v2_projection_provider_threads SET payload_json = json_remove(payload_json, '$.nativeSessionOrigin') WHERE provider_thread_id = ${decoy.id}`;
+        const thread = yield* projection.getThread(threadId);
+        yield* eventSink.write({
+          events: [
+            {
+              id: yield* ids.allocate.event({ threadId }),
+              type: "thread.metadata-updated",
+              threadId,
+              occurredAt: now,
+              payload: { ...thread, activeProviderThreadId: target.id },
+            },
+          ],
+        });
+        yield* blocked(invoke());
+        assert.deepEqual(yield* Ref.get(rawCalls), []);
+        assert.deepEqual(rawFactories, []);
+        const rolledBack = yield* Effect.exit(
+          sql.withTransaction(
+            persist(gated).pipe(Effect.andThen(Effect.fail("gate-transaction-rollback"))),
+          ),
+        );
+        assert.isTrue(Exit.isFailure(rolledBack));
+        yield* blocked(invoke());
+        assert.deepEqual(yield* Ref.get(rawCalls), []);
+        assert.deepEqual(rawFactories, []);
+        const rows = yield* sql<{
+          readonly origin: string;
+          readonly provider_session_id: string | null;
+          readonly bindings: number;
+        }>`SELECT json_extract(payload_json, '$.nativeSessionOrigin.state') AS origin, provider_session_id, (SELECT count(*) FROM orchestration_v2_native_session_bindings b WHERE b.provider_thread_id = p.provider_thread_id) AS bindings FROM orchestration_v2_projection_provider_threads p WHERE provider_thread_id = ${target.id}`;
+        assert.deepEqual(rows, [{ origin: "unstarted", provider_session_id: null, bindings: 0 }]);
+        yield* persist(gated);
+      } else {
+        const { nativeSessionOrigin: _origin, ...legacyProvider } = gated;
+        const provider =
+          legacy === "session"
+            ? legacyProvider
+            : {
+                ...legacyProvider,
+                providerSessionId: null,
+                firstRunOrdinal: null,
+                lastRunOrdinal: null,
+                nativeThreadRef: {
+                  driver: PI_DRIVER,
+                  nativeId: "legacy-native",
+                  strength: "strong" as const,
+                },
+              };
+        yield* persist(provider);
+        if (legacy === "binding") {
+          yield* eventSink.write({
+            events: [
+              {
+                id: yield* ids.allocate.event({ threadId }),
+                type: "provider-session.attached",
+                threadId,
+                occurredAt: now,
+                payload: {
+                  ...makeProviderSession({ providerSessionId, now }),
+                  driver: PI_DRIVER,
+                  providerInstanceId: piGateSelection.instanceId,
+                },
+              },
+            ],
+          });
+        }
+        // Model an existing database written before origin was introduced.
+        yield* sql`UPDATE orchestration_v2_projection_provider_threads SET payload_json = json_remove(payload_json, '$.nativeSessionOrigin') WHERE provider_thread_id = ${target.id}`;
+        yield* Ref.set(expectedTarget, provider);
+      }
+      if (operation === "rollback" || operation === "start")
+        yield* manager.open({
+          threadId,
+          providerThreadId: target.id,
+          providerSessionId,
+          modelSelection: piGateSelection,
+          runtimePolicy,
+        });
+      const result = yield* invoke();
+      if (operation === "reuse") assert.strictEqual(result, runtime);
+      else
+        assert.deepEqual(yield* Ref.get(rawCalls), [
+          operation === "ensure-new" ? "ensure" : operation,
+        ]);
+      if (operation === "fork") {
+        assert.isDefined(result);
+        assert.equal(
+          (result as OrchestrationV2ProviderThread).id,
+          ProviderThreadId.make("pi:new-fork-native-id"),
+        );
+        assert.notEqual((result as OrchestrationV2ProviderThread).id, gated.id);
+        assert.notEqual(source.providerSessionId, providerSessionId);
+      }
+      if (legacy === undefined) {
+        const calls = yield* Ref.get(rawCalls);
+        const factories = [...rawFactories];
+        yield* sql`UPDATE orchestration_v2_projection_provider_threads
+          SET payload_json = json_set(payload_json, '$.nativeSessionOrigin', json('{"version":1,"state":"unstarted"}'))
+          WHERE provider_thread_id = ${gated.id}`;
+        yield* blocked(invoke());
+        assert.deepEqual(yield* Ref.get(rawCalls), calls);
+        assert.deepEqual(rawFactories, factories);
+        yield* persist(gated);
+        for (const mismatch of [
+          { providerSessionId: ProviderSessionId.make("wrong-session") },
+          { appThreadId: ownerId },
+          { driver: CODEX_DRIVER },
+          { providerInstanceId: ProviderInstanceId.make("wrong-instance") },
+        ]) {
+          yield* persist({ ...gated, ...mismatch });
+          yield* blocked(invoke());
+          assert.deepEqual(yield* Ref.get(rawCalls), calls);
+          assert.deepEqual(rawFactories, factories);
+        }
+        yield* persist(gated);
+        if (operation !== "fork") {
+          yield* blocked(invoke({ ...gated, id: ProviderThreadId.make("pi:missing-target") }));
+          assert.deepEqual(yield* Ref.get(rawCalls), calls);
+          assert.deepEqual(rawFactories, factories);
+        }
+      }
+    }).pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 60_000, adapterLayer })));
+  });
+}
+
+it.effect.each(nativeGateOperations)(
+  "native gate precedes %s on new and exposed runtimes and survives transaction rollback",
+  (operation) => testNativeGate(operation),
+);
+
+it.effect("native gate still protects a live Pi runtime when the registry changes driver", () =>
+  testNativeGate("reuse", undefined, true),
+);
+
+it.effect.each(
+  (["session", "binding"] as const).flatMap((legacy) =>
+    (["open", "ensure", "resume", "fork", "rollback"] as const).map((operation) => ({
+      legacy,
+      operation,
+    })),
+  ),
+)(
+  "native gate accepts exact legacy $legacy without origin for $operation",
+  ({ legacy, operation }) => testNativeGate(operation, legacy),
+);
 
 it.effect("ProviderSessionManagerV2 opens independent sessions concurrently", () =>
   Effect.gen(function* () {

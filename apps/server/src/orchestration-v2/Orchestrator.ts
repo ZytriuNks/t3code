@@ -5801,6 +5801,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         }),
       );
       const queuedProviderThread: OrchestrationV2ProviderThread = targetProviderThread ?? {
+        ...(queuedAdapter.driver === "pi"
+          ? { nativeSessionOrigin: { version: 1 as const, state: "unstarted" as const } }
+          : {}),
         id: idAllocator.derive.providerThread({
           driver: queuedAdapter.driver,
           nativeThreadId: `pending:${runId}`,

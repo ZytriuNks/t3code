@@ -21,6 +21,7 @@ import {
 } from "@t3tools/contracts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
+import * as NativeSessionStorageResolver from "@t3tools/provider-core/server/NativeSessionStorage";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import { PiAdapterV2Driver } from "@t3tools/provider-pi/server";
 import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
@@ -695,14 +696,50 @@ it.effect(
               },
             ],
           });
+          const plannedProviderThread: OrchestrationV2ProviderThread = {
+            id: ProviderThreadId.make("task8:pi-native-thread"),
+            driver: piDriver,
+            providerInstanceId: piInstanceId,
+            providerSessionId,
+            appThreadId: threadId,
+            ownerNodeId: null,
+            nativeThreadRef: { driver: piDriver, nativeId: sessionFile, strength: "strong" },
+            nativeStorage: yield* NativeSessionStorageResolver.make.pipe(
+              Effect.flatMap((storage) =>
+                storage.resolve({ driver: piDriver, nativeId: sessionFile, sessionFile }),
+              ),
+            ),
+            nativeConversationHeadRef: null,
+            status: "not_loaded",
+            firstRunOrdinal: 1,
+            lastRunOrdinal: 1,
+            handoffIds: [],
+            forkedFrom: null,
+            createdAt: now,
+            updatedAt: now,
+          };
+          yield* sink.write({
+            lifecycleGuard: yield* orchestrator.resolveLifecycleSource(threadId),
+            events: [
+              {
+                id: EventId.make("task8:pi-start-gate"),
+                type: "provider-thread.updated",
+                threadId,
+                occurredAt: now,
+                payload: plannedProviderThread,
+              },
+            ],
+          });
           const firstRuntime = yield* sessions.open({
             threadId,
+            providerThreadId: plannedProviderThread.id,
             providerSessionId,
             modelSelection: piModelSelection,
             runtimePolicy,
           });
           const nativeThread = yield* firstRuntime.ensureThread({
             threadId,
+            existingProviderThread: plannedProviderThread,
             modelSelection: piModelSelection,
             runtimePolicy,
           });
@@ -1035,12 +1072,6 @@ it.effect(
             ...pi.makeNativeThread(outsideOwnerId, outsideSessionId),
             id: ProviderThreadId.make("task8:pi-shared-owner-native-thread"),
           };
-          const runtimeSession = yield* sessions.open({
-            threadId,
-            providerSessionId,
-            modelSelection: piModelSelection,
-            runtimePolicy,
-          });
           yield* sink.write({
             lifecycleGuard: yield* orchestrator.resolveLifecycleSource(threadId),
             events: [
@@ -1052,6 +1083,13 @@ it.effect(
                 payload: providerThread,
               },
             ],
+          });
+          const runtimeSession = yield* sessions.open({
+            threadId,
+            providerThreadId: providerThread.id,
+            providerSessionId,
+            modelSelection: piModelSelection,
+            runtimePolicy,
           });
           yield* runtimeSession.resumeThread({ threadId, providerThread });
           yield* sink.write({

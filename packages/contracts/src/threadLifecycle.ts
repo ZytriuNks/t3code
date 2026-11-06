@@ -5,8 +5,6 @@ import {
   IsoDateTime,
   ProjectId,
   ProviderThreadId,
-  RunAttemptId,
-  RunId,
   ThreadId,
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
@@ -58,10 +56,8 @@ export const ThreadDeletionRecord = Schema.Struct({
       Schema.Struct({
         providerThreadId: ProviderThreadId,
         providerInstanceId: ProviderInstanceId,
-        source: Schema.Literal("cancelled_queued_runs"),
-        runIds: Schema.NonEmptyArray(RunId),
-        attemptIds: Schema.NonEmptyArray(RunAttemptId),
-        cancelledStartEffectIds: Schema.Array(TrimmedNonEmptyString),
+        source: Schema.Literal("queued_provider_origin"),
+        version: Schema.Literal(1),
       }),
     ),
   ),

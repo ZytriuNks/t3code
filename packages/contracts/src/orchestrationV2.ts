@@ -1084,6 +1084,12 @@ const nativeSessionStorageHasFile = Schema.makeFilter(
 );
 
 export const OrchestrationV2ProviderThread = Schema.Struct({
+  nativeSessionOrigin: Schema.optional(
+    Schema.Struct({
+      version: Schema.Literal(1),
+      state: Schema.Literals(["unstarted", "may_exist"]),
+    }),
+  ),
   nativeStorage: Schema.optional(NativeSessionStorage).pipe(
     Schema.withDecodingDefault(
       Effect.succeed({ type: "unresolved" as const, reason: "legacy_missing_locator" as const }),

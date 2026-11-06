@@ -1,8 +1,25 @@
 import { assert, it } from "@effect/vitest";
-import { ProviderDriverKind, ProviderInstanceId } from "@t3tools/contracts";
+import {
+  CommandId,
+  ContextTransferId,
+  EventId,
+  MessageId,
+  NodeId,
+  type OrchestrationV2DomainEvent,
+  ProjectId,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  ProviderThreadId,
+  RunAttemptId,
+  RunId,
+  ThreadId,
+} from "@t3tools/contracts";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -11,8 +28,25 @@ import * as NativeSessionBindings from "./NativeSessionBindings.ts";
 import * as ProjectionMaintenance from "./ProjectionMaintenance.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ThreadDataReclamation from "./ThreadDataReclamation.ts";
+import * as EventSink from "./EventSink.ts";
+import * as EffectOutbox from "./EffectOutbox.ts";
+import * as ThreadDeletionRecords from "./ThreadDeletionRecords.ts";
+import * as ThreadLifecyclePlan from "./ThreadLifecyclePlan.ts";
+import * as ThreadOwnership from "./ThreadOwnership.ts";
 
 const layerTest = ThreadDataReclamation.layer.pipe(
+  Layer.provideMerge(SqlitePersistence.layerMemory),
+);
+const layerCertifiedTest = Layer.mergeAll(
+  EventSink.layer,
+  ThreadDataReclamation.layer,
+  ThreadDeletionRecords.layer,
+  EffectOutbox.layer,
+  NativeSessionBindings.layer,
+  IdAllocator.layer,
+).pipe(
+  Layer.provideMerge(ThreadOwnership.layer),
+  Layer.provideMerge(Layer.mergeAll(EventStore.layer, ProjectionStore.layer)),
   Layer.provideMerge(SqlitePersistence.layerMemory),
 );
 const layerMaintenanceStores = Layer.mergeAll(EventStore.layer, ProjectionStore.layer).pipe(
@@ -244,6 +278,8 @@ const snapshotRows = Effect.fn("test.snapshotRows")(function* () {
     messages,
     turnItems,
     positions,
+    modelContexts,
+    launchWorkflows,
   ] = yield* Effect.all(
     [
       sql`SELECT * FROM orchestration_events ORDER BY sequence`,
@@ -270,6 +306,8 @@ const snapshotRows = Effect.fn("test.snapshotRows")(function* () {
       sql`SELECT * FROM orchestration_v2_projection_messages ORDER BY message_id`,
       sql`SELECT * FROM orchestration_v2_projection_turn_items ORDER BY turn_item_id`,
       sql`SELECT * FROM orchestration_v2_turn_item_positions ORDER BY thread_id, turn_item_id`,
+      sql`SELECT * FROM mcp_app_model_context ORDER BY thread_id, item_id`,
+      sql`SELECT * FROM orchestration_v2_thread_launch_workflows ORDER BY command_id`,
     ],
     { concurrency: 1 },
   );
@@ -298,6 +336,8 @@ const snapshotRows = Effect.fn("test.snapshotRows")(function* () {
     messages,
     turnItems,
     positions,
+    modelContexts,
+    launchWorkflows,
   };
 });
 
@@ -1930,10 +1970,8 @@ const seedCertifiedSideChatRoot = Effect.fn("test.seedCertifiedSideChatRoot")(fu
   const proof = {
     providerThreadId: "provider-thread:certified:reclaimed",
     providerInstanceId: "pi",
-    source: "cancelled_queued_runs",
-    runIds: ["run:certified:reclaimed"],
-    attemptIds: ["attempt:certified:reclaimed"],
-    cancelledStartEffectIds: [],
+    source: "queued_provider_origin",
+    version: 1,
   };
   for (const threadId of threadIds) {
     yield* seedDeletedThread({
@@ -1956,9 +1994,49 @@ const seedCertifiedSideChatRoot = Effect.fn("test.seedCertifiedSideChatRoot")(fu
             insertReceipt: false,
           }),
     });
-    yield* seedRun({ threadId, status: "cancelled" });
+    if (threadId === threadIds.at(-1)) {
+      yield* seedReclamationRows(threadId);
+      yield* sql`
+        INSERT INTO mcp_app_model_context (thread_id, item_id, server, tool, text, updated_at)
+        VALUES (${threadId}, 'certified:context', 'synthetic', 'tool', 'synthetic', ${at})
+      `;
+      yield* sql`
+        INSERT INTO orchestration_v2_thread_launch_workflows (
+          command_id, thread_id, project_id, status, title, setup_committed, thread_committed,
+          message_committed, created_at, updated_at
+        ) VALUES ('certified:launch', ${threadId}, 'project:reclamation', 'completed', 'synthetic', 1, 1, 1, ${at}, ${at})
+      `;
+    } else {
+      yield* seedRun({ threadId, status: "cancelled" });
+    }
   }
-  // 来源已在先前维护中回收；本夹具验证保留证明的后续批次边界，不验证首次发证。
+  const source = {
+    id: proof.providerThreadId,
+    appThreadId: rootThreadId,
+    driver: "pi",
+    providerInstanceId: "pi",
+    nativeSessionOrigin: { version: 1, state: "unstarted" },
+    providerSessionId: null,
+    ownerNodeId: null,
+    nativeThreadRef: null,
+    nativeStorage: { type: "unresolved", reason: "unavailable" },
+    nativeConversationHeadRef: null,
+    status: "not_loaded",
+    firstRunOrdinal: null,
+    lastRunOrdinal: null,
+    handoffIds: [],
+    forkedFrom: null,
+    createdAt: at,
+    updatedAt: at,
+  };
+  yield* sql`
+    INSERT INTO orchestration_v2_projection_provider_threads (
+      provider_thread_id, thread_id, owner_node_id, provider, provider_session_id,
+      status, first_run_ordinal, last_run_ordinal, updated_at, payload_json, driver, provider_instance_id
+    ) VALUES (${proof.providerThreadId}, ${rootThreadId}, NULL, 'pi', NULL, 'not_loaded',
+      NULL, NULL, ${at}, ${JSON.stringify(source)}, 'pi', 'pi')
+  `;
+  // 此夹具固定 v1 肯定来源；首次发证由下方真实 EventSink 流程覆盖。
   yield* sql`
     UPDATE orchestration_v2_thread_deletions
     SET payload_json = ${JSON.stringify({
@@ -1977,14 +2055,701 @@ const seedCertifiedSideChatRoot = Effect.fn("test.seedCertifiedSideChatRoot")(fu
   return { rootThreadId, lastThreadId: threadIds.at(-1)!, threadIds, proof };
 });
 
-it.effect.each(["root", "fork-with-live-parent"] as const)(
-  "preserves committed batches of a certified root after a later SQLite failure (%s)",
+const seedCertifiedSubagents = Effect.fn("test.seedCertifiedSubagents")(function* (
+  count: number,
+  order: "parent-first" | "child-first" | "permuted",
+  boundary: "internal" | "live-child" | "external-transfer" | "external-fork" = "internal",
+) {
+  const sql = yield* SqlClient.SqlClient;
+  assert.isTrue(
+    (yield* sql<{ file: string }>`PRAGMA database_list`).every((row) => row.file === ""),
+  );
+  const sink = yield* EventSink.EventSinkV2;
+  const store = yield* ProjectionStore.ProjectionStoreV2;
+  const allocator = yield* IdAllocator.IdAllocatorV2;
+  const now = DateTime.makeUnsafe(at);
+  const instance = ProviderInstanceId.make("codex-synthetic");
+  const rootId = ThreadId.make(
+    `synthetic:${order === "parent-first" ? "000" : order === "child-first" ? "zzz" : "050"}:root`,
+  );
+  const memberIds = Array.from({ length: count - 1 }, (_, index) =>
+    ThreadId.make(
+      `synthetic:${String(order === "permuted" ? (index * 37) % count : index + 1).padStart(3, "0")}:child`,
+    ),
+  );
+  const threadIds = [rootId, ...memberIds];
+  const thread = (id: ThreadId, parent: ThreadId | null = null) => ({
+    id,
+    projectId: ProjectId.make("synthetic-project"),
+    createdBy: "user" as const,
+    creationSource: "web" as const,
+    title: "synthetic",
+    providerInstanceId: instance,
+    modelSelection: { instanceId: instance, model: "unused" },
+    runtimeMode: "full-access" as const,
+    interactionMode: "default" as const,
+    branch: null,
+    worktreePath: null,
+    activeProviderThreadId: null,
+    lineage: {
+      parentThreadId: parent,
+      relationshipToParent: parent === null ? null : ("subagent" as const),
+      rootThreadId: parent ?? id,
+    },
+    forkedFrom:
+      parent === null ? null : { type: "node" as const, nodeId: NodeId.make(`original:${id}`) },
+    createdAt: now,
+    updatedAt: now,
+    archivedAt: null,
+    deletedAt: null,
+    settledOverride: null,
+    settledAt: null,
+    lastVisitedAt: null,
+  });
+  const write = (event: OrchestrationV2DomainEvent) => sink.write({ events: [event] });
+  for (const id of threadIds) {
+    yield* write({
+      id: EventId.make(`thread:${id}`),
+      type: "thread.created",
+      threadId: id,
+      occurredAt: now,
+      payload: thread(id, id === rootId ? null : rootId),
+    });
+    const runId = RunId.make(`original-run:${id}`);
+    const providerId = ProviderThreadId.make(`provider:${id}`);
+    const rootNodeId = NodeId.make(`node:${id}`);
+    const run = {
+      id: runId,
+      threadId: id,
+      ordinal: 1,
+      providerInstanceId: instance,
+      modelSelection: { instanceId: instance, model: "unused" },
+      providerThreadId: providerId,
+      userMessageId: MessageId.make(`message:${id}`),
+      rootNodeId,
+      activeAttemptId: RunAttemptId.make(`attempt:${id}`),
+      status: "completed" as const,
+      queuePosition: null,
+      requestedAt: now,
+      startedAt: now,
+      completedAt: now,
+      checkpointId: null,
+      contextHandoffId: null,
+    };
+    // original run 没有 delegatedTaskId；当前对象与 task 展示实例不同，历史事件不作回收来源。
+    const provider = {
+      id: providerId,
+      driver: ProviderDriverKind.make("codex"),
+      providerInstanceId: instance,
+      providerSessionId: null,
+      appThreadId: id,
+      ownerNodeId: null,
+      nativeThreadRef: {
+        driver: ProviderDriverKind.make("codex"),
+        nativeId: `native:${id}`,
+        strength: "strong" as const,
+      },
+      nativeStorage: { type: "resolved" as const, canonicalRoot: `/synthetic/${id}` },
+      nativeConversationHeadRef: null,
+      status: "closed" as const,
+      firstRunOrdinal: 1,
+      lastRunOrdinal: 1,
+      handoffIds: [],
+      forkedFrom: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    yield* sink.write({
+      events: [
+        {
+          id: EventId.make(`provider:${id}`),
+          type: "provider-thread.updated",
+          threadId: id,
+          occurredAt: now,
+          payload: provider,
+        },
+        {
+          id: EventId.make(`run:${id}`),
+          type: "run.created",
+          threadId: id,
+          occurredAt: now,
+          payload: run,
+        },
+        {
+          id: EventId.make(`attempt:${id}`),
+          type: "run-attempt.created",
+          threadId: id,
+          occurredAt: now,
+          payload: {
+            id: run.activeAttemptId,
+            runId,
+            attemptOrdinal: 1,
+            rootNodeId,
+            providerInstanceId: instance,
+            providerThreadId: providerId,
+            providerTurnId: null,
+            reason: "initial",
+            status: "completed",
+            startedAt: now,
+            completedAt: now,
+          },
+        },
+        {
+          id: EventId.make(`node:${id}`),
+          type: "node.updated",
+          threadId: id,
+          occurredAt: now,
+          payload: {
+            id: rootNodeId,
+            threadId: id,
+            runId,
+            parentNodeId: null,
+            rootNodeId,
+            kind: "root_turn",
+            status: "completed",
+            countsForRun: true,
+            providerThreadId: providerId,
+            providerTurnId: null,
+            nativeItemRef: null,
+            runtimeRequestId: null,
+            checkpointScopeId: null,
+            startedAt: now,
+            completedAt: now,
+          },
+        },
+      ],
+    });
+    if (id === rootId) continue;
+    for (const [ordinal, taskKind] of ["original", "followup", "reused"].entries()) {
+      if (taskKind !== "original") {
+        const reusedInstance = ProviderInstanceId.make(`codex-${taskKind}`);
+        const followup = {
+          ...run,
+          id: RunId.make(`${taskKind}-run:${id}`),
+          ordinal: ordinal + 1,
+          delegatedTaskId: NodeId.make(`${taskKind}:${id}`),
+          providerInstanceId: reusedInstance,
+          modelSelection: { instanceId: reusedInstance, model: "unused" },
+          rootNodeId: NodeId.make(`${taskKind}-node:${id}`),
+          activeAttemptId: RunAttemptId.make(`${taskKind}-attempt:${id}`),
+        };
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make(`${taskKind}-provider:${id}`),
+              type: "provider-thread.updated",
+              threadId: id,
+              occurredAt: now,
+              payload: {
+                ...provider,
+                providerInstanceId: reusedInstance,
+                lastRunOrdinal: ordinal + 1,
+              },
+            },
+            {
+              id: EventId.make(`${taskKind}-run:${id}`),
+              type: "run.created",
+              threadId: id,
+              occurredAt: now,
+              payload: followup,
+            },
+            {
+              id: EventId.make(`${taskKind}-attempt:${id}`),
+              type: "run-attempt.created",
+              threadId: id,
+              occurredAt: now,
+              payload: {
+                id: followup.activeAttemptId,
+                runId: followup.id,
+                attemptOrdinal: 1,
+                rootNodeId: followup.rootNodeId,
+                providerInstanceId: reusedInstance,
+                providerThreadId: providerId,
+                providerTurnId: null,
+                reason: "initial",
+                status: "completed",
+                startedAt: now,
+                completedAt: now,
+              },
+            },
+            {
+              id: EventId.make(`${taskKind}-node:${id}`),
+              type: "node.updated",
+              threadId: id,
+              occurredAt: now,
+              payload: {
+                id: followup.rootNodeId,
+                threadId: id,
+                runId: followup.id,
+                parentNodeId: null,
+                rootNodeId: followup.rootNodeId,
+                kind: "root_turn",
+                status: "completed",
+                countsForRun: true,
+                providerThreadId: providerId,
+                providerTurnId: null,
+                nativeItemRef: null,
+                runtimeRequestId: null,
+                checkpointScopeId: null,
+                startedAt: now,
+                completedAt: now,
+              },
+            },
+          ],
+        });
+      }
+      yield* write({
+        id: EventId.make(`${taskKind}:${id}`),
+        type: "subagent.updated",
+        threadId: rootId,
+        occurredAt: now,
+        payload: {
+          id: NodeId.make(`${taskKind}:${id}`),
+          threadId: rootId,
+          runId: RunId.make(`original-run:${rootId}`),
+          parentNodeId: NodeId.make(`node:${rootId}`),
+          origin: "app_owned",
+          createdBy: "user",
+          driver: ProviderDriverKind.make("claudeAgent"),
+          providerInstanceId: ProviderInstanceId.make("synthetic-old-instance"),
+          providerThreadId: providerId,
+          childThreadId: id,
+          nativeTaskRef: null,
+          prompt: "synthetic",
+          title: "synthetic",
+          model: "unused",
+          completionDelivery: { state: "delivered", observedByRunId: null },
+          status: "completed",
+          result: boundary === "internal" ? null : "Synthetic retained result",
+          startedAt: now,
+          completedAt: now,
+          updatedAt: now,
+        },
+      });
+    }
+    for (const type of ["subagent_spawn", "subagent_result"] as const) {
+      const spawn = type === "subagent_spawn";
+      const source = spawn ? rootId : id;
+      const target = spawn ? id : rootId;
+      yield* write({
+        id: EventId.make(`${type}:${id}`),
+        type: "context-transfer.created",
+        threadId: target,
+        occurredAt: now,
+        payload: {
+          id: ContextTransferId.make(`${type}:${id}`),
+          type,
+          sourceThreadId: source,
+          targetThreadId: target,
+          sourcePoint: { threadId: source, runId: RunId.make(`original-run:${source}`) },
+          basePoint: null,
+          sourceProviderInstanceId: instance,
+          targetProviderInstanceId: instance,
+          targetRunId: RunId.make(`original-run:${target}`),
+          status: "consumed",
+          resolution: null,
+          createdBy: "system",
+          error: null,
+          createdAt: now,
+          updatedAt: now,
+          consumedAt: now,
+        },
+      });
+    }
+    // 只移除正常已被压缩的历史；保留所有投影、ownership 和删除所需锚点。
+    yield* sql`DELETE FROM orchestration_events WHERE stream_id = ${id} AND event_type <> 'thread.created'`;
+  }
+  const piRunId = allocator.derive.run({ threadId: rootId, ordinal: 2 });
+  const piId = allocator.derive.providerThread({
+    driver: ProviderDriverKind.make("pi"),
+    nativeThreadId: `pending:${piRunId}`,
+  });
+  const piInstance = ProviderInstanceId.make("pi-synthetic");
+  const piNode = allocator.derive.rootNode({ runId: piRunId });
+  const piAttempt = allocator.derive.runAttempt({ runId: piRunId, attemptOrdinal: 1 });
+  yield* sink.write({
+    events: [
+      {
+        id: EventId.make("pi:provider"),
+        type: "provider-thread.updated",
+        threadId: rootId,
+        occurredAt: now,
+        payload: {
+          id: piId,
+          driver: ProviderDriverKind.make("pi"),
+          providerInstanceId: piInstance,
+          nativeSessionOrigin: { version: 1, state: "unstarted" },
+          providerSessionId: null,
+          appThreadId: rootId,
+          ownerNodeId: null,
+          nativeThreadRef: null,
+          nativeStorage: { type: "unresolved", reason: "unavailable" },
+          nativeConversationHeadRef: null,
+          status: "not_loaded",
+          firstRunOrdinal: null,
+          lastRunOrdinal: null,
+          handoffIds: [],
+          forkedFrom: null,
+          createdAt: now,
+          updatedAt: now,
+        },
+      },
+      {
+        id: EventId.make("pi:run"),
+        type: "run.created",
+        threadId: rootId,
+        occurredAt: now,
+        payload: {
+          id: piRunId,
+          threadId: rootId,
+          ordinal: 2,
+          providerInstanceId: piInstance,
+          modelSelection: { instanceId: piInstance, model: "unused" },
+          providerThreadId: piId,
+          userMessageId: MessageId.make("pi:message"),
+          rootNodeId: piNode,
+          activeAttemptId: piAttempt,
+          status: "queued",
+          queuePosition: 1,
+          requestedAt: now,
+          startedAt: null,
+          completedAt: null,
+          checkpointId: null,
+          contextHandoffId: null,
+        },
+      },
+      {
+        id: EventId.make("pi:attempt"),
+        type: "run-attempt.created",
+        threadId: rootId,
+        occurredAt: now,
+        payload: {
+          id: piAttempt,
+          runId: piRunId,
+          attemptOrdinal: 1,
+          rootNodeId: piNode,
+          providerInstanceId: piInstance,
+          providerThreadId: piId,
+          providerTurnId: null,
+          reason: "initial",
+          status: "pending",
+          startedAt: null,
+          completedAt: null,
+        },
+      },
+      {
+        id: EventId.make("pi:node"),
+        type: "node.updated",
+        threadId: rootId,
+        occurredAt: now,
+        payload: {
+          id: piNode,
+          threadId: rootId,
+          runId: piRunId,
+          parentNodeId: null,
+          rootNodeId: piNode,
+          kind: "root_turn",
+          status: "pending",
+          countsForRun: true,
+          providerThreadId: piId,
+          providerTurnId: null,
+          nativeItemRef: null,
+          runtimeRequestId: null,
+          checkpointScopeId: null,
+          startedAt: null,
+          completedAt: null,
+        },
+      },
+    ],
+  });
+  const childId = memberIds[0]!;
+  if (boundary === "external-fork") {
+    const externalId = ThreadId.make("external:fork");
+    yield* write({
+      id: EventId.make("external:fork"),
+      type: "thread.created",
+      threadId: externalId,
+      occurredAt: now,
+      payload: {
+        ...thread(externalId),
+        lineage: { parentThreadId: childId, relationshipToParent: "fork", rootThreadId: rootId },
+        forkedFrom: {
+          type: "run",
+          threadId: childId,
+          runId: RunId.make(`original-run:${childId}`),
+        },
+      },
+    });
+  } else if (boundary === "external-transfer") {
+    yield* seedThread({ threadId: "external:target", state: "active" });
+    yield* sql`
+      INSERT INTO orchestration_v2_projection_context_transfers (
+        context_transfer_id, source_thread_id, target_thread_id, target_run_id, type, status,
+        source_provider, target_provider, updated_at, source_provider_instance_id, target_provider_instance_id, payload_json
+      ) VALUES ('external:transfer', ${childId}, 'external:target', NULL, 'fork', 'pending',
+        'codex', 'codex', ${at}, ${instance}, ${instance}, '{}')
+    `;
+  }
+  const deletingIds = boundary === "live-child" ? [rootId] : threadIds;
+  const commandId = CommandId.make("delete:synthetic");
+  const plan = yield* ThreadLifecyclePlan.planThreadLifecycle({
+    command: { type: "thread.delete", commandId, threadId: rootId },
+    operationRootThreadId: rootId,
+    members: yield* Effect.forEach(deletingIds, (id) =>
+      store.getThreadRecords(id, [
+        "runs",
+        "attempts",
+        "nodes",
+        "subagents",
+        "runtimeRequests",
+        "providerSessions",
+        "providerThreads",
+        "providerTurns",
+        "turnItems",
+      ]),
+    ),
+    bindings: [],
+    attachmentIdsByThread: new Map(),
+    now,
+    idAllocator: allocator,
+  });
+  assert.isTrue(
+    (yield* sink.commitCommand({
+      ...plan,
+      commandId,
+      commandType: "thread.delete",
+      threadId: rootId,
+      acceptedAt: now,
+    })).committed,
+  );
+  const outbox = yield* EffectOutbox.EffectOutboxV2;
+  for (const _ of plan.effects) {
+    const claimed = Option.getOrThrow(yield* outbox.claimNext({ workerId: "synthetic" }));
+    assert.isTrue(yield* outbox.succeed({ effectId: claimed.id, workerId: "synthetic" }));
+  }
+  const record = Option.getOrThrow(
+    yield* (yield* ThreadDeletionRecords.ThreadDeletionRecords).get(rootId),
+  );
+  assert.equal(record.noNativeSessionProofs?.length, 1);
+  return { threadIds, rootId, childId, piId };
+});
+
+it.effect.each([
+  [51, "parent-first"],
+  [51, "child-first"],
+  [101, "parent-first"],
+  [101, "child-first"],
+  [101, "permuted"],
+] as const)(
+  "clears certified app-owned roots with original and reused providers: %s",
+  ([count, order]) =>
+    Effect.gen(function* () {
+      yield* seedCertifiedSubagents(count, order);
+      const result = yield* reclaim();
+      assert.equal(result.reclaimedThreadCount, count);
+      assert.isEmpty(result.skippedThreads);
+      const rows = yield* snapshotRows();
+      for (const [name, values] of Object.entries(rows)) {
+        if (["threads", "deletions", "events", "receipts", "deletionSessions"].includes(name))
+          continue;
+        assert.isEmpty(values, name);
+      }
+      assert.lengthOf(rows.events, count * 2);
+      assert.lengthOf(rows.receipts, 1);
+      assert.lengthOf(rows.deletions, count);
+      assert.equal((yield* reclaim()).deletedProjectionRowCount, 0);
+    }).pipe(Effect.provide(layerCertifiedTest)),
+);
+
+it.effect.each(["live-child", "external-transfer", "external-fork"] as const)(
+  "preserves all certified root data across a genuine external boundary: %s",
+  (boundary) =>
+    Effect.gen(function* () {
+      yield* seedCertifiedSubagents(51, "parent-first", boundary);
+      const before = yield* snapshotRows();
+      const result = yield* reclaim();
+      assert.equal(result.reclaimedThreadCount, 0);
+      assert.isNotEmpty(result.skippedThreads);
+      assert.deepEqual(yield* snapshotRows(), before);
+    }).pipe(Effect.provide(layerCertifiedTest)),
+);
+
+it.effect.each(["missing-original", "missing-followup", "wrong-owner", "external-node"] as const)(
+  "preserves certified root data when current ownership is invalid: %s",
   (scenario) =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      const { lastThreadId, threadIds } = yield* seedCertifiedSideChatRoot(
-        scenario === "fork-with-live-parent",
-      );
+      const { rootId, childId } = yield* seedCertifiedSubagents(51, "parent-first");
+      if (scenario === "missing-original" || scenario === "missing-followup") {
+        yield* sql`DELETE FROM orchestration_v2_projection_subagents
+          WHERE subagent_id = ${`${scenario === "missing-original" ? "original" : "followup"}:${childId}`}`;
+      } else if (scenario === "wrong-owner") {
+        yield* sql`UPDATE orchestration_v2_projection_subagents SET run_id = ${`original-run:${childId}`}
+          WHERE subagent_id = ${`original:${childId}`}`;
+      } else {
+        yield* seedThread({ threadId: "external:node-reader", state: "active" });
+        yield* sql`
+          INSERT INTO orchestration_v2_projection_nodes (
+            node_id, thread_id, run_id, root_node_id, kind, status, provider_thread_id, payload_json
+          ) VALUES ('external:node', 'external:node-reader', 'external:run', 'external:node',
+            'root_turn', 'completed', ${`provider:${rootId}`}, '{}')
+        `;
+      }
+      const before = yield* snapshotRows();
+      const result = yield* Effect.exit(reclaim());
+      if (scenario === "external-node") assert.isTrue(Exit.isFailure(result));
+      else {
+        assert.isTrue(Exit.isSuccess(result));
+        if (Exit.isSuccess(result)) {
+          assert.equal(result.value.reclaimedThreadCount, 0);
+          assert.lengthOf(result.value.skippedThreads, 51);
+        }
+      }
+      assert.deepEqual(yield* snapshotRows(), before);
+    }).pipe(Effect.provide(layerCertifiedTest)),
+);
+
+it.effect.each(["unknown-version", "fake-source", "malformed-record", "missing-origin"] as const)(
+  "does not enable certified deletion from an invalid proof on a Codex root: %s",
+  (scenario) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const { rootThreadId, proof } = yield* seedCertifiedSideChatRoot();
+      yield* sql`DELETE FROM orchestration_v2_projection_provider_threads`;
+      yield* sql`
+        UPDATE orchestration_v2_thread_deletions SET payload_json = json_set(payload_json,
+          '$.noNativeSessionProofs', json(${JSON.stringify([
+            {
+              ...proof,
+              ...(scenario === "unknown-version" ? { version: 2 } : {}),
+              ...(scenario === "fake-source" ? { source: "synthetic-fake" } : {}),
+            },
+          ])})) WHERE thread_id = ${rootThreadId}
+      `;
+      if (scenario === "malformed-record") {
+        yield* sql`UPDATE orchestration_v2_thread_deletions
+          SET payload_json = json_set(payload_json, '$.threadId', 'synthetic-wrong-thread')
+          WHERE thread_id = ${rootThreadId}`;
+      }
+      const before = yield* snapshotRows();
+      const result = yield* reclaim();
+      assert.equal(result.reclaimedThreadCount, 0);
+      assert.lengthOf(result.skippedThreads, 51);
+      assert.deepEqual(yield* snapshotRows(), before);
+    }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect.each([51, 101, 201])("counts SQL work for a certified synthetic root: %s", (count) =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* seedCertifiedSubagents(count, "parent-first");
+    const input = yield* bounds();
+    const calls = {
+      total: 0,
+      outsideTransaction: 0,
+      preflight: 0,
+      deletionAndVerification: 0,
+      maxParameters: 0,
+      rootTransactions: 0,
+      rootCommits: 0,
+    };
+    let depth = 0;
+    let deleting = false;
+    const observe = (statement: ReturnType<typeof sql.unsafe>) => {
+      const [query, params] = statement.compile();
+      if (query.trimStart().startsWith("DELETE")) deleting = true;
+      calls.total++;
+      calls.maxParameters = Math.max(calls.maxParameters, params.length);
+      if (depth === 0) calls.outsideTransaction++;
+      else if (deleting) calls.deletionAndVerification++;
+      else calls.preflight++;
+      return statement;
+    };
+    const withTransaction: typeof sql.withTransaction = (effect) =>
+      Effect.gen(function* () {
+        const root = depth === 0;
+        if (root) calls.rootTransactions++;
+        depth++;
+        try {
+          const result = yield* sql.withTransaction(effect);
+          if (root) calls.rootCommits++;
+          return result;
+        } finally {
+          depth--;
+        }
+      });
+    const intercepted = new Proxy(sql, {
+      apply(target, receiver, args) {
+        const result = Reflect.apply(target, receiver, args);
+        return Array.isArray(args[0]) ? observe(result) : result;
+      },
+      get(target, key, receiver) {
+        if (key === "withTransaction") return withTransaction;
+        if (key === "unsafe") {
+          return (...args: Parameters<typeof sql.unsafe>) => observe(target.unsafe(...args));
+        }
+        return Reflect.get(target, key, receiver);
+      },
+    });
+    const result = yield* Effect.gen(function* () {
+      return yield* (yield* ThreadDataReclamation.ThreadDataReclamation).reclaim(input);
+    }).pipe(
+      Effect.provide(
+        Layer.fresh(
+          ThreadDataReclamation.layer.pipe(
+            Layer.provide(Layer.succeed(SqlClient.SqlClient, intercepted)),
+          ),
+        ),
+      ),
+    );
+    assert.equal(result.reclaimedThreadCount, count);
+    assert.isEmpty(result.skippedThreads);
+    assert.equal(calls.rootTransactions, 1);
+    assert.equal(calls.rootCommits, 1);
+    assert.isAtMost(calls.maxParameters, 999);
+    assert.equal(
+      calls.total,
+      calls.outsideTransaction + calls.preflight + calls.deletionAndVerification,
+    );
+    const rows = yield* snapshotRows();
+    assert.isEmpty(rows.runs);
+    assert.isEmpty(rows.providerThreads);
+    assert.isEmpty(rows.nodes);
+    assert.isEmpty(rows.subagents);
+    assert.isEmpty(rows.transfers);
+    process.stdout.write(`RECLAIMER_SQL_COUNTS ${JSON.stringify({ members: count, ...calls })}\n`);
+  }).pipe(Effect.provide(layerCertifiedTest)),
+);
+
+it.effect("keeps the existing uncertified cross-batch provider/task retention semantics", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const { rootId, piId } = yield* seedCertifiedSubagents(51, "parent-first");
+    yield* sql`UPDATE orchestration_v2_thread_deletions
+      SET payload_json = json_remove(payload_json, '$.noNativeSessionProofs') WHERE thread_id = ${rootId}`;
+    yield* sql`DELETE FROM orchestration_v2_projection_runs WHERE provider_thread_id = ${piId}`;
+    yield* sql`DELETE FROM orchestration_v2_projection_run_attempts WHERE provider_thread_id = ${piId}`;
+    yield* sql`DELETE FROM orchestration_v2_projection_nodes WHERE provider_thread_id = ${piId}`;
+    yield* sql`DELETE FROM orchestration_v2_projection_provider_threads WHERE provider_thread_id = ${piId}`;
+    assert.equal((yield* reclaim()).reclaimedThreadCount, 51);
+    const remaining = yield* snapshotRows();
+    assert.lengthOf(remaining.providerThreads, 1);
+    assert.lengthOf(remaining.subagents, 3);
+    assert.isEmpty(remaining.runs);
+    assert.isEmpty(remaining.transfers);
+    // B1 保持独立归因；本轮不得借 certified 闭包修复普通 root 的残留。
+    yield* reclaim();
+    assert.deepEqual(yield* snapshotRows(), remaining);
+  }).pipe(Effect.provide(layerCertifiedTest)),
+);
+
+it.effect.each(["root", "fork-with-live-parent"] as const)(
+  "rolls back the entire certified root after a later SQLite failure and resumes (%s)",
+  (scenario) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const { threadIds } = yield* seedCertifiedSideChatRoot(scenario === "fork-with-live-parent");
+      const before = yield* snapshotRows();
       yield* sql`
       CREATE TRIGGER reject_certified_second_batch
       BEFORE DELETE ON orchestration_v2_projection_runs
@@ -1994,15 +2759,13 @@ it.effect.each(["root", "fork-with-live-parent"] as const)(
 
       const failed = yield* Effect.exit(reclaim());
       assert.isTrue(Exit.isFailure(failed));
-      assert.deepEqual(
-        yield* sql`SELECT thread_id FROM orchestration_v2_projection_runs ORDER BY thread_id`,
-        [{ thread_id: lastThreadId }],
-      );
+      // 单根事务必须保留失败前的全部执行来源与删除锚点。
+      assert.deepEqual(yield* snapshotRows(), before);
 
       yield* sql`DROP TRIGGER reject_certified_second_batch`;
       const resumed = yield* reclaim();
       assert.equal(resumed.reclaimedThreadCount, threadIds.length);
-      assert.equal(resumed.deletedProjectionRowCount, 1);
+      assert.equal(resumed.deletedProjectionRowCount, threadIds.length + 19);
       assert.deepEqual(resumed.skippedThreads, []);
       assert.isEmpty(yield* sql`SELECT * FROM orchestration_v2_projection_runs`);
       assert.lengthOf(
@@ -2025,26 +2788,17 @@ it.effect.each([
   "cancelled-cleanup",
   "ineligible-member",
   "malformed-lineage",
-] as const)("rechecks the whole certified root between committed batches: %s", (scenario) =>
-  Effect.gen(function* () {
-    const sql = yield* SqlClient.SqlClient;
-    const { rootThreadId, lastThreadId, proof } = yield* seedCertifiedSideChatRoot();
-    let transactionDepth = 0;
-    let injected = false;
-    const withTransaction: typeof sql.withTransaction = (effect) =>
-      Effect.gen(function* () {
-        transactionDepth++;
-        let result;
-        try {
-          result = yield* sql.withTransaction(effect);
-        } finally {
-          transactionDepth--;
-        }
-        if (transactionDepth === 0 && !injected) {
-          const remaining = yield* sql<{ readonly thread_id: string }>`
-            SELECT thread_id FROM orchestration_v2_projection_runs ORDER BY thread_id
-          `;
-          if (remaining.length === 1 && remaining[0]?.thread_id === lastThreadId) {
+] as const)(
+  "checks late barriers inside the certified root transaction before deletion: %s",
+  (scenario) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const { rootThreadId, lastThreadId, threadIds, proof } = yield* seedCertifiedSideChatRoot();
+      let transactionDepth = 0;
+      let injected = false;
+      const withTransaction: typeof sql.withTransaction = (effect) =>
+        Effect.gen(function* () {
+          if (transactionDepth === 0 && !injected) {
             injected = true;
             if (scenario === "late-native-binding") {
               yield* sql`
@@ -2058,12 +2812,16 @@ it.effect.each([
               `;
             } else if (scenario === "claimed-start") {
               yield* sql`
+                UPDATE orchestration_v2_projection_runs SET provider_thread_id = ${proof.providerThreadId}
+                WHERE thread_id = ${rootThreadId}
+              `;
+              yield* sql`
                 INSERT INTO orchestration_v2_effect_outbox (
                   effect_id, command_id, thread_id, effect_type, payload_json,
                   status, attempt_count, available_at, created_at, updated_at
                 ) VALUES (
                   'late:certified:start', 'start:certified', ${rootThreadId}, 'provider-turn.start',
-                  ${JSON.stringify({ runId: proof.runIds[0] })}, 'cancelled', 1, ${at}, ${at}, ${at}
+                  ${JSON.stringify({ runId: `run:${rootThreadId}` })}, 'cancelled', 1, ${at}, ${at}, ${at}
                 )
               `;
             } else if (scenario === "cancelled-cleanup") {
@@ -2083,44 +2841,118 @@ it.effect.each([
               `;
             }
           }
-        }
-        return result;
+          transactionDepth++;
+          try {
+            return yield* sql.withTransaction(effect);
+          } finally {
+            transactionDepth--;
+          }
+        });
+      const intercepted = new Proxy(sql, {
+        get(target, key, receiver) {
+          return key === "withTransaction" ? withTransaction : Reflect.get(target, key, receiver);
+        },
       });
-    const intercepted = new Proxy(sql, {
-      get(target, key, receiver) {
-        return key === "withTransaction" ? withTransaction : Reflect.get(target, key, receiver);
-      },
-    });
-    const result = yield* reclaim().pipe(
-      Effect.provide(
-        Layer.fresh(
-          ThreadDataReclamation.layer.pipe(
-            Layer.provide(Layer.succeed(SqlClient.SqlClient, intercepted)),
+      const result = yield* reclaim().pipe(
+        Effect.provide(
+          Layer.fresh(
+            ThreadDataReclamation.layer.pipe(
+              Layer.provide(Layer.succeed(SqlClient.SqlClient, intercepted)),
+            ),
           ),
         ),
-      ),
-    );
+      );
 
-    assert.isTrue(injected);
-    assert.equal(
-      result.reclaimedThreadCount,
-      ThreadDataReclamation.THREAD_DATA_RECLAMATION_BATCH_SIZE,
-    );
-    assert.equal(
-      result.deletedProjectionRowCount,
-      ThreadDataReclamation.THREAD_DATA_RECLAMATION_BATCH_SIZE,
-    );
-    assert.deepEqual(
-      yield* sql`SELECT thread_id FROM orchestration_v2_projection_runs ORDER BY thread_id`,
-      [{ thread_id: lastThreadId }],
-    );
-    assert.isTrue(
-      result.skippedThreads.some((thread) =>
-        thread.blockerCodes.includes(
-          scenario === "cancelled-cleanup" ? "lifecycle_cleanup" : "unknown_dependency",
+      assert.isTrue(injected);
+      assert.equal(result.reclaimedThreadCount, 0);
+      assert.equal(result.deletedProjectionRowCount, 0);
+      assert.deepEqual(
+        yield* sql`SELECT thread_id FROM orchestration_v2_projection_runs ORDER BY thread_id`,
+        threadIds.map((thread_id) => ({ thread_id })),
+      );
+      assert.isTrue(
+        result.skippedThreads.some((thread) =>
+          thread.blockerCodes.includes(
+            scenario === "cancelled-cleanup" ? "lifecycle_cleanup" : "unknown_dependency",
+          ),
         ),
-      ),
-    );
+      );
+    }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect.each([
+  "silent-delete",
+  "silent-message",
+  "silent-session",
+  "silent-outbox",
+  "silent-position",
+  "silent-metadata",
+  "silent-workflow",
+  "late-identity",
+  "late-event",
+] as const)("rolls back a certified root when heavy data survives deletion: %s", (scenario) =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* seedCertifiedSideChatRoot();
+    const before = yield* snapshotRows();
+    if (scenario.startsWith("silent-")) {
+      const table = {
+        "silent-delete": "orchestration_v2_projection_runs",
+        "silent-message": "orchestration_v2_projection_messages",
+        "silent-session": "orchestration_v2_projection_provider_sessions",
+        "silent-outbox": "orchestration_v2_effect_outbox",
+        "silent-position": "orchestration_v2_turn_item_positions",
+        "silent-metadata": "mcp_app_model_context",
+        "silent-workflow": "orchestration_v2_thread_launch_workflows",
+        "late-identity": "",
+        "late-event": "",
+      }[scenario];
+      yield* sql`
+          CREATE TRIGGER retain_certified_data
+          BEFORE DELETE ON ${sql(table)}
+          WHEN OLD.thread_id = 'thread:certified:050'
+          BEGIN SELECT RAISE(IGNORE); END
+        `;
+    } else if (scenario === "late-identity") {
+      yield* sql`
+          CREATE TRIGGER retain_certified_data
+          AFTER DELETE ON orchestration_v2_projection_runs
+          WHEN OLD.thread_id = 'thread:certified:050'
+          BEGIN
+            INSERT INTO orchestration_v2_native_session_bindings (
+              binding_key, thread_id, provider_thread_id, provider_instance_id, driver,
+              native_id, storage_type, canonical_root, canonical_file, bound_at, payload_json
+            ) VALUES ('late:inside-root', 'thread:certified:000', 'provider-thread:certified:reclaimed', 'pi', 'pi',
+              NULL, 'unresolved', '', '', '2026-10-31T12:00:00.000Z', '{}');
+          END
+        `;
+    } else {
+      yield* sql`
+          CREATE TRIGGER retain_certified_data
+          AFTER DELETE ON orchestration_v2_projection_runs
+          WHEN OLD.thread_id = 'thread:certified:050'
+          BEGIN
+            INSERT INTO orchestration_events (
+              event_id, aggregate_kind, stream_id, stream_version, event_type, occurred_at,
+              actor_kind, payload_json, metadata_json, application_event_version
+            ) VALUES ('late:inside-root', 'thread', 'thread:certified:000', 99, 'thread.updated',
+              '2026-10-31T12:00:00.000Z', 'server', '{}', '{}', 2);
+          END
+        `;
+    }
+    const result = yield* Effect.exit(reclaim());
+    assert.isTrue(Exit.isFailure(result));
+    assert.deepEqual(yield* snapshotRows(), before);
+    yield* sql`DROP TRIGGER retain_certified_data`;
+    const resumed = yield* reclaim();
+    assert.equal(resumed.reclaimedThreadCount, 51);
+    assert.isEmpty(resumed.skippedThreads);
+    const rows = yield* snapshotRows();
+    for (const [name, values] of Object.entries(rows)) {
+      if (["threads", "deletions", "events", "receipts", "deletionSessions"].includes(name))
+        continue;
+      assert.isEmpty(values, name);
+    }
   }).pipe(Effect.provide(layerTest)),
 );
 

@@ -6,8 +6,6 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderThreadId,
-  RunAttemptId,
-  RunId,
   ThreadId,
   type ThreadDeletionRecord,
   type OrchestrationV2ProviderThread,
@@ -110,10 +108,8 @@ it.effect.each([false, true])(
       const proof = {
         providerThreadId: ProviderThreadId.make("queued-pi"),
         providerInstanceId: ProviderInstanceId.make("pi"),
-        source: "cancelled_queued_runs" as const,
-        runIds: [RunId.make("queued-run")] as const,
-        attemptIds: [RunAttemptId.make("queued-attempt")] as const,
-        cancelledStartEffectIds: [],
+        source: "queued_provider_origin" as const,
+        version: 1 as const,
       };
       const first = { ...record, ...(certified ? { noNativeSessionProofs: [proof] } : {}) };
       expect(Option.isNone(yield* deletions.get(R))).toBe(true);
@@ -124,7 +120,9 @@ it.effect.each([false, true])(
         commandId: CommandId.make("repeat"),
         operationRootThreadId: ThreadId.make("later-root"),
         sessions: [piSession],
-        noNativeSessionProofs: [{ ...proof, runIds: [RunId.make("untrusted-later-run")] }],
+        noNativeSessionProofs: [
+          { ...proof, providerThreadId: ProviderThreadId.make("untrusted-later-provider") },
+        ],
       });
       yield* sql`DELETE FROM orchestration_v2_projection_provider_threads`;
       yield* sql`DELETE FROM orchestration_v2_projection_threads`;

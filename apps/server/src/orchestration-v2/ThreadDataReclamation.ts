@@ -222,7 +222,7 @@ const make = Effect.gen(function* () {
 
   const findThreadsWithReclaimableData = Effect.fn(
     "ThreadDataReclamation.findThreadsWithReclaimableData",
-  )(function* (threadIds: ReadonlyArray<string>) {
+  )(function* (threadIds: ReadonlyArray<string>, verifyEmpty = false) {
     const rows = yield* sql<{ readonly thread_id: string }>`
         WITH candidate_ids AS (
           SELECT thread_id
@@ -265,10 +265,26 @@ const make = Effect.gen(function* () {
           WHERE thread_id IN (SELECT thread_id FROM candidate_ids)
         UNION SELECT thread_id FROM orchestration_v2_projection_provider_session_bindings
           WHERE thread_id IN (SELECT thread_id FROM candidate_ids)
+        UNION SELECT thread_id FROM orchestration_v2_projection_provider_sessions
+          WHERE ${verifyEmpty ? 1 : 0} AND thread_id IN (SELECT thread_id FROM candidate_ids)
         UNION SELECT thread_id FROM orchestration_v2_native_session_bindings
           WHERE thread_id IN (SELECT thread_id FROM candidate_ids)
-        UNION SELECT thread_id FROM orchestration_v2_effect_outbox
+        UNION SELECT thread_id FROM orchestration_v2_effect_outbox AS cleanup
           WHERE thread_id IN (SELECT thread_id FROM candidate_ids)
+            AND (${verifyEmpty ? 0 : 1} OR cleanup.status NOT IN ('succeeded', 'cancelled') OR (
+              NOT (cleanup.effect_type = 'provider-session.detach' AND (
+                json_type(cleanup.payload_json, '$.retirementRevision') IS NOT NULL
+                OR json_type(cleanup.payload_json, '$.lifecycle') IS 'object'
+              ))
+              AND NOT (cleanup.status = 'cancelled' AND cleanup.effect_type <> 'provider-thread.delete'
+                AND json_type(cleanup.payload_json, '$.lifecycle') IS 'object')
+              AND NOT ((cleanup.status = 'cancelled' OR cleanup.effect_type = 'provider-session.detach')
+                AND cleanup.effect_type <> 'provider-thread.delete' AND EXISTS (
+                  SELECT 1 FROM orchestration_command_receipts AS receipt
+                  WHERE receipt.command_id = cleanup.command_id AND receipt.status = 'accepted'
+                    AND receipt.command_type IN ('thread.archive', 'thread.delete', 'project.delete')
+                ))
+            ))
         UNION SELECT thread_id FROM mcp_app_model_context
           WHERE thread_id IN (SELECT thread_id FROM candidate_ids)
         UNION SELECT thread_id FROM orchestration_v2_thread_launch_workflows
@@ -281,6 +297,10 @@ const make = Effect.gen(function* () {
               SELECT 1 FROM orchestration_v2_thread_deletions AS deletion
               WHERE deletion.command_id = receipt.command_id
             )
+            AND (${verifyEmpty ? 0 : 1} OR NOT EXISTS (
+              SELECT 1 FROM orchestration_v2_effect_outbox AS retained_outbox
+              WHERE retained_outbox.command_id = receipt.command_id
+            ))
         UNION SELECT stream_id AS thread_id FROM orchestration_events
           WHERE application_event_version = 2
             AND aggregate_kind = 'thread'
@@ -311,6 +331,9 @@ const make = Effect.gen(function* () {
       };
       const candidateIds = candidates.map((candidate) => candidate.thread_id);
       const candidateIdSet = new Set(candidateIds);
+      const candidateIdsFragment = certified
+        ? sql`(SELECT value FROM json_each(${encodeStringArray(candidateIds)}))`
+        : sql.in(candidateIds);
       const batchOperationRootThreadId = candidates[0]?.operation_root_thread_id ?? "";
       const ineligibleOperationRootRows = yield* sql<{ readonly thread_id: string }>`
         SELECT deletion.thread_id
@@ -353,7 +376,11 @@ const make = Effect.gen(function* () {
             ON shell.thread_id = deletion.thread_id
           WHERE deletion.scope = 't3_only'
             AND deletion.operation_root_thread_id = ${batchOperationRootThreadId}
-            AND deletion.thread_id IN ${sql.in(parentIds)}
+            AND deletion.thread_id IN ${
+              certified
+                ? sql`(SELECT value FROM json_each(${encodeStringArray(parentIds)}))`
+                : sql.in(parentIds)
+            }
         `;
         for (const parent of parentRows) {
           if (eligibleThreadIds.has(parent.thread_id)) candidateById.set(parent.thread_id, parent);
@@ -392,7 +419,7 @@ const make = Effect.gen(function* () {
           WHERE ${sql.in("thread_id", candidateIdChunk)}
             AND child_thread_id IS NOT NULL
             AND (
-              child_thread_id IN ${sql.in(candidateIdChunk)}
+              ${certified ? 1 : 0} OR child_thread_id IN ${sql.in(candidateIdChunk)}
               OR NOT EXISTS (
                 SELECT 1
                 FROM orchestration_v2_thread_deletions AS internal_child
@@ -440,6 +467,47 @@ const make = Effect.gen(function* () {
             addBlocker(ownership.parent_thread_id, "unknown_dependency");
             addBlocker(ownership.child_thread_id, "unknown_dependency");
           }
+        }
+      }
+
+      if (certified) {
+        const ownedIds = encodeStringArray(candidateIds);
+        const invalidOwnership = yield* sql<{ readonly thread_id: string }>`
+          SELECT DISTINCT task.thread_id
+          FROM orchestration_v2_projection_subagents AS task
+          LEFT JOIN orchestration_v2_projection_runs AS owner ON owner.run_id = task.run_id
+          LEFT JOIN orchestration_v2_projection_nodes AS parent ON parent.node_id = task.parent_node_id
+          WHERE task.thread_id IN (SELECT value FROM json_each(${ownedIds}))
+            AND task.run_id IS NOT NULL
+            AND (owner.thread_id IS NOT task.thread_id OR parent.thread_id IS NOT task.thread_id
+              OR parent.run_id IS NOT task.run_id)
+          UNION
+          SELECT child.thread_id FROM orchestration_v2_projection_threads AS child
+          JOIN orchestration_v2_projection_threads AS parent
+            ON parent.thread_id = json_extract(child.payload_json, '$.lineage.parentThreadId')
+          WHERE child.thread_id IN (SELECT value FROM json_each(${ownedIds}))
+            AND json_extract(child.payload_json, '$.lineage.relationshipToParent') = 'subagent'
+            AND (json_extract(child.payload_json, '$.lineage.rootThreadId') IS NOT
+                json_extract(parent.payload_json, '$.lineage.rootThreadId')
+              OR json_extract(child.payload_json, '$.forkedFrom.type') IS NOT 'node'
+              OR NOT EXISTS (
+                SELECT 1 FROM orchestration_v2_projection_subagents AS original
+                WHERE original.subagent_id = json_extract(child.payload_json, '$.forkedFrom.nodeId')
+                  AND original.thread_id = parent.thread_id AND original.child_thread_id = child.thread_id
+              ))
+          UNION
+          SELECT run.thread_id FROM orchestration_v2_projection_runs AS run
+          WHERE run.thread_id IN (SELECT value FROM json_each(${ownedIds}))
+            AND json_extract(run.payload_json, '$.delegatedTaskId') IS NOT NULL
+            AND NOT EXISTS (
+              SELECT 1 FROM orchestration_v2_projection_subagents AS task
+              WHERE task.subagent_id = json_extract(run.payload_json, '$.delegatedTaskId')
+                AND task.child_thread_id = run.thread_id
+            )
+        `;
+        for (const row of invalidOwnership) {
+          if (candidateThreadsWithData.has(row.thread_id))
+            addBlocker(row.thread_id, "unknown_dependency");
         }
       }
       const childrenByParentId = new Map<string, Array<CandidateRow>>();
@@ -572,12 +640,24 @@ const make = Effect.gen(function* () {
         });
         closureRootByThreadId.set(candidate.thread_id, batchOperationRootThreadId);
       }
+      if (certified && closures.length > 0) {
+        closures.splice(0, closures.length, {
+          ...closures[0]!,
+          threadIds: candidateIds,
+          subagentRows: [...subagentRowsByPair.values()].flat(),
+        });
+        for (const threadId of candidateIds)
+          closureRootByThreadId.set(threadId, batchOperationRootThreadId);
+      }
 
       const contextTransfersByRoot = new Map<string, Map<string, InternalContextTransferRow>>();
       const contextHandoffsByRoot = new Map<string, Map<string, InternalContextHandoffRow>>();
       for (const candidateIdChunk of chunksOf(candidateIds, THREAD_DATA_RECLAMATION_BATCH_SIZE)) {
         const transferRows = yield* sql<
           InternalContextTransferRow & {
+            readonly source_run_id: string | null;
+            readonly source_run_thread_id: string | null;
+            readonly source_point_thread_id: string | null;
             readonly target_run_id: string | null;
             readonly target_run_thread_id: string | null;
             readonly status: string;
@@ -590,6 +670,9 @@ const make = Effect.gen(function* () {
             transfer.context_transfer_id,
             transfer.source_thread_id,
             transfer.target_thread_id,
+            json_extract(transfer.payload_json, '$.sourcePoint.runId') AS source_run_id,
+            json_extract(transfer.payload_json, '$.sourcePoint.threadId') AS source_point_thread_id,
+            source_run.thread_id AS source_run_thread_id,
             transfer.target_run_id,
             transfer.status,
             target_run.thread_id AS target_run_thread_id,
@@ -597,6 +680,8 @@ const make = Effect.gen(function* () {
             target_deletion.operation_root_thread_id AS target_operation_root_thread_id,
             target_run_deletion.operation_root_thread_id AS target_run_operation_root_thread_id
           FROM orchestration_v2_projection_context_transfers AS transfer
+          LEFT JOIN orchestration_v2_projection_runs AS source_run
+            ON source_run.run_id = json_extract(transfer.payload_json, '$.sourcePoint.runId')
           LEFT JOIN orchestration_v2_projection_runs AS target_run
             ON target_run.run_id = transfer.target_run_id
           LEFT JOIN orchestration_v2_thread_deletions AS source_deletion
@@ -619,12 +704,21 @@ const make = Effect.gen(function* () {
           const targetRootThreadId = targetIsEligible ? batchOperationRootThreadId : undefined;
           const runIsInternal =
             transfer.target_run_id === null ||
-            (transfer.target_run_thread_id !== null &&
-              eligibleThreadIds.has(transfer.target_run_thread_id));
+            (certified
+              ? transfer.target_run_thread_id === transfer.target_thread_id
+              : transfer.target_run_thread_id !== null &&
+                eligibleThreadIds.has(transfer.target_run_thread_id));
+          const sourceIsOwned =
+            !certified ||
+            ((transfer.source_point_thread_id === null ||
+              transfer.source_point_thread_id === transfer.source_thread_id) &&
+              (transfer.source_run_id === null ||
+                transfer.source_run_thread_id === transfer.source_thread_id));
           if (
             sourceIsEligible &&
             targetIsEligible &&
             rootThreadId === targetRootThreadId &&
+            sourceIsOwned &&
             runIsInternal
           ) {
             const byId = contextTransfersByRoot.get(batchOperationRootThreadId) ?? new Map();
@@ -921,20 +1015,20 @@ const make = Effect.gen(function* () {
             json_extract(attachment.value, '$.id') AS attachment_id
           FROM orchestration_v2_projection_messages AS message,
             json_each(message.payload_json, '$.attachments') AS attachment
-          WHERE message.thread_id IN ${sql.in(candidateIds)}
+          WHERE message.thread_id IN ${candidateIdsFragment}
           UNION ALL
           SELECT item.thread_id, json_extract(attachment.value, '$.id') AS attachment_id
           FROM orchestration_v2_projection_turn_items AS item,
             json_each(item.payload_json, '$.questionAnswer.attachmentsByQuestionId') AS question,
             json_each(question.value) AS attachment
-          WHERE item.thread_id IN ${sql.in(candidateIds)}
+          WHERE item.thread_id IN ${candidateIdsFragment}
             AND item.type = 'user_input_request'
           UNION ALL
           SELECT thread.thread_id, json_extract(attachment.value, '$.id') AS attachment_id
           FROM orchestration_v2_projection_threads AS thread,
             json_each(thread.payload_json, '$.guestShare.messages') AS guest_message,
             json_each(guest_message.value, '$.attachments') AS attachment
-          WHERE thread.thread_id IN ${sql.in(candidateIds)}
+          WHERE thread.thread_id IN ${candidateIdsFragment}
             AND json_extract(guest_message.value, '$.status') = 'pending'
         )
         SELECT DISTINCT thread_id, attachment_id
@@ -1098,6 +1192,7 @@ const make = Effect.gen(function* () {
         };
       }
 
+      let confirmedProofCount = 0;
       for (const candidateIdChunk of chunksOf(candidateIds, THREAD_DATA_RECLAMATION_BATCH_SIZE)) {
         const activeRows = yield* sql<{ readonly thread_id: string }>`
           SELECT thread_id FROM orchestration_v2_projection_runs
@@ -1379,9 +1474,15 @@ const make = Effect.gen(function* () {
           addBlocker(row.thread_id, "shared_provider_session");
         }
 
-        const noNative = yield* checkNoNativeSessionProofs(candidateIdChunk).pipe(
-          Effect.provideService(SqlClient.SqlClient, sql),
-        );
+        const proofRows = yield* sql<{ readonly thread_id: string }>`
+          SELECT thread_id FROM orchestration_v2_thread_deletions
+          WHERE thread_id IN ${sql.in(candidateIdChunk)}
+            AND json_array_length(payload_json, '$.noNativeSessionProofs') > 0
+        `;
+        const noNative = yield* checkNoNativeSessionProofs(
+          proofRows.map((row) => row.thread_id),
+        ).pipe(Effect.provideService(SqlClient.SqlClient, sql));
+        confirmedProofCount += noNative.confirmed.size;
         for (const threadId of noNative.contradicted) addBlocker(threadId, "unknown_dependency");
         const unknownNativeRows = yield* sql<{
           readonly thread_id: string;
@@ -1501,6 +1602,16 @@ const make = Effect.gen(function* () {
         for (const row of sharedNativeRows) addBlocker(row.thread_id, "shared_native_session");
       }
 
+      if (certified && confirmedProofCount === 0) {
+        // 仅残留证明的空根可重复维护；仍有数据时必须有肯定来源才能启用整根删除。
+        for (const threadIds of chunksOf(candidateIds, THREAD_DATA_RECLAMATION_BATCH_SIZE)) {
+          if ((yield* findThreadsWithReclaimableData(threadIds, true)).size > 0) {
+            for (const threadId of candidateIds) addBlocker(threadId, "unknown_dependency");
+            break;
+          }
+        }
+      }
+
       let reclaimedThreadCount = 0;
       const skippedThreads: Array<ThreadDataReclamationSummary["skippedThreads"][number]> = [];
       const reclaimableClosures: Array<Closure> = [];
@@ -1532,145 +1643,6 @@ const make = Effect.gen(function* () {
           deletedOutboxCount: 0,
         } satisfies ThreadDataReclamationSummary;
       }
-
-      const internalParentIds = [
-        ...new Set(
-          candidates
-            .filter((candidate) => candidate.relationship_to_parent === "subagent")
-            .map((candidate) => candidate.parent_thread_id)
-            .filter(
-              (threadId): threadId is string =>
-                threadId !== null && eligibleThreadIds.has(threadId),
-            ),
-        ),
-      ];
-      // 父批已清除执行来源后，仅保留的合法 app-owned task 不再占有子 provider。
-      const internalSubagentIds =
-        certified && internalParentIds.length > 0
-          ? (yield* sql<{ readonly subagent_id: string }>`
-            SELECT task.subagent_id
-            FROM orchestration_v2_projection_subagents AS task
-            JOIN orchestration_v2_projection_threads AS child ON child.thread_id = task.child_thread_id
-            JOIN orchestration_v2_projection_threads AS parent ON parent.thread_id = task.thread_id
-            JOIN orchestration_v2_thread_deletions AS child_deletion ON child_deletion.thread_id = child.thread_id
-            JOIN orchestration_v2_thread_deletions AS parent_deletion ON parent_deletion.thread_id = parent.thread_id
-            JOIN orchestration_v2_projection_provider_threads AS provider
-              ON provider.provider_thread_id = task.provider_thread_id AND provider.thread_id = child.thread_id
-            JOIN orchestration_v2_projection_runs AS child_run ON child_run.thread_id = child.thread_id
-              AND (json_extract(child_run.payload_json, '$.delegatedTaskId') = task.subagent_id
-                OR task.subagent_id = json_extract(child.payload_json, '$.forkedFrom.nodeId'))
-            JOIN orchestration_v2_projection_subagents AS original
-              ON original.subagent_id = json_extract(child.payload_json, '$.forkedFrom.nodeId')
-              AND original.thread_id = parent.thread_id AND original.child_thread_id = child.thread_id
-            WHERE task.thread_id IN ${sql.in(internalParentIds)}
-              AND child.thread_id IN ${sql.in(candidateIds)}
-              AND child.deleted_at IS NOT NULL AND parent.deleted_at IS NOT NULL
-              AND child.project_id = parent.project_id
-              AND json_extract(child.payload_json, '$.id') = child.thread_id
-              AND json_extract(parent.payload_json, '$.id') = parent.thread_id
-              AND json_extract(child.payload_json, '$.projectId') = child.project_id
-              AND json_extract(parent.payload_json, '$.projectId') = parent.project_id
-              AND child_deletion.project_id = child.project_id AND parent_deletion.project_id = parent.project_id
-              AND child_deletion.scope = 't3_only' AND parent_deletion.scope = 't3_only'
-              AND child_deletion.operation_root_thread_id = ${batchOperationRootThreadId}
-              AND parent_deletion.operation_root_thread_id = ${batchOperationRootThreadId}
-              AND child_deletion.parent_thread_id = parent.thread_id
-              AND json_extract(child.payload_json, '$.lineage.parentThreadId') = parent.thread_id
-              AND json_extract(child.payload_json, '$.lineage.relationshipToParent') = 'subagent'
-              AND json_extract(child.payload_json, '$.lineage.rootThreadId') = json_extract(parent.payload_json, '$.lineage.rootThreadId')
-              AND json_extract(child.payload_json, '$.forkedFrom.type') = 'node'
-              AND task.origin = 'app_owned' AND original.origin = 'app_owned'
-              AND json_type(original.payload_json, '$.result') = 'text'
-              AND json_extract(original.payload_json, '$.id') = original.subagent_id
-              AND json_extract(original.payload_json, '$.threadId') = original.thread_id
-              AND json_extract(original.payload_json, '$.childThreadId') = original.child_thread_id
-              AND json_extract(original.payload_json, '$.origin') = original.origin
-              AND (
-                json_extract(child_run.payload_json, '$.delegatedTaskId') = task.subagent_id
-                OR (task.subagent_id = original.subagent_id AND EXISTS (
-                  SELECT 1 FROM orchestration_events AS spawn
-                  JOIN orchestration_v2_projection_runs AS spawned_run
-                    ON spawned_run.run_id = json_extract(spawn.payload_json, '$.targetRunId')
-                    AND spawned_run.thread_id = child.thread_id
-                    AND json_extract(spawned_run.payload_json, '$.id') = spawned_run.run_id
-                    AND json_extract(spawned_run.payload_json, '$.threadId') = child.thread_id
-                  WHERE spawn.stream_id = child.thread_id AND spawn.aggregate_kind = 'thread'
-                    AND spawn.application_event_version = 2 AND spawn.event_type = 'context-transfer.created'
-                    AND json_extract(spawn.payload_json, '$.type') = 'subagent_spawn'
-                    AND json_extract(spawn.payload_json, '$.sourceThreadId') = parent.thread_id
-                    AND json_extract(spawn.payload_json, '$.targetThreadId') = child.thread_id
-                    AND json_extract(spawn.payload_json, '$.sourcePoint.threadId') = parent.thread_id
-                    AND json_extract(spawn.payload_json, '$.sourcePoint.runId') = task.run_id
-                    AND json_extract(spawn.payload_json, '$.status') = 'consumed'
-                    AND json_type(spawn.payload_json, '$.consumedAt') = 'text'
-                ))
-              )
-              AND (
-                (child_run.provider_thread_id = task.provider_thread_id
-                  AND child_run.provider_instance_id = provider.provider_instance_id
-                  AND ((task.driver = provider.driver AND task.provider_instance_id = provider.provider_instance_id)
-                    OR json_type(task.payload_json, '$.result') = 'text'))
-                OR EXISTS (
-                  SELECT 1 FROM orchestration_v2_projection_run_attempts AS child_attempt
-                  JOIN orchestration_events AS run_history
-                    ON run_history.stream_id = child.thread_id AND run_history.aggregate_kind = 'thread'
-                    AND run_history.application_event_version = 2 AND run_history.event_type IN ('run.created', 'run.updated')
-                    AND json_extract(run_history.payload_json, '$.id') = child_run.run_id
-                    AND json_extract(run_history.payload_json, '$.threadId') = child.thread_id
-                    AND (json_extract(run_history.payload_json, '$.delegatedTaskId') = task.subagent_id
-                      OR task.subagent_id = original.subagent_id)
-                    AND json_extract(run_history.payload_json, '$.providerThreadId') = task.provider_thread_id
-                    AND json_extract(run_history.payload_json, '$.providerInstanceId') = child_attempt.provider_instance_id
-                    AND json_extract(run_history.payload_json, '$.activeAttemptId') = child_attempt.attempt_id
-                    AND json_extract(run_history.payload_json, '$.rootNodeId') = child_attempt.root_node_id
-                  JOIN orchestration_events AS attempt_created
-                    ON attempt_created.stream_id = child.thread_id AND attempt_created.aggregate_kind = 'thread'
-                    AND attempt_created.application_event_version = 2 AND attempt_created.event_type = 'run-attempt.created'
-                    AND json_extract(attempt_created.payload_json, '$.id') = child_attempt.attempt_id
-                    AND json_extract(attempt_created.payload_json, '$.runId') = child_run.run_id
-                    AND json_extract(attempt_created.payload_json, '$.rootNodeId') = child_attempt.root_node_id
-                    AND json_extract(attempt_created.payload_json, '$.providerThreadId') = task.provider_thread_id
-                    AND json_extract(attempt_created.payload_json, '$.providerInstanceId') = child_attempt.provider_instance_id
-                  JOIN orchestration_events AS provider_history
-                    ON provider_history.stream_id = child.thread_id AND provider_history.aggregate_kind = 'thread'
-                    AND provider_history.application_event_version = 2 AND provider_history.event_type = 'provider-thread.updated'
-                    AND json_extract(provider_history.payload_json, '$.id') = task.provider_thread_id
-                    AND json_extract(provider_history.payload_json, '$.appThreadId') = child.thread_id
-                    AND json_extract(provider_history.payload_json, '$.driver') = provider.driver
-                    AND json_extract(provider_history.payload_json, '$.providerInstanceId') = child_attempt.provider_instance_id
-                  WHERE child_attempt.thread_id = child.thread_id AND child_attempt.run_id = child_run.run_id
-                    AND child_attempt.provider_thread_id = task.provider_thread_id
-                    AND ((task.driver = provider.driver AND child_attempt.provider_instance_id = task.provider_instance_id)
-                      OR json_type(task.payload_json, '$.result') = 'text')
-                    AND json_extract(child_attempt.payload_json, '$.id') = child_attempt.attempt_id
-                    AND json_extract(child_attempt.payload_json, '$.runId') = child_attempt.run_id
-                    AND json_extract(child_attempt.payload_json, '$.rootNodeId') = child_attempt.root_node_id
-                    AND json_extract(child_attempt.payload_json, '$.providerThreadId') = child_attempt.provider_thread_id
-                    AND json_extract(child_attempt.payload_json, '$.providerInstanceId') = child_attempt.provider_instance_id
-                    AND json_extract(child_attempt.payload_json, '$.status') = child_attempt.status
-                )
-              )
-              AND json_extract(provider.payload_json, '$.id') = provider.provider_thread_id
-              AND json_extract(provider.payload_json, '$.appThreadId') = provider.thread_id
-              AND json_extract(provider.payload_json, '$.driver') = provider.driver
-              AND json_extract(provider.payload_json, '$.providerInstanceId') = provider.provider_instance_id
-              AND json_extract(child_run.payload_json, '$.id') = child_run.run_id
-              AND json_extract(child_run.payload_json, '$.threadId') = child_run.thread_id
-              AND json_extract(child_run.payload_json, '$.providerThreadId') = child_run.provider_thread_id
-              AND json_extract(child_run.payload_json, '$.providerInstanceId') = child_run.provider_instance_id
-              AND json_extract(task.payload_json, '$.id') = task.subagent_id
-              AND json_extract(task.payload_json, '$.threadId') = task.thread_id
-              AND json_extract(task.payload_json, '$.runId') = task.run_id
-              AND json_extract(task.payload_json, '$.parentNodeId') = task.parent_node_id
-              AND json_extract(task.payload_json, '$.childThreadId') = task.child_thread_id
-              AND json_extract(task.payload_json, '$.origin') = task.origin
-              AND json_extract(task.payload_json, '$.driver') = task.driver
-              AND json_extract(task.payload_json, '$.providerInstanceId') = task.provider_instance_id
-              AND json_extract(task.payload_json, '$.providerThreadId') = task.provider_thread_id
-              AND json_extract(task.payload_json, '$.status') = task.status
-              AND json_type(task.payload_json, '$.nativeTaskRef') = 'null'
-          `).map((row) => row.subagent_id)
-          : [];
 
       // Closures are preflighted as a unit, then reclaimed in stable ascending-ID chunks.
       const deletionChunks = reclaimableClosures.flatMap((closure) =>
@@ -1726,6 +1698,7 @@ const make = Effect.gen(function* () {
         closure: Closure,
       ) {
         const threadIds = closure.threadIds;
+        const ownedThreadIds = certified ? candidateIdsFragment : sql.in(threadIds);
         const counts = {
           deletedProjectionRowCount: 0,
           deletedTurnItemPositionCount: 0,
@@ -1765,7 +1738,7 @@ const make = Effect.gen(function* () {
                 SELECT 1
                 FROM orchestration_v2_projection_checkpoints AS external_checkpoint
                 WHERE external_checkpoint.parent_checkpoint_id = checkpoint.checkpoint_id
-                  AND external_checkpoint.thread_id NOT IN ${sql.in(threadIds)}
+                  AND external_checkpoint.thread_id NOT IN ${ownedThreadIds}
               )
             RETURNING checkpoint_id
           `;
@@ -1778,19 +1751,19 @@ const make = Effect.gen(function* () {
                 SELECT 1
                 FROM orchestration_v2_projection_checkpoint_scopes AS external_scope
                 WHERE external_scope.parent_scope_id = scope.scope_id
-                  AND external_scope.thread_id NOT IN ${sql.in(threadIds)}
+                  AND external_scope.thread_id NOT IN ${ownedThreadIds}
               )
               AND NOT EXISTS (
                 SELECT 1
                 FROM orchestration_v2_projection_checkpoints AS external_checkpoint
                 WHERE external_checkpoint.scope_id = scope.scope_id
-                  AND external_checkpoint.thread_id NOT IN ${sql.in(threadIds)}
+                  AND external_checkpoint.thread_id NOT IN ${ownedThreadIds}
               )
               AND NOT EXISTS (
                 SELECT 1
                 FROM orchestration_v2_projection_nodes AS external_node
                 WHERE external_node.checkpoint_scope_id = scope.scope_id
-                  AND external_node.thread_id NOT IN ${sql.in(threadIds)}
+                  AND external_node.thread_id NOT IN ${ownedThreadIds}
               )
             RETURNING scope_id
           `;
@@ -1803,7 +1776,7 @@ const make = Effect.gen(function* () {
                 SELECT 1
                 FROM orchestration_v2_projection_nodes AS external_node
                 WHERE external_node.runtime_request_id = request.runtime_request_id
-                  AND external_node.thread_id NOT IN ${sql.in(threadIds)}
+                  AND external_node.thread_id NOT IN ${ownedThreadIds}
               )
             RETURNING runtime_request_id
           `;
@@ -1835,7 +1808,7 @@ const make = Effect.gen(function* () {
                 SELECT 1
                 FROM orchestration_v2_projection_turn_items AS external_item
                 WHERE external_item.parent_item_id = item.turn_item_id
-                  AND external_item.thread_id NOT IN ${sql.in(threadIds)}
+                  AND external_item.thread_id NOT IN ${ownedThreadIds}
               )
             RETURNING turn_item_id
           `;
@@ -1861,25 +1834,25 @@ const make = Effect.gen(function* () {
                 SELECT 1
                 FROM orchestration_v2_projection_runtime_requests AS external_request
                 WHERE external_request.provider_turn_id = provider_turn.provider_turn_id
-                  AND external_request.thread_id NOT IN ${sql.in(threadIds)}
+                  AND external_request.thread_id NOT IN ${ownedThreadIds}
               )
               AND NOT EXISTS (
                 SELECT 1
                 FROM orchestration_v2_projection_nodes AS external_node
                 WHERE external_node.provider_turn_id = provider_turn.provider_turn_id
-                  AND external_node.thread_id NOT IN ${sql.in(threadIds)}
+                  AND external_node.thread_id NOT IN ${ownedThreadIds}
               )
               AND NOT EXISTS (
                 SELECT 1
                 FROM orchestration_v2_projection_turn_items AS external_item
                 WHERE external_item.provider_turn_id = provider_turn.provider_turn_id
-                  AND external_item.thread_id NOT IN ${sql.in(threadIds)}
+                  AND external_item.thread_id NOT IN ${ownedThreadIds}
               )
               AND NOT EXISTS (
                 SELECT 1
                 FROM orchestration_v2_projection_run_attempts AS external_attempt
                 WHERE external_attempt.provider_turn_id = provider_turn.provider_turn_id
-                  AND external_attempt.thread_id NOT IN ${sql.in(threadIds)}
+                  AND external_attempt.thread_id NOT IN ${ownedThreadIds}
               )
             RETURNING provider_turn_id
           `;
@@ -1892,79 +1865,68 @@ const make = Effect.gen(function* () {
                 SELECT 1
                 FROM orchestration_v2_projection_threads AS external_thread
                 WHERE external_thread.active_provider_thread_id = provider_thread.provider_thread_id
-                  AND external_thread.thread_id NOT IN ${sql.in(threadIds)}
+                  AND external_thread.thread_id NOT IN ${ownedThreadIds}
               )
               AND NOT EXISTS (
                 SELECT 1
                 FROM orchestration_v2_projection_runs AS external_run
                 WHERE external_run.provider_thread_id = provider_thread.provider_thread_id
-                  AND external_run.thread_id NOT IN ${sql.in(threadIds)}
+                  AND external_run.thread_id NOT IN ${ownedThreadIds}
               )
               AND NOT EXISTS (
                 SELECT 1
                 FROM orchestration_v2_projection_nodes AS external_owner_node
                 WHERE external_owner_node.node_id = provider_thread.owner_node_id
-                  AND external_owner_node.thread_id NOT IN ${sql.in(threadIds)}
+                  AND external_owner_node.thread_id NOT IN ${ownedThreadIds}
               )
               AND NOT EXISTS (
                 SELECT 1
                 FROM orchestration_v2_projection_run_attempts AS external_attempt
                 WHERE external_attempt.provider_thread_id = provider_thread.provider_thread_id
-                  AND external_attempt.thread_id NOT IN ${sql.in(threadIds)}
+                  AND external_attempt.thread_id NOT IN ${ownedThreadIds}
               )
               AND NOT EXISTS (
                 SELECT 1
                 FROM orchestration_v2_projection_nodes AS external_node
                 WHERE external_node.provider_thread_id = provider_thread.provider_thread_id
-                  AND external_node.thread_id NOT IN ${sql.in(threadIds)}
+                  AND external_node.thread_id NOT IN ${ownedThreadIds}
               )
               AND NOT EXISTS (
                 SELECT 1
                 FROM orchestration_v2_projection_provider_turns AS external_turn
                 WHERE external_turn.provider_thread_id = provider_thread.provider_thread_id
-                  AND external_turn.thread_id NOT IN ${sql.in(threadIds)}
+                  AND external_turn.thread_id NOT IN ${ownedThreadIds}
               )
               AND NOT EXISTS (
                 SELECT 1
                 FROM orchestration_v2_projection_turn_items AS external_item
                 WHERE external_item.provider_thread_id = provider_thread.provider_thread_id
-                  AND external_item.thread_id NOT IN ${sql.in(threadIds)}
+                  AND external_item.thread_id NOT IN ${ownedThreadIds}
               )
               AND NOT EXISTS (
                 SELECT 1
                 FROM orchestration_v2_projection_subagents AS external_subagent
                 WHERE external_subagent.provider_thread_id = provider_thread.provider_thread_id
-                  AND external_subagent.thread_id NOT IN ${sql.in(threadIds)}
-                  AND NOT (
-                    external_subagent.subagent_id IN ${sql.in(internalSubagentIds)}
-                    AND NOT EXISTS (
-                      SELECT 1 FROM orchestration_v2_projection_nodes AS tracking_node
-                      WHERE tracking_node.node_id = external_subagent.subagent_id
-                        OR tracking_node.node_id = external_subagent.parent_node_id
-                    )
-                    AND NOT EXISTS (
-                      SELECT 1 FROM orchestration_v2_projection_runs AS owner
-                      WHERE owner.run_id = external_subagent.run_id
-                    )
-                  )
+                  AND external_subagent.thread_id NOT IN ${ownedThreadIds}
+
               )
               AND NOT EXISTS (
                 SELECT 1
                 FROM orchestration_v2_projection_context_handoffs AS external_handoff
                 WHERE external_handoff.to_provider_thread_id = provider_thread.provider_thread_id
-                  AND external_handoff.thread_id NOT IN ${sql.in(threadIds)}
+                  AND external_handoff.thread_id NOT IN ${ownedThreadIds}
               )
               AND NOT EXISTS (
                 SELECT 1
                 FROM orchestration_v2_native_session_bindings AS external_binding
                 WHERE external_binding.provider_thread_id = provider_thread.provider_thread_id
-                  AND external_binding.thread_id NOT IN ${sql.in(threadIds)}
+                  AND external_binding.thread_id NOT IN ${ownedThreadIds}
               )
               AND NOT EXISTS (
                 SELECT 1
                 FROM orchestration_v2_thread_deletion_sessions AS external_session
                 WHERE external_session.provider_thread_id = provider_thread.provider_thread_id
-                  AND external_session.thread_id NOT IN ${sql.in(threadIds)}
+                  AND external_session.thread_id NOT IN ${ownedThreadIds}
               )
             RETURNING provider_thread_id
           `;
@@ -1977,7 +1939,7 @@ const make = Effect.gen(function* () {
                 SELECT 1
                 FROM orchestration_v2_projection_provider_turns AS external_turn
                 WHERE external_turn.run_attempt_id = attempt.attempt_id
-                  AND external_turn.thread_id NOT IN ${sql.in(threadIds)}
+                  AND external_turn.thread_id NOT IN ${ownedThreadIds}
               )
             RETURNING attempt_id
           `;
@@ -1990,73 +1952,73 @@ const make = Effect.gen(function* () {
                 SELECT 1
                 FROM orchestration_v2_projection_nodes AS external_node
                 WHERE external_node.parent_node_id = node.node_id
-                  AND external_node.thread_id NOT IN ${sql.in(threadIds)}
+                  AND external_node.thread_id NOT IN ${ownedThreadIds}
               )
               AND NOT EXISTS (
                 SELECT 1
                 FROM orchestration_v2_projection_nodes AS external_root_node
                 WHERE external_root_node.root_node_id = node.node_id
-                  AND external_root_node.thread_id NOT IN ${sql.in(threadIds)}
+                  AND external_root_node.thread_id NOT IN ${ownedThreadIds}
               )
               AND NOT EXISTS (
                 SELECT 1
                 FROM orchestration_v2_projection_run_attempts AS external_attempt
                 WHERE external_attempt.root_node_id = node.node_id
-                  AND external_attempt.thread_id NOT IN ${sql.in(threadIds)}
+                  AND external_attempt.thread_id NOT IN ${ownedThreadIds}
               )
               AND NOT EXISTS (
                 SELECT 1
                 FROM orchestration_v2_projection_runtime_requests AS external_request
                 WHERE external_request.node_id = node.node_id
-                  AND external_request.thread_id NOT IN ${sql.in(threadIds)}
+                  AND external_request.thread_id NOT IN ${ownedThreadIds}
               )
               AND NOT EXISTS (
                 SELECT 1
                 FROM orchestration_v2_projection_plans AS external_plan
                 WHERE external_plan.node_id = node.node_id
-                  AND external_plan.thread_id NOT IN ${sql.in(threadIds)}
+                  AND external_plan.thread_id NOT IN ${ownedThreadIds}
               )
               AND NOT EXISTS (
                 SELECT 1
                 FROM orchestration_v2_projection_messages AS external_message
                 WHERE external_message.node_id = node.node_id
-                  AND external_message.thread_id NOT IN ${sql.in(threadIds)}
+                  AND external_message.thread_id NOT IN ${ownedThreadIds}
               )
               AND NOT EXISTS (
                 SELECT 1
                 FROM orchestration_v2_projection_turn_items AS external_item
                 WHERE external_item.node_id = node.node_id
-                  AND external_item.thread_id NOT IN ${sql.in(threadIds)}
+                  AND external_item.thread_id NOT IN ${ownedThreadIds}
               )
               AND NOT EXISTS (
                 SELECT 1
                 FROM orchestration_v2_projection_provider_turns AS external_turn
                 WHERE external_turn.node_id = node.node_id
-                  AND external_turn.thread_id NOT IN ${sql.in(threadIds)}
+                  AND external_turn.thread_id NOT IN ${ownedThreadIds}
               )
               AND NOT EXISTS (
                 SELECT 1
                 FROM orchestration_v2_projection_subagents AS external_subagent
                 WHERE external_subagent.parent_node_id = node.node_id
-                  AND external_subagent.thread_id NOT IN ${sql.in(threadIds)}
+                  AND external_subagent.thread_id NOT IN ${ownedThreadIds}
               )
               AND NOT EXISTS (
                 SELECT 1
                 FROM orchestration_v2_projection_checkpoints AS external_checkpoint
                 WHERE external_checkpoint.node_id = node.node_id
-                  AND external_checkpoint.thread_id NOT IN ${sql.in(threadIds)}
+                  AND external_checkpoint.thread_id NOT IN ${ownedThreadIds}
               )
               AND NOT EXISTS (
                 SELECT 1
                 FROM orchestration_v2_projection_checkpoint_scopes AS external_scope
                 WHERE external_scope.node_id = node.node_id
-                  AND external_scope.thread_id NOT IN ${sql.in(threadIds)}
+                  AND external_scope.thread_id NOT IN ${ownedThreadIds}
               )
               AND NOT EXISTS (
                 SELECT 1
                 FROM orchestration_v2_projection_provider_threads AS external_provider_thread
                 WHERE external_provider_thread.owner_node_id = node.node_id
-                  AND external_provider_thread.thread_id NOT IN ${sql.in(threadIds)}
+                  AND external_provider_thread.thread_id NOT IN ${ownedThreadIds}
               )
             RETURNING node_id
           `;
@@ -2069,63 +2031,63 @@ const make = Effect.gen(function* () {
                 SELECT 1
                 FROM orchestration_v2_projection_run_attempts AS external_attempt
                 WHERE external_attempt.run_id = run.run_id
-                  AND external_attempt.thread_id NOT IN ${sql.in(threadIds)}
+                  AND external_attempt.thread_id NOT IN ${ownedThreadIds}
               )
               AND NOT EXISTS (
                 SELECT 1
                 FROM orchestration_v2_projection_nodes AS external_node
                 WHERE external_node.run_id = run.run_id
-                  AND external_node.thread_id NOT IN ${sql.in(threadIds)}
+                  AND external_node.thread_id NOT IN ${ownedThreadIds}
               )
               AND NOT EXISTS (
                 SELECT 1
                 FROM orchestration_v2_projection_messages AS external_message
                 WHERE external_message.run_id = run.run_id
-                  AND external_message.thread_id NOT IN ${sql.in(threadIds)}
+                  AND external_message.thread_id NOT IN ${ownedThreadIds}
               )
               AND NOT EXISTS (
                 SELECT 1
                 FROM orchestration_v2_projection_plans AS external_plan
                 WHERE external_plan.run_id = run.run_id
-                  AND external_plan.thread_id NOT IN ${sql.in(threadIds)}
+                  AND external_plan.thread_id NOT IN ${ownedThreadIds}
               )
               AND NOT EXISTS (
                 SELECT 1
                 FROM orchestration_v2_projection_turn_items AS external_item
                 WHERE external_item.run_id = run.run_id
-                  AND external_item.thread_id NOT IN ${sql.in(threadIds)}
+                  AND external_item.thread_id NOT IN ${ownedThreadIds}
               )
               AND NOT EXISTS (
                 SELECT 1
                 FROM orchestration_v2_projection_checkpoints AS external_checkpoint
                 WHERE external_checkpoint.run_id = run.run_id
-                  AND external_checkpoint.thread_id NOT IN ${sql.in(threadIds)}
+                  AND external_checkpoint.thread_id NOT IN ${ownedThreadIds}
               )
               AND NOT EXISTS (
                 SELECT 1
                 FROM orchestration_v2_projection_checkpoint_scopes AS external_scope
                 WHERE external_scope.run_id = run.run_id
-                  AND external_scope.thread_id NOT IN ${sql.in(threadIds)}
+                  AND external_scope.thread_id NOT IN ${ownedThreadIds}
               )
               AND NOT EXISTS (
                 SELECT 1
                 FROM orchestration_v2_projection_context_handoffs AS external_handoff
                 WHERE external_handoff.target_run_id = run.run_id
-                  AND external_handoff.thread_id NOT IN ${sql.in(threadIds)}
+                  AND external_handoff.thread_id NOT IN ${ownedThreadIds}
               )
               AND NOT EXISTS (
                 SELECT 1
                 FROM orchestration_v2_projection_subagents AS external_subagent
                 WHERE external_subagent.run_id = run.run_id
-                  AND external_subagent.thread_id NOT IN ${sql.in(threadIds)}
+                  AND external_subagent.thread_id NOT IN ${ownedThreadIds}
               )
               AND NOT EXISTS (
                 SELECT 1
                 FROM orchestration_v2_projection_context_transfers AS external_transfer
                 WHERE external_transfer.target_run_id = run.run_id
                   AND (
-                    external_transfer.source_thread_id NOT IN ${sql.in(threadIds)}
-                    OR external_transfer.target_thread_id NOT IN ${sql.in(threadIds)}
+                    external_transfer.source_thread_id NOT IN ${ownedThreadIds}
+                    OR external_transfer.target_thread_id NOT IN ${ownedThreadIds}
                   )
               )
             RETURNING run_id
@@ -2140,13 +2102,13 @@ const make = Effect.gen(function* () {
                 SELECT 1
                 FROM orchestration_v2_projection_nodes AS external_node
                 WHERE external_node.node_id = subagent.parent_node_id
-                  AND external_node.thread_id NOT IN ${sql.in(threadIds)}
+                  AND external_node.thread_id NOT IN ${ownedThreadIds}
               )
               AND NOT EXISTS (
                 SELECT 1
                 FROM orchestration_v2_projection_provider_threads AS external_provider_thread
                 WHERE external_provider_thread.provider_thread_id = subagent.provider_thread_id
-                  AND external_provider_thread.thread_id NOT IN ${sql.in(threadIds)}
+                  AND external_provider_thread.thread_id NOT IN ${ownedThreadIds}
               )
             RETURNING subagent_id
           `;
@@ -2178,7 +2140,7 @@ const make = Effect.gen(function* () {
                 SELECT 1
                 FROM orchestration_v2_projection_provider_session_bindings AS binding
                 WHERE binding.provider_session_id = session.provider_session_id
-                  AND binding.thread_id NOT IN ${sql.in(threadIds)}
+                  AND binding.thread_id NOT IN ${ownedThreadIds}
               )
           `;
         for (const row of internallyRetainedSessionThreads) cleanThreadIds.add(row.thread_id);
@@ -2196,13 +2158,13 @@ const make = Effect.gen(function* () {
                   SELECT 1
                   FROM orchestration_v2_projection_nodes AS external_node
                   WHERE external_node.node_id = subagent.parent_node_id
-                    AND external_node.thread_id NOT IN ${sql.in(threadIds)}
+                    AND external_node.thread_id NOT IN ${ownedThreadIds}
                 )
                 AND NOT EXISTS (
                   SELECT 1
                   FROM orchestration_v2_projection_provider_threads AS external_provider_thread
                   WHERE external_provider_thread.provider_thread_id = subagent.provider_thread_id
-                    AND external_provider_thread.thread_id NOT IN ${sql.in(threadIds)}
+                    AND external_provider_thread.thread_id NOT IN ${ownedThreadIds}
                 )
               RETURNING subagent_id
             `;
@@ -2327,9 +2289,8 @@ const make = Effect.gen(function* () {
       do {
         sweepDeletedRowCount = 0;
         for (const batch of batches) {
-          const batchCounts = yield* sql.withTransaction(
-            Effect.forEach(batch, deleteClosure, { concurrency: 1 }),
-          );
+          const deleteBatch = Effect.forEach(batch, deleteClosure, { concurrency: 1 });
+          const batchCounts = yield* certified ? deleteBatch : sql.withTransaction(deleteBatch);
           for (const counts of batchCounts) {
             deletedEventCount += counts.deletedEventCount;
             deletedReceiptCount += counts.deletedReceiptCount;
@@ -2353,8 +2314,7 @@ const make = Effect.gen(function* () {
         reclaimedProviderSessionIds,
         THREAD_DATA_RECLAMATION_BATCH_SIZE,
       )) {
-        const providerSessions = yield* sql.withTransaction(
-          sql<{ readonly provider_session_id: string }>`
+        const deleteSessions = sql<{ readonly provider_session_id: string }>`
             DELETE FROM orchestration_v2_projection_provider_sessions AS session
             WHERE session.provider_session_id IN ${sql.in(providerSessionIdChunk)}
               AND NOT EXISTS (
@@ -2368,9 +2328,23 @@ const make = Effect.gen(function* () {
                 WHERE provider_thread.provider_session_id = session.provider_session_id
               )
             RETURNING provider_session_id
-          `,
-        );
+          `;
+        const providerSessions = yield* certified
+          ? deleteSessions
+          : sql.withTransaction(deleteSessions);
         deletedProjectionRowCount += providerSessions.length;
+      }
+
+      if (certified && skippedThreads.length === 0) {
+        for (const threadIds of chunksOf(candidateIds, THREAD_DATA_RECLAMATION_BATCH_SIZE)) {
+          const remaining = yield* findThreadsWithReclaimableData(threadIds, true);
+          if (remaining.size > 0) {
+            return yield* new ThreadDataReclamationError({
+              operation: "verifyEmpty",
+              cause: new Error("Certified root retains reclaimable data"),
+            });
+          }
+        }
       }
 
       return {
@@ -2512,6 +2486,16 @@ const make = Effect.gen(function* () {
             eligibilityAfterThreadId = candidates.at(-1)!.thread_id;
           }
 
+          if (certified.length > 0) {
+            return yield* reclaimCandidateBatch(
+              input,
+              candidateRows,
+              true,
+              eligibleThreadIds,
+              true,
+            );
+          }
+
           let rootBlocked = false;
 
           for (const candidates of chunksOf(candidateRows, THREAD_DATA_RECLAMATION_BATCH_SIZE)) {
@@ -2528,69 +2512,33 @@ const make = Effect.gen(function* () {
           }
 
           if (rootBlocked) return;
-          if (certified.length === 0)
-            return { eligibleThreadIds, orderedCandidates: candidateRows };
-          const childrenByParentId = new Map<string, Array<CandidateRow>>();
-          const orderedCandidates = candidateRows.filter(
-            (row) => row.parent_thread_id === null || !eligibleThreadIds.has(row.parent_thread_id),
-          );
-          for (const row of candidateRows) {
-            if (row.parent_thread_id === null || !eligibleThreadIds.has(row.parent_thread_id))
-              continue;
-            const children = childrenByParentId.get(row.parent_thread_id) ?? [];
-            children.push(row);
-            childrenByParentId.set(row.parent_thread_id, children);
-          }
-          for (let index = 0; index < orderedCandidates.length; index++) {
-            for (const child of childrenByParentId.get(orderedCandidates[index]!.thread_id) ?? [])
-              orderedCandidates.push(child);
-          }
-          if (orderedCandidates.length !== candidateRows.length) {
-            for (const row of candidateRows) {
-              skippedThreads.push({
-                threadId: ThreadId.make(row.thread_id),
-                blockerCodes: ["unknown_dependency"],
-              });
-            }
-            return;
-          }
-          return { eligibleThreadIds, orderedCandidates };
+          return eligibleThreadIds;
         });
 
-        const preflight = certified.length === 0 ? yield* preflightRoot : undefined;
-        if (certified.length === 0 && preflight === undefined) continue;
+        const preflight = yield* certified.length > 0
+          ? sql.withTransaction(preflightRoot)
+          : preflightRoot;
+        if (preflight === undefined) continue;
+        if (!(preflight instanceof Set)) {
+          reclaimedThreadCount += preflight.reclaimedThreadCount;
+          skippedThreads.push(...preflight.skippedThreads);
+          deletedEventCount += preflight.deletedEventCount;
+          deletedReceiptCount += preflight.deletedReceiptCount;
+          deletedProjectionRowCount += preflight.deletedProjectionRowCount;
+          deletedTurnItemPositionCount += preflight.deletedTurnItemPositionCount;
+          deletedOutboxCount += preflight.deletedOutboxCount;
+          continue;
+        }
 
         let afterThreadId = "";
-        const processedThreadIds = new Set<string>();
         while (true) {
-          const reclaimBatch = Effect.gen(function* () {
-            const currentPreflight = certified.length > 0 ? yield* preflightRoot : preflight;
-            if (currentPreflight === undefined) return;
-            // 父跟踪节点先回收，子证明来源始终保留到其自身批次。
-            const candidates =
-              certified.length > 0
-                ? currentPreflight.orderedCandidates
-                    .filter((candidate) => !processedThreadIds.has(candidate.thread_id))
-                    .slice(0, THREAD_DATA_RECLAMATION_BATCH_SIZE)
-                : yield* selectCandidateChunk(input, operationRootThreadId, afterThreadId);
-            if (candidates.length === 0) return;
-
-            const summary = yield* reclaimCandidateBatch(
-              input,
-              candidates,
-              true,
-              currentPreflight.eligibleThreadIds,
-              certified.length > 0,
-            );
-            return { candidates, summary };
-          });
-          // 带证明的每批 DELETE 与整个根的最新资格、闭包及证明复核共用写事务。
-          const result = yield* certified.length > 0
-            ? sql.withTransaction(reclaimBatch)
-            : reclaimBatch;
-          if (result === undefined) break;
-          const { candidates, summary } = result;
-          for (const candidate of candidates) processedThreadIds.add(candidate.thread_id);
+          const candidates = yield* selectCandidateChunk(
+            input,
+            operationRootThreadId,
+            afterThreadId,
+          );
+          if (candidates.length === 0) break;
+          const summary = yield* reclaimCandidateBatch(input, candidates, true, preflight);
           reclaimedThreadCount += summary.reclaimedThreadCount;
           skippedThreads.push(...summary.skippedThreads);
           deletedEventCount += summary.deletedEventCount;

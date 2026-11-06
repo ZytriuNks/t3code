@@ -30,6 +30,7 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import { forkParked } from "../serverActivation.ts";
+import { assertNativeSessionGate } from "./NativeSessionGate.ts";
 
 export const LifecycleCleanup = Schema.Struct({
   commandId: CommandId,
@@ -640,11 +641,50 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
             )
             RETURNING *
           `;
-          const rows = yield* claimStatement.pipe(Effect.withTracerEnabled(false));
-          const row = rows[0];
-          if (row === undefined) return Option.none();
-          cancellationSignals.set(row.effect_id, Deferred.makeUnsafe<void>());
-          return Option.some(yield* rowToEffect(row));
+          const claimed = yield* sql.withTransaction(
+            Effect.gen(function* () {
+              const rows = yield* claimStatement.pipe(Effect.withTracerEnabled(false));
+              const row = rows[0];
+              if (row === undefined) return Option.none();
+              const effect = yield* rowToEffect(row);
+              const request = effect.request;
+              if (
+                request.type === "provider-turn.start" ||
+                request.type === "provider-turn.restart" ||
+                request.type === "provider-runtime.continue"
+              ) {
+                const runId =
+                  request.type === "provider-runtime.continue"
+                    ? request.sourceRunId
+                    : request.runId;
+                const providers = yield* sql<{
+                  readonly provider_thread_id: string;
+                  readonly provider_session_id: string | null;
+                  readonly provider_instance_id: string;
+                }>`
+                SELECT p.provider_thread_id, p.provider_session_id, p.provider_instance_id
+                FROM orchestration_v2_projection_runs r
+                JOIN orchestration_v2_projection_provider_threads p ON p.provider_thread_id = r.provider_thread_id
+                WHERE r.run_id = ${runId} AND r.thread_id = ${effect.threadId} AND p.driver = 'pi'
+              `;
+                for (const provider of providers)
+                  yield* assertNativeSessionGate({
+                    threadId: effect.threadId,
+                    providerThreadId: ProviderThreadId.make(provider.provider_thread_id),
+                    providerInstanceId: ProviderInstanceId.make(provider.provider_instance_id),
+                    ...(provider.provider_session_id === null
+                      ? {}
+                      : {
+                          providerSessionId: ProviderSessionId.make(provider.provider_session_id),
+                        }),
+                  }).pipe(Effect.provideService(SqlClient.SqlClient, sql));
+              }
+              return Option.some(effect);
+            }),
+          );
+          if (Option.isSome(claimed))
+            cancellationSignals.set(claimed.value.id, Deferred.makeUnsafe<void>());
+          return claimed;
         },
         Effect.mapError((cause) => new EffectOutboxError({ operation: "claim", cause })),
       ),

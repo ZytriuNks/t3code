@@ -55,6 +55,7 @@ import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter"
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import { assertNativeSessionGate } from "./NativeSessionGate.ts";
 import * as ThreadLifecycleGuard from "./ThreadLifecycleGuard.ts";
 import * as ThreadOwnership from "./ThreadOwnership.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
@@ -183,6 +184,7 @@ export interface ProviderSessionManagerV2Shape {
     readonly lifecycleGuard?: ThreadLifecycleGuard.LifecycleWriteGuard;
     readonly threadId: ThreadId;
     readonly providerSessionId: ProviderSessionId;
+    readonly providerThreadId?: ProviderThreadId;
     readonly modelSelection: ModelSelection;
     readonly runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
     readonly resumeFromSession?: OrchestrationV2ProviderSession;
@@ -403,6 +405,7 @@ export const layerWithOptions = (
       const ownership = yield* ThreadOwnership.ThreadOwnership;
       const providerEventIngestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
       const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const sql = yield* SqlClient.SqlClient;
       const lifecycle = yield* ThreadLifecycleGuard.ThreadLifecycleGuard;
       const outbox = yield* EffectOutbox.EffectOutboxV2;
       const agentScope = yield* AgentScope;
@@ -2258,32 +2261,71 @@ export const layerWithOptions = (
               }),
             ),
           );
+        const withNativeGate = Effect.fn("ProviderSessionManager.withNativeGate")(function* <A>(
+          threadId: ThreadId | null,
+          providerThreadId: ProviderThreadId | undefined,
+          action: () => Effect.Effect<A, ProviderAdapter.ProviderAdapterV2Error>,
+        ) {
+          if (runtime.driver === "pi") {
+            if (threadId === null)
+              return yield* new ProviderAdapter.ProviderAdapterEventStreamError({
+                driver: runtime.driver,
+                providerSessionId,
+                cause: "Native session target is missing.",
+              });
+            yield* assertNativeSessionGate({
+              threadId,
+              providerSessionId,
+              providerInstanceId: runtime.instanceId,
+              ...(providerThreadId === undefined ? {} : { providerThreadId }),
+            }).pipe(
+              Effect.provideService(SqlClient.SqlClient, sql),
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapter.ProviderAdapterEventStreamError({
+                    driver: runtime.driver,
+                    providerSessionId,
+                    cause,
+                  }),
+              ),
+            );
+          }
+          return yield* action();
+        });
         return {
           ...decorated,
           ensureThread: (input) =>
-            withBinding(
-              input.threadId,
-              remember(input.threadId, decorated.ensureThread(input)),
-              true,
+            withNativeGate(input.threadId, input.existingProviderThread?.id, () =>
+              withBinding(
+                input.threadId,
+                remember(input.threadId, decorated.ensureThread(input)),
+                true,
+              ),
             ),
           resumeThread: (input) => {
             const threadId = input.threadId ?? input.providerThread.appThreadId;
-            return withBinding(
-              threadId,
-              threadId === null
-                ? decorated.resumeThread(input)
-                : remember(threadId, decorated.resumeThread(input)),
-              true,
+            return withNativeGate(threadId, input.providerThread.id, () =>
+              withBinding(
+                threadId,
+                threadId === null
+                  ? decorated.resumeThread(input)
+                  : remember(threadId, decorated.resumeThread(input)),
+                true,
+              ),
             );
           },
           forkThread: (input) =>
-            withBinding(
-              input.targetThreadId,
-              remember(input.targetThreadId, decorated.forkThread(input)),
-              true,
+            withNativeGate(input.targetThreadId, undefined, () =>
+              withBinding(
+                input.targetThreadId,
+                remember(input.targetThreadId, decorated.forkThread(input)),
+                true,
+              ),
             ),
           startTurn: Effect.fn("ProviderSessionManager.startTurn")(function (input) {
-            return withBinding(input.threadId, decorated.startTurn(input)).pipe(
+            return withNativeGate(input.threadId, input.providerThread.id, () =>
+              withBinding(input.threadId, decorated.startTurn(input)),
+            ).pipe(
               Effect.catchTags({
                 ProviderAdapterEventStreamError: (cause) =>
                   Effect.fail(
@@ -2312,7 +2354,9 @@ export const layerWithOptions = (
                   withBinding(input.providerThread.appThreadId, runtime.injectHistory!(input)),
               }),
           rollbackThread: (input) =>
-            withBinding(input.providerThread.appThreadId, runtime.rollbackThread(input)),
+            withNativeGate(input.providerThread.appThreadId, input.providerThread.id, () =>
+              withBinding(input.providerThread.appThreadId, runtime.rollbackThread(input)),
+            ),
           respondToRuntimeRequest: Effect.fn("ProviderSessionManager.respondToRuntimeRequest")(
             function* (input) {
               const entry = (yield* Ref.get(sessions)).get(sessionKey(providerSessionId));
@@ -2600,6 +2644,42 @@ export const layerWithOptions = (
                 if ((yield* lifecycle.check({ guard, purpose: "activity" })) === "stale")
                   return yield* refuse("stale");
                 yield* requireRetirements(input, source);
+                const key = sessionKey(input.providerSessionId);
+                const existing = (yield* Ref.get(sessions)).get(key);
+                const adapter = yield* registry.get(input.modelSelection.instanceId).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new ProviderSessionOpenError({
+                        instanceId: input.modelSelection.instanceId,
+                        providerSessionId: input.providerSessionId,
+                        cause,
+                      }),
+                  ),
+                );
+                if (adapter.driver === "pi" || existing?.runtime.driver === "pi") {
+                  if (input.providerThreadId === undefined)
+                    return yield* new ProviderSessionOpenError({
+                      instanceId: input.modelSelection.instanceId,
+                      providerSessionId: input.providerSessionId,
+                      cause: "Pi session open requires an exact provider thread target.",
+                    });
+                  yield* assertNativeSessionGate({
+                    threadId: input.threadId,
+                    providerThreadId: input.providerThreadId,
+                    providerSessionId: input.providerSessionId,
+                    providerInstanceId: input.modelSelection.instanceId,
+                  }).pipe(
+                    Effect.provideService(SqlClient.SqlClient, sql),
+                    Effect.mapError(
+                      (cause) =>
+                        new ProviderSessionOpenError({
+                          instanceId: input.modelSelection.instanceId,
+                          providerSessionId: input.providerSessionId,
+                          cause,
+                        }),
+                    ),
+                  );
+                }
                 const cwd = input.runtimePolicy.cwd;
                 if (cwd !== null) {
                   const workspaceIsDirectory = yield* fileSystem.stat(cwd).pipe(
@@ -2613,8 +2693,6 @@ export const layerWithOptions = (
                     });
                   }
                 }
-                const key = sessionKey(input.providerSessionId);
-                const existing = (yield* Ref.get(sessions)).get(key);
                 if (existing !== undefined) {
                   if (existing.lifecycleByThread.has(input.threadId))
                     yield* checkBinding(existing, input.threadId);
@@ -2636,16 +2714,6 @@ export const layerWithOptions = (
                   return existing.exposedRuntime;
                 }
 
-                const adapter = yield* registry.get(input.modelSelection.instanceId).pipe(
-                  Effect.mapError(
-                    (cause) =>
-                      new ProviderSessionOpenError({
-                        instanceId: input.modelSelection.instanceId,
-                        providerSessionId: input.providerSessionId,
-                        cause,
-                      }),
-                  ),
-                );
                 const capabilities = yield* adapter.getCapabilities();
                 if (
                   capabilities.sessions.supportsMultipleProviderThreadsPerSession &&

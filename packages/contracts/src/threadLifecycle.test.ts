@@ -60,10 +60,8 @@ const record = {
 const noNativeSessionProof = {
   providerThreadId: "pending-pi",
   providerInstanceId: "pi",
-  source: "cancelled_queued_runs",
-  runIds: ["queued-run"],
-  attemptIds: ["pending-attempt"],
-  cancelledStartEffectIds: [],
+  source: "queued_provider_origin",
+  version: 1,
 };
 
 describe("thread lifecycle contracts", () => {
@@ -121,6 +119,20 @@ describe("thread lifecycle contracts", () => {
       type: "unresolved",
       reason: "legacy_missing_locator",
     });
+    expect(decodeProvider(provider).nativeSessionOrigin).toBeUndefined();
+    for (const state of ["unstarted", "may_exist"]) {
+      expect(
+        decodeProvider({ ...provider, nativeSessionOrigin: { version: 1, state } })
+          .nativeSessionOrigin,
+      ).toEqual({ version: 1, state });
+    }
+    for (const nativeSessionOrigin of [
+      { version: 0, state: "unstarted" },
+      { version: 1, state: "unknown" },
+      true,
+    ]) {
+      expect(() => decodeProvider({ ...provider, nativeSessionOrigin })).toThrow();
+    }
     expect(() => decodeProvider({ ...provider, nativeStorage: binding.storage })).toThrow();
     expect(
       decodeProvider({
@@ -147,9 +159,9 @@ describe("thread lifecycle contracts", () => {
     expect(() => decodeRecord({ ...record, scope: "native" })).toThrow();
     for (const proof of [
       { ...noNativeSessionProof, source: "not_loaded" },
-      { ...noNativeSessionProof, runIds: [] },
-      { ...noNativeSessionProof, attemptIds: [] },
-      { ...noNativeSessionProof, cancelledStartEffectIds: [1] },
+      { ...noNativeSessionProof, version: 0 },
+      { ...noNativeSessionProof, version: undefined },
+      { ...noNativeSessionProof, providerThreadId: "" },
     ]) {
       expect(() => decodeRecord({ ...record, noNativeSessionProofs: [proof] })).toThrow();
     }
