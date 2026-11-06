@@ -1,6 +1,7 @@
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
+  ContextTransferId,
   EventId,
   MessageId,
   type NativeSessionBinding,
@@ -20,6 +21,7 @@ import {
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -34,6 +36,7 @@ import * as ProjectStore from "./ProjectStore.ts";
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import { applyToProjection, emptyProjection } from "./ProjectionStore.ts";
 import * as NativeSessionBindings from "./NativeSessionBindings.ts";
@@ -687,6 +690,25 @@ it.effect.each([
   "unclaimed-start",
   "archive-before-delete",
   "archive-after-compaction",
+  "pre-start-failure",
+  "pre-start-failure-then-archive",
+  "pre-start-failure-after-rebuild",
+  "pre-start-failure-with-queued-run",
+  "rerouted-before-start",
+  "rerouted-with-queued-run",
+  "rerouted-after-compaction",
+  "rerouted-target-restart",
+  "rerouted-target-running",
+  "rerouted-target-switch",
+  "rerouted-target-instance-switch",
+  "rerouted-returned-to-pi",
+  "rerouted-after-pi-start",
+  "failure-without-origin",
+  "failure-without-attempt-origin",
+  "failure-without-root-origin",
+  "failure-with-corrupt-origin",
+  "failure-after-starting-history",
+  "failure-after-attempt-start-history",
   "started-attempt",
   "claimed-after-plan",
   "existing-binding",
@@ -788,6 +810,507 @@ it.effect.each([
           },
         ],
       });
+      if (scenario.startsWith("pre-start-failure") || scenario.startsWith("failure-")) {
+        if (scenario === "failure-after-starting-history") {
+          yield* sink.write({
+            events: [
+              {
+                id: EventId.make("placeholder-crossed-starting"),
+                type: "run.updated",
+                threadId,
+                occurredAt: createdAt,
+                payload: { ...run, status: "starting", queuePosition: null },
+              },
+            ],
+          });
+        }
+        if (scenario === "failure-after-attempt-start-history") {
+          yield* sink.write({
+            events: [
+              {
+                id: EventId.make("placeholder-attempt-started"),
+                type: "run-attempt.updated",
+                threadId,
+                occurredAt: createdAt,
+                payload: { ...attempt, status: "running", startedAt: createdAt },
+              },
+            ],
+          });
+        }
+        // Match failQueuedRunStart: one system write fails the initial attempt, root and queued run.
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make("placeholder-failed-attempt"),
+              type: "run-attempt.updated",
+              threadId,
+              occurredAt: deletedAt,
+              payload: { ...attempt, status: "failed", completedAt: deletedAt },
+            },
+            {
+              id: EventId.make("placeholder-failed-root"),
+              type: "node.updated",
+              threadId,
+              occurredAt: deletedAt,
+              payload: { ...node, status: "failed", completedAt: deletedAt },
+            },
+            {
+              id: EventId.make("placeholder-failure-item"),
+              type: "turn-item.updated",
+              threadId,
+              occurredAt: deletedAt,
+              payload: {
+                id: allocator.derive.turnItemFromProviderItem({
+                  driver: pending.driver,
+                  nativeItemId: `queued-start-failure:${runId}`,
+                }),
+                threadId,
+                runId,
+                nodeId,
+                providerThreadId: pending.id,
+                providerTurnId: null,
+                nativeItemRef: null,
+                parentItemId: null,
+                ordinal: 1,
+                status: "failed",
+                title: "Queued provider could not start",
+                startedAt: deletedAt,
+                completedAt: deletedAt,
+                updatedAt: deletedAt,
+                type: "error",
+                failure: makeProviderFailure({
+                  cause: "checkpoint preparation failed",
+                  code: "queued_start_failed",
+                  class: "unknown",
+                }),
+              },
+            },
+            {
+              id: EventId.make("placeholder-failed-run"),
+              type: "run.updated",
+              threadId,
+              occurredAt: deletedAt,
+              payload: { ...run, status: "failed", queuePosition: null, completedAt: deletedAt },
+            },
+          ],
+        });
+        if (scenario === "failure-without-origin") {
+          const sql = yield* SqlClient.SqlClient;
+          yield* sql`DELETE FROM orchestration_events WHERE event_type = 'run.created'`;
+        }
+        if (scenario === "failure-without-attempt-origin") {
+          const sql = yield* SqlClient.SqlClient;
+          yield* sql`DELETE FROM orchestration_events WHERE event_type = 'run-attempt.created'`;
+        }
+        if (scenario === "failure-without-root-origin") {
+          const sql = yield* SqlClient.SqlClient;
+          yield* sql`DELETE FROM orchestration_events WHERE event_type = 'node.updated' AND json_extract(payload_json, '$.status') = 'pending'`;
+        }
+        if (scenario === "failure-with-corrupt-origin") {
+          const sql = yield* SqlClient.SqlClient;
+          yield* sql`UPDATE orchestration_events SET payload_json = json_remove(payload_json, '$.rootNodeId') WHERE event_type = 'run.created'`;
+        }
+        if (scenario === "pre-start-failure-with-queued-run") {
+          const secondRunId = allocator.derive.run({ threadId, ordinal: 3 });
+          const secondAttemptId = allocator.derive.runAttempt({
+            runId: secondRunId,
+            attemptOrdinal: 1,
+          });
+          const secondNodeId = allocator.derive.rootNode({ runId: secondRunId });
+          yield* sink.write({
+            events: [
+              {
+                id: EventId.make("placeholder-second-run"),
+                type: "run.created",
+                threadId,
+                occurredAt: deletedAt,
+                payload: {
+                  ...run,
+                  id: secondRunId,
+                  ordinal: 3,
+                  rootNodeId: secondNodeId,
+                  activeAttemptId: secondAttemptId,
+                },
+              },
+              {
+                id: EventId.make("placeholder-second-attempt"),
+                type: "run-attempt.created",
+                threadId,
+                occurredAt: deletedAt,
+                payload: {
+                  ...attempt,
+                  id: secondAttemptId,
+                  runId: secondRunId,
+                  rootNodeId: secondNodeId,
+                },
+              },
+              {
+                id: EventId.make("placeholder-second-node"),
+                type: "node.updated",
+                threadId,
+                occurredAt: deletedAt,
+                payload: {
+                  ...node,
+                  id: secondNodeId,
+                  rootNodeId: secondNodeId,
+                  runId: secondRunId,
+                },
+              },
+            ],
+          });
+        }
+        if (scenario === "pre-start-failure-after-rebuild") {
+          yield* Effect.gen(function* () {
+            const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+            yield* maintenance.compactEventStore();
+            assert.isTrue((yield* maintenance.rebuild).valid);
+          }).pipe(Effect.provide(ProjectionMaintenance.layer));
+        }
+      }
+      if (scenario.startsWith("rerouted-")) {
+        if (scenario === "rerouted-with-queued-run") {
+          const secondRunId = allocator.derive.run({ threadId, ordinal: 3 });
+          const secondAttemptId = allocator.derive.runAttempt({
+            runId: secondRunId,
+            attemptOrdinal: 1,
+          });
+          const secondNodeId = allocator.derive.rootNode({ runId: secondRunId });
+          yield* sink.write({
+            events: [
+              {
+                id: EventId.make("rerouted-remaining-run"),
+                type: "run.created",
+                threadId,
+                occurredAt: createdAt,
+                payload: {
+                  ...run,
+                  id: secondRunId,
+                  ordinal: 3,
+                  rootNodeId: secondNodeId,
+                  activeAttemptId: secondAttemptId,
+                },
+              },
+              {
+                id: EventId.make("rerouted-remaining-attempt"),
+                type: "run-attempt.created",
+                threadId,
+                occurredAt: createdAt,
+                payload: {
+                  ...attempt,
+                  id: secondAttemptId,
+                  runId: secondRunId,
+                  rootNodeId: secondNodeId,
+                },
+              },
+              {
+                id: EventId.make("rerouted-remaining-root"),
+                type: "node.updated",
+                threadId,
+                occurredAt: createdAt,
+                payload: {
+                  ...node,
+                  id: secondNodeId,
+                  rootNodeId: secondNodeId,
+                  runId: secondRunId,
+                },
+              },
+            ],
+          });
+        }
+        if (scenario === "rerouted-after-pi-start") {
+          yield* sink.write({
+            events: [
+              {
+                id: EventId.make("placeholder-prior-gate"),
+                type: "provider-thread.updated",
+                threadId,
+                occurredAt: createdAt,
+                payload: {
+                  ...pending,
+                  firstRunOrdinal: 2,
+                  lastRunOrdinal: 2,
+                  providerSessionId: ProviderSessionId.make("prior-pi-session"),
+                },
+              },
+            ],
+          });
+        }
+        // A monitor wake can move to the current conversation before its original placeholder starts.
+        const targetStatus =
+          scenario === "rerouted-target-running"
+            ? ("running" as const)
+            : scenario === "rerouted-target-switch" ||
+                scenario === "rerouted-target-instance-switch"
+              ? ("waiting" as const)
+              : ("completed" as const);
+        const targetCompletedAt = targetStatus === "completed" ? deletedAt : null;
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make("placeholder-rerouted-target"),
+              type: "provider-thread.updated",
+              threadId,
+              occurredAt: deletedAt,
+              payload: {
+                ...pending,
+                id: providerThreadId,
+                driver,
+                providerInstanceId,
+                nativeThreadRef: { driver, nativeId: "codex-target", strength: "strong" },
+                nativeStorage: { type: "resolved", canonicalRoot: "/codex-target" },
+                firstRunOrdinal: 2,
+                lastRunOrdinal: 2,
+                status: targetStatus === "completed" ? "closed" : "active",
+              },
+            },
+            {
+              id: EventId.make("placeholder-rerouted-attempt"),
+              type: "run-attempt.updated",
+              threadId,
+              occurredAt: deletedAt,
+              payload: {
+                ...attempt,
+                providerThreadId,
+                providerInstanceId,
+                status: targetStatus === "completed" ? "completed" : "running",
+                startedAt: createdAt,
+                completedAt: targetCompletedAt,
+              },
+            },
+            {
+              id: EventId.make("placeholder-rerouted-root"),
+              type: "node.updated",
+              threadId,
+              occurredAt: deletedAt,
+              payload: {
+                ...node,
+                providerThreadId,
+                status: targetStatus,
+                startedAt: createdAt,
+                completedAt: targetCompletedAt,
+              },
+            },
+            {
+              id: EventId.make("placeholder-rerouted-run"),
+              type: "run.updated",
+              threadId,
+              occurredAt: deletedAt,
+              payload: {
+                ...run,
+                providerThreadId,
+                providerInstanceId,
+                modelSelection,
+                status: targetStatus,
+                queuePosition: null,
+                startedAt: createdAt,
+                completedAt: targetCompletedAt,
+              },
+            },
+          ],
+        });
+        if (scenario === "rerouted-target-restart") {
+          const nextAttemptId = allocator.derive.runAttempt({ runId, attemptOrdinal: 2 });
+          yield* sink.write({
+            events: [
+              {
+                id: EventId.make("rerouted-target-attempt-2"),
+                type: "run-attempt.created",
+                threadId,
+                occurredAt: deletedAt,
+                payload: {
+                  ...attempt,
+                  id: nextAttemptId,
+                  attemptOrdinal: 2,
+                  reason: "retry",
+                  providerThreadId,
+                  providerInstanceId,
+                  status: "completed",
+                  startedAt: createdAt,
+                  completedAt: deletedAt,
+                },
+              },
+              {
+                id: EventId.make("rerouted-target-retried-run"),
+                type: "run.updated",
+                threadId,
+                occurredAt: deletedAt,
+                payload: {
+                  ...run,
+                  providerThreadId,
+                  providerInstanceId,
+                  modelSelection,
+                  activeAttemptId: nextAttemptId,
+                  status: "completed",
+                  queuePosition: null,
+                  startedAt: createdAt,
+                  completedAt: deletedAt,
+                },
+              },
+              {
+                id: EventId.make("rerouted-target-tool"),
+                type: "node.updated",
+                threadId,
+                occurredAt: deletedAt,
+                payload: {
+                  ...node,
+                  id: NodeId.make("rerouted-target-tool"),
+                  parentNodeId: node.id,
+                  providerThreadId,
+                  kind: "tool_call",
+                  status: "completed",
+                  startedAt: createdAt,
+                  completedAt: deletedAt,
+                },
+              },
+            ],
+          });
+        }
+        if (
+          scenario === "rerouted-target-switch" ||
+          scenario === "rerouted-target-instance-switch"
+        ) {
+          const nextAttemptId = allocator.derive.runAttempt({ runId, attemptOrdinal: 2 });
+          const nextNodeId = NodeId.make("rerouted-next-root");
+          const nextProviderId =
+            scenario === "rerouted-target-instance-switch"
+              ? providerThreadId
+              : ProviderThreadId.make("rerouted-next-provider");
+          const nextInstanceId = ProviderInstanceId.make("codex-next-instance");
+          yield* sink.write({
+            events: [
+              {
+                id: EventId.make("rerouted-old-attempt"),
+                type: "run-attempt.updated",
+                threadId,
+                occurredAt: deletedAt,
+                payload: {
+                  ...attempt,
+                  providerThreadId,
+                  providerInstanceId,
+                  status: "superseded",
+                  startedAt: createdAt,
+                  completedAt: deletedAt,
+                },
+              },
+              {
+                id: EventId.make("rerouted-old-root"),
+                type: "node.updated",
+                threadId,
+                occurredAt: deletedAt,
+                payload: {
+                  ...node,
+                  providerThreadId,
+                  status: "interrupted",
+                  startedAt: createdAt,
+                  completedAt: deletedAt,
+                },
+              },
+              {
+                id: EventId.make("rerouted-new-provider"),
+                type: "provider-thread.updated",
+                threadId,
+                occurredAt: deletedAt,
+                payload: {
+                  ...pending,
+                  id: nextProviderId,
+                  driver,
+                  providerInstanceId: nextInstanceId,
+                  nativeThreadRef: { driver, nativeId: "next-native", strength: "strong" },
+                  nativeStorage: { type: "resolved", canonicalRoot: "/codex-next" },
+                  firstRunOrdinal: 2,
+                  lastRunOrdinal: 2,
+                  status: "closed",
+                },
+              },
+              {
+                id: EventId.make("rerouted-new-attempt"),
+                type: "run-attempt.created",
+                threadId,
+                occurredAt: deletedAt,
+                payload: {
+                  ...attempt,
+                  id: nextAttemptId,
+                  attemptOrdinal: 2,
+                  reason: "steering_restart",
+                  rootNodeId: nextNodeId,
+                  providerThreadId: nextProviderId,
+                  providerInstanceId: nextInstanceId,
+                  status: "completed",
+                  startedAt: createdAt,
+                  completedAt: deletedAt,
+                },
+              },
+              {
+                id: EventId.make("rerouted-new-root"),
+                type: "node.updated",
+                threadId,
+                occurredAt: deletedAt,
+                payload: {
+                  ...node,
+                  id: nextNodeId,
+                  rootNodeId: nextNodeId,
+                  providerThreadId: nextProviderId,
+                  status: "completed",
+                  startedAt: createdAt,
+                  completedAt: deletedAt,
+                },
+              },
+              {
+                id: EventId.make("rerouted-new-run"),
+                type: "run.updated",
+                threadId,
+                occurredAt: deletedAt,
+                payload: {
+                  ...run,
+                  providerThreadId: nextProviderId,
+                  providerInstanceId: nextInstanceId,
+                  modelSelection: { instanceId: nextInstanceId, model: "next" },
+                  rootNodeId: nextNodeId,
+                  activeAttemptId: nextAttemptId,
+                  status: "completed",
+                  queuePosition: null,
+                  startedAt: createdAt,
+                  completedAt: deletedAt,
+                },
+              },
+            ],
+          });
+        }
+        if (scenario === "rerouted-returned-to-pi") {
+          yield* sink.write({
+            events: [
+              {
+                id: EventId.make("rerouted-returned-run"),
+                type: "run.updated",
+                threadId,
+                occurredAt: deletedAt,
+                payload: run,
+              },
+              {
+                id: EventId.make("rerouted-returned-attempt"),
+                type: "run-attempt.updated",
+                threadId,
+                occurredAt: deletedAt,
+                payload: attempt,
+              },
+              {
+                id: EventId.make("rerouted-returned-node"),
+                type: "node.updated",
+                threadId,
+                occurredAt: deletedAt,
+                payload: node,
+              },
+            ],
+          });
+        }
+        if (scenario === "rerouted-after-compaction") {
+          yield* Effect.gen(function* () {
+            const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+            yield* maintenance.compactEventStore();
+            assert.isTrue((yield* maintenance.rebuild).valid);
+          }).pipe(Effect.provide(ProjectionMaintenance.layer));
+        }
+      }
       if (scenario === "existing-binding") {
         yield* (yield* NativeSessionBindings.NativeSessionBindings).applyProviderThread({
           id: EventId.make("placeholder-existing-binding"),
@@ -814,7 +1337,11 @@ it.effect.each([
         });
       }
       const planner = yield* ThreadLifecyclePlan.ThreadLifecyclePlanner;
-      if (scenario === "archive-before-delete" || scenario === "archive-after-compaction") {
+      if (
+        scenario === "archive-before-delete" ||
+        scenario === "archive-after-compaction" ||
+        scenario === "pre-start-failure-then-archive"
+      ) {
         const archive = {
           ...command,
           commandId: CommandId.make("placeholder-archive"),
@@ -885,6 +1412,9 @@ it.effect.each([
       });
       assert.isTrue(committed.committed);
       const first = Option.getOrThrow(yield* records.get(threadId));
+      if (scenario === "rerouted-before-start") {
+        assert.nestedPropertyVal(first, "noNativeSessionProofs.0.providerThreadId", pending.id);
+      }
       if (scenario === "late-unresolved-identity" || scenario === "late-resolved-identity") {
         yield* sink.write({
           events: [
@@ -929,6 +1459,17 @@ it.effect.each([
         "unclaimed-start",
         "archive-before-delete",
         "archive-after-compaction",
+        "pre-start-failure",
+        "pre-start-failure-then-archive",
+        "pre-start-failure-after-rebuild",
+        "pre-start-failure-with-queued-run",
+        "rerouted-before-start",
+        "rerouted-with-queued-run",
+        "rerouted-after-compaction",
+        "rerouted-target-restart",
+        "rerouted-target-running",
+        "rerouted-target-switch",
+        "rerouted-target-instance-switch",
       ].includes(scenario);
       const certified =
         allowed ||
@@ -997,7 +1538,13 @@ it.effect.each([
       if (certified) {
         assert.nestedPropertyVal(first, "noNativeSessionProofs.0.providerThreadId", pending.id);
         assert.nestedPropertyVal(first, "noNativeSessionProofs.0.source", "cancelled_queued_runs");
-        assert.deepEqual(first.noNativeSessionProofs?.[0]?.runIds, [runId]);
+        assert.deepEqual(
+          first.noNativeSessionProofs?.[0]?.runIds,
+          scenario === "pre-start-failure-with-queued-run" ||
+            scenario === "rerouted-with-queued-run"
+            ? [runId, allocator.derive.run({ threadId, ordinal: 3 })]
+            : [runId],
+        );
         const stored = committed.storedEvents.find((row) => row.event.type === "thread.deleted")!;
         assert.deepNestedPropertyVal(
           stored,
@@ -1387,4 +1934,1257 @@ it.effect(
         );
       }
     }).pipe(Effect.provide(IdAllocator.layer)),
+);
+
+it.effect.each([
+  "same-root-pending",
+  "same-root-held",
+  "cross-batch-parent-reference",
+  "cross-batch-parent-first",
+  "cross-batch-parent-first-failure",
+  "cross-batch-parent-first-late-binding",
+  "cross-batch-parent-first-claimed-start",
+  "cross-batch-parent-first-child-provider-restart",
+  "cross-batch-parent-first-child-instance-resume",
+  "cross-batch-parent-first-child-terminal-switch",
+  "same-root-child-terminal-reuse",
+  "cross-batch-parent-first-child-terminal-reuse",
+  "cross-batch-parent-first-child-terminal-switch-reuse",
+  "cross-batch-parent-first-child-terminal-reuse-compacted",
+  "cross-batch-parent-first-child-terminal-reuse-missing-origin",
+  "cross-batch-parent-first-child-terminal-reuse-missing-attempt",
+  "cross-batch-parent-first-child-terminal-reuse-missing-provider-history",
+  "cross-batch-parent-first-child-restart-missing-origin",
+  "cross-batch-parent-first-child-resume-wrong-instance",
+  "cross-batch-parent-first-missing-spawn",
+  "cross-batch-parent-first-wrong-spawn-owner",
+  "parent-owner-restart",
+  "parent-owner-restart-compacted",
+  "parent-owner-restart-wrong-root",
+  "parent-owner-restart-missing-attempt",
+  "live-parent",
+  "different-operation-root",
+  "missing-task",
+  "wrong-lineage",
+  "wrong-original-task",
+  "wrong-task-child",
+  "wrong-task-owner",
+  "wrong-task-instance",
+  "extra-execution-node",
+  "started-root",
+  "native-binding",
+  "late-native-identity",
+] as const)("A3 validates app-owned queued follow-up references (%s)", (scenario) =>
+  Effect.gen(function* () {
+    yield* TestClock.setTime(DateTime.toEpochMillis(deletedAt));
+    const sink = yield* EventSink.EventSinkV2;
+    const store = yield* ProjectionStore.ProjectionStoreV2;
+    const records = yield* ThreadDeletionRecords.ThreadDeletionRecords;
+    const outbox = yield* EffectOutbox.EffectOutboxV2;
+    const allocator = yield* IdAllocator.IdAllocatorV2;
+    const sql = yield* SqlClient.SqlClient;
+    const base = makeProjection();
+    const parentFirst = scenario.startsWith("cross-batch-parent-first");
+    const parentId = ThreadId.make(parentFirst ? "thread:a3-000parent" : "thread:a3-parent");
+    const childId = ThreadId.make(parentFirst ? "thread:a3-zchild" : "thread:a3-child");
+    const originalTaskId = NodeId.make("task:a3-original");
+    const followupTaskId = allocator.derive.delegatedTaskNode({
+      commandId: CommandId.make("command:a3-followup"),
+    });
+    const owner = {
+      ...base.runs[5]!,
+      id: RunId.make("run:a3-parent-owner"),
+      threadId: parentId,
+      providerThreadId: ProviderThreadId.make("provider:a3-parent"),
+      rootNodeId: NodeId.make("node:a3-parent-root"),
+      activeAttemptId: RunAttemptId.make("attempt:a3-parent"),
+      ...(scenario.startsWith("parent-owner-restart")
+        ? { status: "running" as const, completedAt: null }
+        : {}),
+    };
+    const originalRun = {
+      ...base.runs[5]!,
+      id: RunId.make("run:a3-child-original"),
+      ordinal: 1,
+      threadId: childId,
+      providerThreadId: ProviderThreadId.make("provider:a3-child-codex"),
+      rootNodeId: NodeId.make("node:a3-child-original"),
+      activeAttemptId: RunAttemptId.make("attempt:a3-child-original"),
+    };
+    const activeRun = {
+      ...originalRun,
+      id: RunId.make("run:a3-child-active"),
+      ordinal: 2,
+      status: "running" as const,
+      rootNodeId: NodeId.make("node:a3-child-active"),
+      activeAttemptId: RunAttemptId.make("attempt:a3-child-active"),
+      delegatedTaskId: NodeId.make("task:a3-active"),
+      completedAt: null,
+    };
+    const queuedId = allocator.derive.run({ threadId: childId, ordinal: 3 });
+    const pending = makePiThread({
+      id: allocator.derive.providerThread({
+        driver: ProviderDriverKind.make("pi"),
+        nativeThreadId: `pending:${queuedId}`,
+      }),
+      appThreadId: childId,
+      nativeThreadRef: null,
+      nativeStorage: { type: "unresolved", reason: "unavailable" },
+      status: "not_loaded",
+    });
+    const queued: OrchestrationV2Run = {
+      ...base.runs[1]!,
+      id: queuedId,
+      threadId: childId,
+      ordinal: 3,
+      providerThreadId: pending.id,
+      providerInstanceId: piInstanceId,
+      modelSelection: { instanceId: piInstanceId, model: "test" },
+      rootNodeId: allocator.derive.rootNode({ runId: queuedId }),
+      activeAttemptId: allocator.derive.runAttempt({ runId: queuedId, attemptOrdinal: 1 }),
+      startedAt: null,
+      ...(scenario === "same-root-held" ? { queueHeld: true } : {}),
+    };
+    const parent = {
+      ...base.thread,
+      id: parentId,
+      lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: parentId },
+    };
+    const child = {
+      ...base.thread,
+      id: childId,
+      lineage: {
+        parentThreadId: parentId,
+        relationshipToParent:
+          scenario === "wrong-lineage" ? ("fork" as const) : ("subagent" as const),
+        rootThreadId: parentId,
+      },
+      forkedFrom: {
+        type: "node" as const,
+        nodeId:
+          scenario === "wrong-original-task" ? NodeId.make("task:a3-missing") : originalTaskId,
+      },
+    };
+    const fillers = scenario.startsWith("cross-batch")
+      ? Array.from({ length: 49 }, (_, index) => ({
+          ...base.thread,
+          id: ThreadId.make(`thread:a3-filler:${String(index).padStart(3, "0")}`),
+          forkedFrom: null,
+          lineage: {
+            parentThreadId: parentId,
+            relationshipToParent: "fork" as const,
+            rootThreadId: parentId,
+            sideChat: true,
+          },
+        }))
+      : [];
+    const members = [parent, child, ...fillers];
+    for (const thread of members) {
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make(`a3-created:${thread.id}`),
+            type: "thread.created",
+            threadId: thread.id,
+            occurredAt: createdAt,
+            payload: thread,
+          },
+        ],
+      });
+    }
+    for (const run of [owner, originalRun]) {
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make(`a3-codex-provider:${run.id}`),
+            type: "provider-thread.updated",
+            threadId: run.threadId,
+            occurredAt: createdAt,
+            payload: {
+              ...pending,
+              id: run.providerThreadId,
+              appThreadId: run.threadId,
+              driver,
+              providerInstanceId,
+              nativeThreadRef: { driver, nativeId: `native:${run.id}`, strength: "strong" },
+              nativeStorage: { type: "resolved", canonicalRoot: `/codex/${run.id}` },
+              status: "active",
+              firstRunOrdinal: 1,
+              lastRunOrdinal: 2,
+            },
+          },
+        ],
+      });
+    }
+    yield* sink.write({
+      events: [
+        {
+          id: EventId.make("a3-pending-provider"),
+          type: "provider-thread.updated",
+          threadId: childId,
+          occurredAt: createdAt,
+          payload: pending,
+        },
+      ],
+    });
+    for (const run of [owner, originalRun, activeRun, queued]) {
+      const isQueued = run.id === queuedId;
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make(`a3-run:${run.id}`),
+            type: "run.created",
+            threadId: run.threadId,
+            occurredAt: createdAt,
+            payload: run,
+          },
+          {
+            id: EventId.make(`a3-attempt:${run.id}`),
+            type: "run-attempt.created",
+            threadId: run.threadId,
+            occurredAt: createdAt,
+            payload: {
+              ...base.attempts[5]!,
+              id: run.activeAttemptId!,
+              runId: run.id,
+              rootNodeId: run.rootNodeId!,
+              providerInstanceId: run.providerInstanceId,
+              providerThreadId: run.providerThreadId!,
+              status: isQueued ? "pending" : run.status === "running" ? "running" : "completed",
+              startedAt: run.startedAt,
+              completedAt: run.completedAt,
+            },
+          },
+          {
+            id: EventId.make(`a3-root:${run.id}`),
+            type: "node.updated",
+            threadId: run.threadId,
+            occurredAt: createdAt,
+            payload: {
+              ...base.nodes[5]!,
+              id: run.rootNodeId!,
+              rootNodeId: run.rootNodeId!,
+              threadId: run.threadId,
+              runId: run.id,
+              providerThreadId: run.providerThreadId,
+              status: isQueued ? "pending" : run.status === "running" ? "running" : "completed",
+              startedAt: run.startedAt,
+              completedAt: run.completedAt,
+            },
+          },
+        ],
+      });
+    }
+    assert.notProperty(originalRun, "delegatedTaskId");
+    // 首次委派由 spawn transfer 关联；只有 follow-up 向 run 写入 delegatedTaskId。
+    for (const run of [originalRun, activeRun, { ...queued, delegatedTaskId: followupTaskId }]) {
+      const isQueued = run.id === queuedId;
+      const task = {
+        id: run.id === originalRun.id ? originalTaskId : run.delegatedTaskId!,
+        threadId: parentId,
+        runId: owner.id,
+        parentNodeId: owner.rootNodeId!,
+        origin: "app_owned" as const,
+        createdBy: "user" as const,
+        driver: isQueued ? ProviderDriverKind.make("pi") : driver,
+        providerInstanceId: run.providerInstanceId,
+        providerThreadId: run.providerThreadId,
+        childThreadId: childId,
+        nativeTaskRef: null,
+        prompt: "Follow up",
+        title: "Child",
+        model: run.modelSelection.model,
+        completionDelivery: { state: "pending" as const, observedByRunId: null },
+        status: isQueued
+          ? scenario === "same-root-held"
+            ? ("idle" as const)
+            : ("pending" as const)
+          : run.status === "running"
+            ? ("running" as const)
+            : ("completed" as const),
+        result: run.id === originalRun.id ? "Original result" : null,
+        startedAt: createdAt,
+        completedAt: run.completedAt,
+        updatedAt: createdAt,
+      };
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make(`a3-delegated-run:${run.id}`),
+            type: "run.updated",
+            threadId: childId,
+            occurredAt: createdAt,
+            payload: run,
+          },
+          {
+            id: EventId.make(`a3-task:${run.id}`),
+            type: "subagent.updated",
+            threadId: parentId,
+            occurredAt: createdAt,
+            payload: task,
+          },
+          {
+            id: EventId.make(`a3-tracking-node:${run.id}`),
+            type: "node.updated",
+            threadId: parentId,
+            occurredAt: createdAt,
+            payload: {
+              ...base.nodes[5]!,
+              id: task.id,
+              threadId: parentId,
+              runId: owner.id,
+              parentNodeId: owner.rootNodeId,
+              rootNodeId: owner.rootNodeId!,
+              kind: "subagent",
+              countsForRun: false,
+              providerThreadId: run.providerThreadId,
+              status: task.status,
+              startedAt: task.startedAt,
+              completedAt: task.completedAt,
+            },
+          },
+        ],
+      });
+    }
+    for (const type of ["subagent_spawn", "subagent_result"] as const) {
+      if (type === "subagent_spawn" && scenario.endsWith("missing-spawn")) continue;
+      const spawn = type === "subagent_spawn";
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make(`a3-transfer-event:${type}`),
+            type: "context-transfer.created",
+            threadId: spawn ? childId : parentId,
+            occurredAt: createdAt,
+            payload: {
+              id: ContextTransferId.make(`a3-transfer:${type}`),
+              type,
+              sourceThreadId: spawn ? parentId : childId,
+              targetThreadId: spawn ? childId : parentId,
+              sourcePoint: {
+                threadId: spawn ? parentId : childId,
+                runId: spawn
+                  ? scenario.endsWith("wrong-spawn-owner")
+                    ? activeRun.id
+                    : owner.id
+                  : originalRun.id,
+              },
+              basePoint: null,
+              sourceProviderInstanceId: providerInstanceId,
+              targetProviderInstanceId: providerInstanceId,
+              targetRunId: spawn ? originalRun.id : owner.id,
+              status: "consumed",
+              resolution: null,
+              createdBy: "system",
+              error: null,
+              createdAt,
+              updatedAt: createdAt,
+              consumedAt: createdAt,
+            },
+          },
+        ],
+      });
+    }
+    if (scenario.includes("child-")) {
+      const previous = yield* store.getThreadRecords(childId, [
+        "attempts",
+        "nodes",
+        "providerThreads",
+      ]);
+      const initialAttempt = previous.attempts.find(
+        (attempt) => attempt.id === activeRun.activeAttemptId,
+      )!;
+      const initialRoot = previous.nodes.find((node) => node.id === activeRun.rootNodeId)!;
+      const initialProvider = previous.providerThreads.find(
+        (provider) => provider.id === activeRun.providerThreadId,
+      )!;
+      const resume = scenario.includes("resume");
+      const nextProviderId = resume
+        ? initialProvider.id
+        : ProviderThreadId.make("provider:a3-child-restarted");
+      const nextInstanceId = ProviderInstanceId.make("codex-a3-restarted");
+      const nextDriver = scenario.includes("terminal-switch")
+        ? ProviderDriverKind.make("claude")
+        : driver;
+      const nextRoot = allocator.derive.rootNodeAttempt({ runId: activeRun.id, attemptOrdinal: 2 });
+      const nextAttempt = allocator.derive.runAttempt({ runId: activeRun.id, attemptOrdinal: 2 });
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make("a3-child-initial-ended"),
+            type: "run-attempt.updated",
+            threadId: childId,
+            occurredAt: createdAt,
+            payload: { ...initialAttempt, status: "superseded", completedAt: createdAt },
+          },
+          {
+            id: EventId.make("a3-child-root-ended"),
+            type: "node.updated",
+            threadId: childId,
+            occurredAt: createdAt,
+            payload: { ...initialRoot, status: "interrupted", completedAt: createdAt },
+          },
+          {
+            id: EventId.make("a3-child-restart-provider"),
+            type: "provider-thread.updated",
+            threadId: childId,
+            occurredAt: createdAt,
+            payload: {
+              ...initialProvider,
+              id: nextProviderId,
+              providerInstanceId: nextInstanceId,
+              driver: nextDriver,
+              nativeThreadRef: {
+                driver: nextDriver,
+                nativeId: "native:a3-restarted",
+                strength: "strong",
+              },
+              status: "active",
+            },
+          },
+          {
+            id: EventId.make("a3-child-restarted"),
+            type: "run.updated",
+            threadId: childId,
+            occurredAt: createdAt,
+            payload: {
+              ...activeRun,
+              status: "starting",
+              providerThreadId: nextProviderId,
+              providerInstanceId: nextInstanceId,
+              modelSelection: { ...activeRun.modelSelection, instanceId: nextInstanceId },
+              rootNodeId: nextRoot,
+              activeAttemptId: nextAttempt,
+            },
+          },
+          {
+            id: EventId.make("a3-child-attempt-next"),
+            type: "run-attempt.created",
+            threadId: childId,
+            occurredAt: createdAt,
+            payload: {
+              ...initialAttempt,
+              id: nextAttempt,
+              rootNodeId: nextRoot,
+              providerThreadId: nextProviderId,
+              providerInstanceId: nextInstanceId,
+              attemptOrdinal: 2,
+              reason: "steering_restart",
+              status: "pending",
+              startedAt: null,
+              completedAt: null,
+            },
+          },
+          {
+            id: EventId.make("a3-child-root-next"),
+            type: "node.updated",
+            threadId: childId,
+            occurredAt: createdAt,
+            payload: {
+              ...initialRoot,
+              id: nextRoot,
+              rootNodeId: nextRoot,
+              providerThreadId: nextProviderId,
+              status: "pending",
+              startedAt: null,
+              completedAt: null,
+            },
+          },
+        ],
+      });
+      if (scenario.includes("terminal")) {
+        if (scenario.includes("reuse")) {
+          const childSource = yield* store.getThreadRecords(childId, ["runs", "attempts", "nodes"]);
+          const parentSource = yield* store.getThreadRecords(parentId, ["subagents", "nodes"]);
+          const queuedTask = parentSource.subagents.find((task) => task.id === followupTaskId)!;
+          const queuedNode = parentSource.nodes.find((node) => node.id === followupTaskId)!;
+          assert.isTrue(
+            (yield* sink.commitCommand({
+              commandId: CommandId.make("a3-cancel-before-reuse"),
+              commandType: "queued-run.cancel",
+              threadId: childId,
+              acceptedAt: createdAt,
+              effects: [],
+              events: [
+                {
+                  id: EventId.make("a3-cancelled-queued-run"),
+                  type: "run.updated",
+                  threadId: childId,
+                  occurredAt: createdAt,
+                  payload: {
+                    ...childSource.runs.find((run) => run.id === queuedId)!,
+                    status: "cancelled",
+                    completedAt: createdAt,
+                  },
+                },
+                {
+                  id: EventId.make("a3-cancelled-queued-attempt"),
+                  type: "run-attempt.updated",
+                  threadId: childId,
+                  occurredAt: createdAt,
+                  payload: {
+                    ...childSource.attempts.find(
+                      (attempt) => attempt.id === queued.activeAttemptId,
+                    )!,
+                    status: "cancelled",
+                    completedAt: createdAt,
+                  },
+                },
+                {
+                  id: EventId.make("a3-cancelled-queued-root"),
+                  type: "node.updated",
+                  threadId: childId,
+                  occurredAt: createdAt,
+                  payload: {
+                    ...childSource.nodes.find((node) => node.id === queued.rootNodeId)!,
+                    status: "cancelled",
+                    completedAt: createdAt,
+                  },
+                },
+                {
+                  id: EventId.make("a3-cancelled-queued-task"),
+                  type: "subagent.updated",
+                  threadId: parentId,
+                  occurredAt: createdAt,
+                  payload: {
+                    ...queuedTask,
+                    status: "cancelled",
+                    completedAt: createdAt,
+                    updatedAt: createdAt,
+                  },
+                },
+                {
+                  id: EventId.make("a3-cancelled-queued-tracking"),
+                  type: "node.updated",
+                  threadId: parentId,
+                  occurredAt: createdAt,
+                  payload: { ...queuedNode, status: "cancelled", completedAt: createdAt },
+                },
+              ],
+            })).committed,
+          );
+        }
+        const current = yield* store.getThreadRecords(childId, ["runs", "attempts", "nodes"]);
+        const task = (yield* store.getThreadRecords(parentId, ["subagents"])).subagents.find(
+          (task) => task.id === activeRun.delegatedTaskId,
+        )!;
+        const tracking = (yield* store.getThreadRecords(parentId, ["nodes"])).nodes.find(
+          (node) => node.id === task.id,
+        )!;
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make("a3-switched-run-completed"),
+              type: "run.updated",
+              threadId: childId,
+              occurredAt: createdAt,
+              payload: {
+                ...current.runs.find((run) => run.id === activeRun.id)!,
+                status: "completed",
+                completedAt: createdAt,
+              },
+            },
+            {
+              id: EventId.make("a3-switched-attempt-completed"),
+              type: "run-attempt.updated",
+              threadId: childId,
+              occurredAt: createdAt,
+              payload: {
+                ...current.attempts.find((attempt) => attempt.id === nextAttempt)!,
+                status: "completed",
+                startedAt: createdAt,
+                completedAt: createdAt,
+              },
+            },
+            {
+              id: EventId.make("a3-switched-root-completed"),
+              type: "node.updated",
+              threadId: childId,
+              occurredAt: createdAt,
+              payload: {
+                ...current.nodes.find((node) => node.id === nextRoot)!,
+                status: "completed",
+                startedAt: createdAt,
+                completedAt: createdAt,
+              },
+            },
+            {
+              id: EventId.make("a3-switched-task-completed"),
+              type: "subagent.updated",
+              threadId: parentId,
+              occurredAt: createdAt,
+              payload: {
+                ...task,
+                providerThreadId: nextProviderId,
+                status: "completed",
+                result: "Completed on another provider",
+                completedAt: createdAt,
+                updatedAt: createdAt,
+              },
+            },
+            {
+              id: EventId.make("a3-switched-tracking-completed"),
+              type: "node.updated",
+              threadId: parentId,
+              occurredAt: createdAt,
+              payload: {
+                ...tracking,
+                providerThreadId: nextProviderId,
+                status: "completed",
+                completedAt: createdAt,
+              },
+            },
+            {
+              id: EventId.make("a3-switched-result-transfer"),
+              type: "context-transfer.created",
+              threadId: parentId,
+              occurredAt: createdAt,
+              payload: {
+                id: ContextTransferId.make("a3-transfer:switched-result"),
+                type: "subagent_result",
+                sourceThreadId: childId,
+                targetThreadId: parentId,
+                sourcePoint: { threadId: childId, runId: activeRun.id },
+                basePoint: null,
+                sourceProviderInstanceId: nextInstanceId,
+                targetProviderInstanceId: owner.providerInstanceId,
+                targetRunId: owner.id,
+                status: "consumed",
+                resolution: null,
+                createdBy: "system",
+                error: null,
+                createdAt,
+                updatedAt: createdAt,
+                consumedAt: createdAt,
+              },
+            },
+          ],
+        });
+        if (scenario.includes("reuse")) {
+          const currentProvider = (yield* store.getThreadRecords(childId, [
+            "providerThreads",
+          ])).providerThreads.find((provider) => provider.id === nextProviderId)!;
+          const reusedInstanceId = ProviderInstanceId.make("codex-a3-reused");
+          const reusedRunId = allocator.derive.run({ threadId: childId, ordinal: 4 });
+          const reusedRoot = allocator.derive.rootNode({ runId: reusedRunId });
+          const reusedAttempt = allocator.derive.runAttempt({
+            runId: reusedRunId,
+            attemptOrdinal: 1,
+          });
+          const reusedTaskId = NodeId.make("task:a3-reused");
+          const reusedRun = {
+            ...activeRun,
+            id: reusedRunId,
+            ordinal: 4,
+            providerThreadId: nextProviderId,
+            providerInstanceId: reusedInstanceId,
+            modelSelection: { instanceId: reusedInstanceId, model: "test" },
+            delegatedTaskId: reusedTaskId,
+            rootNodeId: reusedRoot,
+            activeAttemptId: reusedAttempt,
+            status: "starting" as const,
+          };
+          yield* sink.write({
+            events: [
+              {
+                id: EventId.make("a3-reused-provider"),
+                type: "provider-thread.updated",
+                threadId: childId,
+                occurredAt: createdAt,
+                payload: {
+                  ...currentProvider,
+                  providerInstanceId: reusedInstanceId,
+                  providerSessionId: ProviderSessionId.make("session:a3-reused"),
+                  status: "not_loaded",
+                },
+              },
+              {
+                id: EventId.make("a3-reused-run"),
+                type: "run.created",
+                threadId: childId,
+                occurredAt: createdAt,
+                payload: reusedRun,
+              },
+              {
+                id: EventId.make("a3-reused-attempt"),
+                type: "run-attempt.created",
+                threadId: childId,
+                occurredAt: createdAt,
+                payload: {
+                  ...initialAttempt,
+                  id: reusedAttempt,
+                  runId: reusedRunId,
+                  rootNodeId: reusedRoot,
+                  providerThreadId: nextProviderId,
+                  providerInstanceId: reusedInstanceId,
+                  status: "pending",
+                  startedAt: null,
+                  completedAt: null,
+                },
+              },
+              {
+                id: EventId.make("a3-reused-root"),
+                type: "node.updated",
+                threadId: childId,
+                occurredAt: createdAt,
+                payload: {
+                  ...initialRoot,
+                  id: reusedRoot,
+                  rootNodeId: reusedRoot,
+                  runId: reusedRunId,
+                  providerThreadId: nextProviderId,
+                  status: "pending",
+                  startedAt: null,
+                  completedAt: null,
+                },
+              },
+              {
+                id: EventId.make("a3-reused-task"),
+                type: "subagent.updated",
+                threadId: parentId,
+                occurredAt: createdAt,
+                payload: {
+                  ...task,
+                  id: reusedTaskId,
+                  driver: nextDriver,
+                  providerInstanceId: reusedInstanceId,
+                  providerThreadId: nextProviderId,
+                  status: "running",
+                  result: null,
+                  completedAt: null,
+                },
+              },
+              {
+                id: EventId.make("a3-reused-tracking"),
+                type: "node.updated",
+                threadId: parentId,
+                occurredAt: createdAt,
+                payload: {
+                  ...tracking,
+                  id: reusedTaskId,
+                  providerThreadId: nextProviderId,
+                  status: "running",
+                  completedAt: null,
+                },
+              },
+            ],
+          });
+          const terminal = (yield* store.getThreadRecords(childId, ["runs"])).runs.find(
+            (run) => run.id === activeRun.id,
+          )!;
+          const completedTask = (yield* store.getThreadRecords(parentId, [
+            "subagents",
+          ])).subagents.find((candidate) => candidate.id === task.id)!;
+          assert.equal(completedTask.providerInstanceId, providerInstanceId);
+          assert.equal(terminal.providerInstanceId, nextInstanceId);
+          assert.equal(
+            (yield* store.getThreadRecords(childId, ["providerThreads"])).providerThreads.find(
+              (provider) => provider.id === nextProviderId,
+            )!.providerInstanceId,
+            reusedInstanceId,
+          );
+          if (scenario.endsWith("compacted")) {
+            yield* Effect.gen(function* () {
+              const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+              yield* maintenance.compactEventStore();
+              assert.isTrue((yield* maintenance.rebuild).valid);
+            }).pipe(Effect.provide(ProjectionMaintenance.layer));
+          } else if (scenario.endsWith("missing-origin")) {
+            yield* sql`DELETE FROM orchestration_events WHERE stream_id = ${childId}
+              AND event_type IN ('run.created', 'run.updated') AND json_extract(payload_json, '$.id') = ${activeRun.id}
+              AND json_extract(payload_json, '$.providerThreadId') = ${nextProviderId}`;
+          } else if (scenario.endsWith("missing-attempt")) {
+            yield* sql`DELETE FROM orchestration_events WHERE stream_id = ${childId}
+              AND event_type = 'run-attempt.created' AND json_extract(payload_json, '$.id') = ${nextAttempt}`;
+          } else if (scenario.endsWith("missing-provider-history")) {
+            yield* sql`DELETE FROM orchestration_events WHERE stream_id = ${childId}
+              AND event_type = 'provider-thread.updated' AND json_extract(payload_json, '$.id') = ${nextProviderId}
+              AND json_extract(payload_json, '$.providerInstanceId') = ${nextInstanceId}`;
+          }
+        }
+      }
+      if (scenario.endsWith("missing-origin") && !scenario.includes("reuse")) {
+        yield* sql`DELETE FROM orchestration_events
+          WHERE event_type IN ('run.created', 'run.updated') AND json_extract(payload_json, '$.id') = ${activeRun.id}
+            AND json_extract(payload_json, '$.providerThreadId') = ${initialProvider.id}`;
+      } else if (scenario.endsWith("wrong-instance")) {
+        yield* sql`UPDATE orchestration_v2_projection_subagents
+          SET provider_instance_id = 'codex-a3-unrelated', payload_json = json_set(payload_json, '$.providerInstanceId', 'codex-a3-unrelated')
+          WHERE subagent_id = ${activeRun.delegatedTaskId}`;
+      }
+    }
+    if (scenario.startsWith("parent-owner-restart")) {
+      const previous = yield* store.getThreadRecords(parentId, ["attempts", "nodes"]);
+      const initialAttempt = previous.attempts.find(
+        (attempt) => attempt.id === owner.activeAttemptId,
+      )!;
+      const initialRoot = previous.nodes.find((node) => node.id === owner.rootNodeId)!;
+      const nextRoot = allocator.derive.rootNodeAttempt({ runId: owner.id, attemptOrdinal: 2 });
+      const nextAttempt = allocator.derive.runAttempt({ runId: owner.id, attemptOrdinal: 2 });
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make("a3-parent-initial-ended"),
+            type: "run-attempt.updated",
+            threadId: parentId,
+            occurredAt: createdAt,
+            payload: { ...initialAttempt, status: "superseded", completedAt: createdAt },
+          },
+          {
+            id: EventId.make("a3-parent-root-ended"),
+            type: "node.updated",
+            threadId: parentId,
+            occurredAt: createdAt,
+            payload: { ...initialRoot, status: "interrupted", completedAt: createdAt },
+          },
+          {
+            id: EventId.make("a3-parent-restarted"),
+            type: "run.updated",
+            threadId: parentId,
+            occurredAt: createdAt,
+            payload: {
+              ...owner,
+              status: "starting",
+              rootNodeId: nextRoot,
+              activeAttemptId: nextAttempt,
+              completedAt: null,
+            },
+          },
+          {
+            id: EventId.make("a3-parent-attempt-next"),
+            type: "run-attempt.created",
+            threadId: parentId,
+            occurredAt: createdAt,
+            payload: {
+              ...initialAttempt,
+              id: nextAttempt,
+              rootNodeId: nextRoot,
+              attemptOrdinal: 2,
+              reason: "steering_restart",
+              status: "pending",
+              startedAt: null,
+              completedAt: null,
+            },
+          },
+          {
+            id: EventId.make("a3-parent-root-next"),
+            type: "node.updated",
+            threadId: parentId,
+            occurredAt: createdAt,
+            payload: {
+              ...initialRoot,
+              id: nextRoot,
+              rootNodeId: nextRoot,
+              status: "pending",
+              startedAt: null,
+              completedAt: null,
+            },
+          },
+        ],
+      });
+      if (scenario === "parent-owner-restart-wrong-root") {
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make("a3-parent-root-conflict"),
+              type: "node.updated",
+              threadId: parentId,
+              occurredAt: createdAt,
+              payload: {
+                ...initialRoot,
+                runId: RunId.make("run:a3-foreign"),
+                status: "interrupted",
+                completedAt: createdAt,
+              },
+            },
+          ],
+        });
+      } else if (scenario === "parent-owner-restart-missing-attempt") {
+        yield* sql`DELETE FROM orchestration_v2_projection_run_attempts WHERE attempt_id = ${initialAttempt.id}`;
+      } else if (scenario === "parent-owner-restart-compacted") {
+        yield* Effect.gen(function* () {
+          yield* (yield* ProjectionMaintenance.ProjectionMaintenanceV2).compactEventStore();
+        }).pipe(Effect.provide(ProjectionMaintenance.layer));
+      }
+    }
+    if (scenario === "missing-task") {
+      yield* sql`DELETE FROM orchestration_v2_projection_subagents WHERE subagent_id = ${followupTaskId}`;
+    }
+    if (scenario.startsWith("wrong-task-")) {
+      const task = (yield* store.getThreadRecords(parentId, ["subagents"])).subagents.find(
+        (row) => row.id === followupTaskId,
+      )!;
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make("a3-conflicting-task"),
+            type: "subagent.updated",
+            threadId: parentId,
+            occurredAt: createdAt,
+            payload: {
+              ...task,
+              ...(scenario === "wrong-task-child"
+                ? { childThreadId: ThreadId.make("thread:a3-foreign") }
+                : scenario === "wrong-task-owner"
+                  ? { runId: activeRun.id }
+                  : { providerInstanceId }),
+            },
+          },
+        ],
+      });
+    }
+    if (scenario === "extra-execution-node" || scenario === "started-root") {
+      const root = (yield* store.getThreadRecords(childId, ["nodes"])).nodes.find(
+        (row) => row.id === queued.rootNodeId,
+      )!;
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make("a3-executed-node"),
+            type: "node.updated",
+            threadId: childId,
+            occurredAt: createdAt,
+            payload: {
+              ...root,
+              id: scenario === "extra-execution-node" ? NodeId.make("node:a3-extra") : root.id,
+              startedAt: createdAt,
+            },
+          },
+        ],
+      });
+    }
+    if (scenario === "native-binding") {
+      yield* (yield* NativeSessionBindings.NativeSessionBindings).applyProviderThread({
+        id: EventId.make("a3-binding"),
+        type: "provider-thread.updated",
+        threadId: childId,
+        occurredAt: createdAt,
+        payload: {
+          ...pending,
+          status: "not_loaded",
+          firstRunOrdinal: 3,
+          lastRunOrdinal: 3,
+          providerSessionId: ProviderSessionId.make("session:a3-started"),
+        },
+      });
+    }
+    const separateDelete = scenario === "live-parent" || scenario === "different-operation-root";
+    const deleteRoot = separateDelete ? childId : parentId;
+    const deletionCommand = {
+      type: "thread.delete" as const,
+      commandId: CommandId.make("command:a3-delete"),
+      threadId: deleteRoot,
+    };
+    const plan = yield* planThreadLifecycle({
+      command: deletionCommand,
+      operationRootThreadId: deleteRoot,
+      members: yield* Effect.forEach(
+        separateDelete ? [childId] : members.map((thread) => thread.id),
+        (id) =>
+          store.getThreadRecords(id, [
+            "runs",
+            "attempts",
+            "nodes",
+            "subagents",
+            "runtimeRequests",
+            "providerSessions",
+            "providerThreads",
+            "providerTurns",
+            "turnItems",
+          ]),
+      ),
+      bindings: yield* (yield* NativeSessionBindings.NativeSessionBindings).listForThreads([
+        parentId,
+        childId,
+      ]),
+      attachmentIdsByThread: new Map(),
+      now: deletedAt,
+      idAllocator: allocator,
+    });
+    assert.isNull((yield* store.getThread(childId)).deletedAt);
+    assert.isNull((yield* store.getThread(parentId)).deletedAt);
+    const committed = yield* sink.commitCommand({
+      ...plan,
+      commandId: deletionCommand.commandId,
+      commandType: deletionCommand.type,
+      threadId: deleteRoot,
+      acceptedAt: deletedAt,
+    });
+    assert.isTrue(committed.committed);
+    const cleanupEffects = [...plan.effects];
+    if (scenario === "different-operation-root") {
+      const parentCommand = {
+        type: "thread.delete" as const,
+        commandId: CommandId.make("command:a3-delete-parent"),
+        threadId: parentId,
+      };
+      const parentPlan = yield* planThreadLifecycle({
+        command: parentCommand,
+        operationRootThreadId: parentId,
+        members: [
+          yield* store.getThreadRecords(parentId, [
+            "runs",
+            "attempts",
+            "nodes",
+            "subagents",
+            "runtimeRequests",
+            "providerSessions",
+            "providerThreads",
+            "providerTurns",
+            "turnItems",
+          ]),
+        ],
+        bindings: yield* (yield* NativeSessionBindings.NativeSessionBindings).listForThreads([
+          parentId,
+        ]),
+        attachmentIdsByThread: new Map(),
+        now: deletedAt,
+        idAllocator: allocator,
+      });
+      assert.isTrue(
+        (yield* sink.commitCommand({
+          ...parentPlan,
+          commandId: parentCommand.commandId,
+          commandType: parentCommand.type,
+          threadId: parentId,
+          acceptedAt: deletedAt,
+        })).committed,
+      );
+      cleanupEffects.push(...parentPlan.effects);
+    }
+    const first = Option.getOrThrow(yield* records.get(childId));
+    const certified =
+      [
+        "same-root-pending",
+        "same-root-held",
+        "cross-batch-parent-reference",
+        "parent-owner-restart",
+        "parent-owner-restart-compacted",
+        "live-parent",
+        "different-operation-root",
+        "late-native-identity",
+      ].includes(scenario) ||
+      scenario.startsWith("cross-batch") ||
+      scenario.includes("reuse");
+    assert.equal(first.noNativeSessionProofs?.length ?? 0, certified ? 1 : 0);
+    if (certified) {
+      assert.equal(first.noNativeSessionProofs![0]!.providerThreadId, pending.id);
+      assert.deepEqual(first.noNativeSessionProofs![0]!.runIds, [queuedId]);
+      assert.deepEqual(first.noNativeSessionProofs![0]!.attemptIds, [queued.activeAttemptId!]);
+      assert.deepNestedPropertyVal(
+        committed.storedEvents.find(
+          (row) => row.event.type === "thread.deleted" && row.event.threadId === childId,
+        ),
+        "event.deletionRecord.noNativeSessionProofs",
+        first.noNativeSessionProofs,
+      );
+    }
+    if (scenario === "late-native-identity") {
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make("a3-late-identity"),
+            type: "provider-thread.updated",
+            threadId: childId,
+            occurredAt: deletedAt,
+            payload: {
+              ...pending,
+              status: "closed",
+              providerSessionId: ProviderSessionId.make("session:a3-late"),
+              nativeThreadRef: {
+                driver: ProviderDriverKind.make("pi"),
+                nativeId: "a3-late-native",
+                strength: "strong",
+              },
+            },
+          },
+        ],
+      });
+    }
+    const cleanupIds = new Set(cleanupEffects.map((effect) => effect.id));
+    for (const _effect of cleanupEffects) {
+      const claimed = Option.getOrThrow(yield* outbox.claimNext({ workerId: "a3-cleanup" }));
+      assert.isTrue(cleanupIds.delete(claimed.id));
+      assert.isTrue(yield* outbox.succeed({ effectId: claimed.id, workerId: "a3-cleanup" }));
+    }
+    assert.isEmpty(cleanupIds);
+    const bounds = {
+      eventThroughSequence: Number.MAX_SAFE_INTEGER,
+      receiptThroughRowId: Number.MAX_SAFE_INTEGER,
+    };
+    const reclaimer = yield* ThreadDataReclamation.ThreadDataReclamation;
+    if (scenario === "cross-batch-parent-first-failure") {
+      yield* sql`
+        CREATE TRIGGER reject_a3_child_batch BEFORE DELETE ON orchestration_v2_projection_runs
+        WHEN OLD.thread_id = 'thread:a3-zchild'
+        BEGIN SELECT RAISE(ABORT, 'injected A3 second-batch failure'); END
+      `;
+      assert.isTrue(Exit.isFailure(yield* Effect.exit(reclaimer.reclaim(bounds))));
+      assert.isEmpty(
+        yield* sql`SELECT 1 FROM orchestration_v2_projection_runs WHERE thread_id = ${parentId}`,
+      );
+      assert.lengthOf(
+        yield* sql`SELECT 1 FROM orchestration_v2_projection_runs WHERE thread_id = ${childId}`,
+        3,
+      );
+      yield* sql`DROP TRIGGER reject_a3_child_batch`;
+    }
+    const lateBarrier =
+      scenario === "cross-batch-parent-first-late-binding" ||
+      scenario === "cross-batch-parent-first-claimed-start";
+    let injected = false;
+    let reclaimEffect = Effect.gen(function* () {
+      return yield* (yield* ThreadDataReclamation.ThreadDataReclamation).reclaim(bounds);
+    });
+    if (lateBarrier) {
+      let transactionDepth = 0;
+      const withTransaction: typeof sql.withTransaction = (effect) =>
+        Effect.gen(function* () {
+          transactionDepth++;
+          let result;
+          try {
+            result = yield* sql.withTransaction(effect);
+          } finally {
+            transactionDepth--;
+          }
+          if (transactionDepth === 0 && !injected) {
+            const parentRuns =
+              yield* sql`SELECT 1 FROM orchestration_v2_projection_runs WHERE thread_id = ${parentId}`;
+            const childRuns =
+              yield* sql`SELECT 1 FROM orchestration_v2_projection_runs WHERE thread_id = ${childId}`;
+            if (parentRuns.length === 0 && childRuns.length === 3) {
+              injected = true;
+              const barrierAt = "2026-09-04T00:00:00.000Z";
+              if (scenario === "cross-batch-parent-first-late-binding") {
+                yield* sql`
+                INSERT INTO orchestration_v2_native_session_bindings (
+                  binding_key, thread_id, provider_thread_id, provider_instance_id, driver,
+                  native_id, storage_type, canonical_root, canonical_file, bound_at, payload_json
+                ) VALUES ('a3:late-binding', ${childId}, ${pending.id}, ${piInstanceId}, 'pi',
+                  NULL, 'unresolved', '', '', ${barrierAt}, '{}')
+              `;
+              } else {
+                yield* sql`
+                INSERT INTO orchestration_v2_effect_outbox (
+                  effect_id, command_id, thread_id, effect_type, payload_json, status,
+                  attempt_count, available_at, created_at, updated_at
+                ) VALUES ('a3:claimed-start', 'a3:claimed-start-command', ${childId}, 'provider-turn.start',
+                  ${JSON.stringify({ runId: queuedId })}, 'cancelled', 1, ${barrierAt}, ${barrierAt}, ${barrierAt})
+              `;
+              }
+            }
+          }
+          return result;
+        });
+      const intercepted = new Proxy(sql, {
+        get(target, key, receiver) {
+          return key === "withTransaction" ? withTransaction : Reflect.get(target, key, receiver);
+        },
+      });
+      reclaimEffect = reclaimEffect.pipe(
+        Effect.provide(
+          Layer.fresh(
+            ThreadDataReclamation.layer.pipe(
+              Layer.provide(Layer.succeed(SqlClient.SqlClient, intercepted)),
+            ),
+          ),
+        ),
+      );
+    }
+    const summary = yield* reclaimEffect;
+    if (scenario.endsWith("missing-spawn") || scenario.endsWith("wrong-spawn-owner")) {
+      assert.lengthOf(
+        yield* sql`SELECT 1 FROM orchestration_v2_projection_provider_threads WHERE provider_thread_id = ${originalRun.providerThreadId}`,
+        1,
+      );
+      assert.lengthOf(
+        yield* sql`SELECT 1 FROM orchestration_v2_projection_subagents WHERE subagent_id = ${originalTaskId}`,
+        1,
+      );
+      return;
+    }
+    if (scenario.includes("reuse-missing-")) {
+      assert.lengthOf(
+        yield* sql`SELECT 1 FROM orchestration_v2_projection_provider_threads WHERE provider_thread_id = 'provider:a3-child-restarted'`,
+        1,
+      );
+      assert.lengthOf(
+        yield* sql`SELECT 1 FROM orchestration_v2_projection_subagents WHERE subagent_id = ${activeRun.delegatedTaskId}`,
+        1,
+      );
+      return;
+    }
+    if (scenario.endsWith("missing-origin") || scenario.endsWith("wrong-instance")) {
+      assert.lengthOf(
+        yield* sql`SELECT 1 FROM orchestration_v2_projection_provider_threads WHERE provider_thread_id = ${activeRun.providerThreadId}`,
+        1,
+      );
+      assert.lengthOf(
+        yield* sql`SELECT 1 FROM orchestration_v2_projection_subagents WHERE subagent_id = ${activeRun.delegatedTaskId}`,
+        1,
+      );
+      return;
+    }
+    const allowed =
+      [
+        "same-root-pending",
+        "same-root-held",
+        "cross-batch-parent-reference",
+        "cross-batch-parent-first",
+        "cross-batch-parent-first-failure",
+        "cross-batch-parent-first-child-provider-restart",
+        "cross-batch-parent-first-child-instance-resume",
+        "cross-batch-parent-first-child-terminal-switch",
+        "parent-owner-restart",
+        "parent-owner-restart-compacted",
+      ].includes(scenario) ||
+      (scenario.includes("reuse") && !scenario.includes("reuse-missing-"));
+    assert.equal(summary.reclaimedThreadCount, lateBarrier ? 50 : allowed ? members.length : 0);
+    if (allowed) {
+      assert.isEmpty(summary.skippedThreads);
+      assert.isEmpty(yield* sql`SELECT * FROM orchestration_v2_projection_nodes`);
+      assert.isEmpty(yield* sql`SELECT * FROM orchestration_v2_projection_subagents`);
+      assert.isEmpty(yield* sql`SELECT * FROM orchestration_v2_projection_runs`);
+      assert.isEmpty(yield* sql`SELECT * FROM orchestration_v2_projection_provider_threads`);
+      assert.equal(
+        (yield* (yield* ThreadDataReclamation.ThreadDataReclamation).reclaim(bounds))
+          .deletedProjectionRowCount,
+        0,
+      );
+    } else {
+      if (lateBarrier) {
+        assert.isTrue(injected);
+        assert.lengthOf(
+          yield* sql`SELECT 1 FROM orchestration_v2_projection_runs WHERE thread_id = ${childId}`,
+          3,
+        );
+      }
+      assert.isTrue(summary.skippedThreads.some((row) => row.threadId === childId));
+      assert.lengthOf(
+        yield* sql`SELECT 1 FROM orchestration_v2_projection_provider_threads WHERE provider_thread_id = ${pending.id}`,
+        1,
+      );
+    }
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(ThreadLifecyclePlan.layer, EventSink.layerFromStores).pipe(
+        Layer.provideMerge(ThreadOwnership.layer),
+        Layer.provideMerge(
+          Layer.mergeAll(
+            ProjectionStore.layer,
+            EventStore.layer,
+            IdAllocator.layer,
+            EffectOutbox.layer,
+            CommandReceiptStore.layer,
+            ProjectStore.layer,
+            TurnItemPositionStore.layer,
+            ThreadDeletionRecords.layer,
+            ThreadDataReclamation.layer,
+            NativeSessionBindings.layer,
+          ),
+        ),
+        Layer.provideMerge(SqlitePersistence.layerMemory),
+      ),
+    ),
+  ),
 );

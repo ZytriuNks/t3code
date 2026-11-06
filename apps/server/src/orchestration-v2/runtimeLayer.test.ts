@@ -299,9 +299,20 @@ const layerTest = Layer.mergeAll(
   Layer.provide(layerPlatformTest),
 );
 
-it.effect.each([false, true])(
-  "reclaims a never-started Pi placeholder after queued-run.cancel (thenArchive=%s)",
-  (thenArchive) =>
+it.effect.each([
+  ["queue-cancel", false],
+  ["queue-cancel", true],
+  ["stop", false],
+  ["buffered-stop", false],
+  ["interrupt-queued", false],
+  ["provider-switch", false],
+  ["startup", false],
+  ["shutdown", false],
+  ["buffered-recovery", false],
+  ["automatic-settle", false],
+] as const)(
+  "reclaims a never-started Pi placeholder after %s (thenArchive=%s)",
+  ([action, thenArchive]) =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       const sink = yield* EventSink.EventSinkV2;
@@ -432,18 +443,92 @@ it.effect.each([false, true])(
               completedAt: null,
             },
           },
+          {
+            id: EventId.make("fix04:queued-message"),
+            type: "message.updated",
+            threadId,
+            occurredAt: at,
+            payload: {
+              id: MessageId.make("fix03:queued-message"),
+              threadId,
+              runId,
+              nodeId,
+              role: "user",
+              text: "Queued message",
+              attachments: [],
+              streaming: false,
+              createdBy: "agent",
+              creationSource: action.startsWith("buffered-") ? "provider" : "server",
+              createdAt: at,
+              updatedAt: at,
+              ...(action.startsWith("buffered-") || action === "automatic-settle"
+                ? {
+                    notification: {
+                      source: { kind: "monitor" },
+                      outcome: "updated",
+                      summary: "Queued update",
+                    },
+                  }
+                : {}),
+            },
+          },
         ],
       });
-      const cancelled = yield* orchestrator.dispatch({
-        type: "queued-run.cancel",
-        commandId: CommandId.make("fix03:queue-cancel"),
-        threadId,
-        runId,
-      });
-      assert.isTrue(
-        cancelled.storedEvents.some(
-          (row) => row.event.type === "run.updated" && row.event.payload.status === "cancelled",
-        ),
+      if (action === "queue-cancel") {
+        const cancelled = yield* orchestrator.dispatch({
+          type: "queued-run.cancel",
+          commandId: CommandId.make("fix03:queue-cancel"),
+          threadId,
+          runId,
+        });
+        assert.isTrue(
+          cancelled.storedEvents.some(
+            (row) => row.event.type === "run.updated" && row.event.payload.status === "cancelled",
+          ),
+        );
+      } else if (action === "stop" || action === "buffered-stop") {
+        yield* orchestrator.dispatch({
+          type: "thread.stop",
+          commandId: CommandId.make("fix04:stop"),
+          threadId,
+        });
+      } else if (action === "interrupt-queued") {
+        assert.isTrue(
+          Exit.isFailure(
+            yield* Effect.exit(
+              orchestrator.dispatch({
+                type: "run.interrupt",
+                commandId: CommandId.make("fix04:interrupt"),
+                threadId,
+                runId,
+              }),
+            ),
+          ),
+        );
+      } else if (action === "provider-switch") {
+        yield* orchestrator.dispatch({
+          type: "thread.model-selection.set",
+          commandId: CommandId.make("fix04:select"),
+          threadId,
+          modelSelection: { ...modelSelection, instanceId: alternateInstanceId },
+        });
+      } else if (action === "automatic-settle") {
+        yield* orchestrator.dispatch({
+          type: "thread.settle",
+          commandId: CommandId.make("fix04:settle"),
+          threadId,
+        });
+      } else {
+        yield* (yield* ProviderRuntimeRecoveryService.ProviderRuntimeRecoveryService).reconcile(
+          action === "shutdown" ? "shutdown" : "startup",
+        );
+      }
+      const afterAction = (yield* store.getThreadRecords(threadId, ["runs"])).runs[0]!;
+      assert.equal(
+        afterAction.status,
+        ["queue-cancel", "buffered-stop", "buffered-recovery", "automatic-settle"].includes(action)
+          ? "cancelled"
+          : "queued",
       );
       if (thenArchive) {
         yield* orchestrator.dispatch({

@@ -1913,6 +1913,217 @@ it.effect("resumes after a later batch rolls back without restoring committed ba
   }).pipe(Effect.provide(layerTest)),
 );
 
+const seedCertifiedSideChatRoot = Effect.fn("test.seedCertifiedSideChatRoot")(function* (
+  forkRoot = false,
+) {
+  const sql = yield* SqlClient.SqlClient;
+  const count = ThreadDataReclamation.THREAD_DATA_RECLAMATION_BATCH_SIZE + 1;
+  const threadIds = Array.from(
+    { length: count },
+    (_, index) => `thread:certified:${String(index).padStart(3, "0")}`,
+  );
+  const rootThreadId = threadIds[0]!;
+  const commandId = `delete:${rootThreadId}`;
+  if (forkRoot) {
+    yield* seedThread({ threadId: "thread:certified:live-parent", state: "active" });
+  }
+  const proof = {
+    providerThreadId: "provider-thread:certified:reclaimed",
+    providerInstanceId: "pi",
+    source: "cancelled_queued_runs",
+    runIds: ["run:certified:reclaimed"],
+    attemptIds: ["attempt:certified:reclaimed"],
+    cancelledStartEffectIds: [],
+  };
+  for (const threadId of threadIds) {
+    yield* seedDeletedThread({
+      threadId,
+      rootThreadId,
+      operationRootThreadId: rootThreadId,
+      commandId,
+      ...(threadId === rootThreadId
+        ? forkRoot
+          ? {
+              parentThreadId: "thread:certified:live-parent",
+              relationshipToParent: "fork",
+              sideChat: true,
+            }
+          : {}
+        : {
+            parentThreadId: rootThreadId,
+            relationshipToParent: "fork",
+            sideChat: true,
+            insertReceipt: false,
+          }),
+    });
+    yield* seedRun({ threadId, status: "cancelled" });
+  }
+  // 来源已在先前维护中回收；本夹具验证保留证明的后续批次边界，不验证首次发证。
+  yield* sql`
+    UPDATE orchestration_v2_thread_deletions
+    SET payload_json = ${JSON.stringify({
+      threadId: rootThreadId,
+      projectId: "project:reclamation",
+      parentThreadId: forkRoot ? "thread:certified:live-parent" : null,
+      operationRootThreadId: rootThreadId,
+      deletedAt: at,
+      commandId,
+      scope: "t3_only",
+      sessions: [],
+      noNativeSessionProofs: [proof],
+    })}
+    WHERE thread_id = ${rootThreadId}
+  `;
+  return { rootThreadId, lastThreadId: threadIds.at(-1)!, threadIds, proof };
+});
+
+it.effect.each(["root", "fork-with-live-parent"] as const)(
+  "preserves committed batches of a certified root after a later SQLite failure (%s)",
+  (scenario) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const { lastThreadId, threadIds } = yield* seedCertifiedSideChatRoot(
+        scenario === "fork-with-live-parent",
+      );
+      yield* sql`
+      CREATE TRIGGER reject_certified_second_batch
+      BEFORE DELETE ON orchestration_v2_projection_runs
+      WHEN OLD.thread_id = 'thread:certified:050'
+      BEGIN SELECT RAISE(ABORT, 'injected certified second-batch failure'); END
+    `;
+
+      const failed = yield* Effect.exit(reclaim());
+      assert.isTrue(Exit.isFailure(failed));
+      assert.deepEqual(
+        yield* sql`SELECT thread_id FROM orchestration_v2_projection_runs ORDER BY thread_id`,
+        [{ thread_id: lastThreadId }],
+      );
+
+      yield* sql`DROP TRIGGER reject_certified_second_batch`;
+      const resumed = yield* reclaim();
+      assert.equal(resumed.reclaimedThreadCount, threadIds.length);
+      assert.equal(resumed.deletedProjectionRowCount, 1);
+      assert.deepEqual(resumed.skippedThreads, []);
+      assert.isEmpty(yield* sql`SELECT * FROM orchestration_v2_projection_runs`);
+      assert.lengthOf(
+        yield* sql`SELECT * FROM orchestration_v2_thread_deletions`,
+        threadIds.length,
+      );
+      assert.lengthOf(
+        yield* sql`SELECT * FROM orchestration_v2_projection_threads WHERE deleted_at IS NOT NULL`,
+        threadIds.length,
+      );
+      const repeated = yield* reclaim();
+      assert.equal(repeated.deletedProjectionRowCount, 0);
+      assert.deepEqual(repeated.skippedThreads, []);
+    }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect.each([
+  "late-native-binding",
+  "claimed-start",
+  "cancelled-cleanup",
+  "ineligible-member",
+  "malformed-lineage",
+] as const)("rechecks the whole certified root between committed batches: %s", (scenario) =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const { rootThreadId, lastThreadId, proof } = yield* seedCertifiedSideChatRoot();
+    let transactionDepth = 0;
+    let injected = false;
+    const withTransaction: typeof sql.withTransaction = (effect) =>
+      Effect.gen(function* () {
+        transactionDepth++;
+        let result;
+        try {
+          result = yield* sql.withTransaction(effect);
+        } finally {
+          transactionDepth--;
+        }
+        if (transactionDepth === 0 && !injected) {
+          const remaining = yield* sql<{ readonly thread_id: string }>`
+            SELECT thread_id FROM orchestration_v2_projection_runs ORDER BY thread_id
+          `;
+          if (remaining.length === 1 && remaining[0]?.thread_id === lastThreadId) {
+            injected = true;
+            if (scenario === "late-native-binding") {
+              yield* sql`
+                INSERT INTO orchestration_v2_native_session_bindings (
+                  binding_key, thread_id, provider_thread_id, provider_instance_id, driver,
+                  native_id, storage_type, canonical_root, canonical_file, bound_at, payload_json
+                ) VALUES (
+                  'late:certified', ${rootThreadId}, ${proof.providerThreadId}, 'pi', 'pi',
+                  NULL, 'unresolved', '', '', ${at}, '{}'
+                )
+              `;
+            } else if (scenario === "claimed-start") {
+              yield* sql`
+                INSERT INTO orchestration_v2_effect_outbox (
+                  effect_id, command_id, thread_id, effect_type, payload_json,
+                  status, attempt_count, available_at, created_at, updated_at
+                ) VALUES (
+                  'late:certified:start', 'start:certified', ${rootThreadId}, 'provider-turn.start',
+                  ${JSON.stringify({ runId: proof.runIds[0] })}, 'cancelled', 1, ${at}, ${at}, ${at}
+                )
+              `;
+            } else if (scenario === "cancelled-cleanup") {
+              yield* seedLifecycleCleanup({ threadId: rootThreadId, status: "cancelled" }).pipe(
+                Effect.provideService(SqlClient.SqlClient, sql),
+              );
+            } else if (scenario === "ineligible-member") {
+              yield* sql`
+                UPDATE orchestration_v2_thread_deletions SET command_id = 'delete:unmatched'
+                WHERE thread_id = ${lastThreadId}
+              `;
+            } else {
+              yield* sql`
+                UPDATE orchestration_v2_projection_threads
+                SET payload_json = json_set(payload_json, '$.lineage.sideChat', json('false'))
+                WHERE thread_id = ${lastThreadId}
+              `;
+            }
+          }
+        }
+        return result;
+      });
+    const intercepted = new Proxy(sql, {
+      get(target, key, receiver) {
+        return key === "withTransaction" ? withTransaction : Reflect.get(target, key, receiver);
+      },
+    });
+    const result = yield* reclaim().pipe(
+      Effect.provide(
+        Layer.fresh(
+          ThreadDataReclamation.layer.pipe(
+            Layer.provide(Layer.succeed(SqlClient.SqlClient, intercepted)),
+          ),
+        ),
+      ),
+    );
+
+    assert.isTrue(injected);
+    assert.equal(
+      result.reclaimedThreadCount,
+      ThreadDataReclamation.THREAD_DATA_RECLAMATION_BATCH_SIZE,
+    );
+    assert.equal(
+      result.deletedProjectionRowCount,
+      ThreadDataReclamation.THREAD_DATA_RECLAMATION_BATCH_SIZE,
+    );
+    assert.deepEqual(
+      yield* sql`SELECT thread_id FROM orchestration_v2_projection_runs ORDER BY thread_id`,
+      [{ thread_id: lastThreadId }],
+    );
+    assert.isTrue(
+      result.skippedThreads.some((thread) =>
+        thread.blockerCodes.includes(
+          scenario === "cancelled-cleanup" ? "lifecycle_cleanup" : "unknown_dependency",
+        ),
+      ),
+    );
+  }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect("reclaims cancelled settled outbox rows but preserves lifecycle barriers", () =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;

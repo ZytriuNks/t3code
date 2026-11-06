@@ -298,6 +298,7 @@ const make = Effect.gen(function* () {
       eligibleThreadIds: ReadonlySet<string> = new Set(
         candidates.map((candidate) => candidate.thread_id),
       ),
+      certified = false,
     ) {
       const blockersByThreadId = new Map<string, Set<ThreadDataReclamationBlockerCode>>();
       const addBlocker = (threadId: string, blocker: ThreadDataReclamationBlockerCode) => {
@@ -1532,6 +1533,145 @@ const make = Effect.gen(function* () {
         } satisfies ThreadDataReclamationSummary;
       }
 
+      const internalParentIds = [
+        ...new Set(
+          candidates
+            .filter((candidate) => candidate.relationship_to_parent === "subagent")
+            .map((candidate) => candidate.parent_thread_id)
+            .filter(
+              (threadId): threadId is string =>
+                threadId !== null && eligibleThreadIds.has(threadId),
+            ),
+        ),
+      ];
+      // 父批已清除执行来源后，仅保留的合法 app-owned task 不再占有子 provider。
+      const internalSubagentIds =
+        certified && internalParentIds.length > 0
+          ? (yield* sql<{ readonly subagent_id: string }>`
+            SELECT task.subagent_id
+            FROM orchestration_v2_projection_subagents AS task
+            JOIN orchestration_v2_projection_threads AS child ON child.thread_id = task.child_thread_id
+            JOIN orchestration_v2_projection_threads AS parent ON parent.thread_id = task.thread_id
+            JOIN orchestration_v2_thread_deletions AS child_deletion ON child_deletion.thread_id = child.thread_id
+            JOIN orchestration_v2_thread_deletions AS parent_deletion ON parent_deletion.thread_id = parent.thread_id
+            JOIN orchestration_v2_projection_provider_threads AS provider
+              ON provider.provider_thread_id = task.provider_thread_id AND provider.thread_id = child.thread_id
+            JOIN orchestration_v2_projection_runs AS child_run ON child_run.thread_id = child.thread_id
+              AND (json_extract(child_run.payload_json, '$.delegatedTaskId') = task.subagent_id
+                OR task.subagent_id = json_extract(child.payload_json, '$.forkedFrom.nodeId'))
+            JOIN orchestration_v2_projection_subagents AS original
+              ON original.subagent_id = json_extract(child.payload_json, '$.forkedFrom.nodeId')
+              AND original.thread_id = parent.thread_id AND original.child_thread_id = child.thread_id
+            WHERE task.thread_id IN ${sql.in(internalParentIds)}
+              AND child.thread_id IN ${sql.in(candidateIds)}
+              AND child.deleted_at IS NOT NULL AND parent.deleted_at IS NOT NULL
+              AND child.project_id = parent.project_id
+              AND json_extract(child.payload_json, '$.id') = child.thread_id
+              AND json_extract(parent.payload_json, '$.id') = parent.thread_id
+              AND json_extract(child.payload_json, '$.projectId') = child.project_id
+              AND json_extract(parent.payload_json, '$.projectId') = parent.project_id
+              AND child_deletion.project_id = child.project_id AND parent_deletion.project_id = parent.project_id
+              AND child_deletion.scope = 't3_only' AND parent_deletion.scope = 't3_only'
+              AND child_deletion.operation_root_thread_id = ${batchOperationRootThreadId}
+              AND parent_deletion.operation_root_thread_id = ${batchOperationRootThreadId}
+              AND child_deletion.parent_thread_id = parent.thread_id
+              AND json_extract(child.payload_json, '$.lineage.parentThreadId') = parent.thread_id
+              AND json_extract(child.payload_json, '$.lineage.relationshipToParent') = 'subagent'
+              AND json_extract(child.payload_json, '$.lineage.rootThreadId') = json_extract(parent.payload_json, '$.lineage.rootThreadId')
+              AND json_extract(child.payload_json, '$.forkedFrom.type') = 'node'
+              AND task.origin = 'app_owned' AND original.origin = 'app_owned'
+              AND json_type(original.payload_json, '$.result') = 'text'
+              AND json_extract(original.payload_json, '$.id') = original.subagent_id
+              AND json_extract(original.payload_json, '$.threadId') = original.thread_id
+              AND json_extract(original.payload_json, '$.childThreadId') = original.child_thread_id
+              AND json_extract(original.payload_json, '$.origin') = original.origin
+              AND (
+                json_extract(child_run.payload_json, '$.delegatedTaskId') = task.subagent_id
+                OR (task.subagent_id = original.subagent_id AND EXISTS (
+                  SELECT 1 FROM orchestration_events AS spawn
+                  JOIN orchestration_v2_projection_runs AS spawned_run
+                    ON spawned_run.run_id = json_extract(spawn.payload_json, '$.targetRunId')
+                    AND spawned_run.thread_id = child.thread_id
+                    AND json_extract(spawned_run.payload_json, '$.id') = spawned_run.run_id
+                    AND json_extract(spawned_run.payload_json, '$.threadId') = child.thread_id
+                  WHERE spawn.stream_id = child.thread_id AND spawn.aggregate_kind = 'thread'
+                    AND spawn.application_event_version = 2 AND spawn.event_type = 'context-transfer.created'
+                    AND json_extract(spawn.payload_json, '$.type') = 'subagent_spawn'
+                    AND json_extract(spawn.payload_json, '$.sourceThreadId') = parent.thread_id
+                    AND json_extract(spawn.payload_json, '$.targetThreadId') = child.thread_id
+                    AND json_extract(spawn.payload_json, '$.sourcePoint.threadId') = parent.thread_id
+                    AND json_extract(spawn.payload_json, '$.sourcePoint.runId') = task.run_id
+                    AND json_extract(spawn.payload_json, '$.status') = 'consumed'
+                    AND json_type(spawn.payload_json, '$.consumedAt') = 'text'
+                ))
+              )
+              AND (
+                (child_run.provider_thread_id = task.provider_thread_id
+                  AND child_run.provider_instance_id = provider.provider_instance_id
+                  AND ((task.driver = provider.driver AND task.provider_instance_id = provider.provider_instance_id)
+                    OR json_type(task.payload_json, '$.result') = 'text'))
+                OR EXISTS (
+                  SELECT 1 FROM orchestration_v2_projection_run_attempts AS child_attempt
+                  JOIN orchestration_events AS run_history
+                    ON run_history.stream_id = child.thread_id AND run_history.aggregate_kind = 'thread'
+                    AND run_history.application_event_version = 2 AND run_history.event_type IN ('run.created', 'run.updated')
+                    AND json_extract(run_history.payload_json, '$.id') = child_run.run_id
+                    AND json_extract(run_history.payload_json, '$.threadId') = child.thread_id
+                    AND (json_extract(run_history.payload_json, '$.delegatedTaskId') = task.subagent_id
+                      OR task.subagent_id = original.subagent_id)
+                    AND json_extract(run_history.payload_json, '$.providerThreadId') = task.provider_thread_id
+                    AND json_extract(run_history.payload_json, '$.providerInstanceId') = child_attempt.provider_instance_id
+                    AND json_extract(run_history.payload_json, '$.activeAttemptId') = child_attempt.attempt_id
+                    AND json_extract(run_history.payload_json, '$.rootNodeId') = child_attempt.root_node_id
+                  JOIN orchestration_events AS attempt_created
+                    ON attempt_created.stream_id = child.thread_id AND attempt_created.aggregate_kind = 'thread'
+                    AND attempt_created.application_event_version = 2 AND attempt_created.event_type = 'run-attempt.created'
+                    AND json_extract(attempt_created.payload_json, '$.id') = child_attempt.attempt_id
+                    AND json_extract(attempt_created.payload_json, '$.runId') = child_run.run_id
+                    AND json_extract(attempt_created.payload_json, '$.rootNodeId') = child_attempt.root_node_id
+                    AND json_extract(attempt_created.payload_json, '$.providerThreadId') = task.provider_thread_id
+                    AND json_extract(attempt_created.payload_json, '$.providerInstanceId') = child_attempt.provider_instance_id
+                  JOIN orchestration_events AS provider_history
+                    ON provider_history.stream_id = child.thread_id AND provider_history.aggregate_kind = 'thread'
+                    AND provider_history.application_event_version = 2 AND provider_history.event_type = 'provider-thread.updated'
+                    AND json_extract(provider_history.payload_json, '$.id') = task.provider_thread_id
+                    AND json_extract(provider_history.payload_json, '$.appThreadId') = child.thread_id
+                    AND json_extract(provider_history.payload_json, '$.driver') = provider.driver
+                    AND json_extract(provider_history.payload_json, '$.providerInstanceId') = child_attempt.provider_instance_id
+                  WHERE child_attempt.thread_id = child.thread_id AND child_attempt.run_id = child_run.run_id
+                    AND child_attempt.provider_thread_id = task.provider_thread_id
+                    AND ((task.driver = provider.driver AND child_attempt.provider_instance_id = task.provider_instance_id)
+                      OR json_type(task.payload_json, '$.result') = 'text')
+                    AND json_extract(child_attempt.payload_json, '$.id') = child_attempt.attempt_id
+                    AND json_extract(child_attempt.payload_json, '$.runId') = child_attempt.run_id
+                    AND json_extract(child_attempt.payload_json, '$.rootNodeId') = child_attempt.root_node_id
+                    AND json_extract(child_attempt.payload_json, '$.providerThreadId') = child_attempt.provider_thread_id
+                    AND json_extract(child_attempt.payload_json, '$.providerInstanceId') = child_attempt.provider_instance_id
+                    AND json_extract(child_attempt.payload_json, '$.status') = child_attempt.status
+                )
+              )
+              AND json_extract(provider.payload_json, '$.id') = provider.provider_thread_id
+              AND json_extract(provider.payload_json, '$.appThreadId') = provider.thread_id
+              AND json_extract(provider.payload_json, '$.driver') = provider.driver
+              AND json_extract(provider.payload_json, '$.providerInstanceId') = provider.provider_instance_id
+              AND json_extract(child_run.payload_json, '$.id') = child_run.run_id
+              AND json_extract(child_run.payload_json, '$.threadId') = child_run.thread_id
+              AND json_extract(child_run.payload_json, '$.providerThreadId') = child_run.provider_thread_id
+              AND json_extract(child_run.payload_json, '$.providerInstanceId') = child_run.provider_instance_id
+              AND json_extract(task.payload_json, '$.id') = task.subagent_id
+              AND json_extract(task.payload_json, '$.threadId') = task.thread_id
+              AND json_extract(task.payload_json, '$.runId') = task.run_id
+              AND json_extract(task.payload_json, '$.parentNodeId') = task.parent_node_id
+              AND json_extract(task.payload_json, '$.childThreadId') = task.child_thread_id
+              AND json_extract(task.payload_json, '$.origin') = task.origin
+              AND json_extract(task.payload_json, '$.driver') = task.driver
+              AND json_extract(task.payload_json, '$.providerInstanceId') = task.provider_instance_id
+              AND json_extract(task.payload_json, '$.providerThreadId') = task.provider_thread_id
+              AND json_extract(task.payload_json, '$.status') = task.status
+              AND json_type(task.payload_json, '$.nativeTaskRef') = 'null'
+          `).map((row) => row.subagent_id)
+          : [];
+
       // Closures are preflighted as a unit, then reclaimed in stable ascending-ID chunks.
       const deletionChunks = reclaimableClosures.flatMap((closure) =>
         chunksOf(closure.threadIds, THREAD_DATA_RECLAMATION_BATCH_SIZE).map((threadIds) => {
@@ -1795,6 +1935,18 @@ const make = Effect.gen(function* () {
                 FROM orchestration_v2_projection_subagents AS external_subagent
                 WHERE external_subagent.provider_thread_id = provider_thread.provider_thread_id
                   AND external_subagent.thread_id NOT IN ${sql.in(threadIds)}
+                  AND NOT (
+                    external_subagent.subagent_id IN ${sql.in(internalSubagentIds)}
+                    AND NOT EXISTS (
+                      SELECT 1 FROM orchestration_v2_projection_nodes AS tracking_node
+                      WHERE tracking_node.node_id = external_subagent.subagent_id
+                        OR tracking_node.node_id = external_subagent.parent_node_id
+                    )
+                    AND NOT EXISTS (
+                      SELECT 1 FROM orchestration_v2_projection_runs AS owner
+                      WHERE owner.run_id = external_subagent.run_id
+                    )
+                  )
               )
               AND NOT EXISTS (
                 SELECT 1
@@ -2338,8 +2490,14 @@ const make = Effect.gen(function* () {
 
       const rootIds = roots.map((row) => row.operation_root_thread_id);
       for (const operationRootThreadId of rootIds) {
-        const reclaimRoot = Effect.gen(function* () {
+        const certified = yield* sql`
+          SELECT 1 FROM orchestration_v2_thread_deletions
+          WHERE operation_root_thread_id = ${operationRootThreadId}
+            AND json_array_length(payload_json, '$.noNativeSessionProofs') > 0 LIMIT 1
+        `;
+        const preflightRoot = Effect.gen(function* () {
           const eligibleThreadIds = new Set<string>();
+          const candidateRows: Array<CandidateRow> = [];
           let eligibilityAfterThreadId = "";
           while (true) {
             const candidates = yield* selectCandidateChunk(
@@ -2348,22 +2506,15 @@ const make = Effect.gen(function* () {
               eligibilityAfterThreadId,
             );
             for (const candidate of candidates) eligibleThreadIds.add(candidate.thread_id);
+            candidateRows.push(...candidates);
             if (candidates.length === 0 || candidates.length < THREAD_DATA_RECLAMATION_BATCH_SIZE)
               break;
             eligibilityAfterThreadId = candidates.at(-1)!.thread_id;
           }
 
-          let afterThreadId = "";
           let rootBlocked = false;
 
-          while (true) {
-            const candidates = yield* selectCandidateChunk(
-              input,
-              operationRootThreadId,
-              afterThreadId,
-            );
-            if (candidates.length === 0) break;
-
+          for (const candidates of chunksOf(candidateRows, THREAD_DATA_RECLAMATION_BATCH_SIZE)) {
             const preview = yield* reclaimCandidateBatch(
               input,
               candidates,
@@ -2374,47 +2525,83 @@ const make = Effect.gen(function* () {
               skippedThreads.push(...preview.skippedThreads);
               rootBlocked = true;
             }
-
-            afterThreadId = candidates.at(-1)!.thread_id;
-            if (candidates.length < THREAD_DATA_RECLAMATION_BATCH_SIZE) break;
           }
 
           if (rootBlocked) return;
+          if (certified.length === 0)
+            return { eligibleThreadIds, orderedCandidates: candidateRows };
+          const childrenByParentId = new Map<string, Array<CandidateRow>>();
+          const orderedCandidates = candidateRows.filter(
+            (row) => row.parent_thread_id === null || !eligibleThreadIds.has(row.parent_thread_id),
+          );
+          for (const row of candidateRows) {
+            if (row.parent_thread_id === null || !eligibleThreadIds.has(row.parent_thread_id))
+              continue;
+            const children = childrenByParentId.get(row.parent_thread_id) ?? [];
+            children.push(row);
+            childrenByParentId.set(row.parent_thread_id, children);
+          }
+          for (let index = 0; index < orderedCandidates.length; index++) {
+            for (const child of childrenByParentId.get(orderedCandidates[index]!.thread_id) ?? [])
+              orderedCandidates.push(child);
+          }
+          if (orderedCandidates.length !== candidateRows.length) {
+            for (const row of candidateRows) {
+              skippedThreads.push({
+                threadId: ThreadId.make(row.thread_id),
+                blockerCodes: ["unknown_dependency"],
+              });
+            }
+            return;
+          }
+          return { eligibleThreadIds, orderedCandidates };
+        });
 
-          afterThreadId = "";
-          while (true) {
-            const candidates = yield* selectCandidateChunk(
-              input,
-              operationRootThreadId,
-              afterThreadId,
-            );
-            if (candidates.length === 0) break;
+        const preflight = certified.length === 0 ? yield* preflightRoot : undefined;
+        if (certified.length === 0 && preflight === undefined) continue;
+
+        let afterThreadId = "";
+        const processedThreadIds = new Set<string>();
+        while (true) {
+          const reclaimBatch = Effect.gen(function* () {
+            const currentPreflight = certified.length > 0 ? yield* preflightRoot : preflight;
+            if (currentPreflight === undefined) return;
+            // 父跟踪节点先回收，子证明来源始终保留到其自身批次。
+            const candidates =
+              certified.length > 0
+                ? currentPreflight.orderedCandidates
+                    .filter((candidate) => !processedThreadIds.has(candidate.thread_id))
+                    .slice(0, THREAD_DATA_RECLAMATION_BATCH_SIZE)
+                : yield* selectCandidateChunk(input, operationRootThreadId, afterThreadId);
+            if (candidates.length === 0) return;
 
             const summary = yield* reclaimCandidateBatch(
               input,
               candidates,
               true,
-              eligibleThreadIds,
+              currentPreflight.eligibleThreadIds,
+              certified.length > 0,
             );
-            reclaimedThreadCount += summary.reclaimedThreadCount;
-            skippedThreads.push(...summary.skippedThreads);
-            deletedEventCount += summary.deletedEventCount;
-            deletedReceiptCount += summary.deletedReceiptCount;
-            deletedProjectionRowCount += summary.deletedProjectionRowCount;
-            deletedTurnItemPositionCount += summary.deletedTurnItemPositionCount;
-            deletedOutboxCount += summary.deletedOutboxCount;
+            return { candidates, summary };
+          });
+          // 带证明的每批 DELETE 与整个根的最新资格、闭包及证明复核共用写事务。
+          const result = yield* certified.length > 0
+            ? sql.withTransaction(reclaimBatch)
+            : reclaimBatch;
+          if (result === undefined) break;
+          const { candidates, summary } = result;
+          for (const candidate of candidates) processedThreadIds.add(candidate.thread_id);
+          reclaimedThreadCount += summary.reclaimedThreadCount;
+          skippedThreads.push(...summary.skippedThreads);
+          deletedEventCount += summary.deletedEventCount;
+          deletedReceiptCount += summary.deletedReceiptCount;
+          deletedProjectionRowCount += summary.deletedProjectionRowCount;
+          deletedTurnItemPositionCount += summary.deletedTurnItemPositionCount;
+          deletedOutboxCount += summary.deletedOutboxCount;
 
-            afterThreadId = candidates.at(-1)!.thread_id;
-            if (candidates.length < THREAD_DATA_RECLAMATION_BATCH_SIZE) break;
-          }
-        });
-        const certified = yield* sql`
-          SELECT 1 FROM orchestration_v2_thread_deletions
-          WHERE operation_root_thread_id = ${operationRootThreadId}
-            AND json_array_length(payload_json, '$.noNativeSessionProofs') > 0 LIMIT 1
-        `;
-        // no-native 的完整预检与该 operation root 的全部 DELETE 共用事务，禁止迟到身份穿过批次间隙。
-        yield* certified.length > 0 ? sql.withTransaction(reclaimRoot) : reclaimRoot;
+          afterThreadId = candidates.at(-1)!.thread_id;
+          if (candidates.length < THREAD_DATA_RECLAMATION_BATCH_SIZE) break;
+        }
       }
       lastOperationRootId = rootIds.at(-1)!;
       if (roots.length < THREAD_DATA_RECLAMATION_BATCH_SIZE) break;
