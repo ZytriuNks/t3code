@@ -446,6 +446,10 @@ it.effect.each([
         version: 1,
         state: "unstarted",
       });
+      assert.deepEqual(JSON.parse(persisted[0]!.payload_json).nativeBindingOrigin, {
+        version: 1,
+        kind: "server_placeholder",
+      });
       assert.deepNestedPropertyVal(
         queued.storedEvents.find(
           (row) =>
@@ -454,6 +458,15 @@ it.effect.each([
         ),
         "event.payload.nativeSessionOrigin",
         { version: 1, state: "unstarted" },
+      );
+      assert.deepNestedPropertyVal(
+        queued.storedEvents.find(
+          (row) =>
+            row.event.type === "provider-thread.updated" &&
+            row.event.payload.id === providerThreadId,
+        ),
+        "event.nativeBindingSource",
+        { version: 1, kind: "pre_native_pending" },
       );
       if (!["stop", "buffered-stop", "interrupt-queued", "provider-switch"].includes(action)) {
         yield* orchestrator.dispatch({

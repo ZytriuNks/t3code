@@ -46,10 +46,27 @@ export const make = Effect.gen(function* () {
       ) {
         return { type: "unresolved", reason: "unavailable" };
       }
-      const canonicalFile =
+      const realFile =
         file === undefined
           ? undefined
-          : normalizeProjectPathForComparison(yield* fs.realPath(path.resolve(file)));
+          : yield* fs
+              .realPath(path.resolve(file))
+              .pipe(Effect.catchReason("PlatformError", "NotFound", () => Effect.void));
+      let canonicalFile =
+        realFile === undefined ? undefined : normalizeProjectPathForComparison(realFile);
+      if (file !== undefined && realFile === undefined) {
+        // Pi creates the session file on its first turn, after reporting its absolute locator.
+        const parent = yield* fs.realPath(path.dirname(path.resolve(file)));
+        if (!path.isAbsolute(parent) || (yield* fs.stat(parent)).type !== "Directory") {
+          return { type: "unresolved", reason: "unavailable" };
+        }
+        const leafIsMissing = yield* fs.readLink(path.resolve(file)).pipe(
+          Effect.as(false),
+          Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed(true)),
+        );
+        if (!leafIsMissing) return { type: "unresolved", reason: "unavailable" };
+        canonicalFile = normalizeProjectPathForComparison(path.join(parent, path.basename(file)));
+      }
       const canonicalRoot = normalizeProjectPathForComparison(
         yield* fs.realPath(
           path.resolve(
@@ -57,6 +74,18 @@ export const make = Effect.gen(function* () {
           ),
         ),
       );
+      if (realFile === undefined && canonicalFile !== undefined) {
+        const relative = path.relative(canonicalRoot, canonicalFile);
+        if (
+          !path.isAbsolute(canonicalRoot) ||
+          relative.length === 0 ||
+          path.isAbsolute(relative) ||
+          relative === ".." ||
+          relative.startsWith(`..${path.sep}`)
+        ) {
+          return { type: "unresolved", reason: "unavailable" };
+        }
+      }
       return {
         type: "resolved",
         canonicalRoot,

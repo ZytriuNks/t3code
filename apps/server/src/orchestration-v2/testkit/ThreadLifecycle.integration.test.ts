@@ -379,6 +379,7 @@ const makeRealPiProviderInstance = Effect.fn("test.makeRealPiProviderInstance")(
   readonly closeEntered: Deferred.Deferred<void>;
   readonly closeRelease: Deferred.Deferred<void>;
   readonly closeCompleted: Deferred.Deferred<void>;
+  readonly onPrompt?: () => Effect.Effect<void>;
 }) {
   const requests: Array<Record<string, unknown>> = [];
   const deleteCalls: Array<ProviderAdapter.ProviderAdapterV2DeleteNativeThreadInput> = [];
@@ -434,6 +435,9 @@ const makeRealPiProviderInstance = Effect.fn("test.makeRealPiProviderInstance")(
                   "switch_session",
                   "get_entries",
                   "get_messages",
+                  "get_session_stats",
+                  "prompt",
+                  "set_session_name",
                 ].includes(String(type))
               )
                 return yield* Effect.die(`Unexpected Pi RPC command: ${String(type)}`);
@@ -453,13 +457,33 @@ const makeRealPiProviderInstance = Effect.fn("test.makeRealPiProviderInstance")(
                         ? { messages: [] }
                         : type === "get_commands"
                           ? { commands: [] }
-                          : { cancelled: false };
+                          : type === "get_session_stats"
+                            ? {}
+                            : { cancelled: false };
               yield* Queue.offer(
                 stdout,
                 new TextEncoder().encode(
                   `${encodePiRpcRecord({ type: "response", id: record["id"], command: type, success: true, data })}\n`,
                 ),
               );
+              if (type === "prompt") {
+                if (input.onPrompt !== undefined) yield* input.onPrompt();
+                yield* Queue.offerAll(
+                  stdout,
+                  [
+                    { type: "agent_start" },
+                    {
+                      type: "message_end",
+                      message: {
+                        role: "assistant",
+                        content: [{ type: "text", text: "Lifecycle fixture completed" }],
+                        stopReason: "stop",
+                      },
+                    },
+                    { type: "agent_settled" },
+                  ].map((event) => new TextEncoder().encode(`${encodePiRpcRecord(event)}\n`)),
+                );
+              }
             }
           }),
         ),
@@ -512,6 +536,9 @@ const makeRealPiProviderInstance = Effect.fn("test.makeRealPiProviderInstance")(
   return {
     requests,
     deleteCalls,
+    childExited: Effect.suspend(() =>
+      piExit === null ? Effect.succeed(false) : Deferred.isDone(piExit),
+    ),
     instance: {
       ...input.base,
       instanceId,
@@ -600,6 +627,416 @@ const dispatch = Effect.fn("task8.message")(function* (threadId: ThreadId, suffi
     creationSource: "web",
   });
 });
+
+it.effect.each([
+  { name: "lazy direct delete", lazy: true, detach: false, resume: false },
+  { name: "existing client detach", lazy: false, detach: true, resume: false },
+  { name: "lazy client detach", lazy: true, detach: true, resume: false },
+  { name: "existing resume direct delete", lazy: false, detach: false, resume: true },
+  {
+    name: "lazy concurrent client close",
+    lazy: true,
+    detach: false,
+    resume: false,
+    concurrentClose: true,
+  },
+])("deletes the real Pi session through lifecycle cleanup: $name", (scenario) =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      yield* TestClock.setTime(DateTime.toEpochMillis(now));
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pi-fix06-" });
+      const sessionFile = path.join(root, "session.jsonl");
+      const siblingFile = path.join(root, "sibling.jsonl");
+      const contents = "private Pi lifecycle transcript";
+      yield* fs.writeFileString(siblingFile, "unrelated session");
+      if (!scenario.lazy) yield* fs.writeFileString(sessionFile, contents);
+      assert.isTrue(path.isAbsolute(sessionFile));
+      assert.isTrue(yield* fs.exists(path.dirname(sessionFile)));
+      assert.equal(yield* fs.exists(sessionFile), !scenario.lazy);
+      const threadId = ThreadId.make(`fix06:${scenario.name}`);
+      const piInstanceId = ProviderInstanceId.make("task8-pi");
+      const piDriver = ProviderDriverKind.make("pi");
+      const selection = { instanceId: piInstanceId, model: "default" };
+      const closeEntered = yield* Deferred.make<void>();
+      const closeRelease = yield* Deferred.make<void>();
+      const closeCompleted = yield* Deferred.make<void>();
+      const prompted = yield* Deferred.make<void>();
+      const pauseClose = yield* Ref.make(false);
+      const baseProvider = makeProvider();
+      const pi = yield* makeRealPiProviderInstance({
+        base: baseProvider.instance,
+        sessionFile,
+        pauseClose,
+        closeEntered,
+        closeRelease,
+        closeCompleted,
+        onPrompt: () =>
+          Effect.gen(function* () {
+            assert.equal(yield* fs.exists(sessionFile), !scenario.lazy);
+            if (scenario.lazy) yield* fs.writeFileString(sessionFile, contents);
+            yield* Deferred.succeed(prompted, undefined);
+          }).pipe(Effect.orDie),
+      });
+      yield* Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const events = yield* EventStore.EventStoreV2;
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const bindings = yield* NativeSessionBindings.NativeSessionBindings;
+        const records = yield* ThreadDeletionRecords.ThreadDeletionRecords;
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        const projects = yield* ProjectStore.ProjectStoreV2;
+        yield* projects.apply({
+          sequence: 0,
+          eventId: EventId.make(`${threadId}:project`),
+          aggregateKind: "project",
+          aggregateId: projectId,
+          occurredAt: DateTime.formatIso(now),
+          commandId: null,
+          causationEventId: null,
+          correlationId: null,
+          metadata: {},
+          type: "project.created",
+          payload: {
+            projectId,
+            title: "Pi lifecycle fixture",
+            workspaceRoot: root,
+            defaultModelSelection: null,
+            scripts: [],
+            createdAt: DateTime.formatIso(now),
+            updatedAt: DateTime.formatIso(now),
+          },
+        });
+        yield* create(threadId, selection);
+        const source = yield* orchestrator.resolveLifecycleSource(threadId);
+        const startCommandId = CommandId.make(`${threadId}:message`);
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: startCommandId,
+          threadId,
+          messageId: MessageId.make(`${threadId}:message`),
+          text: "Create the private session transcript",
+          attachments: [],
+          dispatchMode: { type: "start_immediately" },
+          createdBy: "user",
+          creationSource: "web",
+        });
+        const plannedProjection = yield* store.getThreadRecords(threadId, [
+          "providerThreads",
+          "runs",
+        ]);
+        assert.lengthOf(plannedProjection.providerThreads, 1);
+        assert.lengthOf(plannedProjection.runs, 1);
+        const planned = plannedProjection.providerThreads[0]!;
+        const run = plannedProjection.runs[0]!;
+        const providerThreadId = planned.id;
+        assert.isNotNull(planned.providerSessionId);
+        const providerSessionId = planned.providerSessionId!;
+        assert.equal(planned.firstRunOrdinal, run.ordinal);
+        assert.equal(planned.lastRunOrdinal, run.ordinal);
+        assert.isNull(planned.nativeThreadRef);
+        assert.deepEqual(planned.nativeBindingOrigin, {
+          version: 1,
+          kind: "server_placeholder",
+        });
+        const plannedEvents = yield* events.readByCommandId({ commandId: startCommandId }).pipe(
+          Stream.filter((stored) => stored.event.type === "provider-thread.updated"),
+          Stream.runCollect,
+        );
+        assert.isNotEmpty(plannedEvents);
+        for (const stored of plannedEvents) {
+          assert.nestedPropertyVal(stored, "event.payload.id", providerThreadId);
+          assert.deepNestedPropertyVal(stored, "event.nativeBindingSource", {
+            version: 1,
+            kind: "pre_native_pending",
+          });
+        }
+        assert.isEmpty(yield* bindings.listForThreads([threadId]));
+        assert.isFalse(yield* sessions.isLive(providerSessionId));
+        assert.isEmpty(pi.requests);
+        assert.equal(yield* fs.exists(sessionFile), !scenario.lazy);
+        const terminal = yield* orchestrator
+          .streamStoredEventsFrom({
+            threadId,
+            eventType: "run.updated",
+          })
+          .pipe(
+            Stream.filter(
+              (stored) =>
+                stored.event.type === "run.updated" &&
+                stored.event.payload.id === run.id &&
+                ["waiting", "completed", "failed"].includes(stored.event.payload.status),
+            ),
+            Stream.take(1),
+            Stream.runCollect,
+            Effect.forkScoped,
+          );
+        assert.isAbove(yield* worker.drain(), 0);
+        yield* Deferred.await(prompted);
+        const terminalEvents = yield* Fiber.join(terminal);
+        assert.lengthOf(terminalEvents, 1);
+        assert.notNestedPropertyVal(terminalEvents[0]!, "event.payload.status", "failed");
+        yield* worker.drain();
+        const completed = yield* store.getThreadRecords(threadId, [
+          "providerThreads",
+          "providerTurns",
+          "runs",
+        ]);
+        assert.equal(completed.runs[0]!.status, "completed");
+        assert.lengthOf(completed.providerTurns, 1);
+        assert.equal(completed.providerTurns[0]!.status, "completed");
+        const native = completed.providerThreads[0]!;
+        assert.equal(native.id, providerThreadId);
+        assert.equal(native.nativeThreadRef?.nativeId, sessionFile);
+        const nativeEvents = yield* events
+          .read({ threadId, eventType: "provider-thread.updated" })
+          .pipe(
+            Stream.filter(
+              (stored) =>
+                stored.event.type === "provider-thread.updated" &&
+                stored.event.payload.nativeThreadRef !== null,
+            ),
+            Stream.runCollect,
+          );
+        assert.isNotEmpty(nativeEvents);
+        for (const stored of nativeEvents) {
+          assert.notNestedProperty(stored, "event.nativeBindingSource");
+          assert.nestedPropertyVal(stored, "event.payload.nativeThreadRef.nativeId", sessionFile);
+        }
+        const runtime = Option.getOrThrow(yield* sessions.get(providerSessionId));
+        if (scenario.resume) {
+          const resumed = yield* runtime.resumeThread({ threadId, providerThread: native });
+          assert.equal(resumed.id, providerThreadId);
+          assert.equal(resumed.nativeThreadRef?.nativeId, sessionFile);
+          assert.isTrue(
+            pi.requests.some(
+              (request) =>
+                request["type"] === "switch_session" && request["sessionPath"] === sessionFile,
+            ),
+          );
+        }
+        assert.lengthOf(
+          pi.requests.filter((request) => request["type"] === "prompt"),
+          1,
+        );
+        assert.equal(yield* fs.readFileString(sessionFile), contents);
+        assert.isTrue(yield* sessions.isLive(providerSessionId), "live before cleanup");
+        assert.isFalse(yield* pi.childExited);
+        assert.isFalse(yield* Deferred.isDone(closeCompleted));
+        const persistedBindings = yield* bindings.listForThreads([threadId]);
+        assert.lengthOf(persistedBindings, 1);
+        for (const binding of persistedBindings) {
+          assert.equal(binding.nativeId, sessionFile);
+          assert.equal(binding.providerThreadId, providerThreadId);
+          assert.equal(binding.providerInstanceId, piInstanceId);
+          assert.deepEqual(binding.storage, native.nativeStorage);
+        }
+        if (scenario.detach) {
+          const commandId = CommandId.make(`${threadId}:client-detach`);
+          yield* orchestrator.dispatch({
+            type: "provider-session.detach",
+            commandId,
+            threadId,
+            providerSessionId,
+            reason: "client-requested",
+          });
+          assert.isAbove(yield* worker.drain(), 0);
+          const effects = yield* outbox.listByCommandId(commandId);
+          assert.lengthOf(effects, 1);
+          assert.equal(effects[0]!.status, "succeeded", effects[0]!.lastError ?? undefined);
+          assert.nestedPropertyVal(effects[0]!, "request.detail", "client-requested");
+          yield* Deferred.await(closeCompleted);
+          assert.isTrue(yield* pi.childExited);
+          assert.isFalse(yield* sessions.isLive(providerSessionId));
+          assert.isTrue(yield* fs.exists(sessionFile));
+        }
+        assert.isTrue(
+          (yield* store.getProviderAttachmentSources(threadId)).some(
+            (attachment) =>
+              attachment.providerSessionId === providerSessionId &&
+              attachment.lifecycleRevision === source.lifecycleRevision &&
+              attachment.sourceToken === source.sourceToken,
+          ),
+        );
+        const commandId = CommandId.make(`${threadId}:delete`);
+        yield* orchestrator.dispatch({ type: "thread.delete", commandId, threadId });
+        const deletion = Option.getOrThrow(yield* records.get(threadId));
+        assert.deepEqual(deletion.sessions, persistedBindings);
+        assert.equal(deletion.commandId, commandId);
+        assert.equal(deletion.scope, "t3_only");
+        assert.isNotNull((yield* store.getThread(threadId)).deletedAt);
+        assert.equal(
+          yield* bindings.checkImport({
+            driver: piDriver,
+            providerInstanceId: piInstanceId,
+            nativeId: sessionFile,
+            storage: native.nativeStorage!,
+          }),
+          "deleted",
+        );
+        const effects = yield* outbox.listByCommandId(commandId);
+        const retirement = effects.find(
+          (effect) => effect.request.type === "provider-session.detach",
+        );
+        assert.isDefined(retirement);
+        assert.nestedPropertyVal(
+          retirement!,
+          "request.retirementRevision",
+          source.lifecycleRevision,
+        );
+        assert.nestedPropertyVal(retirement!, "request.retirementSourceToken", source.sourceToken);
+        const nativeDelete = effects.find(
+          (effect) =>
+            effect.request.type === "provider-thread.delete" &&
+            effect.request.nativeId === sessionFile,
+        );
+        assert.isDefined(nativeDelete);
+        assert.deepEqual(
+          nativeDelete!.request.type === "provider-thread.delete"
+            ? nativeDelete!.request.nativeStorage
+            : null,
+          native.nativeStorage,
+        );
+        if ("concurrentClose" in scenario) {
+          const readReached = yield* Deferred.make<void>();
+          const readRelease = yield* Deferred.make<void>();
+          const originalRead = store.getThreadRecords;
+          let armed = true;
+          const pausedRead: typeof originalRead = (targetId, fields, filter) =>
+            Effect.gen(function* () {
+              if (
+                armed &&
+                targetId === threadId &&
+                fields.some((field) => field === "providerTurns") &&
+                fields.some((field) => field === "runs")
+              ) {
+                armed = false;
+                yield* Deferred.succeed(readReached, undefined);
+                yield* Deferred.await(readRelease);
+              }
+              return yield* originalRead(targetId, fields, filter);
+            });
+          const blocked = yield* Effect.gen(function* () {
+            yield* Ref.set(pauseClose, true);
+            Object.defineProperty(store, "getThreadRecords", { value: pausedRead });
+            const draining = yield* worker.drain().pipe(Effect.forkScoped);
+            yield* Deferred.await(readReached);
+            const ordinaryClose = yield* sessions
+              .detach({ threadId, providerSessionId, detail: "client-requested" })
+              .pipe(Effect.forkScoped);
+            yield* Deferred.await(closeEntered);
+            assert.isFalse(yield* sessions.isLive(providerSessionId));
+            yield* Deferred.succeed(readRelease, undefined);
+            assert.isAbove(yield* Fiber.join(draining), 0);
+            const retirementEffect = Option.getOrThrow(yield* outbox.get(retirement!.id));
+            const deleteEffect = Option.getOrThrow(yield* outbox.get(nativeDelete!.id));
+            return {
+              ordinaryClose,
+              retirementEffect,
+              deleteEffect,
+              state: {
+                fileExists: yield* fs.exists(sessionFile),
+                childExited: yield* pi.childExited,
+                closeCompleted: yield* Deferred.isDone(closeCompleted),
+                retirement: retirementEffect.status,
+                nativeDelete: deleteEffect.status,
+                attempts: [retirementEffect.attemptCount, deleteEffect.attemptCount],
+                succeededReceipt: (yield* outbox.attachmentRetirements(threadId)).some(
+                  (receipt) =>
+                    receipt.effectId === retirement!.id && receipt.status === "succeeded",
+                ),
+                deleteCalls: pi.deleteCalls.length,
+              },
+            };
+          }).pipe(
+            Effect.ensuring(
+              Effect.gen(function* () {
+                Object.defineProperty(store, "getThreadRecords", { value: originalRead });
+                yield* Deferred.succeed(readRelease, undefined);
+                yield* Ref.set(pauseClose, false);
+                yield* Deferred.succeed(closeRelease, undefined);
+              }),
+            ),
+          );
+          yield* Fiber.join(blocked.ordinaryClose);
+          yield* Deferred.await(closeCompleted);
+          assert.isTrue(yield* pi.childExited);
+          assert.deepEqual(blocked.state, {
+            fileExists: true,
+            childExited: false,
+            closeCompleted: false,
+            retirement: "pending",
+            nativeDelete: "pending",
+            attempts: [1, 0],
+            succeededReceipt: false,
+            deleteCalls: 0,
+          });
+          yield* TestClock.setTime(
+            Math.max(
+              DateTime.toEpochMillis(DateTime.makeUnsafe(blocked.retirementEffect.availableAt)),
+              DateTime.toEpochMillis(DateTime.makeUnsafe(blocked.deleteEffect.availableAt)),
+            ),
+          );
+        }
+        assert.isAbove(yield* worker.drain(), 0);
+        const completedRetirement = Option.getOrThrow(yield* outbox.get(retirement!.id));
+        const completedDelete = Option.getOrThrow(yield* outbox.get(nativeDelete!.id));
+        if (completedRetirement.status !== "succeeded" || completedDelete.status !== "succeeded") {
+          assert.isTrue(yield* fs.exists(sessionFile));
+          assert.isEmpty(pi.deleteCalls);
+        }
+        assert.equal(
+          completedRetirement.status,
+          "succeeded",
+          completedRetirement.lastError ?? undefined,
+        );
+        assert.equal(completedDelete.status, "succeeded", completedDelete.lastError ?? undefined);
+        assert.equal(completedRetirement.attemptCount, "concurrentClose" in scenario ? 2 : 1);
+        assert.equal(completedDelete.attemptCount, 1);
+        yield* Deferred.await(closeCompleted);
+        assert.isTrue(yield* pi.childExited);
+        assert.isFalse(yield* fs.exists(sessionFile));
+        assert.equal(yield* fs.readFileString(siblingFile), "unrelated session");
+        assert.lengthOf(pi.deleteCalls, 1);
+        assert.deepEqual(pi.deleteCalls[0]!.providerThread.nativeStorage, native.nativeStorage);
+        assert.isTrue(
+          (yield* outbox.attachmentRetirements(threadId)).some(
+            (receipt) =>
+              receipt.status === "succeeded" &&
+              receipt.effectId === retirement!.id &&
+              receipt.providerSessionId === providerSessionId &&
+              receipt.retirementRevision === source.lifecycleRevision &&
+              receipt.retirementSourceToken === source.sourceToken &&
+              receipt.lifecycleCommandId === commandId &&
+              receipt.lifecycleRootThreadId === threadId,
+          ),
+        );
+        assert.equal(
+          yield* bindings.checkImport({
+            driver: piDriver,
+            providerInstanceId: piInstanceId,
+            nativeId: sessionFile,
+            storage: native.nativeStorage!,
+          }),
+          "deleted",
+        );
+      }).pipe(
+        Effect.provide(
+          Layer.fresh(makeRuntime(SqlitePersistence.layerMemory, makeProvider([pi.instance]))),
+        ),
+      );
+    }).pipe(
+      Effect.provide(
+        ServerConfig.layerTest(process.cwd(), { prefix: "fix06-pi-lifecycle-" }).pipe(
+          Layer.provideMerge(NodeServices.layer),
+        ),
+      ),
+    ),
+  ),
+);
 
 it.effect(
   "re-retires a child Pi session after parent archive before delete drains and recovers its outbox effect",

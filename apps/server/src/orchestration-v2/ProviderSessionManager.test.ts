@@ -365,6 +365,11 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
     readonly interruptTurn?: Effect.Effect<void>;
     readonly beforeUnload?: Effect.Effect<void>;
     readonly confirmsRetirement?: boolean;
+    readonly confirmsSessionRetirement?: boolean;
+    readonly beforeScopeClose?: (input: {
+      readonly providerSessionId: ProviderSessionId;
+      readonly generation: number;
+    }) => Effect.Effect<void>;
     readonly spawnBeforeOpen?: boolean;
     readonly scopeCloseReached?: Deferred.Deferred<void>;
     readonly finishScopeClose?: Deferred.Deferred<void>;
@@ -372,18 +377,6 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
   } = {},
 ) {
   const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
-  const countClose = Effect.addFinalizer(() =>
-    Ref.update(state, (current) => ({
-      ...current,
-      closeCount: current.closeCount + 1,
-    })).pipe(
-      Effect.andThen(
-        options.scopeClosed === undefined
-          ? Effect.void
-          : Deferred.succeed(options.scopeClosed, undefined),
-      ),
-    ),
-  );
   // Register after countClose to wedge teardown before its finalizer, matching a provider stream that never yields.
   const hangClose = Effect.addFinalizer(() =>
     (options.scopeCloseReached === undefined
@@ -404,6 +397,25 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
     planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" }),
     openSession: (input) =>
       Effect.gen(function* () {
+        const closeInput = {
+          providerSessionId: input.providerSessionId,
+          generation: (yield* Ref.get(state)).openCount + 1,
+        };
+        const countClose = Effect.addFinalizer(() =>
+          (options.beforeScopeClose?.(closeInput) ?? Effect.void).pipe(
+            Effect.andThen(
+              Ref.update(state, (current) => ({
+                ...current,
+                closeCount: current.closeCount + 1,
+              })),
+            ),
+            Effect.andThen(
+              options.scopeClosed === undefined
+                ? Effect.void
+                : Deferred.succeed(options.scopeClosed, undefined),
+            ),
+          ),
+        );
         if (options.spawnBeforeOpen === true) {
           yield* countClose;
           if (options.hangSessionScopeClose === true) yield* hangClose;
@@ -443,6 +455,9 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
         return {
           instanceId: ProviderInstanceId.make("codex"),
           supportsConfirmedThreadRetirement: options.confirmsRetirement ?? true,
+          ...(options.confirmsSessionRetirement === true
+            ? { supportsConfirmedSessionRetirement: true as const }
+            : {}),
           driver: CODEX_DRIVER,
           providerSessionId: input.providerSessionId,
           providerSession: session,
@@ -535,6 +550,11 @@ function layerTest(input: {
   readonly interruptTurn?: Effect.Effect<void>;
   readonly beforeUnload?: Effect.Effect<void>;
   readonly confirmsRetirement?: boolean;
+  readonly confirmsSessionRetirement?: boolean;
+  readonly beforeScopeClose?: (input: {
+    readonly providerSessionId: ProviderSessionId;
+    readonly generation: number;
+  }) => Effect.Effect<void>;
   readonly spawnBeforeOpen?: boolean;
   readonly scopeCloseReached?: Deferred.Deferred<void>;
   readonly finishScopeClose?: Deferred.Deferred<void>;
@@ -576,6 +596,10 @@ function layerTest(input: {
       ...(input.confirmsRetirement === undefined
         ? {}
         : { confirmsRetirement: input.confirmsRetirement }),
+      ...(input.confirmsSessionRetirement === undefined
+        ? {}
+        : { confirmsSessionRetirement: input.confirmsSessionRetirement }),
+      ...(input.beforeScopeClose === undefined ? {} : { beforeScopeClose: input.beforeScopeClose }),
       ...(input.spawnBeforeOpen === undefined ? {} : { spawnBeforeOpen: input.spawnBeforeOpen }),
       ...(input.scopeCloseReached === undefined
         ? {}
@@ -5114,6 +5138,683 @@ it.effect.each(["succeeded", "failed"] as const)(
           assert.equal((yield* Ref.get(state)).openCount, 2);
         }
       }).pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 60000, beforeUnload })));
+    }),
+);
+
+const prepareConfirmedSessionRetirement = Effect.fn("test.prepareConfirmedSessionRetirement")(
+  function* (name: string) {
+    const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+    const sink = yield* EventSink.EventSinkV2;
+    const ids = yield* IdAllocator.IdAllocatorV2;
+    const guards = yield* ThreadLifecycleGuard.ThreadLifecycleGuard;
+    const outbox = yield* EffectOutbox.EffectOutboxV2;
+    const now = yield* DateTime.now;
+    const threadId = ThreadId.make(name);
+    const created = yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now });
+    yield* sink.write({ events: [created] });
+    const providerSessionId = ids.derive.providerSession({
+      providerInstanceId: modelSelection.instanceId,
+    });
+    const runtime = yield* manager.open({
+      threadId,
+      providerSessionId,
+      modelSelection,
+      runtimePolicy,
+    });
+    const source = yield* guards.resolveLifecycleSource(threadId);
+    const native = makeProviderThread({ idAllocator: ids, threadId, providerSessionId, now });
+    yield* sink.write({
+      lifecycleGuard: source,
+      events: [
+        {
+          id: yield* ids.allocate.event({ threadId }),
+          type: "provider-thread.updated",
+          threadId,
+          occurredAt: now,
+          payload: native,
+        },
+      ],
+    });
+    yield* runtime.resumeThread({ threadId, providerThread: native });
+    return {
+      manager,
+      sink,
+      ids,
+      guards,
+      outbox,
+      now,
+      created,
+      threadId,
+      providerSessionId,
+      source,
+      retirement: {
+        threadId,
+        providerSessionId,
+        retirementRevision: source.lifecycleRevision,
+        retirementSourceToken: source.sourceToken,
+      },
+    };
+  },
+);
+
+const persistConfirmedSessionRetirement = Effect.fn("test.persistConfirmedSessionRetirement")(
+  function* (
+    effectId: string,
+    input: {
+      readonly threadId: ThreadId;
+      readonly providerSessionId: ProviderSessionId;
+      readonly retirementRevision: number;
+      readonly retirementSourceToken: string;
+    },
+  ) {
+    const outbox = yield* EffectOutbox.EffectOutboxV2;
+    const { threadId, ...request } = input;
+    yield* outbox.enqueue([
+      {
+        id: effectId,
+        commandId: CommandId.make(effectId),
+        threadId,
+        request: { type: "provider-session.detach", ...request },
+      },
+    ]);
+    yield* Effect.gen(function* () {
+      assert.equal(yield* (yield* EffectWorker.OrchestrationEffectWorkerV2).drain(), 1);
+    }).pipe(Effect.provide(layerRetirementWorker));
+    const receipt = yield* outbox.get(effectId);
+    assert.isTrue(Option.isSome(receipt));
+    return Option.getOrThrow(receipt);
+  },
+);
+
+it.effect(
+  "lifecycle confirmed native client detach preserves exact exit until worker retirement",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      yield* Effect.gen(function* () {
+        const { manager, threadId, providerSessionId, source, outbox, retirement } =
+          yield* prepareConfirmedSessionRetirement("confirmed-client-detach");
+        yield* manager.detach({ threadId, providerSessionId, detail: "client-requested" });
+        assert.isFalse(yield* manager.isLive(providerSessionId));
+        assert.equal((yield* Ref.get(state)).closeCount, 1);
+        assert.isEmpty((yield* Ref.get(state)).unloadedNativeThreadIds);
+        assert.isEmpty(yield* outbox.attachmentRetirements(threadId));
+        // A new manager shares SQLite but has no process-local exit evidence.
+        yield* Effect.gen(function* () {
+          const restarted = yield* ProviderSessionManager.ProviderSessionManagerV2;
+          const result = yield* restarted.detach(retirement).pipe(Effect.exit);
+          assert.isTrue(Exit.isFailure(result));
+          if (Exit.isFailure(result))
+            assert.include(Cause.pretty(result.cause), "retirement_unconfirmed");
+        }).pipe(
+          Effect.provide(
+            Layer.fresh(ProviderSessionManager.layerWithOptions({ idleTimeoutMs: 60000 })),
+          ),
+        );
+        const receipt = yield* persistConfirmedSessionRetirement(
+          "confirmed-client-detach:retirement",
+          retirement,
+        );
+        assert.equal(receipt.status, "succeeded", receipt.lastError ?? undefined);
+        assert.deepEqual(
+          (yield* outbox.attachmentRetirements(threadId)).map((receipt) => ({
+            providerSessionId: receipt.providerSessionId,
+            retirementRevision: receipt.retirementRevision,
+            retirementSourceToken: receipt.retirementSourceToken,
+            status: receipt.status,
+          })),
+          [
+            {
+              providerSessionId,
+              retirementRevision: source.lifecycleRevision,
+              retirementSourceToken: source.sourceToken,
+              status: "succeeded",
+            },
+          ],
+        );
+        yield* Effect.gen(function* () {
+          yield* (yield* ProviderSessionManager.ProviderSessionManagerV2).detach(retirement);
+        }).pipe(
+          Effect.provide(
+            Layer.fresh(ProviderSessionManager.layerWithOptions({ idleTimeoutMs: 60000 })),
+          ),
+        );
+      }).pipe(
+        Effect.provide(
+          layerTest({
+            state,
+            idleTimeoutMs: 60000,
+            capabilities: ExclusiveCapabilities,
+            confirmsSessionRetirement: true,
+          }),
+        ),
+      );
+    }),
+);
+
+it.effect.each(["no-session-guarantee", "failed-close"] as const)(
+  "lifecycle ordinary native detach cannot prove retirement after %s",
+  (outcome) =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      yield* Effect.gen(function* () {
+        const { manager, threadId, providerSessionId, retirement } =
+          yield* prepareConfirmedSessionRetirement(`ordinary-native-detach:${outcome}`);
+        const detached = yield* manager
+          .detach({ threadId, providerSessionId, detail: "client-requested" })
+          .pipe(Effect.exit);
+        assert.equal(detached._tag, outcome === "failed-close" ? "Failure" : "Success");
+        assert.equal((yield* Ref.get(state)).closeCount, outcome === "failed-close" ? 0 : 1);
+        assert.isFalse(yield* manager.isLive(providerSessionId));
+        if (outcome === "failed-close") {
+          const reopen = yield* manager
+            .open({ threadId, providerSessionId, modelSelection, runtimePolicy })
+            .pipe(Effect.exit);
+          assert.isTrue(Exit.isFailure(reopen));
+          if (Exit.isFailure(reopen))
+            assert.include(Cause.pretty(reopen.cause), "retirement_unconfirmed");
+        }
+        const receipt = yield* persistConfirmedSessionRetirement(
+          `ordinary-native-detach:${outcome}:retirement`,
+          retirement,
+        );
+        assert.equal(receipt.status, "failed");
+        assert.include(receipt.lastError!, "retirement_unconfirmed");
+        assert.equal((yield* Ref.get(state)).openCount, 1);
+      }).pipe(
+        Effect.provide(
+          layerTest({
+            state,
+            idleTimeoutMs: 60000,
+            capabilities: ExclusiveCapabilities,
+            confirmsSessionRetirement: outcome === "failed-close",
+            beforeScopeClose: () =>
+              outcome === "failed-close" ? Effect.die("native close failed") : Effect.void,
+          }),
+        ),
+      );
+    }),
+);
+
+it.effect("lifecycle ordinary native exit retains only its immutable attachment source", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    yield* Effect.gen(function* () {
+      const fixture = yield* prepareConfirmedSessionRetirement("ordinary-native-source");
+      const {
+        manager,
+        sink,
+        ids,
+        guards,
+        outbox,
+        threadId,
+        providerSessionId,
+        created,
+        retirement,
+      } = fixture;
+      const otherId = ThreadId.make("ordinary-native-source:other");
+      yield* sink.write({
+        events: [
+          yield* makeThreadCreatedEvent({ idAllocator: ids, threadId: otherId, now: fixture.now }),
+          {
+            ...created,
+            id: yield* ids.allocate.event({ threadId }),
+            type: "thread.unarchived",
+            payload: { ...created.payload, lifecycleRevision: 2 },
+          },
+        ],
+      });
+      const current = yield* guards.resolveLifecycleSource(threadId);
+      yield* manager.detach({ threadId, providerSessionId, detail: "client-requested" });
+      const mismatches = [
+        { ...retirement, threadId: otherId },
+        {
+          ...retirement,
+          providerSessionId: ProviderSessionId.make("ordinary-native-source:other"),
+        },
+        { ...retirement, retirementRevision: current.lifecycleRevision },
+        { ...retirement, retirementSourceToken: current.sourceToken },
+        {
+          ...retirement,
+          retirementRevision: current.lifecycleRevision,
+          retirementSourceToken: current.sourceToken,
+        },
+      ];
+      for (const mismatch of mismatches) {
+        const result = yield* manager.detach(mismatch).pipe(Effect.exit);
+        assert.isTrue(Exit.isFailure(result));
+        if (Exit.isFailure(result))
+          assert.include(Cause.pretty(result.cause), "retirement_unconfirmed");
+      }
+      // An ordinary succeeded outbox row still cannot authorize the restored source.
+      const ordinaryId = "ordinary-native-source:ordinary";
+      yield* outbox.enqueue([
+        {
+          id: ordinaryId,
+          commandId: CommandId.make(ordinaryId),
+          threadId,
+          request: { type: "provider-session.detach", providerSessionId },
+        },
+      ]);
+      yield* Effect.gen(function* () {
+        assert.equal(yield* (yield* EffectWorker.OrchestrationEffectWorkerV2).drain(), 1);
+      }).pipe(Effect.provide(layerRetirementWorker));
+      assert.equal(Option.getOrThrow(yield* outbox.get(ordinaryId)).status, "succeeded");
+      assert.isEmpty(yield* outbox.attachmentRetirements(threadId));
+      const activate = {
+        threadId,
+        providerSessionId: ids.derive.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          incarnation: { threadId, sourceToken: current.sourceToken },
+        }),
+        modelSelection,
+        runtimePolicy,
+      };
+      const blocked = yield* manager.open(activate).pipe(Effect.flip);
+      assert.equal(blocked._tag, "ProviderSessionStaleBindingError");
+      assert.equal((yield* Ref.get(state)).openCount, 1);
+      const receipt = yield* persistConfirmedSessionRetirement(
+        "ordinary-native-source:exact",
+        retirement,
+      );
+      assert.equal(receipt.status, "succeeded");
+      yield* manager.open(activate);
+      assert.equal((yield* Ref.get(state)).openCount, 2);
+    }).pipe(
+      Effect.provide(
+        layerTest({
+          state,
+          idleTimeoutMs: 60000,
+          capabilities: ExclusiveCapabilities,
+          confirmsSessionRetirement: true,
+        }),
+      ),
+    );
+  }),
+);
+
+it.effect(
+  "lifecycle confirmed session blocks reopen until late close and clears old exit on reuse",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const closing = yield* Deferred.make<Fiber.Fiber<unknown, unknown>>();
+      const finishClose = yield* Deferred.make<void>();
+      yield* Effect.gen(function* () {
+        const { manager, threadId, providerSessionId, retirement } =
+          yield* prepareConfirmedSessionRetirement("confirmed-session-reopen");
+        const activate = { threadId, providerSessionId, modelSelection, runtimePolicy };
+        const detach = yield* manager
+          .detach({ threadId, providerSessionId, detail: "client-requested" })
+          .pipe(Effect.exit, Effect.forkScoped);
+        const closeFiber = yield* Deferred.await(closing);
+        assert.equal((yield* Ref.get(state)).closeCount, 0);
+        for (const operation of [
+          manager.open(activate).pipe(Effect.asVoid),
+          manager.detach(retirement),
+        ]) {
+          const blocked = yield* operation.pipe(Effect.exit);
+          assert.isTrue(Exit.isFailure(blocked));
+          if (Exit.isFailure(blocked))
+            assert.include(Cause.pretty(blocked.cause), "retirement_unconfirmed");
+        }
+        assert.equal((yield* Ref.get(state)).openCount, 1);
+        yield* TestClock.adjust("30 seconds");
+        assert.isTrue(Exit.isFailure(yield* Fiber.join(detach)));
+        assert.equal((yield* Ref.get(state)).closeCount, 0);
+        assert.equal(
+          (yield* manager.open(activate).pipe(Effect.flip))._tag,
+          "ProviderSessionStaleBindingError",
+        );
+        assert.equal((yield* Ref.get(state)).openCount, 1);
+
+        yield* Deferred.succeed(finishClose, undefined);
+        // Join the actual close fiber, including the manager's proof callback, not just a finalizer signal.
+        yield* Fiber.await(closeFiber);
+        assert.equal((yield* Ref.get(state)).closeCount, 1);
+        yield* manager.detach(retirement);
+        yield* manager.open(activate);
+        assert.equal((yield* Ref.get(state)).openCount, 2);
+        assert.isTrue(
+          Exit.isFailure(
+            yield* manager
+              .detach({ threadId, providerSessionId, detail: "client-requested" })
+              .pipe(Effect.exit),
+          ),
+        );
+        const receipt = yield* persistConfirmedSessionRetirement(
+          "confirmed-session-reopen:failed-replacement",
+          retirement,
+        );
+        assert.equal(receipt.status, "failed");
+        assert.include(receipt.lastError!, "retirement_unconfirmed");
+        assert.equal((yield* Ref.get(state)).closeCount, 1);
+      }).pipe(
+        Effect.ensuring(Deferred.succeed(finishClose, undefined)),
+        Effect.provide(
+          layerTest({
+            state,
+            idleTimeoutMs: 60000,
+            capabilities: ExclusiveCapabilities,
+            confirmsSessionRetirement: true,
+            beforeScopeClose: ({ generation }) =>
+              generation === 1
+                ? Effect.gen(function* () {
+                    yield* Deferred.succeed(closing, yield* Effect.fiber);
+                    yield* Deferred.await(finishClose);
+                  })
+                : Effect.die("replacement close failed"),
+          }),
+        ),
+      );
+    }),
+);
+
+it.effect("lifecycle confirmed session serializes retirement with an inflight raw reopen", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const opening = yield* Deferred.make<void>();
+    const finishOpen = yield* Deferred.make<void>();
+    const retirementCompleted = yield* Deferred.make<void>();
+    yield* Effect.gen(function* () {
+      const { manager, threadId, providerSessionId, retirement } =
+        yield* prepareConfirmedSessionRetirement("confirmed-inflight-reopen");
+      yield* manager.detach({ threadId, providerSessionId, detail: "client-requested" });
+      const reopened = yield* manager
+        .open({ threadId, providerSessionId, modelSelection, runtimePolicy })
+        .pipe(Effect.forkScoped);
+      yield* Deferred.await(opening);
+      const retiring = yield* manager.detach(retirement).pipe(
+        Effect.exit,
+        Effect.tap(() => Deferred.succeed(retirementCompleted, undefined)),
+        Effect.forkScoped({ startImmediately: true }),
+      );
+      assert.isFalse(yield* Deferred.isDone(retirementCompleted));
+      assert.equal((yield* Ref.get(state)).openCount, 1);
+      assert.equal((yield* Ref.get(state)).closeCount, 1);
+      yield* Deferred.succeed(finishOpen, undefined);
+      yield* Fiber.join(reopened);
+      assert.isTrue(Exit.isFailure(yield* Fiber.join(retiring)));
+      assert.equal((yield* Ref.get(state)).openCount, 2);
+      assert.equal((yield* Ref.get(state)).closeCount, 1);
+      assert.isFalse(yield* manager.isLive(providerSessionId));
+      const receipt = yield* persistConfirmedSessionRetirement(
+        "confirmed-inflight-reopen:failed-replacement",
+        retirement,
+      );
+      assert.equal(receipt.status, "failed");
+      assert.include(receipt.lastError!, "retirement_unconfirmed");
+    }).pipe(
+      Effect.ensuring(Deferred.succeed(finishOpen, undefined)),
+      Effect.provide(
+        layerTest({
+          state,
+          idleTimeoutMs: 60000,
+          capabilities: ExclusiveCapabilities,
+          confirmsSessionRetirement: true,
+          beforeOpen: () =>
+            Ref.get(state).pipe(
+              Effect.flatMap((current) =>
+                current.openCount === 1
+                  ? Deferred.succeed(opening, undefined).pipe(
+                      Effect.andThen(Deferred.await(finishOpen)),
+                    )
+                  : Effect.void,
+              ),
+            ),
+          beforeScopeClose: ({ generation }) =>
+            generation === 2 ? Effect.die("replacement close failed") : Effect.void,
+        }),
+      ),
+    );
+  }),
+);
+
+it.effect(
+  "lifecycle failed Pi raw open blocks same-session retry until its scope really closes",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const rawOpens = yield* Ref.make(0);
+      const closing = yield* Deferred.make<Fiber.Fiber<unknown, unknown>>();
+      const finishClose = yield* Deferred.make<void>();
+      const adapterLayer = Layer.unwrap(
+        makeProviderAdapter(state, {
+          capabilities: ExclusiveCapabilities,
+          confirmsSessionRetirement: true,
+          spawnBeforeOpen: true,
+          beforeOpen: () =>
+            Ref.getAndUpdate(rawOpens, (count) => count + 1).pipe(
+              Effect.flatMap((count) =>
+                count === 0 ? Effect.die("Pi raw open failed") : Effect.void,
+              ),
+            ),
+          beforeScopeClose: () =>
+            Effect.gen(function* () {
+              if ((yield* Ref.get(rawOpens)) !== 1) return;
+              yield* Deferred.succeed(closing, yield* Effect.fiber);
+              yield* Deferred.await(finishClose);
+            }),
+        }).pipe(
+          Effect.map((adapter) =>
+            ProviderAdapterRegistry.layerSingle({
+              ...adapter,
+              driver: PI_DRIVER,
+              instanceId: piGateSelection.instanceId,
+              openSession: (input) =>
+                adapter.openSession(input).pipe(
+                  Effect.map((runtime) => ({
+                    ...runtime,
+                    driver: PI_DRIVER,
+                    instanceId: piGateSelection.instanceId,
+                    providerSession: {
+                      ...runtime.providerSession,
+                      driver: PI_DRIVER,
+                      providerInstanceId: piGateSelection.instanceId,
+                    },
+                  })),
+                ),
+            }),
+          ),
+        ),
+      ).pipe(Layer.provide(McpProviderSessions.layer));
+      yield* Effect.gen(function* () {
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const sink = yield* EventSink.EventSinkV2;
+        const ids = yield* IdAllocator.IdAllocatorV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("failed-pi-raw-open");
+        const providerSessionId = ProviderSessionId.make("failed-pi-raw-open:session");
+        const native = {
+          ...makeProviderThread({ idAllocator: ids, threadId, providerSessionId, now }),
+          id: ids.derive.providerThread({
+            driver: PI_DRIVER,
+            nativeThreadId: "failed-pi-raw-open",
+          }),
+          driver: PI_DRIVER,
+          providerInstanceId: piGateSelection.instanceId,
+          nativeThreadRef: {
+            driver: PI_DRIVER,
+            nativeId: "failed-pi-raw-open",
+            strength: "strong" as const,
+          },
+        };
+        const created = yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now });
+        yield* sink.write({
+          events: [
+            {
+              ...created,
+              payload: {
+                ...created.payload,
+                providerInstanceId: piGateSelection.instanceId,
+                modelSelection: piGateSelection,
+                activeProviderThreadId: native.id,
+              },
+            },
+            {
+              id: yield* ids.allocate.event({ threadId }),
+              type: "provider-thread.updated",
+              threadId,
+              occurredAt: now,
+              payload: native,
+            },
+          ],
+        });
+        const activate = {
+          threadId,
+          providerThreadId: native.id,
+          providerSessionId,
+          modelSelection: piGateSelection,
+          runtimePolicy,
+        };
+        const opening = yield* manager.open(activate).pipe(Effect.exit, Effect.forkScoped);
+        const closeFiber = yield* Deferred.await(closing);
+        yield* TestClock.adjust("30 seconds");
+        assert.isTrue(Exit.isFailure(yield* Fiber.join(opening)));
+        assert.equal(yield* Ref.get(rawOpens), 1);
+        assert.equal((yield* Ref.get(state)).closeCount, 0);
+        assert.isFalse(yield* manager.isLive(providerSessionId));
+        const blocked = yield* manager.open(activate).pipe(Effect.exit);
+        assert.isTrue(Exit.isFailure(blocked));
+        if (Exit.isFailure(blocked))
+          assert.include(Cause.pretty(blocked.cause), "retirement_unconfirmed");
+        assert.equal(yield* Ref.get(rawOpens), 1);
+
+        yield* Deferred.succeed(finishClose, undefined);
+        yield* Fiber.await(closeFiber);
+        assert.equal((yield* Ref.get(state)).closeCount, 1);
+        yield* manager.open(activate);
+        assert.equal(yield* Ref.get(rawOpens), 2);
+        yield* manager.close(providerSessionId);
+        assert.equal((yield* Ref.get(state)).closeCount, 2);
+      }).pipe(
+        Effect.ensuring(Deferred.succeed(finishClose, undefined)),
+        Effect.provide(layerTest({ state, idleTimeoutMs: 60000, adapterLayer })),
+      );
+    }),
+);
+
+it.effect.each([
+  { operation: "detach", close: "pending" },
+  { operation: "close", close: "pending" },
+  { operation: "detach", close: "completed" },
+  { operation: "close", close: "completed" },
+] as const)(
+  "lifecycle strict retirement rechecks concurrent $operation scope exit ($close)",
+  ({ operation, close }) =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const readReached = yield* Deferred.make<void>();
+      const finishRead = yield* Deferred.make<void>();
+      const closing = yield* Deferred.make<Fiber.Fiber<unknown, unknown>>();
+      const finishClose = yield* Deferred.make<void>();
+      yield* Effect.gen(function* () {
+        const { manager, threadId, providerSessionId, retirement, outbox } =
+          yield* prepareConfirmedSessionRetirement(`concurrent-close:${operation}:${close}`);
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        const originalRead = store.getThreadRecords;
+        const armed = yield* Ref.make(true);
+        const pausedRead: typeof originalRead = (readThreadId, fields, filter) =>
+          Effect.gen(function* () {
+            if (
+              readThreadId === threadId &&
+              fields.length === 3 &&
+              fields.some((field) => field === "providerThreads") &&
+              fields.some((field) => field === "providerTurns") &&
+              fields.some((field) => field === "runs") &&
+              (yield* Ref.getAndSet(armed, false))
+            ) {
+              yield* Deferred.succeed(readReached, undefined);
+              yield* Deferred.await(finishRead);
+            }
+            return yield* originalRead(readThreadId, fields, filter);
+          });
+        // Keep the real shared store and query; pause only the strict branch's first read.
+        yield* Effect.acquireRelease(
+          Effect.sync(() =>
+            Object.defineProperty(store, "getThreadRecords", { value: pausedRead }),
+          ),
+          () =>
+            Effect.sync(() =>
+              Object.defineProperty(store, "getThreadRecords", { value: originalRead }),
+            ),
+        );
+        const effectId = `concurrent-close:${operation}:${close}:retirement`;
+        const strict = yield* persistConfirmedSessionRetirement(effectId, retirement).pipe(
+          Effect.forkScoped,
+        );
+        yield* Deferred.await(readReached);
+        const ordinary = yield* (
+          operation === "detach"
+            ? manager.detach({ threadId, providerSessionId, detail: "client-requested" })
+            : manager.close(providerSessionId)
+        ).pipe(Effect.exit, Effect.forkScoped);
+        const closeFiber = yield* Deferred.await(closing);
+        assert.isFalse(yield* manager.isLive(providerSessionId));
+        assert.equal((yield* Ref.get(state)).closeCount, 0);
+        if (close === "completed") {
+          yield* Deferred.succeed(finishClose, undefined);
+          yield* Fiber.await(closeFiber);
+          assert.isTrue(Exit.isSuccess(yield* Fiber.join(ordinary)));
+          assert.equal((yield* Ref.get(state)).closeCount, 1);
+        }
+        yield* Deferred.succeed(finishRead, undefined);
+        const receipt = yield* Fiber.join(strict);
+        if (close === "pending") {
+          assert.equal((yield* Ref.get(state)).closeCount, 0);
+          assert.isFalse(yield* Deferred.isDone(finishClose));
+          assert.notEqual(
+            receipt.status,
+            "succeeded",
+            "retirement must wait for the captured scope exit",
+          );
+          assert.equal(receipt.status, "failed");
+          assert.include(receipt.lastError!, "retirement_unconfirmed");
+          assert.equal(receipt.attemptCount, 1);
+          const stillPending = yield* manager.detach(retirement).pipe(Effect.exit);
+          assert.isTrue(Exit.isFailure(stillPending));
+          if (Exit.isFailure(stillPending))
+            assert.include(Cause.pretty(stillPending.cause), "retirement_unconfirmed");
+          assert.equal(
+            (yield* manager
+              .open({ threadId, providerSessionId, modelSelection, runtimePolicy })
+              .pipe(Effect.flip))._tag,
+            "ProviderSessionStaleBindingError",
+          );
+          assert.equal((yield* Ref.get(state)).openCount, 1);
+          yield* Deferred.succeed(finishClose, undefined);
+          yield* Fiber.await(closeFiber);
+          assert.isTrue(Exit.isSuccess(yield* Fiber.join(ordinary)));
+          assert.equal((yield* Ref.get(state)).closeCount, 1);
+          yield* manager.detach(retirement);
+          const settled = Option.getOrThrow(yield* outbox.get(effectId));
+          assert.equal(settled.status, "failed");
+          assert.equal(settled.attemptCount, 1);
+        } else {
+          assert.equal(receipt.status, "succeeded", receipt.lastError ?? undefined);
+          assert.equal(receipt.attemptCount, 1);
+          yield* manager.detach(retirement);
+        }
+      }).pipe(
+        Effect.ensuring(
+          Deferred.succeed(finishRead, undefined).pipe(
+            Effect.andThen(Deferred.succeed(finishClose, undefined)),
+          ),
+        ),
+        Effect.provide(
+          layerTest({
+            state,
+            idleTimeoutMs: 60000,
+            capabilities: ExclusiveCapabilities,
+            confirmsSessionRetirement: true,
+            beforeScopeClose: () =>
+              Effect.gen(function* () {
+                yield* Deferred.succeed(closing, yield* Effect.fiber);
+                yield* Deferred.await(finishClose);
+              }),
+          }),
+        ),
+      );
     }),
 );
 

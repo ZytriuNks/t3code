@@ -43,13 +43,21 @@ export function foldNativeSessionOrigin(
   next: OrchestrationV2ProviderThread,
   hasPersistedGate = false,
 ): OrchestrationV2ProviderThread {
+  // Creation provenance is immutable; an existing legacy row cannot acquire it later.
+  const { nativeBindingOrigin: _bindingOrigin, ...nextProvider } = next;
+  const bindingOrigin =
+    current === undefined ? next.nativeBindingOrigin : current.nativeBindingOrigin;
+  const withBindingOrigin =
+    bindingOrigin === undefined
+      ? nextProvider
+      : { ...nextProvider, nativeBindingOrigin: bindingOrigin };
   if (
     next.driver !== "pi" &&
     current?.driver !== "pi" &&
     next.nativeSessionOrigin === undefined &&
     current?.nativeSessionOrigin === undefined
   )
-    return next;
+    return withBindingOrigin;
   const invalidated =
     hasPersistedGate ||
     hasNativeSessionIdentity(next) ||
@@ -66,7 +74,7 @@ export function foldNativeSessionOrigin(
     : current === undefined
       ? next.nativeSessionOrigin
       : current.nativeSessionOrigin;
-  const { nativeSessionOrigin: _origin, ...provider } = next;
+  const { nativeSessionOrigin: _origin, ...provider } = withBindingOrigin;
   return origin === undefined ? provider : { ...provider, nativeSessionOrigin: origin };
 }
 

@@ -586,6 +586,148 @@ it.effect.each(["unstarted", "may_exist", "unknown", "node-only", "item-only"] a
     ),
 );
 
+it.effect("native binding provenance survives paged compaction, stale snapshots and rebuild", () =>
+  Effect.gen(function* () {
+    const store = yield* ProjectionStore.ProjectionStoreV2;
+    const events = yield* EventStore.EventStoreV2;
+    const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+    const bindings = yield* NativeSessionBindings.NativeSessionBindings;
+    const sql = yield* SqlClient.SqlClient;
+    const f = nativeOriginFixture(yield* DateTime.now);
+    const bindingOrigin = { version: 1, kind: "server_placeholder" } as const;
+    const planned: OrchestrationV2ProviderThread = {
+      ...f.provider,
+      nativeBindingOrigin: bindingOrigin,
+      providerSessionId: ProviderSessionId.make("session:binding-replay"),
+      firstRunOrdinal: 1,
+      lastRunOrdinal: 1,
+    };
+    const legacyId = ProviderThreadId.make("provider:binding-replay:legacy");
+    const legacy = { ...planned, id: legacyId };
+    const { nativeBindingOrigin: _origin, ...unmarkedLegacy } = legacy;
+    const plan = {
+      ...f.update(planned),
+      nativeBindingSource: { version: 1, kind: "pre_native_pending" },
+    } satisfies OrchestrationV2DomainEvent;
+    const native = f.update({
+      ...planned,
+      status: "idle",
+      nativeThreadRef: { driver: f.provider.driver, strength: "strong", nativeId: "native-new" },
+      nativeStorage: {
+        type: "resolved",
+        canonicalRoot: "/fake",
+        canonicalFile: "/fake/native-new.jsonl",
+      },
+    });
+    const legacyNative = f.update({
+      ...native.payload,
+      id: legacyId,
+      nativeThreadRef: {
+        driver: f.provider.driver,
+        strength: "strong",
+        nativeId: "native-legacy",
+      },
+      nativeStorage: {
+        type: "resolved",
+        canonicalRoot: "/fake",
+        canonicalFile: "/fake/native-legacy.jsonl",
+      },
+    });
+    const history: Array<OrchestrationV2DomainEvent> = [];
+    const persist = Effect.fn("persistBindingProvenance")(function* (
+      next: ReadonlyArray<OrchestrationV2DomainEvent>,
+    ) {
+      const batch = next.map((event, index) => ({
+        ...event,
+        id: EventId.make(`event:binding-replay:${history.length + index}`),
+      }));
+      history.push(...batch);
+      for (const stored of yield* events.append({ events: batch }))
+        yield* store.apply(stored.event);
+    });
+    const metadata = (phase: string) =>
+      Array.from({ length: 60 }, (_, index) => ({
+        ...f.created,
+        type: "thread.metadata-updated" as const,
+        payload: { ...f.created.payload, title: `${phase}:${index}` },
+      }));
+    const assertOrigins = (providers: ReadonlyArray<OrchestrationV2ProviderThread>) => {
+      assert.lengthOf(providers, 2);
+      const current = providers.find((provider) => provider.id === f.providerId)!;
+      const old = providers.find((provider) => provider.id === legacyId)!;
+      assert.deepEqual(current.nativeBindingOrigin, bindingOrigin);
+      assert.isFalse("nativeBindingOrigin" in old);
+      assert.equal(current.nativeSessionOrigin?.state, "may_exist");
+      assert.equal(old.nativeSessionOrigin?.state, "may_exist");
+    };
+
+    yield* persist([f.created, plan]);
+    assert.deepEqual(yield* bindings.listForThreads([f.threadId]), []);
+    yield* persist([f.update(unmarkedLegacy), { ...plan, payload: legacy }]);
+    const legacyBindings = yield* bindings.listForThreads([f.threadId]);
+    assert.lengthOf(legacyBindings, 1);
+    assert.equal(legacyBindings[0]?.providerThreadId, legacyId);
+    assert.equal(legacyBindings[0]?.nativeId, null);
+    assert.deepEqual(legacyBindings[0]?.storage, {
+      type: "unresolved",
+      reason: "legacy_missing_locator",
+    });
+    assertOrigins((yield* store.getThreadProjection(f.threadId)).providerThreads);
+
+    yield* persist([...metadata("before-native"), native, legacyNative]);
+    const durableBindings = yield* bindings.listForThreads([f.threadId]);
+    assert.lengthOf(durableBindings, 3);
+    const newBindings = durableBindings.filter(
+      (binding) => binding.providerThreadId === f.providerId,
+    );
+    assert.lengthOf(newBindings, 1);
+    assert.equal(newBindings[0]?.nativeId, "native-new");
+    assert.deepEqual(newBindings[0]?.storage, native.payload.nativeStorage);
+    assert.deepInclude(durableBindings, legacyBindings[0]);
+    const resolvedLegacy = durableBindings.find((binding) => binding.nativeId === "native-legacy");
+    assert.equal(resolvedLegacy?.providerThreadId, legacyId);
+    assert.deepEqual(resolvedLegacy?.storage, legacyNative.payload.nativeStorage);
+
+    const emptySnapshots = [f.update(), f.update({ ...f.provider, id: legacyId })];
+    for (const snapshots of [emptySnapshots, [native, legacyNative], emptySnapshots]) {
+      yield* persist(snapshots);
+      assertOrigins((yield* store.getThreadProjection(f.threadId)).providerThreads);
+      assert.deepEqual(yield* bindings.listForThreads([f.threadId]), durableBindings);
+    }
+    yield* persist(metadata("after-native"));
+    assert.isAbove(history.length, 100);
+    let pageBoundaries = 0;
+    const compacted = yield* maintenance.compactEventStore(
+      Effect.sync(() => {
+        pageBoundaries += 1;
+      }),
+    );
+    assert.isAbove(compacted.deletedEventCount, 0);
+    assert.isAtLeast(pageBoundaries, 2);
+    assert.deepEqual(yield* bindings.listForThreads([f.threadId]), durableBindings);
+    assert.isTrue((yield* maintenance.rebuild).valid);
+    assert.deepEqual(yield* bindings.listForThreads([f.threadId]), durableBindings);
+    const rebuilt = (yield* store.getThreadProjection(f.threadId)).providerThreads;
+    assertOrigins(rebuilt);
+    const pure = history.reduce(
+      ProjectionStore.applyToProjection,
+      ProjectionStore.emptyProjection(f.created),
+    );
+    assertOrigins(pure.providerThreads);
+    for (const provider of rebuilt) {
+      assert.equal(provider.nativeThreadRef, null);
+      assert.equal(provider.providerSessionId, null);
+    }
+    assert.equal((yield* sql<{ readonly file: string }>`PRAGMA database_list`)[0]?.file, "");
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(ProjectionMaintenance.layer, NativeSessionBindings.layer).pipe(
+        Layer.provideMerge(EventStore.layer.pipe(Layer.provideMerge(layerTest))),
+      ),
+    ),
+  ),
+);
+
 const traceSqlStatements = () => {
   const statements: Array<string> = [];
   const tracer = Tracer.make({

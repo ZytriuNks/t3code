@@ -26,6 +26,7 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import * as PlatformError from "effect/PlatformError";
 import { normalizeProjectPathForComparison } from "@t3tools/shared/path";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -613,25 +614,61 @@ describe("PiAdapterV2", () => {
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
-  it.effect("deletes a native session after the Pi runtime scope closes", () =>
+  it.effect.each([true, false])(
+    "deletes a native session after runtime close (file exists at open: %s)",
+    (existsAtOpen) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pi-delete-adapter-" });
+        const sessionFile = path.join(root, "session.jsonl");
+        if (existsAtOpen) yield* fs.writeFileString(sessionFile, "session");
+
+        const fake = yield* makeFakePi;
+        fake.queueState({ sessionFile });
+        const adapter = yield* makeAdapter(fake);
+        const providerThread = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const runtime = yield* adapter.openSession({
+              threadId: THREAD_ID,
+              providerSessionId: SESSION_ID,
+              modelSelection: modelSelection("default"),
+              runtimePolicy,
+            });
+            const providerThread = yield* runtime.ensureThread({
+              threadId: THREAD_ID,
+              modelSelection: modelSelection("default"),
+              runtimePolicy,
+            });
+            if (!existsAtOpen) {
+              assert.isFalse(yield* fs.exists(sessionFile));
+              yield* startTurn(runtime, providerThread);
+              yield* fake.takeRequest("prompt");
+              yield* fs.writeFileString(sessionFile, "first turn");
+            }
+            return providerThread;
+          }),
+        );
+
+        assert.isDefined(adapter.deleteNativeThread);
+        yield* adapter.deleteNativeThread!({ providerThread });
+
+        assert.isFalse(yield* fs.exists(sessionFile));
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("keeps occupied native files retryable and only accepts exact NotFound", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pi-delete-adapter-" });
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pi-delete-occupied-" });
       const sessionFile = path.join(root, "session.jsonl");
-      yield* fs.writeFileString(sessionFile, "session");
-
+      yield* fs.writeFileString(sessionFile, "keep");
       const fake = yield* makeFakePi;
       fake.queueState({ sessionFile });
-      const adapter = yield* makeAdapter(fake);
       const providerThread = yield* Effect.scoped(
         Effect.gen(function* () {
-          const runtime = yield* adapter.openSession({
-            threadId: THREAD_ID,
-            providerSessionId: SESSION_ID,
-            modelSelection: modelSelection("default"),
-            runtimePolicy,
-          });
+          const { runtime } = yield* openRuntime(fake);
           return yield* runtime.ensureThread({
             threadId: THREAD_ID,
             modelSelection: modelSelection("default"),
@@ -639,11 +676,56 @@ describe("PiAdapterV2", () => {
           });
         }),
       );
-
-      assert.isDefined(adapter.deleteNativeThread);
-      yield* adapter.deleteNativeThread!({ providerThread });
-
-      assert.isFalse(yield* fs.exists(sessionFile));
+      assert.equal(providerThread.nativeStorage?.type, "resolved");
+      if (providerThread.nativeStorage?.type !== "resolved")
+        assert.fail("Missing resolved storage");
+      const canonicalFile = providerThread.nativeStorage.canonicalFile;
+      const releasedAdapter = yield* makeAdapter(fake);
+      for (const [_tag, code] of [
+        ["Busy", "EBUSY"],
+        ["Unknown", "EPERM"],
+        ["PermissionDenied", "EACCES"],
+        ["NotFound", "ENOENT"],
+      ] as const) {
+        const cause = PlatformError.systemError({
+          _tag,
+          syscall: "unlink",
+          module: "test",
+          method: "remove",
+          cause: { code, syscall: "unlink" },
+        });
+        let removes = 0;
+        const adapter = yield* makeAdapter(fake).pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fs,
+            remove: (candidate, options) => {
+              if (normalizeProjectPathForComparison(candidate) !== canonicalFile)
+                return fs.remove(candidate, options);
+              removes += 1;
+              return Effect.fail(cause);
+            },
+          }),
+        );
+        assert.isDefined(adapter.deleteNativeThread);
+        const result = yield* adapter.deleteNativeThread!({ providerThread }).pipe(Effect.result);
+        if (_tag === "NotFound") {
+          assert.equal(result._tag, "Success");
+        } else {
+          assert.equal(result._tag, "Failure");
+          if (result._tag === "Failure") {
+            assert.equal(result.failure._tag, "ProviderAdapterNativeThreadDeleteError");
+            if (result.failure._tag === "ProviderAdapterNativeThreadDeleteError") {
+              assert.equal(result.failure.reason, "filesystem_failure");
+              assert.equal(result.failure.cause, cause);
+            }
+          }
+        }
+        assert.equal(removes, 1);
+        assert.equal(yield* fs.readFileString(sessionFile), "keep");
+        yield* releasedAdapter.deleteNativeThread!({ providerThread });
+        assert.isFalse(yield* fs.exists(sessionFile));
+        yield* fs.writeFileString(sessionFile, "keep");
+      }
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 

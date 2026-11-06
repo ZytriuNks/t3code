@@ -142,6 +142,28 @@ const make = Effect.gen(function* () {
       const thread = event.payload;
       if (thread.appThreadId === null) return;
       if (
+        event.nativeBindingSource?.version === 1 &&
+        event.nativeBindingSource.kind === "pre_native_pending" &&
+        thread.nativeBindingOrigin?.version === 1 &&
+        thread.nativeBindingOrigin.kind === "server_placeholder" &&
+        thread.driver === "pi" &&
+        thread.nativeThreadRef === null &&
+        thread.nativeConversationHeadRef === null &&
+        (thread.nativeStorage === undefined ||
+          (thread.nativeStorage.type === "unresolved" &&
+            thread.nativeStorage.reason === "legacy_missing_locator")) &&
+        thread.forkedFrom === null &&
+        (thread.status === "not_loaded" || thread.status === "active")
+      ) {
+        const existing = yield* sql<{ readonly trusted: number }>`
+          SELECT CASE WHEN json_extract(payload_json, '$.nativeBindingOrigin.version') = 1
+            AND json_extract(payload_json, '$.nativeBindingOrigin.kind') = 'server_placeholder'
+            THEN 1 ELSE 0 END AS trusted
+          FROM orchestration_v2_projection_provider_threads WHERE provider_thread_id = ${thread.id}
+        `;
+        if (existing.length === 0 || existing[0]?.trusted === 1) return;
+      }
+      if (
         thread.status === "not_loaded" &&
         thread.firstRunOrdinal === null &&
         thread.lastRunOrdinal === null &&

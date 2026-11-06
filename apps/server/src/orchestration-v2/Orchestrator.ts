@@ -1168,6 +1168,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       } as Event;
     });
 
+  const preNativeBindingSource = (provider: OrchestrationV2ProviderThread) =>
+    provider.nativeBindingOrigin === undefined
+      ? {}
+      : {
+          nativeBindingSource: { version: 1 as const, kind: "pre_native_pending" as const },
+        };
+
   const emit =
     (events: Ref.Ref<Array<OrchestrationV2DomainEvent>>, command: OrchestrationV2ServerCommand) =>
     <Event extends OrchestrationV2DomainEvent>(event: Omit<Event, "id">) =>
@@ -1800,6 +1807,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           : rootProviderThreadsForProvider(projection, queuedRun.providerInstanceId)[0]
         : storedProviderThread;
       const queuedProviderThread: OrchestrationV2ProviderThread = targetProviderThread ?? {
+        ...(targetAdapter.driver === "pi"
+          ? { nativeBindingOrigin: { version: 1 as const, kind: "server_placeholder" as const } }
+          : {}),
         id: idAllocator.derive.providerThread({
           driver: targetAdapter.driver,
           nativeThreadId: `pending:${queuedRun.id}`,
@@ -2307,6 +2317,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ...executionIdentityEvents,
           {
             type: "provider-thread.updated",
+            ...preNativeBindingSource(providerThread),
             threadId,
             providerInstanceId: queuedRun.providerInstanceId,
             occurredAt: now,
@@ -4915,6 +4926,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const targetProviderThreadBase: OrchestrationV2ProviderThread =
         existingTargetProviderThread === undefined
           ? {
+              ...(targetAdapter.driver === "pi"
+                ? {
+                    nativeBindingOrigin: {
+                      version: 1 as const,
+                      kind: "server_placeholder" as const,
+                    },
+                  }
+                : {}),
               id: idAllocator.derive.providerThread({
                 driver: targetAdapter.driver,
                 nativeThreadId: `pending:${targetRun.id}:attempt:${attemptOrdinal}`,
@@ -5126,6 +5145,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     if (requiresProviderThreadHandoff || requiresProviderSessionRestart) {
       yield* emitEvent({
         type: "provider-thread.updated",
+        ...preNativeBindingSource(restartProviderThread),
         threadId: input.command.threadId,
         driver: restartProviderThread.driver,
         providerInstanceId: input.modelSelection.instanceId,
@@ -5802,7 +5822,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       );
       const queuedProviderThread: OrchestrationV2ProviderThread = targetProviderThread ?? {
         ...(queuedAdapter.driver === "pi"
-          ? { nativeSessionOrigin: { version: 1 as const, state: "unstarted" as const } }
+          ? {
+              nativeSessionOrigin: { version: 1 as const, state: "unstarted" as const },
+              nativeBindingOrigin: { version: 1 as const, kind: "server_placeholder" as const },
+            }
           : {}),
         id: idAllocator.derive.providerThread({
           driver: queuedAdapter.driver,
@@ -5957,6 +5980,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       if (targetProviderThread === undefined) {
         yield* emitEvent({
           type: "provider-thread.updated",
+          ...preNativeBindingSource(queuedProviderThread),
           threadId: command.threadId,
           providerInstanceId: modelSelection.instanceId,
           occurredAt: now,
@@ -6173,6 +6197,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const providerThread: OrchestrationV2ProviderThread =
         activeProviderThread === undefined
           ? {
+              ...(adapter.driver === "pi"
+                ? {
+                    nativeBindingOrigin: {
+                      version: 1 as const,
+                      kind: "server_placeholder" as const,
+                    },
+                  }
+                : {}),
               id: providerThreadId,
               driver: adapter.driver,
               providerInstanceId: modelSelection.instanceId,
@@ -6361,6 +6393,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const emitEvent = emit(events, command);
       yield* emitEvent({
         type: "provider-thread.updated",
+        ...preNativeBindingSource(providerThread),
         threadId: command.threadId,
         driver: adapter.driver,
         providerInstanceId: modelSelection.instanceId,
@@ -6612,6 +6645,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     const ensuredProviderThread: OrchestrationV2ProviderThread =
       targetProviderThread === undefined
         ? {
+            ...(adapter.driver === "pi"
+              ? {
+                  nativeBindingOrigin: { version: 1 as const, kind: "server_placeholder" as const },
+                }
+              : {}),
             id: idAllocator.derive.providerThread({
               driver: adapter.driver,
               nativeThreadId: `pending:${runId}`,
@@ -7210,6 +7248,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     }
     yield* emitEvent({
       type: "provider-thread.updated",
+      ...preNativeBindingSource(providerThread),
       threadId: command.threadId,
       providerInstanceId: modelSelection.instanceId,
       occurredAt: now,
