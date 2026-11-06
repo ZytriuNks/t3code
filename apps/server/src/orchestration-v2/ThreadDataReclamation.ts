@@ -1404,8 +1404,6 @@ const make = Effect.gen(function* () {
               json_extract(payload_json, '$.nativeStorage.canonicalFile')
             FROM orchestration_v2_projection_provider_threads
             WHERE ${sql.in("thread_id", candidateIdChunk)} AND driver = 'pi'
-              AND (json_type(payload_json, '$.nativeThreadRef') = 'object'
-                OR json_extract(payload_json, '$.nativeStorage.canonicalFile') IS NOT NULL)
           ) AS binding
           WHERE binding.storage_type IS NOT 'resolved'
             OR COALESCE(binding.canonical_root, '') = ''

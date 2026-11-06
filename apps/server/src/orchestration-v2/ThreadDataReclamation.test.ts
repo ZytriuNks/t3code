@@ -954,14 +954,26 @@ it.effect.each([
     }).pipe(Effect.provide(NativeSessionBindings.layer.pipe(Layer.provideMerge(layerTest)))),
 );
 
-it.effect.each(["binding", "projection", "late-binding", "late-projection"] as const)(
-  "maintenance backfills a legacy T3-only Pi tombstone before reclamation (%s)",
+it.effect.each([
+  "binding",
+  "projection",
+  "late-binding",
+  "late-projection",
+  "unresolved-projection",
+  "missing-locator-projection",
+  "damaged-projection",
+  "unresolved-native-ref-projection",
+  "codex-projection",
+  "codex-damaged-projection",
+] as const)(
+  "maintenance respects retained identity requirements for legacy tombstones (%s)",
   (source) =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       const threadId = `thread:legacy-t3-only:${source}`;
       const providerThreadId = `provider-thread:${threadId}`;
       const updatedAt = source.startsWith("late-") ? "2026-11-02T12:00:00.000Z" : at;
+      const driver = source.startsWith("codex-") ? "codex" : "pi";
       const storage = {
         type: "resolved",
         canonicalRoot: "/sessions",
@@ -1000,13 +1012,25 @@ it.effect.each(["binding", "projection", "late-binding", "late-projection"] as c
         const provider = {
           id: providerThreadId,
           appThreadId: threadId,
-          driver: "pi",
+          driver,
           providerInstanceId: "pi-retained",
           providerSessionId: null,
           ownerNodeId: null,
           status: "closed",
-          nativeThreadRef: { driver: "pi", nativeId: "legacy-native", strength: "strong" },
-          nativeStorage: storage,
+          nativeThreadRef:
+            source === "unresolved-projection" ||
+            source === "missing-locator-projection" ||
+            source === "codex-projection"
+              ? null
+              : { driver, nativeId: "legacy-native", strength: "strong" },
+          nativeStorage:
+            source === "missing-locator-projection"
+              ? null
+              : source === "unresolved-projection" ||
+                  source === "unresolved-native-ref-projection" ||
+                  source === "codex-projection"
+                ? { type: "unresolved", reason: "legacy_missing_locator" }
+                : storage,
           nativeConversationHeadRef: null,
           firstRunOrdinal: null,
           lastRunOrdinal: null,
@@ -1019,9 +1043,33 @@ it.effect.each(["binding", "projection", "late-binding", "late-projection"] as c
         provider_thread_id, thread_id, owner_node_id, provider, provider_session_id,
         status, first_run_ordinal, last_run_ordinal, updated_at, payload_json, driver, provider_instance_id
       ) VALUES (${providerThreadId}, ${threadId}, NULL, 'codex', NULL, 'closed', NULL, NULL,
-        ${updatedAt}, ${JSON.stringify(provider)}, 'pi', 'pi-retained')`;
+        ${updatedAt}, ${source.includes("damaged") ? "{}" : JSON.stringify(provider)}, ${driver}, 'pi-retained')`;
       }
+      const before = yield* snapshotRows();
       const result = yield* reclaim();
+      if (
+        source === "unresolved-projection" ||
+        source === "missing-locator-projection" ||
+        source === "damaged-projection" ||
+        source === "unresolved-native-ref-projection"
+      ) {
+        assert.isEmpty(before.nativeBindings);
+        assert.isEmpty(before.deletionSessions);
+        assert.lengthOf(before.runs, 1);
+        assert.lengthOf(before.providerThreads, 1);
+        assert.equal(result.reclaimedThreadCount, 0);
+        expectBlockers(result, threadId, ["unknown_dependency"]);
+        const after = yield* snapshotRows();
+        if (source === "unresolved-native-ref-projection") {
+          assert.deepEqual(after.runs, before.runs);
+          assert.deepEqual(after.providerThreads, before.providerThreads);
+          assert.lengthOf(after.deletionSessions, 1);
+          assert.equal(after.deletionSessions[0]!.storage_type, "unresolved");
+        } else {
+          assert.deepEqual(after, before);
+        }
+        return;
+      }
       assert.equal(result.reclaimedThreadCount, 1);
       assert.deepEqual(result.skippedThreads, []);
       const after = yield* snapshotRows();
@@ -1029,9 +1077,14 @@ it.effect.each(["binding", "projection", "late-binding", "late-projection"] as c
       assert.isEmpty(after.nativeBindings);
       assert.isEmpty(after.providerThreads);
       assert.isEmpty(after.outbox);
-      assert.lengthOf(after.deletionSessions, 1);
       const saved = JSON.parse(String(after.deletions[0]!.payload_json));
       assert.deepEqual({ ...saved, sessions: [] }, deletion);
+      if (driver !== "pi") {
+        assert.isEmpty(after.deletionSessions);
+        assert.deepEqual(saved.sessions, []);
+        return;
+      }
+      assert.lengthOf(after.deletionSessions, 1);
       assert.equal(saved.sessions[0].providerInstanceId, "pi-retained");
       assert.equal(saved.sessions[0].providerThreadId, providerThreadId);
       const bindings = yield* NativeSessionBindings.NativeSessionBindings;
