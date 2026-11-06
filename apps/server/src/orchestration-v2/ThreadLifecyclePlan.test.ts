@@ -27,6 +27,11 @@ import * as TestClock from "effect/testing/TestClock";
 
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
+import * as EventSink from "./EventSink.ts";
+import * as EventStore from "./EventStore.ts";
+import * as CommandReceiptStore from "./CommandReceiptStore.ts";
+import * as ProjectStore from "./ProjectStore.ts";
+import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
@@ -36,6 +41,7 @@ import * as ThreadDataReclamation from "./ThreadDataReclamation.ts";
 import * as ThreadDeletionRecords from "./ThreadDeletionRecords.ts";
 import * as ThreadLifecyclePlan from "./ThreadLifecyclePlan.ts";
 import * as ThreadOwnership from "./ThreadOwnership.ts";
+import * as ProjectionMaintenance from "./ProjectionMaintenance.ts";
 
 const planThreadLifecycle = ThreadLifecyclePlan.planThreadLifecycle;
 
@@ -664,6 +670,356 @@ it.effect.each(["first-delete", "pr37-binding", "pr37-projection"] as const)(
               ProjectionStore.layer,
               IdAllocator.layer,
               EffectOutbox.layer,
+              ThreadDeletionRecords.layer,
+              ThreadDataReclamation.layer,
+              NativeSessionBindings.layer,
+            ),
+          ),
+          Layer.provideMerge(SqlitePersistence.layerMemory),
+        ),
+      ),
+    ),
+);
+
+it.effect.each([
+  "missing-storage",
+  "unresolved-storage",
+  "unclaimed-start",
+  "archive-before-delete",
+  "archive-after-compaction",
+  "started-attempt",
+  "claimed-after-plan",
+  "existing-binding",
+  "previous-tombstone",
+  "late-unresolved-identity",
+  "late-resolved-identity",
+  "identity-before-reclaim-transaction",
+] as const)(
+  "certifies only never-started queued Pi placeholders through deletion (%s)",
+  (scenario) =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(DateTime.toEpochMillis(deletedAt));
+      const sink = yield* EventSink.EventSinkV2;
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const records = yield* ThreadDeletionRecords.ThreadDeletionRecords;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const allocator = yield* IdAllocator.IdAllocatorV2;
+      const member = makeProjection();
+      const runId = allocator.derive.run({ threadId, ordinal: 2 });
+      const attemptId = allocator.derive.runAttempt({ runId, attemptOrdinal: 1 });
+      const nodeId = allocator.derive.rootNode({ runId });
+      const pending = makePiThread({
+        id: allocator.derive.providerThread({
+          driver: ProviderDriverKind.make("pi"),
+          nativeThreadId: `pending:${runId}`,
+        }),
+        status: "not_loaded",
+        nativeThreadRef: null,
+        nativeStorage:
+          scenario === "missing-storage"
+            ? undefined
+            : { type: "unresolved", reason: "unavailable" },
+      });
+      const run: OrchestrationV2Run = {
+        ...member.runs[1]!,
+        id: runId,
+        providerInstanceId: piInstanceId,
+        modelSelection: { instanceId: piInstanceId, model: "test" },
+        providerThreadId: pending.id,
+        rootNodeId: nodeId,
+        activeAttemptId: attemptId,
+        startedAt: null,
+      };
+      const attempt = {
+        ...member.attempts[1]!,
+        id: attemptId,
+        runId,
+        rootNodeId: nodeId,
+        providerInstanceId: piInstanceId,
+        providerThreadId: pending.id,
+        status: scenario === "started-attempt" ? ("running" as const) : ("pending" as const),
+        startedAt: scenario === "started-attempt" ? createdAt : null,
+      };
+      const node = {
+        ...member.nodes[1]!,
+        id: nodeId,
+        rootNodeId: nodeId,
+        runId,
+        providerThreadId: pending.id,
+        status: "pending" as const,
+        startedAt: null,
+      };
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make("placeholder-created"),
+            type: "thread.created",
+            threadId,
+            occurredAt: createdAt,
+            payload: member.thread,
+          },
+          {
+            id: EventId.make("placeholder-provider"),
+            type: "provider-thread.updated",
+            threadId,
+            occurredAt: createdAt,
+            payload: pending,
+          },
+          {
+            id: EventId.make("placeholder-run"),
+            type: "run.created",
+            threadId,
+            occurredAt: createdAt,
+            payload: run,
+          },
+          {
+            id: EventId.make("placeholder-attempt"),
+            type: "run-attempt.created",
+            threadId,
+            occurredAt: createdAt,
+            payload: attempt,
+          },
+          {
+            id: EventId.make("placeholder-node"),
+            type: "node.updated",
+            threadId,
+            occurredAt: createdAt,
+            payload: node,
+          },
+        ],
+      });
+      if (scenario === "existing-binding") {
+        yield* (yield* NativeSessionBindings.NativeSessionBindings).applyProviderThread({
+          id: EventId.make("placeholder-existing-binding"),
+          type: "provider-thread.updated",
+          threadId,
+          occurredAt: createdAt,
+          payload: { ...pending, status: "error" },
+        });
+      }
+      if (scenario === "missing-storage") {
+        const sql = yield* SqlClient.SqlClient;
+        yield* sql`UPDATE orchestration_v2_projection_provider_threads SET payload_json = json_remove(payload_json, '$.nativeStorage') WHERE provider_thread_id = ${pending.id}`;
+      }
+      if (scenario === "previous-tombstone") {
+        yield* records.apply({
+          threadId,
+          projectId: member.thread.projectId,
+          parentThreadId: null,
+          operationRootThreadId: threadId,
+          deletedAt: DateTime.formatIso(deletedAt),
+          commandId: command.commandId,
+          scope: "t3_only",
+          sessions: [],
+        });
+      }
+      const planner = yield* ThreadLifecyclePlan.ThreadLifecyclePlanner;
+      if (scenario === "archive-before-delete" || scenario === "archive-after-compaction") {
+        const archive = {
+          ...command,
+          commandId: CommandId.make("placeholder-archive"),
+          type: "thread.archive" as const,
+        };
+        const archivePlan = yield* planner.plan(archive);
+        yield* sink.commitCommand({
+          ...archivePlan,
+          commandId: archive.commandId,
+          commandType: archive.type,
+          threadId,
+          acceptedAt: deletedAt,
+        });
+        for (const effect of archivePlan.effects) {
+          const claimed = Option.getOrThrow(
+            yield* outbox.claimNext({ workerId: "placeholder-archive" }),
+          );
+          assert.equal(claimed.request.type, effect.request.type);
+          assert.isTrue(
+            yield* outbox.succeed({ effectId: claimed.id, workerId: "placeholder-archive" }),
+          );
+        }
+        if (scenario === "archive-after-compaction") {
+          yield* sink.write({
+            events: [
+              {
+                id: EventId.make("placeholder-rename-after-archive"),
+                type: "thread.metadata-updated",
+                threadId,
+                occurredAt: deletedAt,
+                payload: { ...(yield* store.getThread(threadId)), title: "Archived placeholder" },
+              },
+            ],
+          });
+          yield* Effect.gen(function* () {
+            yield* (yield* ProjectionMaintenance.ProjectionMaintenanceV2).compactEventStore();
+          }).pipe(Effect.provide(ProjectionMaintenance.layer));
+          const sql = yield* SqlClient.SqlClient;
+          assert.isEmpty(
+            yield* sql`SELECT * FROM orchestration_events WHERE event_type = 'thread.archived'`,
+          );
+        }
+      }
+      const plan = yield* planner.plan(command);
+      const startId = "placeholder-start";
+      if (scenario === "unclaimed-start" || scenario === "claimed-after-plan") {
+        yield* outbox.enqueue([
+          {
+            id: startId,
+            commandId: CommandId.make("placeholder-dispatch"),
+            threadId,
+            request: { type: "provider-turn.start", runId },
+          },
+        ]);
+        if (scenario === "claimed-after-plan") {
+          assert.equal(
+            Option.getOrThrow(yield* outbox.claimNext({ workerId: "racing-start" })).id,
+            startId,
+          );
+        }
+      }
+      const committed = yield* sink.commitCommand({
+        ...plan,
+        commandId: command.commandId,
+        commandType: command.type,
+        threadId,
+        acceptedAt: deletedAt,
+      });
+      assert.isTrue(committed.committed);
+      const first = Option.getOrThrow(yield* records.get(threadId));
+      if (scenario === "late-unresolved-identity" || scenario === "late-resolved-identity") {
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make("placeholder-late-identity"),
+              type: "provider-thread.updated",
+              threadId,
+              occurredAt: deletedAt,
+              payload: {
+                ...pending,
+                status: "closed",
+                providerSessionId: ProviderSessionId.make("late-session"),
+                nativeThreadRef: {
+                  driver: ProviderDriverKind.make("pi"),
+                  nativeId: "late-native",
+                  strength: "strong",
+                },
+                ...(scenario === "late-resolved-identity" ? { nativeStorage: piStorage } : {}),
+              },
+            },
+          ],
+        });
+      }
+      // The worker can no longer claim a start after the deletion transaction commits.
+      for (const effect of plan.effects) {
+        const claimed = Option.getOrThrow(
+          yield* outbox.claimNext({ workerId: "placeholder-cleanup" }),
+        );
+        assert.equal(claimed.request.type, effect.request.type);
+        assert.isTrue(
+          yield* outbox.succeed({ effectId: claimed.id, workerId: "placeholder-cleanup" }),
+        );
+      }
+      if (scenario === "unclaimed-start" || scenario === "claimed-after-plan") {
+        const cancelled = Option.getOrThrow(yield* outbox.get(startId));
+        assert.equal(cancelled.status, "cancelled");
+        assert.equal(cancelled.attemptCount, scenario === "unclaimed-start" ? 0 : 1);
+      }
+      const allowed = [
+        "missing-storage",
+        "unresolved-storage",
+        "unclaimed-start",
+        "archive-before-delete",
+        "archive-after-compaction",
+      ].includes(scenario);
+      const certified =
+        allowed ||
+        scenario.startsWith("late-") ||
+        scenario === "identity-before-reclaim-transaction";
+      const reclaim = (yield* ThreadDataReclamation.ThreadDataReclamation).reclaim;
+      const bounds = {
+        eventThroughSequence: Number.MAX_SAFE_INTEGER,
+        receiptThroughRowId: Number.MAX_SAFE_INTEGER,
+      };
+      let summary: ThreadDataReclamation.ThreadDataReclamationSummary;
+      if (scenario === "identity-before-reclaim-transaction") {
+        const sql = yield* SqlClient.SqlClient;
+        const bindings = yield* NativeSessionBindings.NativeSessionBindings;
+        let injected = false;
+        const withTransaction: typeof sql.withTransaction = (effect) =>
+          Effect.gen(function* () {
+            if (!injected) {
+              injected = true;
+              yield* bindings
+                .applyProviderThread({
+                  id: EventId.make("late-before-reclaim-transaction"),
+                  type: "provider-thread.updated",
+                  threadId,
+                  occurredAt: deletedAt,
+                  payload: { ...pending, status: "error" },
+                })
+                .pipe(Effect.orDie);
+            }
+            return yield* sql.withTransaction(effect);
+          });
+        const intercepted = new Proxy(sql, {
+          get(target, key, receiver) {
+            return key === "withTransaction" ? withTransaction : Reflect.get(target, key, receiver);
+          },
+        });
+        summary = yield* Effect.gen(function* () {
+          return yield* (yield* ThreadDataReclamation.ThreadDataReclamation).reclaim(bounds);
+        }).pipe(
+          Effect.provide(
+            Layer.fresh(
+              ThreadDataReclamation.layer.pipe(
+                Layer.provide(Layer.succeed(SqlClient.SqlClient, intercepted)),
+              ),
+            ),
+          ),
+        );
+        assert.isTrue(injected);
+      } else summary = yield* reclaim(bounds);
+      assert.equal(summary.reclaimedThreadCount, allowed ? 1 : 0);
+      if (allowed) {
+        assert.deepEqual(summary.skippedThreads, []);
+        const sql = yield* SqlClient.SqlClient;
+        assert.isEmpty(yield* sql`SELECT * FROM orchestration_v2_projection_provider_threads`);
+        assert.isEmpty(yield* sql`SELECT * FROM orchestration_v2_projection_runs`);
+        const repeated = yield* reclaim(bounds);
+        assert.deepEqual(repeated.skippedThreads, []);
+        assert.equal(repeated.deletedProjectionRowCount, 0);
+      } else {
+        assert.deepInclude(summary.skippedThreads, {
+          threadId,
+          blockerCodes: ["unknown_dependency"],
+        });
+        assert.lengthOf((yield* store.getThreadRecords(threadId, ["runs"])).runs, 1);
+      }
+      if (certified) {
+        assert.nestedPropertyVal(first, "noNativeSessionProofs.0.providerThreadId", pending.id);
+        assert.nestedPropertyVal(first, "noNativeSessionProofs.0.source", "cancelled_queued_runs");
+        assert.deepEqual(first.noNativeSessionProofs?.[0]?.runIds, [runId]);
+        const stored = committed.storedEvents.find((row) => row.event.type === "thread.deleted")!;
+        assert.deepNestedPropertyVal(
+          stored,
+          "event.deletionRecord.noNativeSessionProofs",
+          first.noNativeSessionProofs,
+        );
+      } else assert.notProperty(first, "noNativeSessionProofs");
+      // A certified placeholder has no native file or id to import. Its T3 tombstone remains durable.
+      assert.isTrue(Option.isSome(yield* records.get(threadId)));
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(ThreadLifecyclePlan.layer, EventSink.layerFromStores).pipe(
+          Layer.provideMerge(ThreadOwnership.layer),
+          Layer.provideMerge(
+            Layer.mergeAll(
+              ProjectionStore.layer,
+              EventStore.layer,
+              IdAllocator.layer,
+              EffectOutbox.layer,
+              CommandReceiptStore.layer,
+              ProjectStore.layer,
+              TurnItemPositionStore.layer,
               ThreadDeletionRecords.layer,
               ThreadDataReclamation.layer,
               NativeSessionBindings.layer,

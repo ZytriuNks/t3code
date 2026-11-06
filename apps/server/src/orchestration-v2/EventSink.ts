@@ -37,6 +37,7 @@ import * as ProjectStore from "./ProjectStore.ts";
 import * as NativeSessionBindings from "./NativeSessionBindings.ts";
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
 import * as ThreadLifecycleGuard from "./ThreadLifecycleGuard.ts";
+import { certifyCancelledQueuedSessions } from "./ThreadNativeAbsence.ts";
 
 interface LifecycleWriteOptions {
   readonly lifecycleGuard?: ThreadLifecycleGuard.LifecycleWriteGuard | undefined;
@@ -1144,11 +1145,44 @@ const layerBase: Layer.Layer<
             return { ...existing, committed: false as const, cancelledEffectIds: [] };
           }
 
+          const cancellations = new Map<
+            ThreadId,
+            { effectTypes: Set<EffectOutbox.OrchestrationEffectRequestV2["type"]>; reason: string }
+          >();
+          for (const target of [
+            ...(input.cancelUnsettledEffectsByThread ?? []),
+            ...(input.cancelUnsettledEffects === undefined
+              ? []
+              : [{ threadId: input.threadId, ...input.cancelUnsettledEffects }]),
+          ]) {
+            const previous = cancellations.get(target.threadId);
+            cancellations.set(target.threadId, {
+              effectTypes: new Set([...(previous?.effectTypes ?? []), ...target.effectTypes]),
+              reason: target.reason,
+            });
+          }
+          const cancelledEffectIds: Array<string> = [];
+          for (const [threadId, target] of cancellations)
+            cancelledEffectIds.push(
+              ...(yield* effectOutbox.cancelUnsettled({
+                threadId,
+                effectTypes: [...target.effectTypes],
+                reason: target.reason,
+              })),
+            );
+          // 与 claimNext 的 UPDATE 共用事务；领取在先会留下 attempt_count，删除在先则无法再领取。
+          const events =
+            input.events.some((event) => event.type === "thread.deleted") &&
+            !input.effects.some((effect) => effect.request.type === "provider-turn.start")
+              ? yield* certifyCancelledQueuedSessions(input.events).pipe(
+                  Effect.provideService(SqlClient.SqlClient, sql),
+                )
+              : input.events;
           const runId = input.updateDelegatedCompletionOnlyRunId;
           const normalized = yield* normalizeEvents(
             runId === undefined
-              ? input.events
-              : yield* updateDelegatedCompletionOnly(input.events, (id) => id === runId),
+              ? events
+              : yield* updateDelegatedCompletionOnly(events, (id) => id === runId),
             input,
           );
           const storedEvents = yield* eventStore.append({
@@ -1177,31 +1211,6 @@ const layerBase: Layer.Layer<
             error: null,
           };
           yield* commandReceipts.upsert(receipt);
-          const cancellations = new Map<
-            ThreadId,
-            { effectTypes: Set<EffectOutbox.OrchestrationEffectRequestV2["type"]>; reason: string }
-          >();
-          for (const target of [
-            ...(input.cancelUnsettledEffectsByThread ?? []),
-            ...(input.cancelUnsettledEffects === undefined
-              ? []
-              : [{ threadId: input.threadId, ...input.cancelUnsettledEffects }]),
-          ]) {
-            const previous = cancellations.get(target.threadId);
-            cancellations.set(target.threadId, {
-              effectTypes: new Set([...(previous?.effectTypes ?? []), ...target.effectTypes]),
-              reason: target.reason,
-            });
-          }
-          const cancelledEffectIds: Array<string> = [];
-          for (const [threadId, target] of cancellations)
-            cancelledEffectIds.push(
-              ...(yield* effectOutbox.cancelUnsettled({
-                threadId,
-                effectTypes: [...target.effectTypes],
-                reason: target.reason,
-              })),
-            );
           yield* effectOutbox.enqueue(input.effects);
           return { receipt, storedEvents, outcomes, committed: true as const, cancelledEffectIds };
         }),

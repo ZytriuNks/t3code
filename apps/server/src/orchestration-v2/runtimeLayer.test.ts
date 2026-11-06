@@ -90,6 +90,7 @@ import * as TerminalManager from "../terminal/Manager.ts";
 import * as ResourceCleanupService from "./ResourceCleanupService.ts";
 import * as ThreadLaunchService from "./ThreadLaunchService.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
+import * as ThreadDeletionRecords from "./ThreadDeletionRecords.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 
@@ -296,6 +297,204 @@ const layerTest = Layer.mergeAll(
   Layer.provide(layerGitWorkflowTest),
   Layer.provide(layerProjectServiceTest),
   Layer.provide(layerPlatformTest),
+);
+
+it.effect.each([false, true])(
+  "reclaims a never-started Pi placeholder after queued-run.cancel (thenArchive=%s)",
+  (thenArchive) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const sink = yield* EventSink.EventSinkV2;
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const allocator = yield* IdAllocator.IdAllocatorV2;
+      const at = yield* DateTime.now;
+      const threadId = ThreadId.make("fix03:cancelled-placeholder");
+      const projectId = ProjectId.make("fix03:cancelled-placeholder-project");
+      yield* seedProject({
+        projectId,
+        title: "Queued Pi",
+        workspaceRoot: "/fix03",
+        defaultModelSelection: null,
+        createdAt: DateTime.formatIso(at),
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("fix03:create"),
+        threadId,
+        projectId,
+        title: "Queued Pi",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdBy: "user",
+        creationSource: "web",
+      });
+      const piInstanceId = ProviderInstanceId.make("pi-saved");
+      const driver = ProviderDriverKind.make("pi");
+      const runId = allocator.derive.run({ threadId, ordinal: 1 });
+      const providerThreadId = allocator.derive.providerThread({
+        driver,
+        nativeThreadId: `pending:${runId}`,
+      });
+      const attemptId = allocator.derive.runAttempt({ runId, attemptOrdinal: 1 });
+      const nodeId = allocator.derive.rootNode({ runId });
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make("fix03:placeholder"),
+            type: "provider-thread.updated",
+            threadId,
+            occurredAt: at,
+            payload: {
+              id: providerThreadId,
+              driver,
+              providerInstanceId: piInstanceId,
+              providerSessionId: null,
+              appThreadId: threadId,
+              ownerNodeId: null,
+              nativeThreadRef: null,
+              nativeConversationHeadRef: null,
+              status: "not_loaded",
+              firstRunOrdinal: null,
+              lastRunOrdinal: null,
+              handoffIds: [],
+              forkedFrom: null,
+              createdAt: at,
+              updatedAt: at,
+            },
+          },
+          {
+            id: EventId.make("fix03:queued-run"),
+            type: "run.created",
+            threadId,
+            occurredAt: at,
+            payload: {
+              id: runId,
+              threadId,
+              ordinal: 1,
+              providerInstanceId: piInstanceId,
+              modelSelection: { instanceId: piInstanceId, model: "test" },
+              providerThreadId,
+              userMessageId: MessageId.make("fix03:queued-message"),
+              rootNodeId: nodeId,
+              activeAttemptId: attemptId,
+              status: "queued",
+              queuePosition: 1,
+              requestedAt: at,
+              startedAt: null,
+              completedAt: null,
+              checkpointId: null,
+              contextHandoffId: null,
+            },
+          },
+          {
+            id: EventId.make("fix03:queued-attempt"),
+            type: "run-attempt.created",
+            threadId,
+            occurredAt: at,
+            payload: {
+              id: attemptId,
+              runId,
+              attemptOrdinal: 1,
+              rootNodeId: nodeId,
+              providerInstanceId: piInstanceId,
+              providerThreadId,
+              providerTurnId: null,
+              reason: "initial",
+              status: "pending",
+              startedAt: null,
+              completedAt: null,
+            },
+          },
+          {
+            id: EventId.make("fix03:queued-root"),
+            type: "node.updated",
+            threadId,
+            occurredAt: at,
+            payload: {
+              id: nodeId,
+              threadId,
+              runId,
+              parentNodeId: null,
+              rootNodeId: nodeId,
+              kind: "root_turn",
+              status: "pending",
+              countsForRun: true,
+              providerThreadId,
+              providerTurnId: null,
+              nativeItemRef: null,
+              runtimeRequestId: null,
+              checkpointScopeId: null,
+              startedAt: null,
+              completedAt: null,
+            },
+          },
+        ],
+      });
+      const cancelled = yield* orchestrator.dispatch({
+        type: "queued-run.cancel",
+        commandId: CommandId.make("fix03:queue-cancel"),
+        threadId,
+        runId,
+      });
+      assert.isTrue(
+        cancelled.storedEvents.some(
+          (row) => row.event.type === "run.updated" && row.event.payload.status === "cancelled",
+        ),
+      );
+      if (thenArchive) {
+        yield* orchestrator.dispatch({
+          type: "thread.archive",
+          commandId: CommandId.make("fix03:archive-cancelled"),
+          threadId,
+        });
+        for (const _effect of yield* outbox.listByCommandId(
+          CommandId.make("fix03:archive-cancelled"),
+        )) {
+          const claimed = Option.getOrThrow(yield* outbox.claimNext({ workerId: "fix03:cleanup" }));
+          assert.isTrue(yield* outbox.succeed({ effectId: claimed.id, workerId: "fix03:cleanup" }));
+        }
+      }
+      const deleteId = CommandId.make("fix03:delete-cancelled");
+      const deleted = yield* orchestrator.dispatch({
+        type: "thread.delete",
+        commandId: deleteId,
+        threadId,
+      });
+      for (const _effect of yield* outbox.listByCommandId(deleteId)) {
+        const claimed = Option.getOrThrow(yield* outbox.claimNext({ workerId: "fix03:cleanup" }));
+        assert.isTrue(yield* outbox.succeed({ effectId: claimed.id, workerId: "fix03:cleanup" }));
+      }
+      const summary = yield* (yield* ProjectionMaintenance.ProjectionMaintenanceV2)
+        .reclaimDeletedThreadData;
+      assert.equal(summary.reclaimedThreadCount, 1);
+      assert.deepEqual(summary.skippedThreads, []);
+      assert.isEmpty(
+        (yield* store.getThreadRecords(threadId, ["providerThreads"])).providerThreads,
+      );
+      const record = Option.getOrThrow(
+        yield* (yield* ThreadDeletionRecords.ThreadDeletionRecords).get(threadId),
+      );
+      assert.equal(record.noNativeSessionProofs?.[0]?.providerThreadId, providerThreadId);
+      const event = deleted.storedEvents.find((row) => row.event.type === "thread.deleted")!.event;
+      assert.deepNestedPropertyVal(
+        event,
+        "deletionRecord.noNativeSessionProofs",
+        record.noNativeSessionProofs,
+      );
+    }).pipe(
+      Effect.provide(
+        Layer.merge(
+          layerTest,
+          Layer.mergeAll(IdAllocator.layer, ThreadDeletionRecords.layer).pipe(
+            Layer.provide(SqlitePersistence.layerMemory),
+          ),
+        ),
+      ),
+    ),
 );
 
 const layerLegacyImportTest = RuntimeLayer.layer.pipe(

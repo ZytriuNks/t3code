@@ -57,6 +57,14 @@ const record = {
   scope: "t3_only",
   sessions: [binding],
 };
+const noNativeSessionProof = {
+  providerThreadId: "pending-pi",
+  providerInstanceId: "pi",
+  source: "cancelled_queued_runs",
+  runIds: ["queued-run"],
+  attemptIds: ["pending-attempt"],
+  cancelledStartEffectIds: [],
+};
 
 describe("thread lifecycle contracts", () => {
   it("reads legacy thread, run and provider payloads and defaults the thread revision", () => {
@@ -137,6 +145,14 @@ describe("thread lifecycle contracts", () => {
     expect(() => decodeBinding({ ...binding, boundAt: 1 })).toThrow();
     expect(decodeRecord(record).scope).toBe("t3_only");
     expect(() => decodeRecord({ ...record, scope: "native" })).toThrow();
+    for (const proof of [
+      { ...noNativeSessionProof, source: "not_loaded" },
+      { ...noNativeSessionProof, runIds: [] },
+      { ...noNativeSessionProof, attemptIds: [] },
+      { ...noNativeSessionProof, cancelledStartEffectIds: [1] },
+    ]) {
+      expect(() => decodeRecord({ ...record, noNativeSessionProofs: [proof] })).toThrow();
+    }
   });
 
   it("round trips legacy and recorded deletions through persisted and forward-compatible wire codecs", () => {
@@ -145,7 +161,11 @@ describe("thread lifecycle contracts", () => {
     const decodeWire = Schema.decodeUnknownSync(
       Schema.toCodecJson(OrchestrationV2RpcSchemas.subscribeThread.output),
     );
-    for (const deletionRecord of [undefined, record]) {
+    for (const deletionRecord of [
+      undefined,
+      record,
+      { ...record, noNativeSessionProofs: [noNativeSessionProof] },
+    ]) {
       const event = {
         id: "event",
         type: "thread.deleted",

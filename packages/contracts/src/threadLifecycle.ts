@@ -5,6 +5,8 @@ import {
   IsoDateTime,
   ProjectId,
   ProviderThreadId,
+  RunAttemptId,
+  RunId,
   ThreadId,
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
@@ -51,5 +53,17 @@ export const ThreadDeletionRecord = Schema.Struct({
   commandId: CommandId,
   scope: Schema.Literal("t3_only"),
   sessions: Schema.Array(NativeSessionBinding),
+  noNativeSessionProofs: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        providerThreadId: ProviderThreadId,
+        providerInstanceId: ProviderInstanceId,
+        source: Schema.Literal("cancelled_queued_runs"),
+        runIds: Schema.NonEmptyArray(RunId),
+        attemptIds: Schema.NonEmptyArray(RunAttemptId),
+        cancelledStartEffectIds: Schema.Array(TrimmedNonEmptyString),
+      }),
+    ),
+  ),
 });
 export type ThreadDeletionRecord = typeof ThreadDeletionRecord.Type;

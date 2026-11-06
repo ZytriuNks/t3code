@@ -6,6 +6,8 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderThreadId,
+  RunAttemptId,
+  RunId,
   ThreadId,
   type ThreadDeletionRecord,
   type OrchestrationV2ProviderThread,
@@ -99,24 +101,34 @@ const seedRetainedSession = Effect.fn("test.seedRetainedSession")(function* (
   else yield* sql`DELETE FROM orchestration_v2_native_session_bindings`;
 });
 
-it.effect(
-  "keeps the first deletion and its sessions independently of provider and thread projections",
-  () =>
+it.effect.each([false, true])(
+  "keeps the first deletion and its sessions independently of projections (certified=%s)",
+  (certified) =>
     Effect.gen(function* () {
       const deletions = yield* ThreadDeletionRecords.ThreadDeletionRecords;
       const sql = yield* SqlClient.SqlClient;
+      const proof = {
+        providerThreadId: ProviderThreadId.make("queued-pi"),
+        providerInstanceId: ProviderInstanceId.make("pi"),
+        source: "cancelled_queued_runs" as const,
+        runIds: [RunId.make("queued-run")] as const,
+        attemptIds: [RunAttemptId.make("queued-attempt")] as const,
+        cancelledStartEffectIds: [],
+      };
+      const first = { ...record, ...(certified ? { noNativeSessionProofs: [proof] } : {}) };
       expect(Option.isNone(yield* deletions.get(R))).toBe(true);
-      yield* deletions.apply(record);
+      yield* deletions.apply(first);
       yield* deletions.apply({
         ...record,
         deletedAt: "2026-10-27T00:00:00.000Z",
         commandId: CommandId.make("repeat"),
         operationRootThreadId: ThreadId.make("later-root"),
         sessions: [piSession],
+        noNativeSessionProofs: [{ ...proof, runIds: [RunId.make("untrusted-later-run")] }],
       });
       yield* sql`DELETE FROM orchestration_v2_projection_provider_threads`;
       yield* sql`DELETE FROM orchestration_v2_projection_threads`;
-      expect(Option.getOrThrow(yield* deletions.get(R))).toEqual(record);
+      expect(Option.getOrThrow(yield* deletions.get(R))).toEqual(first);
       expect(Option.getOrThrow(yield* deletions.get(R)).deletedAt).toBe("2026-10-26T00:00:00.000Z");
       expect(Option.getOrThrow(yield* deletions.get(R)).scope).toBe("t3_only");
       expect(yield* sql`SELECT * FROM orchestration_v2_thread_deletion_sessions`).toHaveLength(1);

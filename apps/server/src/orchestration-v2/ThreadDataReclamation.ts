@@ -8,6 +8,7 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as ThreadDeletionRecords from "./ThreadDeletionRecords.ts";
+import { checkNoNativeSessionProofs } from "./ThreadNativeAbsence.ts";
 
 export const THREAD_DATA_RECLAMATION_BATCH_SIZE = 50;
 
@@ -1377,20 +1378,27 @@ const make = Effect.gen(function* () {
           addBlocker(row.thread_id, "shared_provider_session");
         }
 
-        const unknownNativeRows = yield* sql<{ readonly thread_id: string }>`
-          SELECT thread_id
+        const noNative = yield* checkNoNativeSessionProofs(candidateIdChunk).pipe(
+          Effect.provideService(SqlClient.SqlClient, sql),
+        );
+        for (const threadId of noNative.contradicted) addBlocker(threadId, "unknown_dependency");
+        const unknownNativeRows = yield* sql<{
+          readonly thread_id: string;
+          readonly provider_thread_id: string | null;
+        }>`
+          SELECT thread_id, NULL AS provider_thread_id
           FROM orchestration_v2_native_session_bindings
           WHERE ${sql.in("thread_id", candidateIdChunk)}
             AND ((driver <> 'pi' AND native_id IS NULL)
               OR (driver = 'pi' AND (storage_type <> 'resolved' OR canonical_root = '' OR canonical_file = '')))
           UNION
-          SELECT thread_id
+          SELECT thread_id, NULL AS provider_thread_id
           FROM orchestration_v2_thread_deletion_sessions
           WHERE ${sql.in("thread_id", candidateIdChunk)}
             AND ((driver <> 'pi' AND native_id IS NULL)
               OR (driver = 'pi' AND (storage_type <> 'resolved' OR canonical_root = '' OR canonical_file = '')))
           UNION
-          SELECT binding.thread_id
+          SELECT binding.thread_id, binding.provider_thread_id
           FROM (
             SELECT thread_id, provider_thread_id, provider_instance_id, driver, native_id,
               storage_type, canonical_root, canonical_file
@@ -1420,7 +1428,9 @@ const make = Effect.gen(function* () {
                 AND session.canonical_file = binding.canonical_file
             )
         `;
-        for (const row of unknownNativeRows) addBlocker(row.thread_id, "unknown_dependency");
+        for (const row of unknownNativeRows)
+          if (row.provider_thread_id === null || !noNative.confirmed.has(row.provider_thread_id))
+            addBlocker(row.thread_id, "unknown_dependency");
 
         const sharedNativeRows = yield* sql<{ readonly thread_id: string }>`
           WITH candidate_identities AS (
@@ -2328,64 +2338,83 @@ const make = Effect.gen(function* () {
 
       const rootIds = roots.map((row) => row.operation_root_thread_id);
       for (const operationRootThreadId of rootIds) {
-        const eligibleThreadIds = new Set<string>();
-        let eligibilityAfterThreadId = "";
-        while (true) {
-          const candidates = yield* selectCandidateChunk(
-            input,
-            operationRootThreadId,
-            eligibilityAfterThreadId,
-          );
-          for (const candidate of candidates) eligibleThreadIds.add(candidate.thread_id);
-          if (candidates.length === 0 || candidates.length < THREAD_DATA_RECLAMATION_BATCH_SIZE)
-            break;
-          eligibilityAfterThreadId = candidates.at(-1)!.thread_id;
-        }
-
-        let afterThreadId = "";
-        let rootBlocked = false;
-
-        while (true) {
-          const candidates = yield* selectCandidateChunk(
-            input,
-            operationRootThreadId,
-            afterThreadId,
-          );
-          if (candidates.length === 0) break;
-
-          const preview = yield* reclaimCandidateBatch(input, candidates, false, eligibleThreadIds);
-          if (preview.skippedThreads.length > 0) {
-            skippedThreads.push(...preview.skippedThreads);
-            rootBlocked = true;
+        const reclaimRoot = Effect.gen(function* () {
+          const eligibleThreadIds = new Set<string>();
+          let eligibilityAfterThreadId = "";
+          while (true) {
+            const candidates = yield* selectCandidateChunk(
+              input,
+              operationRootThreadId,
+              eligibilityAfterThreadId,
+            );
+            for (const candidate of candidates) eligibleThreadIds.add(candidate.thread_id);
+            if (candidates.length === 0 || candidates.length < THREAD_DATA_RECLAMATION_BATCH_SIZE)
+              break;
+            eligibilityAfterThreadId = candidates.at(-1)!.thread_id;
           }
 
-          afterThreadId = candidates.at(-1)!.thread_id;
-          if (candidates.length < THREAD_DATA_RECLAMATION_BATCH_SIZE) break;
-        }
+          let afterThreadId = "";
+          let rootBlocked = false;
 
-        if (rootBlocked) continue;
+          while (true) {
+            const candidates = yield* selectCandidateChunk(
+              input,
+              operationRootThreadId,
+              afterThreadId,
+            );
+            if (candidates.length === 0) break;
 
-        afterThreadId = "";
-        while (true) {
-          const candidates = yield* selectCandidateChunk(
-            input,
-            operationRootThreadId,
-            afterThreadId,
-          );
-          if (candidates.length === 0) break;
+            const preview = yield* reclaimCandidateBatch(
+              input,
+              candidates,
+              false,
+              eligibleThreadIds,
+            );
+            if (preview.skippedThreads.length > 0) {
+              skippedThreads.push(...preview.skippedThreads);
+              rootBlocked = true;
+            }
 
-          const summary = yield* reclaimCandidateBatch(input, candidates, true, eligibleThreadIds);
-          reclaimedThreadCount += summary.reclaimedThreadCount;
-          skippedThreads.push(...summary.skippedThreads);
-          deletedEventCount += summary.deletedEventCount;
-          deletedReceiptCount += summary.deletedReceiptCount;
-          deletedProjectionRowCount += summary.deletedProjectionRowCount;
-          deletedTurnItemPositionCount += summary.deletedTurnItemPositionCount;
-          deletedOutboxCount += summary.deletedOutboxCount;
+            afterThreadId = candidates.at(-1)!.thread_id;
+            if (candidates.length < THREAD_DATA_RECLAMATION_BATCH_SIZE) break;
+          }
 
-          afterThreadId = candidates.at(-1)!.thread_id;
-          if (candidates.length < THREAD_DATA_RECLAMATION_BATCH_SIZE) break;
-        }
+          if (rootBlocked) return;
+
+          afterThreadId = "";
+          while (true) {
+            const candidates = yield* selectCandidateChunk(
+              input,
+              operationRootThreadId,
+              afterThreadId,
+            );
+            if (candidates.length === 0) break;
+
+            const summary = yield* reclaimCandidateBatch(
+              input,
+              candidates,
+              true,
+              eligibleThreadIds,
+            );
+            reclaimedThreadCount += summary.reclaimedThreadCount;
+            skippedThreads.push(...summary.skippedThreads);
+            deletedEventCount += summary.deletedEventCount;
+            deletedReceiptCount += summary.deletedReceiptCount;
+            deletedProjectionRowCount += summary.deletedProjectionRowCount;
+            deletedTurnItemPositionCount += summary.deletedTurnItemPositionCount;
+            deletedOutboxCount += summary.deletedOutboxCount;
+
+            afterThreadId = candidates.at(-1)!.thread_id;
+            if (candidates.length < THREAD_DATA_RECLAMATION_BATCH_SIZE) break;
+          }
+        });
+        const certified = yield* sql`
+          SELECT 1 FROM orchestration_v2_thread_deletions
+          WHERE operation_root_thread_id = ${operationRootThreadId}
+            AND json_array_length(payload_json, '$.noNativeSessionProofs') > 0 LIMIT 1
+        `;
+        // no-native 的完整预检与该 operation root 的全部 DELETE 共用事务，禁止迟到身份穿过批次间隙。
+        yield* certified.length > 0 ? sql.withTransaction(reclaimRoot) : reclaimRoot;
       }
       lastOperationRootId = rootIds.at(-1)!;
       if (roots.length < THREAD_DATA_RECLAMATION_BATCH_SIZE) break;
