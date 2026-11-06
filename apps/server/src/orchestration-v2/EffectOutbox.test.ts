@@ -110,6 +110,92 @@ it.effect("retains native delete completion proof beside cancelled lifecycle wor
   }).pipe(Effect.provide(layerTest)),
 );
 
+it.effect.each([
+  "none",
+  "exact",
+  "other-file",
+  "other-native",
+  "other-source",
+  "other-revision",
+  "other-target",
+] as const)(
+  "prunes unneeded and redundant Pi success proofs while retaining an exact dependency (%s)",
+  (dependency) =>
+    Effect.gen(function* () {
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const request = {
+        type: "provider-thread.delete" as const,
+        driver: "pi" as const,
+        providerInstanceId: ProviderInstanceId.make("pi-original"),
+        providerThreadId: ProviderThreadId.make("pi-thread"),
+        threadIds: [R],
+        nativeId: null,
+        nativeStorage: {
+          type: "resolved" as const,
+          canonicalRoot: "/isolated/sessions",
+          canonicalFile: "/isolated/sessions/test.jsonl",
+        },
+        lifecycle: { ...lifecycle, sourceToken: "persisted-source" },
+      };
+      if (dependency !== "none") {
+        yield* outbox.enqueue([{ id: "cancelled-proof", commandId, threadId: R, request }]);
+        yield* outbox.cancelUnsettled({
+          threadId: R,
+          effectTypes: ["provider-thread.delete"],
+          reason: "replacement",
+        });
+      }
+      for (let index = 0; index < 3; index++) {
+        const replacementCommand = CommandId.make(`replacement:${index}`);
+        const id = `success-proof:${index}`;
+        yield* outbox.enqueue([
+          {
+            id,
+            commandId: replacementCommand,
+            threadId: R,
+            request: {
+              ...request,
+              threadIds: dependency === "other-target" ? [F] : [R],
+              nativeId: dependency === "other-native" ? "other-native" : null,
+              nativeStorage: {
+                ...request.nativeStorage,
+                canonicalFile:
+                  dependency === "other-file"
+                    ? "/isolated/sessions/other.jsonl"
+                    : request.nativeStorage.canonicalFile,
+              },
+              lifecycle: {
+                ...request.lifecycle,
+                commandId: replacementCommand,
+                revision: dependency === "other-revision" ? 2 : 1,
+                sourceToken: dependency === "other-source" ? "other-source" : "persisted-source",
+              },
+            },
+          },
+        ]);
+        assert.equal(
+          Option.getOrThrow(yield* outbox.claimNext({ workerId: "proof-worker" })).id,
+          id,
+        );
+        yield* outbox.succeed({ effectId: id, workerId: "proof-worker" });
+      }
+      yield* TestClock.adjust("8 days");
+      assert.equal(yield* outbox.pruneSettled, dependency === "exact" ? 2 : 3);
+      for (let index = 0; index < 3; index++) {
+        assert.equal(
+          Option.isSome(yield* outbox.get(`success-proof:${index}`)),
+          dependency === "exact" && index === 0,
+        );
+      }
+      if (dependency !== "none")
+        assert.equal(Option.getOrThrow(yield* outbox.get("cancelled-proof")).status, "cancelled");
+      yield* TestClock.adjust("365 days");
+      assert.equal(yield* outbox.pruneSettled, 0);
+      if (dependency === "exact")
+        assert.isTrue(Option.isSome(yield* outbox.get("success-proof:0")));
+    }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect(
   "lifecycle cleanup query is thread scoped and distinguishes model-switch detach from legacy archive",
   () =>

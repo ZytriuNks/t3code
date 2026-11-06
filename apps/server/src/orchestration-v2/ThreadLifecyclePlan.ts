@@ -73,6 +73,34 @@ export const planThreadLifecycle = Effect.fn("ThreadLifecyclePlan.planThreadLife
     readonly idAllocator: IdAllocator.IdAllocatorV2["Service"];
   }): Effect.fn.Return<ThreadLifecyclePlan, IdAllocator.IdAllocatorV2Error> {
     const { now, idAllocator } = input;
+    const legacySessionsByThread = new Map(
+      input.members.map((member) => [
+        member.thread.id,
+        member.providerThreads.flatMap((thread): ReadonlyArray<NativeSessionBinding> => {
+          if (thread.appThreadId !== member.thread.id || thread.driver !== "pi") return [];
+          if (thread.nativeThreadRef !== null && thread.nativeThreadRef.driver !== thread.driver)
+            return [];
+          const storage = thread.nativeStorage ?? {
+            type: "unresolved" as const,
+            reason: "legacy_missing_locator" as const,
+          };
+          const nativeId = thread.nativeThreadRef?.nativeId ?? null;
+          if (nativeId === null && !(storage.type === "resolved" && storage.canonicalFile))
+            return [];
+          return [
+            {
+              threadId: member.thread.id,
+              providerThreadId: thread.id,
+              providerInstanceId: thread.providerInstanceId,
+              driver: thread.driver,
+              nativeId,
+              storage,
+              boundAt: DateTime.formatIso(thread.createdAt),
+            },
+          ];
+        }),
+      ]),
+    );
     const events: Array<OrchestrationV2DomainEvent> = [];
     const effects: Array<PendingOrchestrationEffectV2> = [];
     const revisions = new Map<ThreadId, number>();
@@ -141,7 +169,26 @@ export const planThreadLifecycle = Effect.fn("ThreadLifecyclePlan.planThreadLife
             deletedAt: DateTime.formatIso(thread.deletedAt ?? now),
             commandId: command.commandId,
             scope: "t3_only",
-            sessions: input.bindings.filter((binding) => binding.threadId === thread.id),
+            sessions: [
+              ...input.bindings.filter((binding) => binding.threadId === thread.id),
+              ...(legacySessionsByThread.get(thread.id) ?? []).filter(
+                (legacy) =>
+                  !input.bindings.some(
+                    (binding) =>
+                      binding.threadId === legacy.threadId &&
+                      binding.providerThreadId === legacy.providerThreadId &&
+                      binding.providerInstanceId === legacy.providerInstanceId &&
+                      binding.driver === legacy.driver &&
+                      binding.nativeId === legacy.nativeId &&
+                      (binding.storage.type === "resolved" && legacy.storage.type === "resolved"
+                        ? binding.storage.canonicalRoot === legacy.storage.canonicalRoot &&
+                          binding.storage.canonicalFile === legacy.storage.canonicalFile
+                        : binding.storage.type === "unresolved" &&
+                          legacy.storage.type === "unresolved" &&
+                          binding.storage.reason === legacy.storage.reason),
+                  ),
+              ),
+            ],
           },
         });
       } else {
@@ -435,21 +482,8 @@ export const planThreadLifecycle = Effect.fn("ThreadLifecyclePlan.planThreadLife
         ...input.bindings
           .filter((binding) => memberIds.has(binding.threadId))
           .map((binding) => ({ ...binding, priority: 0 })),
-        ...input.members.flatMap((member) =>
-          member.providerThreads
-            .filter((thread) => thread.appThreadId === member.thread.id)
-            .map((thread) => ({
-              threadId: member.thread.id,
-              providerThreadId: thread.id,
-              providerInstanceId: thread.providerInstanceId,
-              driver: thread.driver,
-              nativeId: thread.nativeThreadRef?.nativeId ?? null,
-              storage: thread.nativeStorage ?? {
-                type: "unresolved" as const,
-                reason: "legacy_missing_locator" as const,
-              },
-              priority: 1,
-            })),
+        ...[...legacySessionsByThread.values()].flatMap((sessions) =>
+          sessions.map((session) => ({ ...session, priority: 1 })),
         ),
       ]
         .filter(

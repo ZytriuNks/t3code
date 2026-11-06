@@ -775,9 +775,43 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
             SELECT rowid
             FROM orchestration_v2_effect_outbox
             WHERE status IN ('succeeded', 'cancelled')
-              AND NOT (effect_type IN ('provider-thread.delete', 'provider-session.detach')
+              AND NOT (effect_type = 'provider-session.detach'
                 AND (json_type(payload_json, '$.retirementRevision') IS NOT NULL
                   OR json_type(payload_json, '$.lifecycle') IS 'object'))
+              -- A cancelled native delete needs only one exact success proof.
+              AND rowid NOT IN (
+                SELECT MIN(proof.rowid)
+                FROM orchestration_v2_effect_outbox AS barrier
+                INNER JOIN orchestration_v2_effect_outbox AS proof
+                  ON proof.thread_id = barrier.thread_id
+                  AND proof.effect_type = 'provider-thread.delete'
+                  AND proof.status = 'succeeded'
+                  AND json_type(proof.payload_json, '$.lifecycle') IS 'object'
+                  AND json_extract(proof.payload_json, '$.lifecycle.rootThreadId') =
+                    json_extract(barrier.payload_json, '$.lifecycle.rootThreadId')
+                  AND json_extract(proof.payload_json, '$.lifecycle.revision') =
+                    json_extract(barrier.payload_json, '$.lifecycle.revision')
+                  AND json_extract(proof.payload_json, '$.lifecycle.sourceToken') IS
+                    json_extract(barrier.payload_json, '$.lifecycle.sourceToken')
+                  AND json_extract(proof.payload_json, '$.driver') =
+                    json_extract(barrier.payload_json, '$.driver')
+                  AND json_extract(proof.payload_json, '$.providerInstanceId') =
+                    json_extract(barrier.payload_json, '$.providerInstanceId')
+                  AND json_extract(proof.payload_json, '$.providerThreadId') =
+                    json_extract(barrier.payload_json, '$.providerThreadId')
+                  AND json_extract(proof.payload_json, '$.nativeId') IS
+                    json_extract(barrier.payload_json, '$.nativeId')
+                  AND json_extract(proof.payload_json, '$.nativeStorage.type') =
+                    json_extract(barrier.payload_json, '$.nativeStorage.type')
+                  AND json_extract(proof.payload_json, '$.nativeStorage.canonicalRoot') =
+                    json_extract(barrier.payload_json, '$.nativeStorage.canonicalRoot')
+                  AND json_extract(proof.payload_json, '$.nativeStorage.canonicalFile') =
+                    json_extract(barrier.payload_json, '$.nativeStorage.canonicalFile')
+                  AND json_extract(proof.payload_json, '$.threadIds') =
+                    json_extract(barrier.payload_json, '$.threadIds')
+                WHERE barrier.effect_type = 'provider-thread.delete' AND barrier.status = 'cancelled'
+                GROUP BY barrier.effect_id
+              )
               AND NOT (status = 'cancelled' AND json_type(payload_json, '$.lifecycle') IS 'object')
               AND NOT ((status = 'cancelled' OR effect_type = 'provider-session.detach')
                 AND EXISTS (SELECT 1 FROM orchestration_command_receipts receipt

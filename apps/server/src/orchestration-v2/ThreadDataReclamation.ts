@@ -7,6 +7,8 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 
+import * as ThreadDeletionRecords from "./ThreadDeletionRecords.ts";
+
 export const THREAD_DATA_RECLAMATION_BATCH_SIZE = 50;
 
 const encodeStringPair = Schema.encodeSync(
@@ -131,7 +133,7 @@ interface ReclaimableNativeBindingRow {
   readonly binding_key: string;
   readonly thread_id: string;
   readonly driver: string;
-  readonly native_id: string;
+  readonly native_id: string | null;
   readonly storage_type: string;
   readonly canonical_root: string;
   readonly canonical_file: string;
@@ -357,6 +359,9 @@ const make = Effect.gen(function* () {
       }
       const candidateThreadsWithData = new Set<string>();
       for (const candidateIdChunk of chunksOf(candidateIds, THREAD_DATA_RECLAMATION_BATCH_SIZE)) {
+        yield* ThreadDeletionRecords.backfillRetainedSessions(
+          candidateIdChunk.map((threadId) => ThreadId.make(threadId)),
+        ).pipe(Effect.provideService(SqlClient.SqlClient, sql));
         for (const threadId of yield* findThreadsWithReclaimableData(candidateIdChunk)) {
           candidateThreadsWithData.add(threadId);
         }
@@ -805,7 +810,9 @@ const make = Effect.gen(function* () {
             canonical_root,
             canonical_file
           FROM orchestration_v2_native_session_bindings
-          WHERE thread_id IN ${sql.in(candidateIdChunk)} AND native_id IS NOT NULL
+          WHERE thread_id IN ${sql.in(candidateIdChunk)}
+            AND (native_id IS NOT NULL OR (driver = 'pi' AND storage_type = 'resolved'
+              AND canonical_root <> '' AND canonical_file <> ''))
         `;
         for (const row of rows) {
           const rootThreadId = closureRootByThreadId.get(row.thread_id);
@@ -813,7 +820,7 @@ const make = Effect.gen(function* () {
           const bindings = candidateNativeBindingsByRoot.get(rootThreadId) ?? [];
           bindings.push(row);
           candidateNativeBindingsByRoot.set(rootThreadId, bindings);
-          candidateNativeIds.add(row.native_id);
+          if (row.native_id !== null) candidateNativeIds.add(row.native_id);
         }
       }
       const nativeOwnersById = new Map<string, Array<NativeSessionOwnerRow>>();
@@ -863,6 +870,7 @@ const make = Effect.gen(function* () {
           rootThreadId,
           bindings.filter(
             (candidate) =>
+              candidate.native_id === null ||
               !(nativeOwnersById.get(candidate.native_id) ?? []).some(
                 (owner) =>
                   sameNativeIdentity(candidate, owner) &&
@@ -1372,11 +1380,15 @@ const make = Effect.gen(function* () {
         const unknownNativeRows = yield* sql<{ readonly thread_id: string }>`
           SELECT thread_id
           FROM orchestration_v2_native_session_bindings
-          WHERE ${sql.in("thread_id", candidateIdChunk)} AND native_id IS NULL
+          WHERE ${sql.in("thread_id", candidateIdChunk)}
+            AND ((driver <> 'pi' AND native_id IS NULL)
+              OR (driver = 'pi' AND (storage_type <> 'resolved' OR canonical_root = '' OR canonical_file = '')))
           UNION
           SELECT thread_id
           FROM orchestration_v2_thread_deletion_sessions
-          WHERE ${sql.in("thread_id", candidateIdChunk)} AND native_id IS NULL
+          WHERE ${sql.in("thread_id", candidateIdChunk)}
+            AND ((driver <> 'pi' AND native_id IS NULL)
+              OR (driver = 'pi' AND (storage_type <> 'resolved' OR canonical_root = '' OR canonical_file = '')))
           UNION
           SELECT binding.thread_id
           FROM (
@@ -1395,7 +1407,10 @@ const make = Effect.gen(function* () {
               AND (json_type(payload_json, '$.nativeThreadRef') = 'object'
                 OR json_extract(payload_json, '$.nativeStorage.canonicalFile') IS NOT NULL)
           ) AS binding
-          WHERE NOT EXISTS (
+          WHERE binding.storage_type IS NOT 'resolved'
+            OR COALESCE(binding.canonical_root, '') = ''
+            OR COALESCE(binding.canonical_file, '') = ''
+            OR NOT EXISTS (
               SELECT 1 FROM orchestration_v2_thread_deletion_sessions AS session
               WHERE session.thread_id = binding.thread_id
                 AND session.provider_thread_id = binding.provider_thread_id
@@ -1441,19 +1456,33 @@ const make = Effect.gen(function* () {
             LEFT JOIN orchestration_v2_thread_deletions AS deletion
               ON deletion.thread_id = session.thread_id
               AND deletion.scope = 't3_only'
+            UNION ALL
+            SELECT provider_thread.thread_id, deletion.operation_root_thread_id, provider_thread.driver,
+              json_extract(provider_thread.payload_json, '$.nativeThreadRef.nativeId'),
+              json_extract(provider_thread.payload_json, '$.nativeStorage.type'),
+              json_extract(provider_thread.payload_json, '$.nativeStorage.canonicalRoot'),
+              json_extract(provider_thread.payload_json, '$.nativeStorage.canonicalFile')
+            FROM orchestration_v2_projection_provider_threads AS provider_thread
+            LEFT JOIN orchestration_v2_thread_deletions AS deletion
+              ON deletion.thread_id = provider_thread.thread_id AND deletion.scope = 't3_only'
+            WHERE provider_thread.driver = 'pi' AND provider_thread.thread_id IS NOT NULL
           )
           SELECT DISTINCT candidate.thread_id
           FROM candidate_identities AS candidate
           INNER JOIN native_owners AS shared
             ON shared.driver = candidate.driver
-            AND shared.native_id = candidate.native_id
             AND (
-              candidate.storage_type <> 'resolved'
-              OR shared.storage_type <> 'resolved'
-              OR (
-                shared.canonical_root = candidate.canonical_root
-                AND shared.canonical_file = candidate.canonical_file
-              )
+              (shared.native_id = candidate.native_id AND (
+                candidate.storage_type <> 'resolved'
+                OR shared.storage_type <> 'resolved'
+                OR (shared.canonical_root = candidate.canonical_root
+                  AND shared.canonical_file = candidate.canonical_file)
+              ))
+              OR (candidate.driver = 'pi'
+                AND candidate.storage_type = 'resolved' AND shared.storage_type = 'resolved'
+                AND candidate.canonical_root <> '' AND candidate.canonical_file <> ''
+                AND shared.canonical_root = candidate.canonical_root
+                AND shared.canonical_file = candidate.canonical_file)
             )
             AND shared.thread_id <> candidate.thread_id
           WHERE shared.operation_root_thread_id IS NULL
@@ -2063,12 +2092,13 @@ const make = Effect.gen(function* () {
           counts.deletedProjectionRowCount += providerSessions.length;
         }
 
+        // All lifecycle barriers passed; release native delete requests and proofs together.
         const outbox = yield* sql<{ readonly effect_id: string }>`
             DELETE FROM orchestration_v2_effect_outbox AS cleanup
             WHERE cleanup.thread_id IN ${sql.in(threadIds)}
               AND cleanup.status IN ('succeeded', 'cancelled')
               AND NOT (
-                cleanup.effect_type IN ('provider-thread.delete', 'provider-session.detach')
+                cleanup.effect_type = 'provider-session.detach'
                 AND (
                   json_type(cleanup.payload_json, '$.retirementRevision') IS NOT NULL
                   OR json_type(cleanup.payload_json, '$.lifecycle') IS 'object'
@@ -2076,10 +2106,12 @@ const make = Effect.gen(function* () {
               )
               AND NOT (
                 cleanup.status = 'cancelled'
+                AND cleanup.effect_type <> 'provider-thread.delete'
                 AND json_type(cleanup.payload_json, '$.lifecycle') IS 'object'
               )
               AND NOT (
                 (cleanup.status = 'cancelled' OR cleanup.effect_type = 'provider-session.detach')
+                AND cleanup.effect_type <> 'provider-thread.delete'
                 AND EXISTS (
                   SELECT 1
                   FROM orchestration_command_receipts AS receipt

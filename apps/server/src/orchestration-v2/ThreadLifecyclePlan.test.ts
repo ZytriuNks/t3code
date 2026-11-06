@@ -23,6 +23,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as SqlClient from "effect/sql/SqlClient";
+import * as TestClock from "effect/testing/TestClock";
 
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
@@ -30,6 +31,9 @@ import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import { applyToProjection, emptyProjection } from "./ProjectionStore.ts";
+import * as NativeSessionBindings from "./NativeSessionBindings.ts";
+import * as ThreadDataReclamation from "./ThreadDataReclamation.ts";
+import * as ThreadDeletionRecords from "./ThreadDeletionRecords.ts";
 import * as ThreadLifecyclePlan from "./ThreadLifecyclePlan.ts";
 import * as ThreadOwnership from "./ThreadOwnership.ts";
 
@@ -511,7 +515,7 @@ it.effect("retains canonical-file identity when Pi has no native session id", ()
   }).pipe(Effect.provide(IdAllocator.layer)),
 );
 
-it.effect("ignores provider threads borrowed from outside the operation", () =>
+it.effect("ignores borrowed provider threads and inconsistent native drivers", () =>
   Effect.gen(function* () {
     const plan = yield* planThreadLifecycle({
       command,
@@ -522,6 +526,9 @@ it.effect("ignores provider threads borrowed from outside the operation", () =>
           providerThreads: [
             makePiThread({ appThreadId: null }),
             makePiThread({ appThreadId: ThreadId.make("foreign") }),
+            makePiThread({
+              nativeThreadRef: { driver, nativeId: "foreign-driver-native", strength: "strong" },
+            }),
           ],
         },
       ],
@@ -531,14 +538,20 @@ it.effect("ignores provider threads borrowed from outside the operation", () =>
       idAllocator: yield* IdAllocator.IdAllocatorV2,
     });
     assert.isFalse(plan.effects.some((effect) => effect.request.type === "provider-thread.delete"));
+    assert.deepEqual(
+      plan.events.find((event) => event.type === "thread.deleted")?.deletionRecord?.sessions,
+      [],
+    );
   }).pipe(Effect.provide(IdAllocator.layer)),
 );
 
-it.effect(
-  "keeps closed legacy Pi identity and retires sessions before deletion with in-memory SQLite",
-  () =>
+it.effect.each(["first-delete", "pr37-binding", "pr37-projection"] as const)(
+  "keeps closed legacy Pi identity through cleanup, reclamation and import protection (%s)",
+  (history) =>
     Effect.gen(function* () {
+      yield* TestClock.setTime(DateTime.toEpochMillis(deletedAt));
       const store = yield* ProjectionStore.ProjectionStoreV2;
+      const records = yield* ThreadDeletionRecords.ThreadDeletionRecords;
       const member = makeProjection();
       yield* store.apply({
         id: EventId.make("pi-service-created"),
@@ -547,6 +560,18 @@ it.effect(
         occurredAt: createdAt,
         payload: member.thread,
       });
+      if (history !== "first-delete") {
+        yield* records.apply({
+          threadId,
+          projectId: member.thread.projectId,
+          parentThreadId: null,
+          operationRootThreadId: threadId,
+          deletedAt: DateTime.formatIso(deletedAt),
+          commandId: command.commandId,
+          scope: "t3_only",
+          sessions: [],
+        });
+      }
       yield* store.apply({
         id: EventId.make("pi-service-provider-thread"),
         type: "provider-thread.updated",
@@ -557,7 +582,8 @@ it.effect(
         }),
       });
       const sql = yield* SqlClient.SqlClient;
-      yield* sql`DELETE FROM orchestration_v2_native_session_bindings`;
+      if (history !== "pr37-binding")
+        yield* sql`DELETE FROM orchestration_v2_native_session_bindings`;
       const planner = yield* ThreadLifecyclePlan.ThreadLifecyclePlanner;
       const plan = yield* planner.plan(command);
       assert.deepEqual(
@@ -574,12 +600,74 @@ it.effect(
       assert.equal(deletion.threadId, threadId);
       assert.deepPropertyVal(deletion.request, "threadIds", [threadId]);
       assert.nestedPropertyVal(deletion.request, "lifecycle.revision", 1);
+      const deleted = plan.events.find((event) => event.type === "thread.deleted")!;
+      const expectedSession = makeBinding({
+        providerThreadId: makePiThread().id,
+        nativeId: "pi-native-session",
+      });
+      assert.deepEqual(deleted.deletionRecord?.sessions, [expectedSession]);
+      for (const event of plan.events) yield* store.apply(event);
+      assert.deepEqual(Option.getOrThrow(yield* records.get(threadId)).sessions, [expectedSession]);
+      yield* sql`
+        INSERT INTO orchestration_events (
+          event_id, aggregate_kind, stream_id, stream_version, event_type, occurred_at,
+          command_id, actor_kind, payload_json, metadata_json, application_event_version
+        ) VALUES (
+          ${deleted.id}, 'thread', ${threadId}, 1, 'thread.deleted', ${DateTime.formatIso(deletedAt)},
+          ${command.commandId}, 'server', '{}', '{}', 2
+        )
+      `;
+      yield* sql`
+        INSERT INTO orchestration_command_receipts (
+          command_id, aggregate_kind, aggregate_id, accepted_at, result_sequence,
+          status, error, command_type
+        ) VALUES (
+          ${command.commandId}, 'thread', ${threadId}, ${DateTime.formatIso(deletedAt)},
+          0, 'accepted', NULL, 'thread.delete'
+        )
+      `;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const effects =
+        history === "first-delete"
+          ? plan.effects
+          : plan.effects.filter((effect) => effect.request.type !== "provider-thread.delete");
+      yield* outbox.enqueue(effects);
+      assert.equal(
+        (yield* outbox.listByCommandId(command.commandId)).filter(
+          (effect) => effect.request.type === "provider-thread.delete",
+        ).length,
+        history === "first-delete" ? 1 : 0,
+      );
+      for (const _effect of effects) {
+        const claimed = Option.getOrThrow(yield* outbox.claimNext({ workerId: "i2-worker" }));
+        assert.isTrue(yield* outbox.succeed({ effectId: claimed.id, workerId: "i2-worker" }));
+      }
+      const reclamation = yield* ThreadDataReclamation.ThreadDataReclamation;
+      const summary = yield* reclamation.reclaim({
+        eventThroughSequence: Number.MAX_SAFE_INTEGER,
+        receiptThroughRowId: Number.MAX_SAFE_INTEGER,
+      });
+      assert.equal(summary.reclaimedThreadCount, 1);
+      assert.deepEqual(summary.skippedThreads, []);
+      assert.isEmpty(yield* sql`SELECT * FROM orchestration_v2_projection_provider_threads`);
+      assert.lengthOf(yield* sql`SELECT * FROM orchestration_v2_thread_deletion_sessions`, 1);
+      assert.equal(
+        yield* (yield* NativeSessionBindings.NativeSessionBindings).checkImport(expectedSession),
+        "deleted",
+      );
     }).pipe(
       Effect.provide(
         ThreadLifecyclePlan.layer.pipe(
           Layer.provideMerge(ThreadOwnership.layer),
           Layer.provideMerge(
-            Layer.mergeAll(ProjectionStore.layer, IdAllocator.layer, EffectOutbox.layer),
+            Layer.mergeAll(
+              ProjectionStore.layer,
+              IdAllocator.layer,
+              EffectOutbox.layer,
+              ThreadDeletionRecords.layer,
+              ThreadDataReclamation.layer,
+              NativeSessionBindings.layer,
+            ),
           ),
           Layer.provideMerge(SqlitePersistence.layerMemory),
         ),

@@ -858,6 +858,202 @@ it.effect.each(["missing", "different-file", "legacy-projection", "recorded"] as
     }).pipe(Effect.provide(NativeSessionBindings.layer.pipe(Layer.provideMerge(layerTest)))),
 );
 
+it.effect.each([
+  "complete",
+  "missing-file",
+  "missing-root",
+  "unresolved",
+  "different-file",
+  "shared-file",
+  "shared-legacy-file",
+] as const)(
+  "reclaims a null-native-id Pi file only with exclusive complete identity (%s)",
+  (identity) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const threadId = `thread:null-native:${identity}`;
+      yield* seedDeletedThread({ threadId });
+      yield* seedReclamationRows(threadId);
+      const storage = {
+        type: identity === "unresolved" ? "unresolved" : "resolved",
+        canonicalRoot: identity === "missing-root" ? "" : "/sessions",
+        canonicalFile: identity === "missing-file" ? "" : "null-native.jsonl",
+      };
+      yield* sql`UPDATE orchestration_v2_native_session_bindings
+      SET driver = 'pi', native_id = NULL, storage_type = ${storage.type},
+        canonical_root = ${storage.canonicalRoot}, canonical_file = ${storage.canonicalFile}
+      WHERE thread_id = ${threadId}`;
+      yield* sql`UPDATE orchestration_v2_thread_deletion_sessions
+      SET driver = 'pi', native_id = NULL, storage_type = ${storage.type},
+        canonical_root = ${storage.canonicalRoot},
+        canonical_file = ${identity === "different-file" ? "other.jsonl" : storage.canonicalFile}
+      WHERE thread_id = ${threadId}`;
+      yield* sql`UPDATE orchestration_v2_projection_provider_threads SET driver = 'pi',
+      payload_json = ${JSON.stringify({ nativeThreadRef: { nativeId: null }, nativeStorage: storage })}
+      WHERE thread_id = ${threadId}`;
+      yield* seedLifecycleCleanup({
+        threadId,
+        status: "failed",
+        effectType: "provider-thread.delete",
+      });
+      yield* sql`UPDATE orchestration_v2_effect_outbox SET status = 'succeeded',
+      payload_json = ${JSON.stringify({
+        driver: "pi",
+        providerInstanceId: "codex",
+        providerThreadId: `provider-thread:${threadId}`,
+        nativeId: null,
+        nativeStorage: storage,
+        threadIds: [threadId],
+        lifecycle: { commandId: `delete:${threadId}`, rootThreadId: threadId, revision: 1 },
+      })} WHERE effect_id = ${`cleanup:${threadId}`}`;
+      if (identity === "shared-file") {
+        yield* seedThread({ threadId: "thread:null-native:live", state: "active" });
+        yield* sql`INSERT INTO orchestration_v2_native_session_bindings (
+        binding_key, thread_id, provider_thread_id, provider_instance_id, driver, native_id,
+        storage_type, canonical_root, canonical_file, bound_at, payload_json
+      ) VALUES ('shared-null-native', 'thread:null-native:live', 'provider-thread:live', 'pi', 'pi',
+        'another-native-id', 'resolved', '/sessions', 'null-native.jsonl', ${at}, '{}')`;
+      }
+      if (identity === "shared-legacy-file") {
+        yield* seedThread({ threadId: "thread:null-native:legacy-live", state: "active" });
+        yield* sql`INSERT INTO orchestration_v2_projection_provider_threads (
+          provider_thread_id, thread_id, owner_node_id, provider, provider_session_id,
+          status, first_run_ordinal, last_run_ordinal, updated_at, payload_json, driver, provider_instance_id
+        ) VALUES ('provider-thread:legacy-live', 'thread:null-native:legacy-live', NULL, 'codex', NULL,
+          'closed', NULL, NULL, ${at},
+          ${JSON.stringify({ nativeThreadRef: { nativeId: null }, nativeStorage: storage })}, 'pi', 'pi')`;
+      }
+      const before = yield* snapshotRows();
+      const result = yield* reclaim();
+      if (identity === "complete") {
+        assert.equal(result.reclaimedThreadCount, 1);
+        assert.deepEqual(result.skippedThreads, []);
+        assert.isEmpty((yield* snapshotRows()).nativeBindings);
+        assert.isEmpty((yield* snapshotRows()).runs);
+        const bindings = yield* NativeSessionBindings.NativeSessionBindings;
+        assert.equal(
+          yield* bindings.checkImport({
+            driver: ProviderDriverKind.make("pi"),
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            nativeId: "reimport-native-id",
+            storage: {
+              type: "resolved",
+              canonicalRoot: "/sessions",
+              canonicalFile: "null-native.jsonl",
+            },
+          }),
+          "deleted",
+        );
+      } else {
+        assert.equal(result.reclaimedThreadCount, 0);
+        expectBlockers(result, threadId, [
+          identity.startsWith("shared-") ? "shared_native_session" : "unknown_dependency",
+        ]);
+        assert.deepEqual(yield* snapshotRows(), before);
+      }
+    }).pipe(Effect.provide(NativeSessionBindings.layer.pipe(Layer.provideMerge(layerTest)))),
+);
+
+it.effect.each(["binding", "projection", "late-binding", "late-projection"] as const)(
+  "maintenance backfills a legacy T3-only Pi tombstone before reclamation (%s)",
+  (source) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const threadId = `thread:legacy-t3-only:${source}`;
+      const providerThreadId = `provider-thread:${threadId}`;
+      const updatedAt = source.startsWith("late-") ? "2026-11-02T12:00:00.000Z" : at;
+      const storage = {
+        type: "resolved",
+        canonicalRoot: "/sessions",
+        canonicalFile: "/sessions/legacy.jsonl",
+      };
+      const deletion = {
+        threadId,
+        projectId: "project:reclamation",
+        parentThreadId: null,
+        operationRootThreadId: threadId,
+        deletedAt: at,
+        commandId: `delete:${threadId}`,
+        scope: "t3_only",
+        sessions: [],
+      };
+      yield* seedDeletedThread({ threadId });
+      yield* seedRun({ threadId, status: "completed" });
+      yield* sql`UPDATE orchestration_v2_thread_deletions SET payload_json = ${JSON.stringify(deletion)}
+      WHERE thread_id = ${threadId}`;
+      if (source.endsWith("binding")) {
+        const binding = {
+          threadId,
+          providerThreadId,
+          providerInstanceId: "pi-retained",
+          driver: "pi",
+          nativeId: "legacy-native",
+          storage,
+          boundAt: updatedAt,
+        };
+        yield* sql`INSERT INTO orchestration_v2_native_session_bindings (
+        binding_key, thread_id, provider_thread_id, provider_instance_id, driver,
+        native_id, storage_type, canonical_root, canonical_file, bound_at, payload_json
+      ) VALUES (${`binding:${threadId}`}, ${threadId}, ${providerThreadId}, 'pi-retained', 'pi',
+        'legacy-native', 'resolved', '/sessions', '/sessions/legacy.jsonl', ${updatedAt}, ${JSON.stringify(binding)})`;
+      } else {
+        const provider = {
+          id: providerThreadId,
+          appThreadId: threadId,
+          driver: "pi",
+          providerInstanceId: "pi-retained",
+          providerSessionId: null,
+          ownerNodeId: null,
+          status: "closed",
+          nativeThreadRef: { driver: "pi", nativeId: "legacy-native", strength: "strong" },
+          nativeStorage: storage,
+          nativeConversationHeadRef: null,
+          firstRunOrdinal: null,
+          lastRunOrdinal: null,
+          handoffIds: [],
+          forkedFrom: null,
+          createdAt: at,
+          updatedAt,
+        };
+        yield* sql`INSERT INTO orchestration_v2_projection_provider_threads (
+        provider_thread_id, thread_id, owner_node_id, provider, provider_session_id,
+        status, first_run_ordinal, last_run_ordinal, updated_at, payload_json, driver, provider_instance_id
+      ) VALUES (${providerThreadId}, ${threadId}, NULL, 'codex', NULL, 'closed', NULL, NULL,
+        ${updatedAt}, ${JSON.stringify(provider)}, 'pi', 'pi-retained')`;
+      }
+      const result = yield* reclaim();
+      assert.equal(result.reclaimedThreadCount, 1);
+      assert.deepEqual(result.skippedThreads, []);
+      const after = yield* snapshotRows();
+      assert.isEmpty(after.runs);
+      assert.isEmpty(after.nativeBindings);
+      assert.isEmpty(after.providerThreads);
+      assert.isEmpty(after.outbox);
+      assert.lengthOf(after.deletionSessions, 1);
+      const saved = JSON.parse(String(after.deletions[0]!.payload_json));
+      assert.deepEqual({ ...saved, sessions: [] }, deletion);
+      assert.equal(saved.sessions[0].providerInstanceId, "pi-retained");
+      assert.equal(saved.sessions[0].providerThreadId, providerThreadId);
+      const bindings = yield* NativeSessionBindings.NativeSessionBindings;
+      assert.equal(
+        yield* bindings.checkImport({
+          driver: ProviderDriverKind.make("pi"),
+          providerInstanceId: ProviderInstanceId.make("pi-new"),
+          nativeId: "legacy-native",
+          storage: {
+            type: "resolved",
+            canonicalRoot: "/sessions",
+            canonicalFile: "/sessions/legacy.jsonl",
+          },
+        }),
+        "deleted",
+      );
+      const snapshots = after.deletionSessions;
+      yield* reclaim();
+      assert.deepEqual((yield* snapshotRows()).deletionSessions, snapshots);
+    }).pipe(Effect.provide(NativeSessionBindings.layer.pipe(Layer.provideMerge(layerTest)))),
+);
+
 it.effect("reclaim blocks a deleted source with a surviving fork or pending context transfer", () =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
@@ -1867,11 +2063,12 @@ it.effect.each(["matching", "other-file", "other-thread", "other-source"] as con
       if (replacement === "matching") {
         assert.equal(summary.reclaimedThreadCount, 1);
         assert.isAbove(summary.deletedProjectionRowCount, 0);
-        assert.deepEqual(
-          (yield* snapshotRows()).outbox,
-          before.outbox.filter((row) => row.effect_type === "provider-thread.delete"),
-        );
-        assert.equal((yield* reclaim()).reclaimedThreadCount, 1);
+        assert.isEmpty((yield* snapshotRows()).outbox);
+        assert.equal(summary.deletedOutboxCount, before.outbox.length);
+        const repeated = yield* reclaim();
+        assert.equal(repeated.reclaimedThreadCount, 1);
+        assert.equal(repeated.deletedOutboxCount, 0);
+        assert.isEmpty((yield* snapshotRows()).outbox);
       } else {
         assert.equal(summary.reclaimedThreadCount, 0);
         expectBlockers(summary, threadId, ["lifecycle_cleanup"]);
