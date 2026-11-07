@@ -95,6 +95,11 @@ import { MCP_APP_OUTPUT_KEY } from "@t3tools/shared/mcpApp";
 import { threadHtmlRenderAttachmentIds } from "../attachmentStore.ts";
 import type { LifecycleThread } from "./ThreadOwnership.ts";
 import * as NativeSessionBindings from "./NativeSessionBindings.ts";
+import {
+  foldNativeSessionOrigin,
+  hasPersistedNativeSessionGate,
+  nativeSessionGateTarget,
+} from "./NativeSessionGate.ts";
 import * as ThreadDeletionRecords from "./ThreadDeletionRecords.ts";
 import {
   isThreadHistoryUserTurn,
@@ -801,6 +806,18 @@ export function applyToProjection(
     },
     updatedAt: event.occurredAt,
   };
+  const gate = nativeSessionGateTarget(event);
+  if (gate !== undefined) {
+    base.providerThreads = base.providerThreads.map((provider) =>
+      (
+        "providerThreadId" in gate
+          ? provider.id === gate.providerThreadId
+          : provider.providerSessionId === gate.providerSessionId
+      )
+        ? foldNativeSessionOrigin(provider, provider, true)
+        : provider,
+    );
+  }
 
   switch (event.type) {
     case "thread.pull-request-link-updated":
@@ -903,7 +920,44 @@ export function applyToProjection(
           (session) => session.id !== event.payload.providerSessionId,
         ),
       };
-    case "provider-thread.updated":
+    case "provider-thread.updated": {
+      const current = base.providerThreads.find((candidate) => candidate.id === event.payload.id);
+      const provider = foldNativeSessionOrigin(current, event.payload);
+      const facts: ReadonlyArray<OrchestrationV2DomainEvent> =
+        provider.nativeSessionOrigin?.state === "may_exist" ||
+        (provider.driver !== "pi" && current?.driver !== "pi")
+          ? []
+          : [
+              ...base.runs.map((payload) => ({ ...event, type: "run.updated" as const, payload })),
+              ...base.attempts.map((payload) => ({
+                ...event,
+                type: "run-attempt.updated" as const,
+                payload,
+              })),
+              ...base.nodes.map((payload) => ({
+                ...event,
+                type: "node.updated" as const,
+                payload,
+              })),
+              ...base.providerTurns.map((payload) => ({
+                ...event,
+                type: "provider-turn.updated" as const,
+                payload,
+              })),
+              ...base.turnItems.map((payload) => ({
+                ...event,
+                type: "turn-item.updated" as const,
+                payload,
+              })),
+            ];
+      const hasGate = facts.some((fact) => {
+        const target = nativeSessionGateTarget(fact);
+        return (
+          target !== undefined &&
+          "providerThreadId" in target &&
+          target.providerThreadId === provider.id
+        );
+      });
       return {
         ...base,
         thread:
@@ -914,8 +968,12 @@ export function applyToProjection(
                 activeProviderThreadId: event.payload.id,
               }
             : base.thread,
-        providerThreads: upsertById(base.providerThreads, event.payload),
+        providerThreads: upsertById(
+          base.providerThreads,
+          foldNativeSessionOrigin(current, provider, hasGate),
+        ),
       };
+    }
     case "provider-turn.updated":
       return {
         ...base,
@@ -2352,7 +2410,24 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             }
             case "provider-thread.updated": {
               yield* nativeSessionBindings.applyProviderThread(event);
-              const payloadJson = yield* encodeProviderThreadPayload(event.payload);
+              const existingRows =
+                yield* sql<PayloadRow>`SELECT payload_json FROM orchestration_v2_projection_provider_threads
+                WHERE provider_thread_id = ${event.payload.id}`;
+              const current =
+                existingRows[0] === undefined
+                  ? undefined
+                  : yield* decodeProviderThreadPayload(existingRows[0].payload_json);
+              const provider = foldNativeSessionOrigin(
+                current,
+                event.payload,
+                (event.payload.driver === "pi" || current?.driver === "pi") &&
+                  foldNativeSessionOrigin(current, event.payload).nativeSessionOrigin?.state !==
+                    "may_exist" &&
+                  (yield* hasPersistedNativeSessionGate(event.payload.id).pipe(
+                    Effect.provideService(SqlClient.SqlClient, sql),
+                  )),
+              );
+              const payloadJson = yield* encodeProviderThreadPayload(provider);
               const payload = parseEncodedPayload(payloadJson);
               yield* sql`
               INSERT INTO orchestration_v2_projection_provider_threads (
@@ -2806,6 +2881,14 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             }
           }
 
+          const gate = nativeSessionGateTarget(event);
+          if (gate !== undefined) {
+            yield* sql`UPDATE orchestration_v2_projection_provider_threads
+              SET payload_json = json_set(payload_json, '$.nativeSessionOrigin', json('{"version":1,"state":"may_exist"}'))
+              WHERE (driver = 'pi' OR json_type(payload_json, '$.nativeSessionOrigin') IS NOT NULL)
+                AND ${"providerThreadId" in gate ? sql`provider_thread_id = ${gate.providerThreadId}` : sql`provider_session_id = ${gate.providerSessionId}`}`;
+          }
+
           if (
             event.type !== "thread.created" &&
             event.type !== "thread.archived" &&
@@ -2843,6 +2926,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         },
         (effect, event) =>
           (event.type === "provider-thread.updated" ||
+          nativeSessionGateTarget(event) !== undefined ||
           (event.type === "thread.deleted" && event.deletionRecord !== undefined)
             ? sql.withTransaction(effect)
             : effect

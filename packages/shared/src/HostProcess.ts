@@ -98,19 +98,3 @@ export const UserId = Context.Reference<number | undefined>("@t3tools/shared/Hos
 });
 
 export const isWindows = Effect.map(Platform, (platform) => platform === "win32");
-
-// Keep the pre-0.1.0 names as aliases while downstream adapters migrate to
-// the shorter names above. Aliasing the same Context references preserves
-// existing Effect.provideService overrides across the migration.
-export const HostProcessPlatform = Platform;
-export const HostProcessArchitecture = Architecture;
-export const HostProcessHostname = Hostname;
-export const HostProcessEnvironment = Environment;
-export const HostProcessWorkingDirectory = WorkingDirectory;
-export const HostProcessExecutablePath = ExecutablePath;
-export const HostProcessArguments = Arguments;
-export const HostProcessInvokedAs = InvokedAs;
-export const HostProcessIsExecutable = IsExecutable;
-export const HostProcessAddresses = Addresses;
-export const HostProcessUserId = UserId;
-export const isHostWindows = isWindows;

@@ -4,6 +4,7 @@ import {
   CheckpointId,
   CheckpointRef,
   CheckpointScopeId,
+  CommandId,
   MessageId,
   GitCommandError,
   type ModelSelection,
@@ -14,9 +15,12 @@ import {
   type OrchestrationV2RuntimeRequest,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2Run,
+  type OrchestrationV2RunAttempt,
+  type OrchestrationV2ProviderTurn,
   type OrchestrationV2TurnItem,
   ProviderDriverKind,
   ProviderInstanceId,
+  ProviderSessionId,
   ProviderThreadId,
   ProviderTurnId,
   RunAttemptId,
@@ -42,6 +46,8 @@ import * as ServerConfig from "../config.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as EventSink from "./EventSink.ts";
 import * as EventStore from "./EventStore.ts";
+import * as EffectOutbox from "./EffectOutbox.ts";
+import * as ThreadLifecycleGuard from "./ThreadLifecycleGuard.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
@@ -185,7 +191,7 @@ const CODEX_DRIVER = ProviderDriverKind.make("codex");
 function threadCreatedEvent(
   now: DateTime.Utc,
 ): Effect.Effect<
-  OrchestrationV2DomainEvent,
+  Extract<OrchestrationV2DomainEvent, { type: "thread.created" }>,
   IdAllocator.IdAllocatorV2Error,
   IdAllocator.IdAllocatorV2
 > {
@@ -244,6 +250,708 @@ function threadCreatedEvent(
 }
 
 const layer = it.layer(layerTest);
+
+const seedRestartAcknowledgement = Effect.fn("test.seedRestartAcknowledgement")(function* (
+  transition: "replace" | "detach" | "reuse" = "replace",
+) {
+  const sink = yield* EventSink.EventSinkV2;
+  const ids = yield* IdAllocator.IdAllocatorV2;
+  const now = yield* DateTime.now;
+  const parentEvent = yield* threadCreatedEvent(now);
+  const created = yield* threadCreatedEvent(now);
+  const threadId = created.threadId;
+  const child = {
+    ...created,
+    payload: {
+      ...created.payload,
+      lineage: {
+        parentThreadId: parentEvent.threadId,
+        relationshipToParent: "subagent" as const,
+        rootThreadId: parentEvent.threadId,
+      },
+    },
+  };
+  yield* sink.write({
+    events: [
+      { ...parentEvent, payload: { ...parentEvent.payload, projectId: child.payload.projectId } },
+      child,
+    ],
+  });
+  const source = ThreadLifecycleGuard.lifecycleSourceForPath([
+    { id: parentEvent.threadId, lifecycleRevision: 0 },
+    { id: threadId, lifecycleRevision: 0 },
+  ]);
+  const runId = RunId.make(`${threadId}:run`);
+  const oldAttemptId = RunAttemptId.make(`${runId}:1`);
+  const nextAttemptId = RunAttemptId.make(`${runId}:2`);
+  const nodeId = NodeId.make(`${runId}:root:1`);
+  const providerSessionId = ProviderSessionId.make(`${threadId}:session:1`);
+  const providerThreadId = ids.derive.providerThread({
+    driver: CODEX_DRIVER,
+    nativeThreadId: `${threadId}:native`,
+  });
+  const providerTurn: OrchestrationV2ProviderTurn = {
+    id: ProviderTurnId.make(`${threadId}:turn:1`),
+    providerThreadId,
+    runAttemptId: oldAttemptId,
+    nodeId,
+    nativeTurnRef: null,
+    ordinal: 1,
+    status: "running",
+    startedAt: now,
+    completedAt: null,
+  };
+  const oldThread: OrchestrationV2ProviderThread = {
+    id: providerThreadId,
+    driver: CODEX_DRIVER,
+    providerInstanceId: modelSelection.instanceId,
+    providerSessionId,
+    appThreadId: threadId,
+    ownerNodeId: null,
+    nativeThreadRef: null,
+    nativeConversationHeadRef: null,
+    status: "active",
+    firstRunOrdinal: 1,
+    lastRunOrdinal: 1,
+    handoffIds: [],
+    forkedFrom: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+  const oldRun: OrchestrationV2Run = {
+    id: runId,
+    threadId,
+    ordinal: 1,
+    providerInstanceId: modelSelection.instanceId,
+    modelSelection,
+    providerThreadId,
+    rootNodeId: nodeId,
+    userMessageId: MessageId.make(`${runId}:message`),
+    activeAttemptId: oldAttemptId,
+    lifecycleRevision: source.lifecycleRevision,
+    lifecycleSourceToken: source.sourceToken,
+    status: "running",
+    requestedAt: now,
+    startedAt: now,
+    completedAt: null,
+    checkpointId: null,
+    contextHandoffId: null,
+  };
+  const oldAttempt: OrchestrationV2RunAttempt = {
+    id: oldAttemptId,
+    runId,
+    attemptOrdinal: 1,
+    rootNodeId: nodeId,
+    providerInstanceId: modelSelection.instanceId,
+    providerThreadId,
+    providerTurnId: null,
+    reason: "initial",
+    status: "running",
+    startedAt: now,
+    completedAt: null,
+  };
+  const initial: Array<OrchestrationV2DomainEvent> = [];
+  for (const event of [
+    { type: "provider-thread.updated" as const, payload: oldThread },
+    { type: "run.created" as const, payload: oldRun },
+    { type: "run-attempt.created" as const, payload: oldAttempt },
+    { type: "provider-turn.updated" as const, payload: providerTurn },
+  ])
+    initial.push({
+      id: yield* ids.allocate.event({ threadId }),
+      threadId,
+      occurredAt: now,
+      ...event,
+    });
+  yield* sink.write({ events: initial });
+  const replacement = {
+    ...oldThread,
+    id:
+      transition === "detach"
+        ? ids.derive.providerThread({
+            driver: CODEX_DRIVER,
+            nativeThreadId: `${threadId}:replacement`,
+          })
+        : providerThreadId,
+    providerSessionId:
+      transition === "reuse" ? providerSessionId : ProviderSessionId.make(`${threadId}:session:2`),
+    status: "not_loaded" as const,
+  };
+  const run = {
+    ...oldRun,
+    providerThreadId: replacement.id,
+    activeAttemptId: nextAttemptId,
+    rootNodeId: NodeId.make(`${runId}:root:2`),
+    status: "starting" as const,
+  };
+  const nextAttempt = {
+    ...oldAttempt,
+    id: nextAttemptId,
+    attemptOrdinal: 2,
+    rootNodeId: run.rootNodeId,
+    providerThreadId: replacement.id,
+    providerTurnId: null,
+    reason: "steering_restart" as const,
+    status: "pending" as const,
+    startedAt: null,
+  };
+  const commandId = CommandId.make(`${threadId}:restart`);
+  const events: Array<OrchestrationV2DomainEvent> = [];
+  for (const event of [
+    {
+      type: "run-attempt.updated" as const,
+      payload: { ...oldAttempt, status: "superseded" as const, completedAt: now },
+    },
+    ...(transition === "reuse"
+      ? []
+      : [{ type: "provider-thread.updated" as const, payload: replacement }]),
+    { type: "run.updated" as const, payload: run },
+    { type: "run-attempt.created" as const, payload: nextAttempt },
+  ])
+    events.push({
+      id: yield* ids.allocate.event({ threadId }),
+      threadId,
+      occurredAt: now,
+      ...event,
+    });
+  const effect: EffectOutbox.PendingOrchestrationEffectV2 = {
+    id: `${commandId}:effect`,
+    threadId,
+    commandId,
+    request: {
+      type: "provider-turn.restart",
+      providerSessionId,
+      providerThreadId,
+      providerTurnId: providerTurn.id,
+      interruptedAttemptId: oldAttemptId,
+      runId,
+      ...(transition === "replace"
+        ? {
+            sessionTransition: {
+              type: "replace",
+              replacementProviderSessionId: replacement.providerSessionId!,
+            },
+          }
+        : transition === "detach"
+          ? { sessionTransition: { type: "detach" } }
+          : {}),
+    },
+  };
+  yield* sink.commitCommand({
+    lifecycleGuard: source,
+    commandId,
+    commandType: "message.dispatch",
+    threadId,
+    acceptedAt: now,
+    events,
+    effects: [effect],
+  });
+  return {
+    parentEvent,
+    child,
+    source,
+    now,
+    run,
+    oldAttempt,
+    nextAttempt,
+    oldThread,
+    replacement,
+    effect,
+    input: {
+      lifecycleGuard: { ...source, runId, attemptId: oldAttemptId },
+      providerSessionId,
+      providerInstanceId: modelSelection.instanceId,
+      threadId,
+      runId,
+      nodeId,
+      event: {
+        type: "provider_turn.updated" as const,
+        driver: CODEX_DRIVER,
+        providerTurn: { ...providerTurn, status: "interrupted" as const, completedAt: now },
+      },
+    },
+  };
+});
+
+it.effect.each([
+  "run",
+  "guard run",
+  "missing run",
+  "attempt",
+  "missing attempt",
+  "turn attempt",
+  "missing turn attempt",
+  "provider thread",
+  "turn",
+  "node",
+  "session",
+  "guard session",
+  "provider instance",
+  "driver",
+  "thread",
+  "revision",
+  "source",
+  "missing source",
+  "ordinary activity",
+] as const)("rejects restarted terminal acknowledgement with wrong %s", (invalid) =>
+  Effect.gen(function* () {
+    const fixture = yield* seedRestartAcknowledgement();
+    const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const sink = yield* EventSink.EventSinkV2;
+    const before = yield* projections.getThreadProjection(fixture.input.threadId);
+    const sequence = yield* sink.latestSequence();
+    const offered = fixture.input;
+    const event = offered.event;
+    let input: Parameters<typeof ingestor.ingestNormalized>[0] = offered;
+    switch (invalid) {
+      case "run":
+        input = { ...offered, runId: RunId.make("wrong") };
+        break;
+      case "guard run":
+        input = {
+          ...offered,
+          lifecycleGuard: { ...offered.lifecycleGuard, runId: RunId.make("wrong") },
+        };
+        break;
+      case "missing run":
+        input = {
+          ...offered,
+          lifecycleGuard: { ...fixture.source, attemptId: fixture.oldAttempt.id },
+        };
+        break;
+      case "attempt":
+        input = {
+          ...offered,
+          lifecycleGuard: { ...offered.lifecycleGuard, attemptId: RunAttemptId.make("wrong") },
+        };
+        break;
+      case "missing attempt":
+        input = {
+          ...offered,
+          lifecycleGuard: {
+            ...fixture.source,
+            runId: offered.runId,
+            providerSessionId: offered.providerSessionId,
+          },
+        };
+        break;
+      case "turn attempt":
+        input = {
+          ...offered,
+          event: {
+            ...event,
+            providerTurn: { ...event.providerTurn, runAttemptId: fixture.nextAttempt.id },
+          },
+        };
+        break;
+      case "missing turn attempt":
+        input = {
+          ...offered,
+          event: { ...event, providerTurn: { ...event.providerTurn, runAttemptId: null } },
+        };
+        break;
+      case "provider thread":
+        input = {
+          ...offered,
+          event: {
+            ...event,
+            providerTurn: {
+              ...event.providerTurn,
+              providerThreadId: (fixture.oldThread.id + ":wrong") as ProviderThreadId,
+            },
+          },
+        };
+        break;
+      case "turn":
+        input = {
+          ...offered,
+          event: {
+            ...event,
+            providerTurn: { ...event.providerTurn, id: ProviderTurnId.make("wrong") },
+          },
+        };
+        break;
+      case "node":
+        input = {
+          ...offered,
+          event: {
+            ...event,
+            providerTurn: { ...event.providerTurn, nodeId: fixture.nextAttempt.rootNodeId },
+          },
+        };
+        break;
+      case "session":
+        input = { ...offered, providerSessionId: fixture.replacement.providerSessionId! };
+        break;
+      case "guard session":
+        input = {
+          ...offered,
+          lifecycleGuard: {
+            ...offered.lifecycleGuard,
+            providerSessionId: fixture.replacement.providerSessionId!,
+          },
+        };
+        break;
+      case "provider instance":
+        input = { ...offered, providerInstanceId: ProviderInstanceId.make("wrong") };
+        break;
+      case "driver":
+        input = { ...offered, event: { ...event, driver: ProviderDriverKind.make("claude") } };
+        break;
+      case "thread":
+        input = { ...offered, event: { ...event, threadId: fixture.parentEvent.threadId } };
+        break;
+      case "revision":
+        input = {
+          ...offered,
+          lifecycleGuard: { ...offered.lifecycleGuard, lifecycleRevision: 1 },
+        };
+        break;
+      case "source":
+        input = {
+          ...offered,
+          lifecycleGuard: { ...offered.lifecycleGuard, sourceToken: "wrong" },
+        };
+        break;
+      case "missing source":
+        input = {
+          ...offered,
+          lifecycleGuard: {
+            threadId: offered.threadId,
+            lifecycleRevision: 0,
+            runId: offered.runId,
+            attemptId: fixture.oldAttempt.id,
+          },
+        };
+        break;
+      case "ordinary activity":
+        input = {
+          ...offered,
+          event: {
+            ...event,
+            providerTurn: { ...event.providerTurn, status: "running", completedAt: null },
+          },
+        };
+        break;
+    }
+    assert.isEmpty(yield* ingestor.ingestNormalized(input));
+    assert.equal(yield* sink.latestSequence(), sequence);
+    assert.deepEqual(yield* projections.getThreadProjection(offered.threadId), before);
+  }).pipe(Effect.provide(Layer.fresh(layerTest))),
+);
+
+it.effect.each([
+  "missing restart",
+  "cancelled restart",
+  "failed restart",
+  "settled restart",
+  "restart run",
+  "restart attempt",
+  "restart provider thread",
+  "restart turn",
+  "restart session",
+  "restart replacement session",
+  "restart transition",
+  "restart command",
+  "replacement intent",
+  "replacement attempt",
+  "replacement session",
+  "replacement root",
+  "provider thread owner",
+  "run source",
+  "thread revision",
+  "ancestor revision",
+  "ownership path",
+  "archived thread",
+  "deleted thread",
+  "tombstoned thread",
+  "archived ancestor",
+  "deleted ancestor",
+  "tombstoned ancestor",
+] as const)(
+  "rechecks restarted terminal acknowledgement after %s changes before commit",
+  (changed) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fixture = yield* seedRestartAcknowledgement();
+        const sink = yield* EventSink.EventSinkV2;
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const sql = yield* SqlClient.SqlClient;
+        const normalized = yield* Deferred.make<void>();
+        const releaseWrite = yield* Deferred.make<void>();
+        const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2.pipe(
+          Effect.provide(Layer.fresh(ProviderEventIngestor.layer)),
+          Effect.provideService(EventSink.EventSinkV2, {
+            ...sink,
+            write: (input) =>
+              Deferred.succeed(normalized, undefined).pipe(
+                Effect.andThen(Deferred.await(releaseWrite)),
+                Effect.andThen(sink.write(input)),
+              ),
+          }),
+        );
+        const late = yield* ingestor.ingestNormalized(fixture.input).pipe(Effect.forkScoped);
+        yield* Deferred.await(normalized);
+        const threadId = fixture.input.threadId;
+        switch (changed) {
+          case "missing restart":
+            yield* sql`DELETE FROM orchestration_v2_effect_outbox WHERE effect_id = ${fixture.effect.id}`;
+            break;
+          case "cancelled restart":
+          case "failed restart":
+          case "settled restart": {
+            const status =
+              changed === "cancelled restart"
+                ? "cancelled"
+                : changed === "failed restart"
+                  ? "failed"
+                  : "succeeded";
+            yield* sql`UPDATE orchestration_v2_effect_outbox SET status = ${status} WHERE effect_id = ${fixture.effect.id}`;
+            break;
+          }
+          case "restart run":
+          case "restart attempt":
+          case "restart provider thread":
+          case "restart turn":
+          case "restart session": {
+            const key = {
+              "restart run": "$.runId",
+              "restart attempt": "$.interruptedAttemptId",
+              "restart provider thread": "$.providerThreadId",
+              "restart turn": "$.providerTurnId",
+              "restart session": "$.providerSessionId",
+            }[changed];
+            yield* sql`UPDATE orchestration_v2_effect_outbox SET payload_json = json_set(payload_json, ${key}, 'wrong') WHERE effect_id = ${fixture.effect.id}`;
+            break;
+          }
+          case "restart replacement session":
+            yield* sql`UPDATE orchestration_v2_effect_outbox SET payload_json = json_set(payload_json, '$.sessionTransition.replacementProviderSessionId', 'wrong') WHERE effect_id = ${fixture.effect.id}`;
+            break;
+          case "restart transition":
+            yield* sql`UPDATE orchestration_v2_effect_outbox SET payload_json = json_set(payload_json, '$.sessionTransition.type', 'detach') WHERE effect_id = ${fixture.effect.id}`;
+            break;
+          case "restart command":
+            yield* sql`UPDATE orchestration_v2_effect_outbox SET command_id = 'wrong' WHERE effect_id = ${fixture.effect.id}`;
+            break;
+          case "replacement intent":
+            yield* sql`UPDATE orchestration_v2_projection_runs SET payload_json = json_set(payload_json, '$.activeAttemptId', 'superseding-attempt') WHERE run_id = ${fixture.run.id}`;
+            break;
+          case "replacement attempt":
+            yield* sql`UPDATE orchestration_v2_projection_run_attempts SET status = 'superseded', payload_json = json_set(payload_json, '$.status', 'superseded') WHERE attempt_id = ${fixture.nextAttempt.id}`;
+            break;
+          case "replacement session":
+            yield* sql`UPDATE orchestration_v2_projection_provider_threads SET payload_json = json_set(payload_json, '$.providerSessionId', 'wrong') WHERE provider_thread_id = ${fixture.replacement.id}`;
+            break;
+          case "replacement root":
+            yield* sql`UPDATE orchestration_v2_projection_runs SET payload_json = json_set(payload_json, '$.rootNodeId', 'wrong') WHERE run_id = ${fixture.run.id}`;
+            break;
+          case "provider thread owner":
+            yield* sql`UPDATE orchestration_v2_projection_provider_threads SET last_run_ordinal = 2, payload_json = json_set(payload_json, '$.lastRunOrdinal', 2) WHERE provider_thread_id = ${fixture.replacement.id}`;
+            break;
+          case "run source":
+            yield* sql`UPDATE orchestration_v2_projection_runs SET payload_json = json_set(payload_json, '$.lifecycleSourceToken', 'wrong') WHERE run_id = ${fixture.run.id}`;
+            break;
+          case "thread revision":
+          case "ancestor revision": {
+            const target = changed === "thread revision" ? threadId : fixture.parentEvent.threadId;
+            yield* sql`UPDATE orchestration_v2_projection_threads SET payload_json = json_set(payload_json, '$.lifecycleRevision', 1) WHERE thread_id = ${target}`;
+            break;
+          }
+          case "ownership path":
+            yield* sql`UPDATE orchestration_v2_projection_threads SET payload_json = json_set(payload_json, '$.lineage.parentThreadId', NULL, '$.lineage.relationshipToParent', NULL) WHERE thread_id = ${threadId}`;
+            break;
+          case "archived thread":
+          case "archived ancestor": {
+            const target = changed === "archived thread" ? threadId : fixture.parentEvent.threadId;
+            yield* sql`UPDATE orchestration_v2_projection_threads SET archived_at = ${DateTime.formatIso(fixture.now)} WHERE thread_id = ${target}`;
+            break;
+          }
+          case "deleted thread":
+          case "deleted ancestor": {
+            const target = changed === "deleted thread" ? threadId : fixture.parentEvent.threadId;
+            yield* sql`UPDATE orchestration_v2_projection_threads SET deleted_at = ${DateTime.formatIso(fixture.now)} WHERE thread_id = ${target}`;
+            break;
+          }
+          case "tombstoned thread":
+          case "tombstoned ancestor": {
+            const target =
+              changed === "tombstoned thread" ? threadId : fixture.parentEvent.threadId;
+            yield* sql`INSERT INTO orchestration_v2_thread_deletions (thread_id, project_id, parent_thread_id, operation_root_thread_id, deleted_at, command_id, scope, payload_json) VALUES (${target}, ${fixture.child.payload.projectId}, NULL, ${target}, ${DateTime.formatIso(fixture.now)}, 'delete', 't3_only', '{}')`;
+            break;
+          }
+        }
+        const sequence = yield* sink.latestSequence();
+        yield* Deferred.succeed(releaseWrite, undefined);
+        assert.isEmpty(yield* Fiber.join(late));
+        assert.equal(yield* sink.latestSequence(), sequence);
+        const projection = yield* projections.getThreadProjection(threadId);
+        assert.equal(projection.providerTurns[0]?.status, "running");
+        assert.equal(projection.attempts[0]?.status, "superseded");
+      }),
+    ).pipe(Effect.provide(Layer.fresh(layerTest))),
+);
+
+it.effect.each(["completed", "interrupted", "failed", "cancelled"] as const)(
+  "acknowledges only the exact restarted old turn (%s) without restoring its idle binding",
+  (status) =>
+    Effect.gen(function* () {
+      const fixture = yield* seedRestartAcknowledgement();
+      const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      assert.isEmpty(
+        yield* ingestor.ingestNormalized({
+          ...fixture.input,
+          event: {
+            type: "provider_thread.updated",
+            driver: CODEX_DRIVER,
+            providerThread: { ...fixture.oldThread, status: "idle" },
+          },
+        }),
+      );
+      const stored = yield* ingestor.ingestNormalized({
+        ...fixture.input,
+        event: {
+          ...fixture.input.event,
+          providerTurn: { ...fixture.input.event.providerTurn, status },
+        },
+      });
+      assert.deepEqual(
+        stored.map((entry) => entry.event.type),
+        ["provider-turn.updated"],
+      );
+      const projection = yield* projections.getThreadProjection(fixture.input.threadId);
+      assert.equal(projection.providerTurns[0]?.status, status);
+      assert.equal(projection.attempts[0]?.status, "superseded");
+      assert.deepEqual(projection.attempts[1], fixture.nextAttempt);
+      assert.deepEqual(projection.runs[0], fixture.run);
+      assert.equal(
+        projection.providerThreads[0]?.providerSessionId,
+        fixture.replacement.providerSessionId,
+      );
+      assert.isEmpty(projection.turnItems);
+      assert.isEmpty(yield* ingestor.ingestNormalized(fixture.input));
+      assert.deepEqual(yield* projections.getThreadProjection(fixture.input.threadId), projection);
+    }).pipe(Effect.provide(Layer.fresh(layerTest))),
+);
+
+it.effect.each(["detach", "reuse"] as const)(
+  "acknowledges the exact restarted turn with a %s session transition",
+  (transition) =>
+    Effect.gen(function* () {
+      const fixture = yield* seedRestartAcknowledgement(transition);
+      const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      assert.deepEqual(
+        (yield* ingestor.ingestNormalized(fixture.input)).map(({ event }) => event.type),
+        ["provider-turn.updated"],
+      );
+      const projection = yield* projections.getThreadProjection(fixture.input.threadId);
+      assert.equal(projection.providerTurns[0]?.status, "interrupted");
+      assert.deepEqual(projection.runs[0], fixture.run);
+      assert.equal(projection.attempts[0]?.status, "superseded");
+      assert.deepEqual(projection.attempts[1], fixture.nextAttempt);
+      assert.equal(
+        projection.providerThreads.find((thread) => thread.id === fixture.replacement.id)
+          ?.providerSessionId,
+        fixture.replacement.providerSessionId,
+      );
+    }).pipe(Effect.provide(Layer.fresh(layerTest))),
+);
+
+it.effect("keeps old text, tool activity and terminal cleanup fenced during restart", () =>
+  Effect.gen(function* () {
+    const fixture = yield* seedRestartAcknowledgement();
+    const sink = yield* EventSink.EventSinkV2;
+    const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+    const sequence = yield* sink.latestSequence();
+    const base = {
+      id: TurnItemId.make(`${fixture.input.threadId}:late`),
+      threadId: fixture.input.threadId,
+      runId: fixture.run.id,
+      nodeId: fixture.oldAttempt.rootNodeId,
+      providerThreadId: fixture.oldThread.id,
+      providerTurnId: fixture.input.event.providerTurn.id,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal: 2,
+      status: "running" as const,
+      title: "Late activity",
+      startedAt: fixture.now,
+      completedAt: null,
+      updatedAt: fixture.now,
+    };
+    const items: ReadonlyArray<OrchestrationV2TurnItem> = [
+      {
+        ...base,
+        type: "assistant_message",
+        messageId: MessageId.make(`${base.id}:message`),
+        text: "late text",
+        streaming: true,
+      },
+      { ...base, type: "command_execution", input: "test-command", output: "late output" },
+    ];
+    for (const turnItem of items) {
+      assert.isEmpty(
+        yield* ingestor.ingestNormalized({
+          ...fixture.input,
+          event: { type: "turn_item.updated", driver: CODEX_DRIVER, turnItem },
+        }),
+      );
+    }
+    assert.isEmpty(
+      yield* sink.write({
+        lifecycleGuard: fixture.input.lifecycleGuard,
+        lifecyclePurpose: "terminal_cleanup",
+        restartTerminalSessionId: fixture.input.providerSessionId,
+        events: yield* ingestor.normalize(fixture.input),
+      }),
+    );
+    assert.equal(yield* sink.latestSequence(), sequence);
+  }).pipe(Effect.provide(Layer.fresh(layerTest))),
+);
+
+it.effect(
+  "stores only the restarted turn acknowledgement from a batch that also dismisses native input",
+  () =>
+    Effect.gen(function* () {
+      const fixture = yield* seedRestartAcknowledgement();
+      const sink = yield* EventSink.EventSinkV2;
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const request: OrchestrationV2RuntimeRequest = {
+        id: RuntimeRequestId.make(`${fixture.input.threadId}:pending`),
+        nodeId: fixture.oldAttempt.rootNodeId,
+        providerTurnId: fixture.input.event.providerTurn.id,
+        nativeRequestRef: null,
+        kind: "user_input",
+        status: "pending",
+        responseCapability: { type: "live", providerSessionId: fixture.input.providerSessionId },
+        createdAt: fixture.now,
+        resolvedAt: null,
+      };
+      yield* sink.write({
+        events: [
+          {
+            id: yield* ids.allocate.event({ threadId: fixture.input.threadId }),
+            threadId: fixture.input.threadId,
+            type: "runtime-request.updated",
+            payload: request,
+            occurredAt: fixture.now,
+          },
+        ],
+      });
+      assert.lengthOf(yield* ingestor.normalize(fixture.input), 2);
+      assert.deepEqual(
+        (yield* ingestor.ingestNormalized(fixture.input)).map(({ event }) => event.type),
+        ["provider-turn.updated"],
+      );
+      const projection = yield* projections.getThreadProjection(fixture.input.threadId);
+      assert.equal(projection.providerTurns[0]?.status, "interrupted");
+      assert.deepEqual(projection.runtimeRequests, [request]);
+    }).pipe(Effect.provide(Layer.fresh(layerTest))),
+);
 
 it.effect("refreshes the failing instance snapshot after a committed usage_limit terminal", () =>
   Effect.scoped(

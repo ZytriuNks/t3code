@@ -26,6 +26,7 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import * as PlatformError from "effect/PlatformError";
 import { normalizeProjectPathForComparison } from "@t3tools/shared/path";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -61,6 +62,9 @@ const layerTest = Layer.mergeAll(
   IdAllocator.layer,
   McpProviderSessions.layer,
   TestProviderHost.layer().pipe(Layer.provide(NodeServices.layer)),
+  // Keep the fake PID harmless while exercising the production Windows
+  // tree-kill path and its child-exit confirmation.
+  Layer.succeed(HostProcess.Platform, "win32"),
 );
 
 const decodeUserInputQuestions = Schema.decodeUnknownSync(
@@ -222,6 +226,7 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
   let isStreaming: boolean | null = null;
   let clearQueue: Parameters<FakePi["setClearQueue"]>[0] = { steering: [], followUp: [] };
   let stdinBuffer = "";
+  let activeProcessExit: Deferred.Deferred<ChildProcessSpawner.ExitCode> | null = null;
 
   const emit = (record: PiRpcRecord, chunkBytes?: number) =>
     Effect.gen(function* () {
@@ -328,18 +333,38 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
     env: {},
   };
   const spawner = ChildProcessSpawner.make((command) =>
-    Effect.sync(() => {
+    Effect.gen(function* () {
+      if (ChildProcess.isStandardCommand(command) && command.command === "taskkill") {
+        if (activeProcessExit !== null)
+          yield* Deferred.succeed(activeProcessExit, ChildProcessSpawner.ExitCode(0));
+        return ChildProcessSpawner.makeHandle({
+          pid: ChildProcessSpawner.ProcessId(FAKE_PID),
+          exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(0)),
+          isRunning: Effect.succeed(false),
+          kill: () => Effect.void,
+          unref: Effect.succeed(Effect.void),
+          stdin: Sink.drain,
+          stdout: Stream.empty,
+          stderr: Stream.empty,
+          all: Stream.empty,
+          getInputFd: () => Sink.drain,
+          getOutputFd: () => Stream.empty,
+        });
+      }
       if (ChildProcess.isStandardCommand(command)) {
         lastSpawn = {
           args: command.args,
           env: command.options.env ?? {},
         };
       }
+      const processExit = yield* Deferred.make<ChildProcessSpawner.ExitCode>();
+      activeProcessExit = processExit;
       return ChildProcessSpawner.makeHandle({
-        pid: ChildProcessSpawner.ProcessId(FAKE_PID),
-        exitCode: Effect.never,
-        isRunning: Effect.succeed(true),
-        kill: () => Effect.void,
+        pid: ChildProcessSpawner.ProcessId(process.pid),
+        exitCode: Deferred.await(processExit),
+        isRunning: Deferred.isDone(processExit).pipe(Effect.map((done) => !done)),
+        kill: () =>
+          Deferred.succeed(processExit, ChildProcessSpawner.ExitCode(0)).pipe(Effect.asVoid),
         unref: Effect.succeed(Effect.void),
         stdin: Sink.forEach(handleStdinChunk),
         stdout: Stream.fromQueue(stdout),
@@ -420,14 +445,25 @@ const makeAdapter = Effect.fnUntraced(function* (
   forkFake?: FakePi,
   continuationRequests?: PiAdapterV2Options["continuationRequests"],
 ) {
+  let forkProcessActive = false;
   const spawner =
     forkFake === undefined
       ? fake.spawner
-      : ChildProcessSpawner.make((command) =>
-          ChildProcess.isStandardCommand(command) && command.args.includes("--fork")
-            ? forkFake.spawner.spawn(command)
-            : fake.spawner.spawn(command),
-        );
+      : ChildProcessSpawner.make((command) => {
+          if (ChildProcess.isStandardCommand(command) && command.args.includes("--fork")) {
+            forkProcessActive = true;
+            return forkFake.spawner.spawn(command);
+          }
+          if (
+            forkProcessActive &&
+            ChildProcess.isStandardCommand(command) &&
+            command.command === "taskkill"
+          ) {
+            forkProcessActive = false;
+            return forkFake.spawner.spawn(command);
+          }
+          return fake.spawner.spawn(command);
+        });
   if (continuationRequests !== undefined) {
     return yield* PiAdapterV2Driver.create({
       instanceId: PI_INSTANCE_ID,
@@ -576,6 +612,121 @@ describe("PiAdapterV2", () => {
         const request = yield* restart.takeRequest("switch_session");
         assert.equal(request["sessionPath"], sessionFile);
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect.each([true, false])(
+    "deletes a native session after runtime close (file exists at open: %s)",
+    (existsAtOpen) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pi-delete-adapter-" });
+        const sessionFile = path.join(root, "session.jsonl");
+        if (existsAtOpen) yield* fs.writeFileString(sessionFile, "session");
+
+        const fake = yield* makeFakePi;
+        fake.queueState({ sessionFile });
+        const adapter = yield* makeAdapter(fake);
+        const providerThread = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const runtime = yield* adapter.openSession({
+              threadId: THREAD_ID,
+              providerSessionId: SESSION_ID,
+              modelSelection: modelSelection("default"),
+              runtimePolicy,
+            });
+            const providerThread = yield* runtime.ensureThread({
+              threadId: THREAD_ID,
+              modelSelection: modelSelection("default"),
+              runtimePolicy,
+            });
+            if (!existsAtOpen) {
+              assert.isFalse(yield* fs.exists(sessionFile));
+              yield* startTurn(runtime, providerThread);
+              yield* fake.takeRequest("prompt");
+              yield* fs.writeFileString(sessionFile, "first turn");
+            }
+            return providerThread;
+          }),
+        );
+
+        assert.isDefined(adapter.deleteNativeThread);
+        yield* adapter.deleteNativeThread!({ providerThread });
+
+        assert.isFalse(yield* fs.exists(sessionFile));
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("keeps occupied native files retryable and only accepts exact NotFound", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pi-delete-occupied-" });
+      const sessionFile = path.join(root, "session.jsonl");
+      yield* fs.writeFileString(sessionFile, "keep");
+      const fake = yield* makeFakePi;
+      fake.queueState({ sessionFile });
+      const providerThread = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const { runtime } = yield* openRuntime(fake);
+          return yield* runtime.ensureThread({
+            threadId: THREAD_ID,
+            modelSelection: modelSelection("default"),
+            runtimePolicy,
+          });
+        }),
+      );
+      assert.equal(providerThread.nativeStorage?.type, "resolved");
+      if (providerThread.nativeStorage?.type !== "resolved")
+        assert.fail("Missing resolved storage");
+      const canonicalFile = providerThread.nativeStorage.canonicalFile;
+      const releasedAdapter = yield* makeAdapter(fake);
+      for (const [_tag, code] of [
+        ["Busy", "EBUSY"],
+        ["Unknown", "EPERM"],
+        ["PermissionDenied", "EACCES"],
+        ["NotFound", "ENOENT"],
+      ] as const) {
+        const cause = PlatformError.systemError({
+          _tag,
+          syscall: "unlink",
+          module: "test",
+          method: "remove",
+          cause: { code, syscall: "unlink" },
+        });
+        let removes = 0;
+        const adapter = yield* makeAdapter(fake).pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fs,
+            remove: (candidate, options) => {
+              if (normalizeProjectPathForComparison(candidate) !== canonicalFile)
+                return fs.remove(candidate, options);
+              removes += 1;
+              return Effect.fail(cause);
+            },
+          }),
+        );
+        assert.isDefined(adapter.deleteNativeThread);
+        const result = yield* adapter.deleteNativeThread!({ providerThread }).pipe(Effect.result);
+        if (_tag === "NotFound") {
+          assert.equal(result._tag, "Success");
+        } else {
+          assert.equal(result._tag, "Failure");
+          if (result._tag === "Failure") {
+            assert.equal(result.failure._tag, "ProviderAdapterNativeThreadDeleteError");
+            if (result.failure._tag === "ProviderAdapterNativeThreadDeleteError") {
+              assert.equal(result.failure.reason, "filesystem_failure");
+              assert.equal(result.failure.cause, cause);
+            }
+          }
+        }
+        assert.equal(removes, 1);
+        assert.equal(yield* fs.readFileString(sessionFile), "keep");
+        yield* releasedAdapter.deleteNativeThread!({ providerThread });
+        assert.isFalse(yield* fs.exists(sessionFile));
+        yield* fs.writeFileString(sessionFile, "keep");
+      }
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("keeps native image bytes and the saved path in the prompt", () =>
@@ -1521,8 +1672,13 @@ describe("PiAdapterV2", () => {
       yield* Effect.gen(function* () {
         yield* openRuntime({
           ...fake,
-          spawner: ChildProcessSpawner.make((command) =>
-            Effect.acquireRelease(
+          spawner: ChildProcessSpawner.make((command) => {
+            if (ChildProcess.isStandardCommand(command) && command.command === "taskkill") {
+              return Deferred.succeed(exited, ChildProcessSpawner.ExitCode(0)).pipe(
+                Effect.andThen(fake.spawner.spawn(command)),
+              );
+            }
+            return Effect.acquireRelease(
               fake.spawner
                 .spawn(command)
                 .pipe(
@@ -1534,8 +1690,8 @@ describe("PiAdapterV2", () => {
                 Effect.sync(() => {
                   processReleased = true;
                 }),
-            ),
-          ),
+            );
+          }),
         });
         assert.deepStrictEqual(stopped, []);
         if (exit === "process") {
@@ -4388,13 +4544,31 @@ describe("PiRpc framing", () => {
   it.effect("reassembles records across chunk boundaries and strips CR", () =>
     Effect.gen(function* () {
       const stdout = yield* Queue.unbounded<Uint8Array>();
-      const spawner = ChildProcessSpawner.make(() =>
-        Effect.succeed(
-          ChildProcessSpawner.makeHandle({
-            pid: ChildProcessSpawner.ProcessId(FAKE_PID),
-            exitCode: Effect.never,
-            isRunning: Effect.succeed(true),
-            kill: () => Effect.void,
+      const processExit = yield* Deferred.make<ChildProcessSpawner.ExitCode>();
+      const spawner = ChildProcessSpawner.make((command) =>
+        Effect.gen(function* () {
+          if (ChildProcess.isStandardCommand(command) && command.command === "taskkill") {
+            yield* Deferred.succeed(processExit, ChildProcessSpawner.ExitCode(0));
+            return ChildProcessSpawner.makeHandle({
+              pid: ChildProcessSpawner.ProcessId(FAKE_PID),
+              exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(0)),
+              isRunning: Effect.succeed(false),
+              kill: () => Effect.void,
+              unref: Effect.succeed(Effect.void),
+              stdin: Sink.drain,
+              stdout: Stream.empty,
+              stderr: Stream.empty,
+              all: Stream.empty,
+              getInputFd: () => Sink.drain,
+              getOutputFd: () => Stream.empty,
+            });
+          }
+          return ChildProcessSpawner.makeHandle({
+            pid: ChildProcessSpawner.ProcessId(process.pid),
+            exitCode: Deferred.await(processExit),
+            isRunning: Deferred.isDone(processExit).pipe(Effect.map((done) => !done)),
+            kill: () =>
+              Deferred.succeed(processExit, ChildProcessSpawner.ExitCode(0)).pipe(Effect.asVoid),
             unref: Effect.succeed(Effect.void),
             stdin: Sink.drain,
             stdout: Stream.fromQueue(stdout),
@@ -4402,8 +4576,8 @@ describe("PiRpc framing", () => {
             all: Stream.empty,
             getInputFd: () => Sink.drain,
             getOutputFd: () => Stream.empty,
-          }),
-        ),
+          });
+        }),
       );
       const connection = yield* makePiRpcConnection({
         command: "pi",
@@ -4429,7 +4603,11 @@ describe("PiRpc framing", () => {
       const third = yield* Queue.take(connection.events);
       assert.equal(third["type"], "queue_update");
       assert.equal((yield* Queue.take(connection.events))["type"], "after_oversized");
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(NodeServices.layer),
+      Effect.provideService(HostProcess.Platform, "win32"),
+    ),
   );
 });
 

@@ -74,6 +74,7 @@ import {
 } from "./mcpInjection.ts";
 import { PI_FILE_CHANGE_TOOLS } from "./mcpExtensionSource.ts";
 import { hasPiOpenAIFastExtensionCommand } from "./status.ts";
+import { deletePiNativeSessionFile } from "./nativeSessionDeletion.ts";
 
 export const PI_PROVIDER = ProviderDriverKind.make("pi");
 const PI_DRIVER_KIND = PI_PROVIDER;
@@ -418,6 +419,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const agentScope = yield* AgentScope;
   const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
   const storage = yield* NativeSessionStorage.make;
   const idAllocator = yield* IdAllocator.IdAllocatorV2;
   const host = yield* ProviderHost.ProviderHost;
@@ -439,6 +441,12 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
     }),
     planSelectionTransition: Effect.fn("PiAdapter.planSelectionTransition")(function () {
       return Effect.succeed(turnScopedSelectionTransition());
+    }),
+    deleteNativeThread: Effect.fn("PiAdapter.deleteNativeThread")(function (deleteInput) {
+      return deletePiNativeSessionFile(deleteInput.providerThread).pipe(
+        Effect.provideService(FileSystem.FileSystem, fileSystem),
+        Effect.provideService(Path.Path, path),
+      );
     }),
     openSession: Effect.fn("PiAdapterV2.openSession")(function* (
       input: ProviderAdapter.ProviderAdapterV2OpenSessionInput,
@@ -2423,6 +2431,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           return sessionEntity;
         },
         events: Stream.fromQueue(events),
+        supportsConfirmedSessionRetirement: true,
         hasPendingBackgroundWork: Effect.sync(() => pendingWake !== null),
         hasPendingBackgroundWorkForThread: (providerThread) =>
           Effect.sync(

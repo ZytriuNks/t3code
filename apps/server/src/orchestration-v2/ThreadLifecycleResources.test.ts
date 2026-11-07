@@ -7,6 +7,7 @@ import {
   MessageId,
   ProjectId,
   ProviderInstanceId,
+  ProviderThreadId,
   RunId,
   ThreadId,
   TurnItemId,
@@ -201,6 +202,67 @@ it.effect.each(["failed", "cancelled"] as const)(
         failedCount: 1,
       });
     }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("Pi deletion cleanup stays visible while pending and after retry exhaustion", () =>
+  Effect.gen(function* () {
+    yield* seed(R, { lifecycleRevision: 2 });
+    const outbox = yield* EffectOutbox.EffectOutboxV2;
+    yield* outbox.enqueue([
+      {
+        id: "task6:pi-delete",
+        commandId,
+        threadId: R,
+        request: {
+          type: "provider-thread.delete",
+          driver: "pi",
+          providerInstanceId: ProviderInstanceId.make("pi"),
+          providerThreadId: ProviderThreadId.make("task6:pi-native-thread"),
+          threadIds: [R],
+          nativeId: "pi-native-session",
+          nativeStorage: {
+            type: "resolved",
+            canonicalRoot: "C:/isolated-pi/sessions",
+            canonicalFile: "C:/isolated-pi/sessions/session.jsonl",
+          },
+          lifecycle: { commandId, rootThreadId: R, revision: 1 },
+        },
+      },
+    ]);
+
+    const resources = yield* Resources.ThreadLifecycleResources;
+    assert.deepEqual(yield* resources.getCleanupStatus(commandId), {
+      pendingCount: 1,
+      failedCount: 0,
+    });
+
+    const workerLayer = EffectWorker.layerWithOptions({
+      workerId: "task6:pi-delete-exhausted",
+      maxAttempts: 1,
+    }).pipe(
+      Layer.provide(
+        Layer.succeed(EffectWorker.OrchestrationEffectExecutorV2, {
+          execute: (effect) =>
+            Effect.fail(
+              new EffectWorker.OrchestrationEffectExecutionError({
+                effectId: effect.id,
+                effectType: effect.request.type,
+              }),
+            ),
+        }),
+      ),
+    );
+    yield* Effect.gen(function* () {
+      const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+      assert.equal(yield* worker.drain(), 1);
+    }).pipe(Effect.provide(workerLayer));
+
+    assert.deepEqual(yield* resources.getCleanupStatus(commandId), {
+      pendingCount: 0,
+      failedCount: 1,
+    });
+    assert.equal((yield* resources.assertCanCreate(R).pipe(Effect.result))._tag, "Failure");
+  }).pipe(Effect.provide(layerTest)),
 );
 
 it.effect(

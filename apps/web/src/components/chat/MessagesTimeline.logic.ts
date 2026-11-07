@@ -546,58 +546,6 @@ export function resolveTimelineMinimapCurrentIndex(input: {
   return precedingIndex;
 }
 
-/** Virtual rows are ordered and non-overlapping; read only the viewport's marker band. */
-export function resolveTimelineMinimapViewport(input: {
-  readonly scrollTop: number;
-  readonly scrollBottom: number;
-  readonly itemCount: number;
-  readonly getItemBounds: (index: number) => {
-    readonly top: number | null;
-    readonly height: number | null;
-  };
-}): { currentIndex: number | null; inViewIndices: number[] } {
-  const inView = (item: ReturnType<typeof input.getItemBounds>) =>
-    item.top !== null &&
-    item.top < input.scrollBottom &&
-    item.top + Math.max(1, item.height ?? 1) > input.scrollTop;
-  const firstMatching = (matches: (item: ReturnType<typeof input.getItemBounds>) => boolean) => {
-    let low = 0;
-    let high = input.itemCount;
-    while (low < high) {
-      const middle = Math.floor((low + high) / 2);
-      const item = input.getItemBounds(middle);
-      if (item.top === null) return null;
-      if (matches(item)) high = middle;
-      else low = middle + 1;
-    }
-    return low;
-  };
-  const firstVisible = firstMatching(
-    (item) => item.top! + Math.max(1, item.height ?? 1) > input.scrollTop,
-  );
-  const afterVisible = firstMatching((item) => item.top! >= input.scrollBottom);
-  const inViewIndices: number[] = [];
-  if (firstVisible !== null && afterVisible !== null) {
-    for (let index = firstVisible; index < afterVisible; index += 1) {
-      if (inView(input.getItemBounds(index))) inViewIndices.push(index);
-    }
-    if (inViewIndices.length > 0) return { currentIndex: inViewIndices[0]!, inViewIndices };
-    const afterPreceding = firstMatching((item) => item.top! > input.scrollTop);
-    if (afterPreceding !== null) {
-      return { currentIndex: afterPreceding > 0 ? afterPreceding - 1 : null, inViewIndices };
-    }
-  }
-
-  // An unpositioned list can have holes in its cache; preserve the existing scan semantics.
-  let currentIndex: number | null = null;
-  for (let index = 0; index < input.itemCount; index += 1) {
-    const item = input.getItemBounds(index);
-    if (inView(item)) inViewIndices.push(index);
-    if (item.top !== null && item.top <= input.scrollTop) currentIndex = index;
-  }
-  return { currentIndex: inViewIndices[0] ?? currentIndex, inViewIndices };
-}
-
 /**
  * Side gutter between the viewport edge and the centered content column.
  * `contentWidth` is the rendered column width, which follows the Chat width

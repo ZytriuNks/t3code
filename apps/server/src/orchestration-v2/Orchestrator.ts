@@ -184,7 +184,6 @@ import * as ThreadOwnership from "./ThreadOwnership.ts";
 import * as ThreadLifecycleGuard from "./ThreadLifecycleGuard.ts";
 import * as ThreadLifecycleResources from "./ThreadLifecycleResources.ts";
 import * as ThreadDeletionRecords from "./ThreadDeletionRecords.ts";
-import { planThreadDeletion } from "./ThreadDeletion.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ServerSettings from "../serverSettings.ts";
 
@@ -1169,6 +1168,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       } as Event;
     });
 
+  const preNativeBindingSource = (provider: OrchestrationV2ProviderThread) =>
+    provider.nativeBindingOrigin === undefined
+      ? {}
+      : {
+          nativeBindingSource: { version: 1 as const, kind: "pre_native_pending" as const },
+        };
+
   const emit =
     (events: Ref.Ref<Array<OrchestrationV2DomainEvent>>, command: OrchestrationV2ServerCommand) =>
     <Event extends OrchestrationV2DomainEvent>(event: Omit<Event, "id">) =>
@@ -1801,6 +1807,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           : rootProviderThreadsForProvider(projection, queuedRun.providerInstanceId)[0]
         : storedProviderThread;
       const queuedProviderThread: OrchestrationV2ProviderThread = targetProviderThread ?? {
+        ...(targetAdapter.driver === "pi"
+          ? { nativeBindingOrigin: { version: 1 as const, kind: "server_placeholder" as const } }
+          : {}),
         id: idAllocator.derive.providerThread({
           driver: targetAdapter.driver,
           nativeThreadId: `pending:${queuedRun.id}`,
@@ -2308,6 +2317,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ...executionIdentityEvents,
           {
             type: "provider-thread.updated",
+            ...preNativeBindingSource(providerThread),
             threadId,
             providerInstanceId: queuedRun.providerInstanceId,
             occurredAt: now,
@@ -4916,6 +4926,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const targetProviderThreadBase: OrchestrationV2ProviderThread =
         existingTargetProviderThread === undefined
           ? {
+              ...(targetAdapter.driver === "pi"
+                ? {
+                    nativeBindingOrigin: {
+                      version: 1 as const,
+                      kind: "server_placeholder" as const,
+                    },
+                  }
+                : {}),
               id: idAllocator.derive.providerThread({
                 driver: targetAdapter.driver,
                 nativeThreadId: `pending:${targetRun.id}:attempt:${attemptOrdinal}`,
@@ -5127,6 +5145,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     if (requiresProviderThreadHandoff || requiresProviderSessionRestart) {
       yield* emitEvent({
         type: "provider-thread.updated",
+        ...preNativeBindingSource(restartProviderThread),
         threadId: input.command.threadId,
         driver: restartProviderThread.driver,
         providerInstanceId: input.modelSelection.instanceId,
@@ -5802,6 +5821,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         }),
       );
       const queuedProviderThread: OrchestrationV2ProviderThread = targetProviderThread ?? {
+        ...(queuedAdapter.driver === "pi"
+          ? {
+              nativeSessionOrigin: { version: 1 as const, state: "unstarted" as const },
+              nativeBindingOrigin: { version: 1 as const, kind: "server_placeholder" as const },
+            }
+          : {}),
         id: idAllocator.derive.providerThread({
           driver: queuedAdapter.driver,
           nativeThreadId: `pending:${runId}`,
@@ -5955,6 +5980,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       if (targetProviderThread === undefined) {
         yield* emitEvent({
           type: "provider-thread.updated",
+          ...preNativeBindingSource(queuedProviderThread),
           threadId: command.threadId,
           providerInstanceId: modelSelection.instanceId,
           occurredAt: now,
@@ -6171,6 +6197,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const providerThread: OrchestrationV2ProviderThread =
         activeProviderThread === undefined
           ? {
+              ...(adapter.driver === "pi"
+                ? {
+                    nativeBindingOrigin: {
+                      version: 1 as const,
+                      kind: "server_placeholder" as const,
+                    },
+                  }
+                : {}),
               id: providerThreadId,
               driver: adapter.driver,
               providerInstanceId: modelSelection.instanceId,
@@ -6359,6 +6393,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const emitEvent = emit(events, command);
       yield* emitEvent({
         type: "provider-thread.updated",
+        ...preNativeBindingSource(providerThread),
         threadId: command.threadId,
         driver: adapter.driver,
         providerInstanceId: modelSelection.instanceId,
@@ -6610,6 +6645,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     const ensuredProviderThread: OrchestrationV2ProviderThread =
       targetProviderThread === undefined
         ? {
+            ...(adapter.driver === "pi"
+              ? {
+                  nativeBindingOrigin: { version: 1 as const, kind: "server_placeholder" as const },
+                }
+              : {}),
             id: idAllocator.derive.providerThread({
               driver: adapter.driver,
               nativeThreadId: `pending:${runId}`,
@@ -7208,6 +7248,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     }
     yield* emitEvent({
       type: "provider-thread.updated",
+      ...preNativeBindingSource(providerThread),
       threadId: command.threadId,
       providerInstanceId: modelSelection.instanceId,
       occurredAt: now,
@@ -12965,35 +13006,63 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         break;
       }
       case "thread.delete": {
-        const now = yield* DateTime.now;
         const planDeletion = Effect.fn("Orchestrator.planDeletion")(function* (
           deletion: typeof command,
         ) {
-          const projection = yield* projectionStore
-            .getThreadRecords(deletion.threadId, [
-              "runs",
-              "attempts",
-              "nodes",
-              "runtimeRequests",
-              "subagents",
-              "providerSessions",
-            ])
-            .pipe(
-              Effect.mapError(
-                (cause) => new OrchestratorProjectionError({ threadId: deletion.threadId, cause }),
-              ),
-            );
-          return yield* mapDispatchError(command)(
-            planThreadDeletion({
-              command: deletion,
-              projection,
-              attachmentIds: yield* projectionStore
-                .getThreadAttachmentIds(deletion.threadId)
-                .pipe(mapDispatchError(command)),
-              now,
-              idAllocator,
-            }),
+          const plan = yield* lifecyclePlanner.plan(deletion).pipe(mapDispatchError(command));
+          const events = [...plan.events];
+          const deletedSideChat = events.find(
+            (event) =>
+              event.type === "thread.deleted" &&
+              event.threadId === deletion.threadId &&
+              event.payload.lineage.sideChat === true,
           );
+          if (deletedSideChat?.type === "thread.deleted") {
+            const { contextTransfers } = yield* projectionStore
+              .getThreadRecords(deletion.threadId, ["contextTransfers"])
+              .pipe(mapDispatchError(command));
+            for (const transfer of contextTransfers) {
+              if (
+                transfer.type !== "fork" ||
+                transfer.sourceThreadId !== deletedSideChat.payload.lineage.parentThreadId ||
+                transfer.targetThreadId !== deletion.threadId ||
+                transfer.status !== "pending" ||
+                transfer.targetRunId !== null
+              )
+                continue;
+              // An unused fork has no consumer to settle it once its side chat is deleted.
+              events.push({
+                id: yield* idAllocator.allocate
+                  .event({ threadId: deletion.threadId, commandId: deletion.commandId })
+                  .pipe(mapDispatchError(command)),
+                type: "context-transfer.updated",
+                threadId: deletion.threadId,
+                providerInstanceId: deletedSideChat.providerInstanceId,
+                occurredAt: deletedSideChat.occurredAt,
+                payload: {
+                  ...transfer,
+                  status: "superseded",
+                  error: "Side chat deleted before the fork was consumed.",
+                  updatedAt: deletedSideChat.occurredAt,
+                },
+              });
+            }
+          }
+          return closeLifecycleShares(deletion.commandId, {
+            ...plan,
+            // One accepted deletion operation may contain independently guarded side chats.
+            events: events.map((event) =>
+              event.type === "thread.deleted" && event.deletionRecord !== undefined
+                ? {
+                    ...event,
+                    deletionRecord: {
+                      ...event.deletionRecord,
+                      operationRootThreadId: command.threadId,
+                    },
+                  }
+                : event,
+            ),
+          });
         });
         // Checked under the thread lock: a message sent since the client looked keeps the thread.
         if (command.onlyIfUnused === true) {
@@ -13014,7 +13083,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ...(yield* Effect.forEach(sideChatIds, (threadId) =>
             planDeletion({
               ...command,
-              commandId: CommandId.make(`${command.commandId}:side-chat:${threadId}`),
               threadId,
             }),
           )),
@@ -13022,6 +13090,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         return {
           events: plans.flatMap((plan) => plan.events),
           effects: plans.flatMap((plan) => plan.effects),
+          cancelUnsettledEffectsByThread: plans.flatMap(
+            (plan) => plan.cancelUnsettledEffectsByThread,
+          ),
         };
       }
       case "thread.archive":
@@ -13656,10 +13727,21 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         probes.set(row.id, { row, pending });
       }
     }
+    const dispatchCommand =
+      command.type === "thread.delete"
+        ? liveSideChatIds(command.threadId).pipe(
+            Effect.flatMap((sideChatIds) =>
+              sideChatIds.reduce(
+                (locked, sideChatId) => threadDispatch.withLock(sideChatId, locked),
+                dispatchWithReceiptEffect(command, sideChatIds),
+              ),
+            ),
+          )
+        : dispatchWithReceiptEffect(command);
     const dispatch = threadDispatch
       .withLock(
         commandThreadId(command),
-        dispatchWithReceiptEffect(command).pipe(
+        dispatchCommand.pipe(
           Effect.flatMap((result) =>
             Effect.gen(function* () {
               if (
@@ -13723,18 +13805,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ? dispatch
         : threadDispatch.withLock(command.sourceThreadId, dispatch);
     }
-    if (command.type === "thread.delete")
-      return yield* threadDispatch.withLock(
-        command.threadId,
-        liveSideChatIds(command.threadId).pipe(
-          Effect.flatMap((sideChatIds) =>
-            sideChatIds.reduce(
-              (locked, sideChatId) => threadDispatch.withLock(sideChatId, locked),
-              dispatchWithReceiptEffect(command, sideChatIds),
-            ),
-          ),
-        ),
-      );
     if (
       command.type !== "runtime-request.respond" &&
       (command.type !== "message.dispatch" || !mayStartSubagentFollowup(command))

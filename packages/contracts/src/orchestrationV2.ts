@@ -1084,6 +1084,16 @@ const nativeSessionStorageHasFile = Schema.makeFilter(
 );
 
 export const OrchestrationV2ProviderThread = Schema.Struct({
+  // Creation provenance is not proof of native absence or permission to start a session.
+  nativeBindingOrigin: Schema.optional(
+    Schema.Struct({ version: Schema.Literal(1), kind: Schema.Literal("server_placeholder") }),
+  ),
+  nativeSessionOrigin: Schema.optional(
+    Schema.Struct({
+      version: Schema.Literal(1),
+      state: Schema.Literals(["unstarted", "may_exist"]),
+    }),
+  ),
   nativeStorage: Schema.optional(NativeSessionStorage).pipe(
     Schema.withDecodingDefault(
       Effect.succeed({ type: "unresolved" as const, reason: "legacy_missing_locator" as const }),
@@ -1967,6 +1977,9 @@ export const OrchestrationV2DomainEvent = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2EventBase.fields,
     type: Schema.Literal("provider-thread.updated"),
+    nativeBindingSource: Schema.optional(
+      Schema.Struct({ version: Schema.Literal(1), kind: Schema.Literal("pre_native_pending") }),
+    ),
     lifecycleSource: Schema.optional(
       Schema.Struct({
         lifecycleRevision: NonNegativeInt,
@@ -2865,6 +2878,9 @@ export const OrchestrationV2DomainEventJson = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2JsonEventBaseFields,
     type: Schema.Literal("provider-thread.updated"),
+    nativeBindingSource: Schema.optional(
+      Schema.Struct({ version: Schema.Literal(1), kind: Schema.Literal("pre_native_pending") }),
+    ),
     lifecycleSource: Schema.optional(
       Schema.Struct({
         lifecycleRevision: NonNegativeInt,

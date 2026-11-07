@@ -4,6 +4,7 @@ import {
   OrchestrationV2DomainEvent,
   type OrchestrationV2ProviderThread,
   OrchestrationV2StoredEvent,
+  ProviderSessionId,
   ProviderThreadId,
   RunAttemptId,
   RunId,
@@ -36,6 +37,7 @@ import * as ProjectStore from "./ProjectStore.ts";
 import * as NativeSessionBindings from "./NativeSessionBindings.ts";
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
 import * as ThreadLifecycleGuard from "./ThreadLifecycleGuard.ts";
+import { certifyCancelledQueuedSessions } from "./ThreadNativeAbsence.ts";
 
 interface LifecycleWriteOptions {
   readonly lifecycleGuard?: ThreadLifecycleGuard.LifecycleWriteGuard | undefined;
@@ -76,6 +78,8 @@ export type EventSinkV2Error = typeof EventSinkV2Error.Type;
 export interface EventSinkV2Shape {
   readonly write: (
     input: LifecycleWriteOptions & {
+      /** Only a durable restart may acknowledge its superseded consumer's exact terminal turn. */
+      readonly restartTerminalSessionId?: ProviderSessionId;
       /** Return no events if another thread owns this native session at commit time. */
       readonly unlessNativeThreadOwned?: Pick<
         OrchestrationV2ProviderThread,
@@ -672,6 +676,173 @@ const layerBase: Layer.Layer<
       return true;
     });
 
+    const restartTerminalAcknowledgement = Effect.fn("EventSink.restartTerminalAcknowledgement")(
+      function* (input: Parameters<EventSinkV2Shape["write"]>[0]) {
+        const guard = input.lifecycleGuard;
+        const terminal = input.events.find((event) => event.type === "provider-turn.updated");
+        if (
+          input.restartTerminalSessionId === undefined ||
+          guard?.runId === undefined ||
+          guard.attemptId === undefined ||
+          (guard.providerSessionId !== undefined &&
+            guard.providerSessionId !== input.restartTerminalSessionId) ||
+          terminal?.type !== "provider-turn.updated" ||
+          terminal.threadId !== guard.threadId ||
+          terminal.runId !== guard.runId ||
+          terminal.payload.runAttemptId !== guard.attemptId ||
+          !["completed", "interrupted", "failed", "cancelled"].includes(terminal.payload.status) ||
+          input.lifecyclePurpose === "terminal_cleanup"
+        )
+          return [];
+        // The old attempt is authorized below by its restart, while immutable lifecycle fencing remains active.
+        if (
+          (yield* lifecycle.check({
+            guard: {
+              threadId: guard.threadId,
+              lifecycleRevision: guard.lifecycleRevision,
+              sourceToken: guard.sourceToken,
+              runId: guard.runId,
+              ...(guard.prerequisites === undefined ? {} : { prerequisites: guard.prerequisites }),
+            },
+            purpose: "activity",
+          })) === "stale"
+        )
+          return [];
+        const { providerThread, providerTurn, attempt } =
+          yield* projectionStore.getProviderControlContext(guard.threadId, {
+            providerThreadId: terminal.payload.providerThreadId,
+            providerTurnId: terminal.payload.id,
+            attemptId: guard.attemptId,
+          });
+        if (
+          providerThread === undefined ||
+          providerTurn === undefined ||
+          attempt === undefined ||
+          providerThread.appThreadId !== guard.threadId ||
+          providerThread.driver !== terminal.driver ||
+          attempt.runId !== guard.runId ||
+          attempt.status !== "superseded" ||
+          attempt.providerInstanceId !== terminal.providerInstanceId ||
+          attempt.providerThreadId !== providerThread.id ||
+          (attempt.providerTurnId !== null && attempt.providerTurnId !== providerTurn.id) ||
+          providerTurn.providerThreadId !== providerThread.id ||
+          providerTurn.runAttemptId !== attempt.id ||
+          providerTurn.nodeId !== attempt.rootNodeId ||
+          terminal.payload.nodeId !== providerTurn.nodeId ||
+          terminal.nodeId !== providerTurn.nodeId ||
+          providerTurn.status !== "running"
+        )
+          return [];
+        const { runs, attempts, providerThreads } = yield* projectionStore.getThreadRecords(
+          guard.threadId,
+          ["runs", "attempts", "providerThreads"],
+          { runIds: [guard.runId] },
+        );
+        const run = runs[0];
+        const replacement = attempts.find((offered) => offered.id === run?.activeAttemptId);
+        const binding = providerThreads.find((offered) => offered.id === run?.providerThreadId);
+        if (
+          run?.status !== "starting" ||
+          replacement?.status !== "pending" ||
+          binding === undefined ||
+          replacement.id === attempt.id ||
+          replacement.reason !== "steering_restart" ||
+          replacement.runId !== run.id ||
+          replacement.rootNodeId !== run.rootNodeId ||
+          replacement.providerThreadId !== binding.id ||
+          replacement.providerInstanceId !== run.providerInstanceId ||
+          providerThread.lastRunOrdinal !== run.ordinal ||
+          binding.lastRunOrdinal !== run.ordinal ||
+          binding.appThreadId !== guard.threadId ||
+          binding.providerInstanceId !== run.providerInstanceId
+        )
+          return [];
+        const candidates = yield* sql<{ readonly effect_id: string }>`
+          SELECT effect_id FROM orchestration_v2_effect_outbox
+          WHERE thread_id = ${guard.threadId} AND effect_type = 'provider-turn.restart'
+            AND status IN ('pending', 'running')
+            AND json_extract(payload_json, '$.runId') = ${guard.runId}
+            AND json_extract(payload_json, '$.interruptedAttemptId') = ${attempt.id}
+            AND json_extract(payload_json, '$.providerThreadId') = ${providerThread.id}
+            AND json_extract(payload_json, '$.providerTurnId') = ${providerTurn.id}
+            AND json_extract(payload_json, '$.providerSessionId') = ${input.restartTerminalSessionId}
+        `;
+        for (const candidate of candidates) {
+          const stored = yield* effectOutbox.get(candidate.effect_id);
+          if (Option.isNone(stored) || stored.value.request.type !== "provider-turn.restart")
+            continue;
+          const restart = stored.value.request;
+          const commandEvents = yield* eventStore
+            .readByCommandId({ commandId: stored.value.commandId })
+            .pipe(Stream.runCollect);
+          const committedRun = commandEvents.find(
+            ({ event }) =>
+              event.type === "run.updated" &&
+              event.threadId === guard.threadId &&
+              event.payload.id === run.id,
+          )?.event;
+          const committedAttempt = commandEvents.find(
+            ({ event }) =>
+              event.type === "run-attempt.created" &&
+              event.threadId === guard.threadId &&
+              event.payload.id === replacement.id,
+          )?.event;
+          const committedBinding = commandEvents.find(
+            ({ event }) =>
+              event.type === "provider-thread.updated" &&
+              event.threadId === guard.threadId &&
+              event.payload.id === binding.id,
+          )?.event;
+          if (
+            committedRun?.type !== "run.updated" ||
+            committedAttempt?.type !== "run-attempt.created" ||
+            committedRun.payload.activeAttemptId !== replacement.id ||
+            committedRun.payload.rootNodeId !== replacement.rootNodeId ||
+            committedRun.payload.providerThreadId !== binding.id ||
+            committedRun.payload.providerInstanceId !== binding.providerInstanceId ||
+            committedRun.payload.lifecycleRevision !== run.lifecycleRevision ||
+            committedRun.payload.lifecycleSourceToken !== run.lifecycleSourceToken ||
+            committedAttempt.payload.runId !== run.id ||
+            committedAttempt.payload.rootNodeId !== replacement.rootNodeId ||
+            committedAttempt.payload.providerThreadId !== binding.id ||
+            committedAttempt.payload.providerInstanceId !== binding.providerInstanceId
+          )
+            continue;
+          if (restart.sessionTransition?.type === "replace") {
+            if (
+              binding.id !== providerThread.id ||
+              binding.providerSessionId !==
+                restart.sessionTransition.replacementProviderSessionId ||
+              committedBinding?.type !== "provider-thread.updated" ||
+              committedBinding.payload.providerSessionId !== binding.providerSessionId ||
+              committedBinding.payload.providerInstanceId !== binding.providerInstanceId
+            )
+              continue;
+          } else if (
+            providerThread.providerSessionId !== input.restartTerminalSessionId ||
+            (restart.sessionTransition?.type === "detach"
+              ? binding.id === providerThread.id ||
+                committedBinding?.type !== "provider-thread.updated" ||
+                committedBinding.payload.providerSessionId !== binding.providerSessionId ||
+                committedBinding.payload.providerInstanceId !== binding.providerInstanceId
+              : binding.id !== providerThread.id)
+          )
+            continue;
+          return [
+            {
+              ...terminal,
+              payload: {
+                ...providerTurn,
+                status: terminal.payload.status,
+                completedAt: terminal.payload.completedAt,
+              },
+            },
+          ];
+        }
+        return [];
+      },
+    );
+
     // The enclosing write or commit span already traces this per-event projection merge.
     const updateDelegatedCompletionOnly = Effect.fnUntraced(function* (
       events: ReadonlyArray<OrchestrationV2DomainEvent>,
@@ -695,7 +866,8 @@ const layerBase: Layer.Layer<
     });
 
     const writeEffect = Effect.fn("orchestrationV2.EventSink.write")(function* (
-      input: Parameters<EventSinkV2Shape["writeWithEffects"]>[0],
+      input: Parameters<EventSinkV2Shape["writeWithEffects"]>[0] &
+        Pick<Parameters<EventSinkV2Shape["write"]>[0], "restartTerminalSessionId">,
     ) {
       yield* Effect.annotateCurrentSpan({
         "orchestration_v2.command_id": input.commandId ?? null,
@@ -705,7 +877,14 @@ const layerBase: Layer.Layer<
 
       const { committed } = yield* commitThenPublish(
         Effect.gen(function* () {
-          if (!(yield* acceptLifecycle(input))) return { committed: [], outcomes: [] };
+          const lifecycleAccepted = yield* acceptLifecycle(input);
+          const acceptedEvents = lifecycleAccepted
+            ? input.events
+            : input.effects.length === 0
+              ? yield* restartTerminalAcknowledgement(input)
+              : [];
+          if (!lifecycleAccepted && acceptedEvents.length === 0)
+            return { committed: [], outcomes: [] };
           // Check ownership in the same transaction that claims the native session.
           const imported = input.unlessNativeThreadOwned;
           if (imported?.nativeThreadRef != null) {
@@ -727,8 +906,8 @@ const layerBase: Layer.Layer<
           // Checkpoint capture can finish after a cohort writer reads its parent run.
           // Merge in this transaction so the event log and projection keep that completion.
           const events = input.updateDelegatedCompletionOnly
-            ? yield* updateDelegatedCompletionOnly(input.events, () => true)
-            : input.events;
+            ? yield* updateDelegatedCompletionOnly(acceptedEvents, () => true)
+            : acceptedEvents;
           const normalized = yield* normalizeEvents(
             input.guardPendingUserInputCancellations === true
               ? yield* guardUserInputCancellations(events)
@@ -966,40 +1145,6 @@ const layerBase: Layer.Layer<
             return { ...existing, committed: false as const, cancelledEffectIds: [] };
           }
 
-          const runId = input.updateDelegatedCompletionOnlyRunId;
-          const normalized = yield* normalizeEvents(
-            runId === undefined
-              ? input.events
-              : yield* updateDelegatedCompletionOnly(input.events, (id) => id === runId),
-            input,
-          );
-          const storedEvents = yield* eventStore.append({
-            commandId: input.commandId,
-            events: normalized,
-          });
-          // A Stop that changes nothing can still queue the stop of its delegated tasks.
-          const sequence =
-            storedEvents.at(-1)?.sequence ??
-            (input.effects.length === 0
-              ? undefined
-              : yield* eventStore.latestSequence({ threadId: input.threadId }));
-          if (sequence === undefined) {
-            return yield* Effect.die(
-              new Error(`Command ${input.commandId} produced no orchestration events.`),
-            );
-          }
-          const outcomes = yield* applyStoredEvents(storedEvents);
-          yield* effectOutbox.enqueue(input.effects);
-          const receipt: CommandReceiptStore.CommandReceiptV2 = {
-            commandId: input.commandId,
-            threadId: input.threadId,
-            commandType: input.commandType,
-            acceptedAt: input.acceptedAt,
-            resultSequence: sequence,
-            status: "accepted",
-            error: null,
-          };
-          yield* commandReceipts.upsert(receipt);
           const cancellations = new Map<
             ThreadId,
             { effectTypes: Set<EffectOutbox.OrchestrationEffectRequestV2["type"]>; reason: string }
@@ -1025,6 +1170,48 @@ const layerBase: Layer.Layer<
                 reason: target.reason,
               })),
             );
+          // 与 claimNext 的 UPDATE 共用事务；领取在先会留下 attempt_count，删除在先则无法再领取。
+          const events =
+            input.events.some((event) => event.type === "thread.deleted") &&
+            !input.effects.some((effect) => effect.request.type === "provider-turn.start")
+              ? yield* certifyCancelledQueuedSessions(input.events).pipe(
+                  Effect.provideService(SqlClient.SqlClient, sql),
+                )
+              : input.events;
+          const runId = input.updateDelegatedCompletionOnlyRunId;
+          const normalized = yield* normalizeEvents(
+            runId === undefined
+              ? events
+              : yield* updateDelegatedCompletionOnly(events, (id) => id === runId),
+            input,
+          );
+          const storedEvents = yield* eventStore.append({
+            commandId: input.commandId,
+            events: normalized,
+          });
+          // A Stop that changes nothing can still queue the stop of its delegated tasks.
+          const sequence =
+            storedEvents.at(-1)?.sequence ??
+            (input.effects.length === 0
+              ? undefined
+              : yield* eventStore.latestSequence({ threadId: input.threadId }));
+          if (sequence === undefined) {
+            return yield* Effect.die(
+              new Error(`Command ${input.commandId} produced no orchestration events.`),
+            );
+          }
+          const outcomes = yield* applyStoredEvents(storedEvents);
+          const receipt: CommandReceiptStore.CommandReceiptV2 = {
+            commandId: input.commandId,
+            threadId: input.threadId,
+            commandType: input.commandType,
+            acceptedAt: input.acceptedAt,
+            resultSequence: sequence,
+            status: "accepted",
+            error: null,
+          };
+          yield* commandReceipts.upsert(receipt);
+          yield* effectOutbox.enqueue(input.effects);
           return { receipt, storedEvents, outcomes, committed: true as const, cancelledEffectIds };
         }),
         (result) =>

@@ -1,3 +1,4 @@
+import { assert, describe, it } from "@effect/vitest";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import { beforeEach, vi } from "vite-plus/test";

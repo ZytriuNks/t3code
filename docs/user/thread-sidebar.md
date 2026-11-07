@@ -311,8 +311,11 @@ Resource cleanup can remain pending or fail after the archive or deletion is
 saved. Pending or failed cleanup can block new work after restoration until
 cleanup succeeds.
 
-Deletion applies only to T3 Code. It does not delete provider transcripts or
-physically reclaim database history. Archiving keeps history and attachments.
+Deleting a thread keeps its T3 history and deletion record. T3 deletion also
+queues asynchronous cleanup of an isolated Pi transcript. A live session,
+shared file, or unresolved identity leaves cleanup visibly failed. Other
+providers' transcripts are not deleted. Archiving keeps the Pi transcript,
+history, and attachments.
 Existing forks retain their inherited history and referenced attachments, and
 can continue after the source is deleted. Historical subagent cards do not
 become the fork's live agents; links to deleted source subagents may be

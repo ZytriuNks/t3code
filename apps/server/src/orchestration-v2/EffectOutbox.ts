@@ -3,8 +3,10 @@ import {
   CheckpointScopeId,
   CommandId,
   MessageId,
+  NativeSessionStorage,
   NodeId,
   ProviderSessionId,
+  ProviderInstanceId,
   RunAttemptId,
   ProviderApprovalDecision,
   ProviderUserInputAnswers,
@@ -28,14 +30,27 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import { forkParked } from "../serverActivation.ts";
+import { assertNativeSessionGate } from "./NativeSessionGate.ts";
 
-const LifecycleCleanup = Schema.Struct({
+export const LifecycleCleanup = Schema.Struct({
   commandId: CommandId,
   rootThreadId: ThreadId,
   revision: Schema.Number,
+  sourceToken: Schema.optional(Schema.String),
 });
+export type LifecycleCleanup = typeof LifecycleCleanup.Type;
 
 export const OrchestrationEffectRequestV2 = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("provider-thread.delete"),
+    driver: Schema.Literal("pi"),
+    providerInstanceId: ProviderInstanceId,
+    providerThreadId: ProviderThreadId,
+    threadIds: Schema.Array(ThreadId),
+    nativeId: Schema.NullOr(Schema.String),
+    nativeStorage: NativeSessionStorage,
+    lifecycle: LifecycleCleanup,
+  }),
   Schema.Struct({
     type: Schema.Literal("provider-runtime.continue"),
     sourceRunId: RunId,
@@ -142,6 +157,7 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
 export type OrchestrationEffectRequestV2 = typeof OrchestrationEffectRequestV2.Type;
 
 export const REPLAY_SAFE_EFFECT_TYPES_AFTER_PROCESS_LOSS = [
+  "provider-thread.delete",
   "provider-runtime.continue",
   "provider-session.detach",
   "provider-thread.rollback",
@@ -221,10 +237,14 @@ export interface EffectOutboxV2Shape {
   readonly attachmentRetirements: (threadId: ThreadId) => Effect.Effect<
     ReadonlyArray<{
       readonly effectId: string;
+      readonly commandId: string;
+      readonly threadId: string;
       readonly status: string;
       readonly providerSessionId: string;
       readonly retirementRevision: number;
       readonly retirementSourceToken: string | null;
+      readonly lifecycleCommandId: string | null;
+      readonly lifecycleRootThreadId: string | null;
     }>,
     EffectOutboxError
   >;
@@ -402,15 +422,21 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
       attachmentRetirements: (threadId) =>
         sql<{
           readonly effectId: string;
+          readonly commandId: string;
+          readonly threadId: string;
           readonly status: string;
           readonly providerSessionId: string;
           readonly retirementRevision: number;
           readonly retirementSourceToken: string | null;
+          readonly lifecycleCommandId: string | null;
+          readonly lifecycleRootThreadId: string | null;
         }>`
-        SELECT effect_id AS effectId, status,
+        SELECT effect_id AS effectId, command_id AS commandId, thread_id AS threadId, status,
           json_extract(payload_json, '$.providerSessionId') AS providerSessionId,
           json_extract(payload_json, '$.retirementRevision') AS retirementRevision,
-          json_extract(payload_json, '$.retirementSourceToken') AS retirementSourceToken
+          json_extract(payload_json, '$.retirementSourceToken') AS retirementSourceToken,
+          json_extract(payload_json, '$.lifecycle.commandId') AS lifecycleCommandId,
+          json_extract(payload_json, '$.lifecycle.rootThreadId') AS lifecycleRootThreadId
         FROM orchestration_v2_effect_outbox
         WHERE thread_id = ${threadId} AND effect_type = 'provider-session.detach'
           AND json_type(payload_json, '$.retirementRevision') IS NOT NULL
@@ -492,7 +518,7 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
             SELECT cleanup.* FROM orchestration_v2_effect_outbox cleanup
             WHERE ${sql.in("cleanup.thread_id", threadIds)}
               AND cleanup.status <> 'succeeded'
-              AND cleanup.effect_type IN ('provider-session.detach', 'terminal.cleanup',
+              AND cleanup.effect_type IN ('provider-thread.delete', 'provider-session.detach', 'terminal.cleanup',
                 'preview.cleanup', 'scheduled-tasks.cleanup', 'scheduled-tasks.suspend', 'attachment.cleanup')
               AND (json_type(cleanup.payload_json, '$.lifecycle') = 'object'
                 OR EXISTS (
@@ -615,11 +641,50 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
             )
             RETURNING *
           `;
-          const rows = yield* claimStatement.pipe(Effect.withTracerEnabled(false));
-          const row = rows[0];
-          if (row === undefined) return Option.none();
-          cancellationSignals.set(row.effect_id, Deferred.makeUnsafe<void>());
-          return Option.some(yield* rowToEffect(row));
+          const claimed = yield* sql.withTransaction(
+            Effect.gen(function* () {
+              const rows = yield* claimStatement.pipe(Effect.withTracerEnabled(false));
+              const row = rows[0];
+              if (row === undefined) return Option.none();
+              const effect = yield* rowToEffect(row);
+              const request = effect.request;
+              if (
+                request.type === "provider-turn.start" ||
+                request.type === "provider-turn.restart" ||
+                request.type === "provider-runtime.continue"
+              ) {
+                const runId =
+                  request.type === "provider-runtime.continue"
+                    ? request.sourceRunId
+                    : request.runId;
+                const providers = yield* sql<{
+                  readonly provider_thread_id: string;
+                  readonly provider_session_id: string | null;
+                  readonly provider_instance_id: string;
+                }>`
+                SELECT p.provider_thread_id, p.provider_session_id, p.provider_instance_id
+                FROM orchestration_v2_projection_runs r
+                JOIN orchestration_v2_projection_provider_threads p ON p.provider_thread_id = r.provider_thread_id
+                WHERE r.run_id = ${runId} AND r.thread_id = ${effect.threadId} AND p.driver = 'pi'
+              `;
+                for (const provider of providers)
+                  yield* assertNativeSessionGate({
+                    threadId: effect.threadId,
+                    providerThreadId: ProviderThreadId.make(provider.provider_thread_id),
+                    providerInstanceId: ProviderInstanceId.make(provider.provider_instance_id),
+                    ...(provider.provider_session_id === null
+                      ? {}
+                      : {
+                          providerSessionId: ProviderSessionId.make(provider.provider_session_id),
+                        }),
+                  }).pipe(Effect.provideService(SqlClient.SqlClient, sql));
+              }
+              return Option.some(effect);
+            }),
+          );
+          if (Option.isSome(claimed))
+            cancellationSignals.set(claimed.value.id, Deferred.makeUnsafe<void>());
+          return claimed;
         },
         Effect.mapError((cause) => new EffectOutboxError({ operation: "claim", cause })),
       ),
@@ -753,6 +818,40 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
               AND NOT (effect_type = 'provider-session.detach'
                 AND (json_type(payload_json, '$.retirementRevision') IS NOT NULL
                   OR json_type(payload_json, '$.lifecycle') IS 'object'))
+              -- A cancelled native delete needs only one exact success proof.
+              AND rowid NOT IN (
+                SELECT MIN(proof.rowid)
+                FROM orchestration_v2_effect_outbox AS barrier
+                INNER JOIN orchestration_v2_effect_outbox AS proof
+                  ON proof.thread_id = barrier.thread_id
+                  AND proof.effect_type = 'provider-thread.delete'
+                  AND proof.status = 'succeeded'
+                  AND json_type(proof.payload_json, '$.lifecycle') IS 'object'
+                  AND json_extract(proof.payload_json, '$.lifecycle.rootThreadId') =
+                    json_extract(barrier.payload_json, '$.lifecycle.rootThreadId')
+                  AND json_extract(proof.payload_json, '$.lifecycle.revision') =
+                    json_extract(barrier.payload_json, '$.lifecycle.revision')
+                  AND json_extract(proof.payload_json, '$.lifecycle.sourceToken') IS
+                    json_extract(barrier.payload_json, '$.lifecycle.sourceToken')
+                  AND json_extract(proof.payload_json, '$.driver') =
+                    json_extract(barrier.payload_json, '$.driver')
+                  AND json_extract(proof.payload_json, '$.providerInstanceId') =
+                    json_extract(barrier.payload_json, '$.providerInstanceId')
+                  AND json_extract(proof.payload_json, '$.providerThreadId') =
+                    json_extract(barrier.payload_json, '$.providerThreadId')
+                  AND json_extract(proof.payload_json, '$.nativeId') IS
+                    json_extract(barrier.payload_json, '$.nativeId')
+                  AND json_extract(proof.payload_json, '$.nativeStorage.type') =
+                    json_extract(barrier.payload_json, '$.nativeStorage.type')
+                  AND json_extract(proof.payload_json, '$.nativeStorage.canonicalRoot') =
+                    json_extract(barrier.payload_json, '$.nativeStorage.canonicalRoot')
+                  AND json_extract(proof.payload_json, '$.nativeStorage.canonicalFile') =
+                    json_extract(barrier.payload_json, '$.nativeStorage.canonicalFile')
+                  AND json_extract(proof.payload_json, '$.threadIds') =
+                    json_extract(barrier.payload_json, '$.threadIds')
+                WHERE barrier.effect_type = 'provider-thread.delete' AND barrier.status = 'cancelled'
+                GROUP BY barrier.effect_id
+              )
               AND NOT (status = 'cancelled' AND json_type(payload_json, '$.lifecycle') IS 'object')
               AND NOT ((status = 'cancelled' OR effect_type = 'provider-session.detach')
                 AND EXISTS (SELECT 1 FROM orchestration_command_receipts receipt

@@ -53,16 +53,51 @@ const makePiSpawner = Effect.fnUntraced(function* (
     Effect.gen(function* () {
       assert.isTrue(ChildProcess.isStandardCommand(command));
       if (!ChildProcess.isStandardCommand(command)) return yield* Effect.die("Unexpected pipeline");
-      launches.push(command);
       const version = command.args.includes("--version");
+      if (version) {
+        launches.push(command);
+        return ChildProcessSpawner.makeHandle({
+          pid: ChildProcessSpawner.ProcessId(999_999_999),
+          exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(0)),
+          isRunning: Effect.succeed(false),
+          kill: () => Effect.void,
+          unref: Effect.succeed(Effect.void),
+          stdin: Sink.drain,
+          stdout: Stream.succeed(encoder.encode("pi 1.0.2\n")),
+          stderr: Stream.empty,
+          all: Stream.empty,
+          getInputFd: () => Sink.drain,
+          getOutputFd: () => Stream.empty,
+        });
+      }
+      if (command.command === "taskkill") {
+        return ChildProcessSpawner.makeHandle({
+          pid: ChildProcessSpawner.ProcessId(999_999_998),
+          exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(0)),
+          isRunning: Effect.succeed(false),
+          kill: () => Effect.void,
+          unref: Effect.succeed(Effect.void),
+          stdin: Sink.drain,
+          stdout: Stream.empty,
+          stderr: Stream.empty,
+          all: Stream.empty,
+          getInputFd: () => Sink.drain,
+          getOutputFd: () => Stream.empty,
+        });
+      }
+      launches.push(command);
       const stdout = yield* Queue.unbounded<Uint8Array>();
+      const processExit = yield* Deferred.make<ChildProcessSpawner.ExitCode>();
       const cwd = command.options.cwd;
       return ChildProcessSpawner.makeHandle({
-        // Outside the valid PID range, so transport cleanup cannot signal a real process.
         pid: ChildProcessSpawner.ProcessId(999_999_999),
-        exitCode: version ? Effect.succeed(ChildProcessSpawner.ExitCode(0)) : Effect.never,
-        isRunning: Effect.succeed(!version),
-        kill: () => Effect.void,
+        // Scope close interrupts the exit watcher, completing this spawn for its finalizer.
+        exitCode: Deferred.await(processExit).pipe(
+          Effect.onInterrupt(() => Deferred.succeed(processExit, ChildProcessSpawner.ExitCode(0))),
+        ),
+        isRunning: Deferred.isDone(processExit).pipe(Effect.map((done) => !done)),
+        kill: () =>
+          Deferred.succeed(processExit, ChildProcessSpawner.ExitCode(0)).pipe(Effect.asVoid),
         unref: Effect.succeed(Effect.void),
         stdin: Sink.forEach((chunk: Uint8Array) => {
           const request = decodeRequest(new TextDecoder().decode(chunk).trim());
@@ -102,7 +137,7 @@ const makePiSpawner = Effect.fnUntraced(function* (
             ),
           ).pipe(Effect.asVoid);
         }),
-        stdout: version ? Stream.succeed(encoder.encode("pi 1.0.2\n")) : Stream.fromQueue(stdout),
+        stdout: Stream.fromQueue(stdout),
         stderr: Stream.empty,
         all: Stream.empty,
         getInputFd: () => Sink.drain,

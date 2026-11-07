@@ -45,10 +45,7 @@ function formatByteSize(bytes: number): string {
 }
 
 /** Returns the error to show for a file too large to be a theme, else null. */
-export function describeOversizedThemeFile(
-  bytes: number,
-  language: AppLanguage = "en",
-): string | null {
+function describeOversizedThemeFile(bytes: number, language: AppLanguage = "en"): string | null {
   if (bytes <= MAX_THEME_FILE_BYTES) return null;
   return translate(language, "settings.appearance.theme.fileTooLarge", {
     size: formatByteSize(bytes),

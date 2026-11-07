@@ -1,6 +1,9 @@
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- This native adapter owns a persistent, bidirectional helper pipe.
 import * as NodeChildProcess from "node:child_process";
-import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import {
+  Environment as HostProcessEnvironment,
+  Platform as HostProcessPlatform,
+} from "@t3tools/shared/hostProcess";
 import * as Effect from "effect/Effect";
 import * as Cause from "effect/Cause";
 

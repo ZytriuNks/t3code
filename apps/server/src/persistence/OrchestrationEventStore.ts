@@ -186,6 +186,9 @@ function metadataForV2Event(event: OrchestrationV2DomainEvent): Record<string, u
       ? {}
       : { providerInstanceId: event.providerInstanceId }),
     ...(event.rawEventId === undefined ? {} : { rawEventId: event.rawEventId }),
+    ...(event.type === "provider-thread.updated" && event.nativeBindingSource !== undefined
+      ? { nativeBindingSource: event.nativeBindingSource }
+      : {}),
     ...((event.type === "provider-session.attached" ||
       event.type === "provider-session.updated" ||
       event.type === "provider-thread.updated") &&
@@ -218,6 +221,9 @@ const rowToV2StoredEvent = Effect.fn("OrchestrationEventStore.rowToV2StoredEvent
       ? {}
       : { providerInstanceId: values.providerInstanceId }),
     ...(values.rawEventId === undefined ? {} : { rawEventId: values.rawEventId }),
+    ...(row.event_type === "provider-thread.updated" && values.nativeBindingSource !== undefined
+      ? { nativeBindingSource: values.nativeBindingSource }
+      : {}),
     ...((row.event_type === "provider-session.attached" ||
       row.event_type === "provider-session.updated" ||
       row.event_type === "provider-thread.updated") &&

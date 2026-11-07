@@ -6,8 +6,11 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as PlatformError from "effect/PlatformError";
+import { vi } from "vite-plus/test";
 
 import type * as Electron from "electron";
+
+vi.mock("electron", () => ({}));
 
 import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as DesktopAppIdentity from "./DesktopAppIdentity.ts";
