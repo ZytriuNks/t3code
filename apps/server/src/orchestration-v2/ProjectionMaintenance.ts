@@ -319,6 +319,8 @@ export const layer: Layer.Layer<
       // Retain each key's oldest candidate, deleting it only when an older event appears.
       const oldestCandidateByEntityKey = new Map<string, number | null>();
       const turnItemSegments = new Map<string, { itemId: string; candidate: number | null }>();
+      const retainedNativeGateProviders = new Set<string>();
+      const retainedNativeGateSequences = new Set<number>();
       let deletedEventCount = 0;
       let deletedReceiptCount = 0;
 
@@ -330,6 +332,7 @@ export const layer: Layer.Layer<
           readonly stream_id: string;
           readonly event_type: string;
           readonly entity_id: string | null;
+          readonly native_gate_provider_thread_id: string | null;
           readonly imported_legacy_thread: number;
         }>`
           SELECT
@@ -356,6 +359,18 @@ export const layer: Layer.Layer<
                 json_extract(event.payload_json, '$.number'))
               ELSE NULL
             END AS entity_id,
+            CASE WHEN event.application_event_version = 2
+              AND event.event_type IN ('node.updated', 'turn-item.updated')
+              AND (
+                json_extract(event.payload_json, '$.providerTurnId') IS NOT NULL
+                OR json_extract(event.payload_json, '$.nativeItemRef.nativeId') IS NOT NULL
+                OR (event.event_type = 'node.updated'
+                  AND json_extract(event.payload_json, '$.kind') = 'root_turn'
+                  AND json_extract(event.payload_json, '$.startedAt') IS NOT NULL)
+              )
+              THEN json_extract(event.payload_json, '$.providerThreadId')
+              ELSE NULL
+            END AS native_gate_provider_thread_id,
             CASE
               WHEN event.application_event_version = 1 AND event.aggregate_kind = 'thread'
               THEN EXISTS (
@@ -373,6 +388,13 @@ export const layer: Layer.Layer<
         const page = rows.slice(0, COMPACTION_PAGE_SIZE);
         const obsolete: number[] = [];
         for (const row of page) {
+          if (
+            row.native_gate_provider_thread_id !== null &&
+            !retainedNativeGateProviders.has(row.native_gate_provider_thread_id)
+          ) {
+            retainedNativeGateProviders.add(row.native_gate_provider_thread_id);
+            retainedNativeGateSequences.add(row.sequence);
+          }
           if (
             row.application_event_version === 2 &&
             row.event_type === "turn-item.updated" &&
@@ -433,9 +455,11 @@ export const layer: Layer.Layer<
         }
         // Never hold a transaction or the reader lock across a yield or a rest.
         yield* Effect.yieldNow;
-        if (obsolete.length > 0) {
-          yield* sql`DELETE FROM orchestration_events WHERE sequence IN ${sql.in(obsolete)}`;
-          deletedEventCount += obsolete.length;
+        // A later empty snapshot cannot erase the provider's monotone native-session gate.
+        const deletable = obsolete.filter((sequence) => !retainedNativeGateSequences.has(sequence));
+        if (deletable.length > 0) {
+          yield* sql`DELETE FROM orchestration_events WHERE sequence IN ${sql.in(deletable)}`;
+          deletedEventCount += deletable.length;
           yield* Effect.yieldNow;
         }
         throughSequence =

@@ -2,6 +2,7 @@ import { assert, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as Deferred from "effect/Deferred";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
 import * as References from "effect/References";
@@ -9,6 +10,7 @@ import * as Queue from "effect/Queue";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
+import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import { makePiRpcConnection, type PiRpcRecord } from "./rpc.ts";
 
@@ -22,13 +24,36 @@ it.effect.each(["success", "error", "timeout", "info"] as const)(
     return Effect.gen(function* () {
       const stdout = yield* Queue.unbounded<Uint8Array>();
       const requests = yield* Queue.unbounded<PiRpcRecord>();
-      const spawner = ChildProcessSpawner.make(() =>
-        Effect.succeed(
-          ChildProcessSpawner.makeHandle({
-            pid: ChildProcessSpawner.ProcessId(999_999_999),
-            exitCode: Effect.never,
-            isRunning: Effect.succeed(true),
-            kill: () => Effect.void,
+      let processExit: Deferred.Deferred<ChildProcessSpawner.ExitCode> | null = null;
+      const spawner = ChildProcessSpawner.make((command) =>
+        Effect.gen(function* () {
+          if (ChildProcess.isStandardCommand(command) && command.command === "taskkill") {
+            if (processExit !== null)
+              yield* Deferred.succeed(processExit, ChildProcessSpawner.ExitCode(0));
+            return ChildProcessSpawner.makeHandle({
+              pid: ChildProcessSpawner.ProcessId(999_999_998),
+              exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(0)),
+              isRunning: Effect.succeed(false),
+              kill: () => Effect.void,
+              unref: Effect.succeed(Effect.void),
+              stdin: Sink.drain,
+              stdout: Stream.empty,
+              stderr: Stream.empty,
+              all: Stream.empty,
+              getInputFd: () => Sink.drain,
+              getOutputFd: () => Stream.empty,
+            });
+          }
+          const exited = yield* Deferred.make<ChildProcessSpawner.ExitCode>();
+          processExit = exited;
+          return ChildProcessSpawner.makeHandle({
+            // The transport probes the pid before issuing the Windows tree
+            // termination command; use this test process as a live sentinel.
+            pid: ChildProcessSpawner.ProcessId(process.pid),
+            exitCode: Deferred.await(exited),
+            isRunning: Deferred.isDone(exited).pipe(Effect.map((done) => !done)),
+            kill: () =>
+              Deferred.succeed(exited, ChildProcessSpawner.ExitCode(0)).pipe(Effect.asVoid),
             unref: Effect.succeed(Effect.void),
             stdin: Sink.forEach((chunk: Uint8Array) =>
               Queue.offer(
@@ -41,8 +66,8 @@ it.effect.each(["success", "error", "timeout", "info"] as const)(
             all: Stream.empty,
             getInputFd: () => Sink.drain,
             getOutputFd: () => Stream.empty,
-          }),
-        ),
+          });
+        }),
       );
       const connection = yield* makePiRpcConnection({
         command: "pi",

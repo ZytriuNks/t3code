@@ -24,6 +24,7 @@ import * as NodeOS from "node:os";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import * as Clock from "effect/Clock";
 import * as Config from "effect/Config";
 import * as Console from "effect/Console";
@@ -175,6 +176,68 @@ const CODE = /\.[cm]?[jt]sx?$/;
 const TEST = /\.test\.[cm]?[jt]sx?$/;
 const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+export const collectPresentFiles = Effect.fn("checkChanged.collectPresentFiles")(function* (
+  files: ReadonlyArray<string>,
+  cwd: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  return yield* Effect.filter(files, (file) =>
+    fs.stat(path.join(cwd, file)).pipe(
+      Effect.map((info) => info.type === "File"),
+      Effect.catchIf(
+        (error) => error.reason._tag === "NotFound",
+        () => Effect.succeed(false),
+      ),
+    ),
+  );
+});
+
+export const collectTests = Effect.fn("checkChanged.collectTests")(function* (
+  code: ReadonlyArray<string>,
+  cwd: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const tests = new Set(code.filter((file) => TEST.test(file)));
+  for (const file of code) {
+    const dir = path.dirname(file);
+    const prefix = `${path.basename(file).replace(CODE, "")}.`;
+    for (const entry of yield* fs.readDirectory(path.join(cwd, dir))) {
+      if (entry.startsWith(prefix) && TEST.test(entry)) {
+        tests.add(path.join(dir, entry).replaceAll("\\", "/"));
+      }
+    }
+  }
+  return tests;
+});
+
+export const runCheck = Effect.fn("checkChanged.runCheck")(
+  function* (args: ReadonlyArray<string>, cwd: string, env: NodeJS.ProcessEnv = {}) {
+    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+    const command = yield* resolveSpawnCommand("vp", args, { env, extendEnv: true });
+    return yield* Effect.scoped(
+      Effect.gen(function* () {
+        const handle = yield* spawner.spawn(
+          ChildProcess.make(command.command, command.args, {
+            cwd,
+            env,
+            extendEnv: true,
+            shell: command.shell,
+            forceKillAfter: "5 seconds",
+          }),
+        );
+        const [output, exitCode] = yield* Effect.all(
+          [Stream.mkString(Stream.decodeText(handle.all)), handle.exitCode],
+          { concurrency: 2 },
+        );
+        return { ok: exitCode === 0, output };
+      }),
+    );
+  },
+  Effect.catch((error) => Effect.succeed({ ok: false, output: error.message })),
+);
+
 // A flag wins over its environment variable; either must be a positive integer.
 const override = Effect.fn("checkChanged.override")(function* (
   flagName: string,
@@ -292,7 +355,7 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
     return true;
   }
 
-  const present = yield* Effect.filter(files, (file) => fs.exists(inRoot(file)));
+  const present = yield* collectPresentFiles(files, root);
   const code = present.filter((file) => CODE.test(file));
   const packages = readWorkspace();
   const { affected, outputs } = decide(files, packages, false);
@@ -301,14 +364,7 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
   // (foo.ts -> foo.test.ts, foo.browser.test.tsx). Vitest's import-graph
   // `related` reaches most of a package: one leaf server file pulled in 252 of
   // 406 server test files and took 7 minutes. CI runs the rest.
-  const tests = new Set(code.filter((file) => TEST.test(file)));
-  for (const file of code) {
-    const dir = path.dirname(file);
-    const prefix = `${path.basename(file).replace(CODE, "")}.`;
-    for (const entry of yield* fs.readDirectory(inRoot(dir))) {
-      if (entry.startsWith(prefix) && TEST.test(entry)) tests.add(path.join(dir, entry));
-    }
-  }
+  const tests = yield* collectTests(code, root);
   // It reads files other than the ones beside it, so no changed file selects it.
   if (affected.includes("t3")) tests.add("apps/server/src/provider/AgentContextBudget.test.ts");
 
@@ -381,18 +437,9 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
   // Output is piped, so keep the colors a terminal would get.
   const env = process.stdout.isTTY ? { FORCE_COLOR: "1" } : {};
   const vp = (args: ReadonlyArray<string>, cwd = root) =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const handle = yield* spawner.spawn(
-          ChildProcess.make("vp", args, { cwd, env, extendEnv: true, forceKillAfter: "5 seconds" }),
-        );
-        const [output, exitCode] = yield* Effect.all(
-          [Stream.mkString(Stream.decodeText(handle.all)), handle.exitCode],
-          { concurrency: 2 },
-        );
-        return { ok: exitCode === 0, output };
-      }),
-    ).pipe(Effect.catch((error) => Effect.succeed({ ok: false, output: error.message })));
+    runCheck(args, cwd, env).pipe(
+      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+    );
 
   // Resolve without the lockfile in a temp copy to preserve the working tree and lockfile.
   // Copy mobile modules too: they are file: dependencies, not workspace packages.

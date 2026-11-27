@@ -51,5 +51,15 @@ export const ThreadDeletionRecord = Schema.Struct({
   commandId: CommandId,
   scope: Schema.Literal("t3_only"),
   sessions: Schema.Array(NativeSessionBinding),
+  noNativeSessionProofs: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        providerThreadId: ProviderThreadId,
+        providerInstanceId: ProviderInstanceId,
+        source: Schema.Literal("queued_provider_origin"),
+        version: Schema.Literal(1),
+      }),
+    ),
+  ),
 });
 export type ThreadDeletionRecord = typeof ThreadDeletionRecord.Type;

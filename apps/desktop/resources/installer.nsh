@@ -12,7 +12,14 @@
     ; Legacy registrations contain doubled separators. NSIS rejects that
     ; InstallLocation before the old uninstaller reaches its uninstall section.
     ; Keep the registered old directory until its uninstaller has finished.
-    GetFullPathName $INSTDIR "$INSTDIR"
+    ; GetFullPathName can fail for a destination that does not exist yet.
+    ; Keep explicit /D and fresh-install paths intact in that case.
+    ClearErrors
+    GetFullPathName $1 "$INSTDIR"
+    ${IfNot} ${Errors}
+    ${AndIf} $1 != ""
+      StrCpy $INSTDIR "$1"
+    ${EndIf}
     ReadRegStr $0 SHELL_CONTEXT "${INSTALL_REGISTRY_KEY}" InstallLocation
     ${If} $0 != ""
       ClearErrors
@@ -32,6 +39,29 @@
     Pop $0
     ClearErrors
     !undef T3_NORMALIZE_INSTALL_PATH
+  !endif
+  !if "${PRODUCT_NAME}" == "T3 Code (Alpha)"
+    !define T3_INSTALL_STAGE "alpha"
+  !else if "${PRODUCT_NAME}" == "T3 Code (Experimental)"
+    !define T3_INSTALL_STAGE "experimental"
+  !else if "${PRODUCT_NAME}" == "T3 Code (Dev)"
+    !define T3_INSTALL_STAGE "dev"
+  !endif
+  !ifdef T3_INSTALL_STAGE
+    Push $0
+    Push $1
+    ; The one-click template runs customInit after initMultiUser. Its selected
+    ; shell context identifies the same-channel registration for this mode.
+    !insertmacro GetDParameter $0
+    ReadRegStr $1 SHELL_CONTEXT "${INSTALL_REGISTRY_KEY}" InstallLocation
+    ${If} $0 == ""
+    ${AndIf} $1 == ""
+      StrCpy $INSTDIR "D:\t3code\${T3_INSTALL_STAGE}\${PRODUCT_NAME}"
+    ${EndIf}
+    Pop $1
+    Pop $0
+    ClearErrors
+    !undef T3_INSTALL_STAGE
   !endif
   !if "${PRODUCT_NAME}" == "T3 Code (Beta)"
     Push $0

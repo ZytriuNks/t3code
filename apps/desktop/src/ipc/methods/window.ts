@@ -313,7 +313,7 @@ export const openLocalPath = DesktopIpc.makeIpcMethod({
   payload: Schema.Struct({ path: Schema.String, reveal: Schema.Boolean }),
   result: Schema.Boolean,
   handler: Effect.fn("desktop.ipc.window.openLocalPath")(function* (input, event) {
-    const platform = yield* HostProcess.HostProcessPlatform;
+    const platform = yield* HostProcess.Platform;
     const electronWindow = yield* ElectronWindow.ElectronWindow;
     const window = yield* electronWindow.main;
     if (

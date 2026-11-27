@@ -52,7 +52,7 @@ import { PullRequestMergeMethod } from "./pullRequest.ts";
 
 export const LanguagePreference = Schema.Literals(["system", "en", "zh-CN"]);
 export type LanguagePreference = typeof LanguagePreference.Type;
-export const DEFAULT_LANGUAGE_PREFERENCE: LanguagePreference = "system";
+const DEFAULT_LANGUAGE_PREFERENCE: LanguagePreference = "system";
 
 export const TimestampFormat = Schema.Literals(["locale", "12-hour", "24-hour"]);
 export type TimestampFormat = typeof TimestampFormat.Type;
@@ -1046,7 +1046,7 @@ export const SmoothTextYieldDurationMs = Schema.Int.check(
 export const ConversationStructure = Schema.Literals(["default", "restructured"]);
 export type ConversationStructure = typeof ConversationStructure.Type;
 
-export const DEFAULT_CONVERSATION_STRUCTURE = "default" as const;
+const DEFAULT_CONVERSATION_STRUCTURE = "default" as const;
 
 const StorageRetentionDays = Schema.NullOr(
   Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 3650 })),

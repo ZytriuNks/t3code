@@ -57,6 +57,12 @@ const record = {
   scope: "t3_only",
   sessions: [binding],
 };
+const noNativeSessionProof = {
+  providerThreadId: "pending-pi",
+  providerInstanceId: "pi",
+  source: "queued_provider_origin",
+  version: 1,
+};
 
 describe("thread lifecycle contracts", () => {
   it("reads legacy thread, run and provider payloads and defaults the thread revision", () => {
@@ -113,6 +119,20 @@ describe("thread lifecycle contracts", () => {
       type: "unresolved",
       reason: "legacy_missing_locator",
     });
+    expect(decodeProvider(provider).nativeSessionOrigin).toBeUndefined();
+    for (const state of ["unstarted", "may_exist"]) {
+      expect(
+        decodeProvider({ ...provider, nativeSessionOrigin: { version: 1, state } })
+          .nativeSessionOrigin,
+      ).toEqual({ version: 1, state });
+    }
+    for (const nativeSessionOrigin of [
+      { version: 0, state: "unstarted" },
+      { version: 1, state: "unknown" },
+      true,
+    ]) {
+      expect(() => decodeProvider({ ...provider, nativeSessionOrigin })).toThrow();
+    }
     expect(() => decodeProvider({ ...provider, nativeStorage: binding.storage })).toThrow();
     expect(
       decodeProvider({
@@ -137,6 +157,14 @@ describe("thread lifecycle contracts", () => {
     expect(() => decodeBinding({ ...binding, boundAt: 1 })).toThrow();
     expect(decodeRecord(record).scope).toBe("t3_only");
     expect(() => decodeRecord({ ...record, scope: "native" })).toThrow();
+    for (const proof of [
+      { ...noNativeSessionProof, source: "not_loaded" },
+      { ...noNativeSessionProof, version: 0 },
+      { ...noNativeSessionProof, version: undefined },
+      { ...noNativeSessionProof, providerThreadId: "" },
+    ]) {
+      expect(() => decodeRecord({ ...record, noNativeSessionProofs: [proof] })).toThrow();
+    }
   });
 
   it("round trips legacy and recorded deletions through persisted and forward-compatible wire codecs", () => {
@@ -145,7 +173,11 @@ describe("thread lifecycle contracts", () => {
     const decodeWire = Schema.decodeUnknownSync(
       Schema.toCodecJson(OrchestrationV2RpcSchemas.subscribeThread.output),
     );
-    for (const deletionRecord of [undefined, record]) {
+    for (const deletionRecord of [
+      undefined,
+      record,
+      { ...record, noNativeSessionProofs: [noNativeSessionProof] },
+    ]) {
       const event = {
         id: "event",
         type: "thread.deleted",

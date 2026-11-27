@@ -256,6 +256,7 @@ export const layer: Layer.Layer<
         lifecycleGuard,
         threadId: input.threadId,
         providerSessionId: providerThread.providerSessionId,
+        providerThreadId: providerThread.id,
         modelSelection,
         runtimePolicy: resolvedRuntimePolicy,
         ...(existingSession === undefined ? {} : { resumeFromSession: existingSession }),

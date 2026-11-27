@@ -5,6 +5,7 @@ import * as NodePath from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import * as Cause from "effect/Cause";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
@@ -98,37 +99,48 @@ const piDiscoverySpawner = (
         }
       }),
     );
-    return ChildProcessSpawner.make((command) => {
-      const standardCommand = ChildProcess.isStandardCommand(command) ? command : undefined;
-      const rawArgs = standardCommand?.args ?? [];
-      const args =
-        rawArgs.length > 0
-          ? rawArgs
-          : (standardCommand?.command ?? "")
-              .replaceAll('^"', "")
-              .replaceAll('"', "")
-              .trim()
-              .split(/\s+/)
-              .slice(1);
-      if (args.includes("--version")) {
-        return Effect.succeed(processHandle({ stdout: `pi ${options.version ?? "0.84.3"}\n` }));
-      }
-      if (args[0] === "auth") {
-        const expected = ["auth", "check", "--provider", "openai", "--json", "--no-refresh"];
-        return options.authCheck === undefined || args.join(" ") !== expected.join(" ")
-          ? Effect.die(`Unexpected pi ${args.join(" ")}`)
-          : Effect.succeed(processHandle({ stdout: options.authCheck, exitCode: 1 }));
-      }
-      return Effect.succeed(
-        ChildProcessSpawner.makeHandle({
+    return ChildProcessSpawner.make((command) =>
+      Effect.gen(function* () {
+        const standardCommand = ChildProcess.isStandardCommand(command) ? command : undefined;
+        const rawArgs = standardCommand?.args ?? [];
+        const args =
+          rawArgs.length > 0
+            ? rawArgs
+            : (standardCommand?.command ?? "")
+                .replaceAll('^"', "")
+                .replaceAll('"', "")
+                .trim()
+                .split(/\s+/)
+                .slice(1);
+        if (args.includes("--version")) {
+          return processHandle({ stdout: `pi ${options.version ?? "0.84.3"}\n` });
+        }
+        if (args[0] === "auth") {
+          const expected = ["auth", "check", "--provider", "openai", "--json", "--no-refresh"];
+          return options.authCheck === undefined || args.join(" ") !== expected.join(" ")
+            ? yield* Effect.die(`Unexpected pi ${args.join(" ")}`)
+            : processHandle({ stdout: options.authCheck, exitCode: 1 });
+        }
+        if (ChildProcess.isStandardCommand(command) && command.command === "taskkill") {
+          return processHandle({});
+        }
+        const processExit = yield* Deferred.make<ChildProcessSpawner.ExitCode>();
+        return ChildProcessSpawner.makeHandle({
           ...processHandle({}),
-          exitCode: Effect.never,
-          isRunning: Effect.succeed(true),
+          // Scope close interrupts the exit watcher, completing this spawn for its finalizer.
+          exitCode: Deferred.await(processExit).pipe(
+            Effect.onInterrupt(() =>
+              Deferred.succeed(processExit, ChildProcessSpawner.ExitCode(0)),
+            ),
+          ),
+          isRunning: Deferred.isDone(processExit).pipe(Effect.map((done) => !done)),
+          kill: () =>
+            Deferred.succeed(processExit, ChildProcessSpawner.ExitCode(0)).pipe(Effect.asVoid),
           stdin,
           stdout: Stream.fromQueue(stdout),
-        }),
-      );
-    });
+        });
+      }),
+    );
   });
 
 const settings = {

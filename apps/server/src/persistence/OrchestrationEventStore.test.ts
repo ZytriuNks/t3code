@@ -5,9 +5,12 @@ import {
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
+  ProviderSessionId,
+  ProviderThreadId,
   ThreadId,
   TurnItemId,
-  type OrchestrationV2DomainEvent,
+  OrchestrationV2DomainEvent,
+  OrchestrationV2DomainEventJson,
 } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
@@ -30,6 +33,9 @@ import * as OrchestrationEventStore from "./OrchestrationEventStore.ts";
 import * as SqlitePersistence from "./Sqlite.ts";
 const isPersistenceDecodeError = Schema.is(PersistenceDecodeError);
 const isLiveStreamBufferError = Schema.is(LiveStreamBufferError);
+const decodeV2Event = Schema.decodeUnknownSync(OrchestrationV2DomainEvent);
+const decodeV2EventJson = Schema.decodeUnknownSync(OrchestrationV2DomainEventJson);
+const encodeV2EventJson = Schema.encodeSync(OrchestrationV2DomainEventJson);
 
 const layerTest = OrchestrationEventStore.layer.pipe(
   Layer.provideMerge(SqlitePersistence.layerMemory),
@@ -37,6 +43,102 @@ const layerTest = OrchestrationEventStore.layer.pipe(
 const layer = it.layer(layerTest);
 
 layer("OrchestrationEventStore", (it) => {
+  it.effect("round-trips native binding provenance through contracts and SQLite", () =>
+    Effect.gen(function* () {
+      const store = yield* OrchestrationEventStore.OrchestrationEventStore;
+      const sql = yield* SqlClient.SqlClient;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("thread:binding-provenance");
+      const event = {
+        id: EventId.make("event:binding-provenance:marked"),
+        type: "provider-thread.updated",
+        threadId,
+        occurredAt: now,
+        nativeBindingSource: { version: 1, kind: "pre_native_pending" },
+        payload: {
+          id: ProviderThreadId.make("provider:binding-provenance"),
+          driver: ProviderDriverKind.make("pi"),
+          providerInstanceId: ProviderInstanceId.make("pi-binding-provenance"),
+          providerSessionId: ProviderSessionId.make("session:binding-provenance"),
+          appThreadId: threadId,
+          ownerNodeId: null,
+          nativeThreadRef: null,
+          nativeConversationHeadRef: null,
+          status: "not_loaded",
+          firstRunOrdinal: 1,
+          lastRunOrdinal: 1,
+          handoffIds: [],
+          forkedFrom: null,
+          nativeBindingOrigin: { version: 1, kind: "server_placeholder" },
+          nativeSessionOrigin: { version: 1, state: "may_exist" },
+          createdAt: now,
+          updatedAt: now,
+        },
+      } satisfies OrchestrationV2DomainEvent;
+      const marked = decodeV2Event(event);
+      const json = encodeV2EventJson(marked);
+      assert.equal(json.type, "provider-thread.updated");
+      if (json.type !== "provider-thread.updated") return yield* Effect.die("Wrong event type");
+      assert.deepEqual(decodeV2Event(decodeV2EventJson(json)), marked);
+      for (const [decode, valid] of [
+        [decodeV2Event, event],
+        [decodeV2EventJson, json],
+      ] as const) {
+        assert.throws(() =>
+          decode({ ...valid, nativeBindingSource: { version: 2, kind: "pre_native_pending" } }),
+        );
+        assert.throws(() =>
+          decode({
+            ...valid,
+            payload: {
+              ...valid.payload,
+              nativeBindingOrigin: { version: 2, kind: "server_placeholder" },
+            },
+          }),
+        );
+      }
+      const { nativeBindingSource: _source, ...unmarked } = json;
+      const { nativeBindingOrigin: _origin, ...legacyPayload } = json.payload;
+      const legacy = decodeV2EventJson({
+        ...unmarked,
+        id: EventId.make("event:binding-provenance:legacy"),
+        payload: legacyPayload,
+      });
+      yield* store.appendAgentEvents({ events: [marked, legacy] });
+      const stored = yield* sql<{
+        readonly source: string | null;
+        readonly origin: string | null;
+        readonly payload_source: string | null;
+      }>`
+        SELECT json_extract(metadata_json, '$.nativeBindingSource') AS source,
+          json_extract(payload_json, '$.nativeBindingOrigin') AS origin,
+          json_type(payload_json, '$.nativeBindingSource') AS payload_source
+        FROM orchestration_events WHERE stream_id = ${threadId} ORDER BY sequence
+      `;
+      assert.deepEqual(stored, [
+        {
+          source: JSON.stringify(event.nativeBindingSource),
+          origin: JSON.stringify(event.payload.nativeBindingOrigin),
+          payload_source: null,
+        },
+        { source: null, origin: null, payload_source: null },
+      ]);
+      const replayed = yield* store.readAgentEvents({ threadId }).pipe(Stream.runCollect);
+      assert.deepEqual(
+        replayed.map((entry) => entry.event),
+        [marked, legacy],
+      );
+      for (const entry of replayed) {
+        assert.equal(entry.event.type, "provider-thread.updated");
+        if (entry.event.type !== "provider-thread.updated")
+          return yield* Effect.die("Wrong replayed event type");
+        assert.equal("nativeBindingSource" in entry.event, entry.event.id === event.id);
+        assert.equal("nativeBindingOrigin" in entry.event.payload, entry.event.id === event.id);
+      }
+      assert.equal((yield* sql<{ readonly file: string }>`PRAGMA database_list`)[0]?.file, "");
+    }),
+  );
+
   it.effect("retains only shell metadata from oversized replay and live application events", () =>
     Effect.scoped(
       Effect.gen(function* () {

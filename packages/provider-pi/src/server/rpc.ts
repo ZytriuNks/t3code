@@ -229,7 +229,15 @@ export const makePiRpcConnection = Effect.fnUntraced(function* (options: PiRpcSp
     platform === "win32" ? terminateWindowsTree : terminatePiProcess(killProcessGroup, hasExited);
 
   // Register teardown immediately after spawn so interrupted setup cannot leak a detached process.
-  yield* Scope.addFinalizer(scope, terminateProcess.pipe(Effect.ignore, Effect.uninterruptible));
+  yield* Scope.addFinalizer(
+    scope,
+    terminateProcess.pipe(
+      Effect.andThen(child.exitCode),
+      Effect.asVoid,
+      Effect.orDie,
+      Effect.uninterruptible,
+    ),
+  );
 
   const pendingRequests = new Map<string, PendingPiRequest>();
   const events = yield* Queue.unbounded<PiRpcRecord, PiRpcError>();

@@ -425,8 +425,16 @@ function waitForCursorAdvance(promise: Promise<void>, signal: AbortSignal): Prom
   });
 }
 
-async function waitForReplayDelay(afterMs: number, signal: AbortSignal): Promise<void> {
-  const exit = await Effect.runPromiseExit(Effect.sleep(Duration.millis(afterMs)), { signal });
+async function waitForReplayDelay(
+  afterMs: number,
+  signal: AbortSignal,
+  onStarted: () => void,
+): Promise<void> {
+  const exit = await Effect.runPromiseExit(Effect.sleep(Duration.millis(afterMs)), {
+    signal,
+    // The runtime notifies after evaluating sleep to its suspended fiber.
+    onFiberStart: onStarted,
+  });
   if (Exit.isFailure(exit) && !Cause.hasInterruptsOnly(exit.cause)) {
     throw Cause.squash(exit.cause);
   }
@@ -488,7 +496,11 @@ function makeClaudeSessionForkFrame(
 
 export function makeReplayQueryRunner(
   transcript: ClaudeAgentSdkReplayTranscript,
-  replayOptions: { readonly replayGate?: ProviderReplayGate } = {},
+  replayOptions: {
+    readonly replayGate?: ProviderReplayGate;
+    readonly onInboundDelayStarted?: (cursor: number) => void;
+    readonly onOutboundWaitStarted?: (cursor: number) => void;
+  } = {},
 ): ClaudeQueryRunner {
   let cursor = 0;
   let failure: ClaudeAgentSdkReplayError | null = null;
@@ -543,7 +555,9 @@ export function makeReplayQueryRunner(
           }
         }
         if (entry.afterMs !== undefined && entry.afterMs > 0) {
-          await waitForReplayDelay(entry.afterMs, signal);
+          await waitForReplayDelay(entry.afterMs, signal, () =>
+            replayOptions.onInboundDelayStarted?.(cursor),
+          );
           throwIfFailed();
           if (signal.aborted) {
             return;
@@ -613,7 +627,9 @@ export function makeReplayQueryRunner(
       }
 
       if (entry.type === "expect_outbound") {
-        await waitForCursorAdvance(cursorAdvanced.promise, signal);
+        const waiting = waitForCursorAdvance(cursorAdvanced.promise, signal);
+        replayOptions.onOutboundWaitStarted?.(cursor);
+        await waiting;
         throwIfFailed();
         if (signal.aborted) {
           return;

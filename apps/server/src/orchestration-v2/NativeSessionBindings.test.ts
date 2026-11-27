@@ -3,6 +3,7 @@ import {
   EventId,
   ProviderDriverKind,
   ProviderInstanceId,
+  ProviderSessionId,
   ProviderThreadId,
   ThreadId,
   type OrchestrationV2DomainEvent,
@@ -139,5 +140,103 @@ it.effect("includes Pi file locators and null native IDs in idempotent identitie
       });
     }
     expect(yield* bindings.listForThreads([R])).toHaveLength(2);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect.each(["not_loaded", "active"] as const)(
+  "does not turn a marked %s pre-native plan into a historical unknown identity",
+  (status) =>
+    Effect.gen(function* () {
+      const bindings = yield* NativeSessionBindings.NativeSessionBindings;
+      const base = event("pi", null);
+      const planned = {
+        ...base,
+        nativeBindingSource: { version: 1 as const, kind: "pre_native_pending" as const },
+        payload: {
+          ...base.payload,
+          nativeBindingOrigin: { version: 1 as const, kind: "server_placeholder" as const },
+          status,
+          nativeThreadRef: null,
+          providerSessionId: ProviderSessionId.make("planned-session"),
+          firstRunOrdinal: 1,
+          lastRunOrdinal: 1,
+        },
+      };
+      yield* bindings.applyProviderThread(planned);
+      expect(yield* bindings.listForThreads([R])).toEqual([]);
+      yield* bindings.applyProviderThread({
+        ...base,
+        payload: {
+          ...base.payload,
+          nativeStorage: {
+            type: "resolved",
+            canonicalRoot: "C:/pi",
+            canonicalFile: "C:/pi/session.jsonl",
+          },
+        },
+      });
+      expect(yield* bindings.listForThreads([R])).toHaveLength(1);
+      const { nativeBindingSource: _source, ...legacy } = planned;
+      yield* bindings.applyProviderThread(legacy);
+      yield* bindings.applyProviderThread(planned);
+      const rows = yield* bindings.listForThreads([R]);
+      expect(rows).toHaveLength(2);
+      expect(rows.filter((row) => row.storage.type === "unresolved")).toHaveLength(1);
+    }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect.each([
+  "missing_origin",
+  "native_result",
+  "native_ref",
+  "native_head",
+  "file_with_null_id",
+  "unavailable_locator",
+  "fork",
+  "loaded",
+] as const)("retains %s identity evidence despite planned-placeholder provenance", (variant) =>
+  Effect.gen(function* () {
+    const bindings = yield* NativeSessionBindings.NativeSessionBindings;
+    const base = event("pi", null);
+    yield* bindings.applyProviderThread({
+      ...base,
+      ...(variant === "native_result"
+        ? {}
+        : { nativeBindingSource: { version: 1 as const, kind: "pre_native_pending" as const } }),
+      payload: {
+        ...base.payload,
+        ...(variant === "missing_origin"
+          ? {}
+          : { nativeBindingOrigin: { version: 1 as const, kind: "server_placeholder" as const } }),
+        providerSessionId: ProviderSessionId.make("planned-session"),
+        firstRunOrdinal: 1,
+        lastRunOrdinal: 1,
+        status: variant === "loaded" ? "idle" : "active",
+        nativeThreadRef: variant === "native_ref" ? base.payload.nativeThreadRef : null,
+        nativeConversationHeadRef: variant === "native_head" ? base.payload.nativeThreadRef : null,
+        ...(variant === "file_with_null_id"
+          ? {
+              nativeStorage: {
+                type: "resolved" as const,
+                canonicalRoot: "C:/pi",
+                canonicalFile: "C:/pi/session.jsonl",
+              },
+            }
+          : variant === "unavailable_locator"
+            ? { nativeStorage: { type: "unresolved" as const, reason: "unavailable" as const } }
+            : {}),
+        forkedFrom:
+          variant === "fork" ? { providerThreadId: ProviderThreadId.make("source") } : null,
+      },
+    });
+    const rows = yield* bindings.listForThreads([R]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.nativeId).toBeNull();
+    if (variant === "file_with_null_id")
+      expect(rows[0]?.storage).toEqual({
+        type: "resolved",
+        canonicalRoot: "C:/pi",
+        canonicalFile: "C:/pi/session.jsonl",
+      });
   }).pipe(Effect.provide(layerTest)),
 );

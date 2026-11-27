@@ -2,11 +2,13 @@ import { assert, it } from "@effect/vitest";
 import { ProviderInstanceId } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
 import * as Cause from "effect/Cause";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
+import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import { makePiTextGeneration } from "./textGeneration.ts";
@@ -47,14 +49,35 @@ const makeFakePi = (
           }
         }
       });
-    const spawner = ChildProcessSpawner.make(() =>
-      Effect.succeed(
-        ChildProcessSpawner.makeHandle({
-          // Outside the valid pid range, so PiRpc's process-group kill never lands.
+    const spawner = ChildProcessSpawner.make((command) =>
+      Effect.gen(function* () {
+        if (ChildProcess.isStandardCommand(command) && command.command === "taskkill") {
+          return ChildProcessSpawner.makeHandle({
+            pid: ChildProcessSpawner.ProcessId(999_999_998),
+            exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(0)),
+            isRunning: Effect.succeed(false),
+            kill: () => Effect.void,
+            unref: Effect.succeed(Effect.void),
+            stdin: Sink.drain,
+            stdout: Stream.empty,
+            stderr: Stream.empty,
+            all: Stream.empty,
+            getInputFd: () => Sink.drain,
+            getOutputFd: () => Stream.empty,
+          });
+        }
+        const processExit = yield* Deferred.make<ChildProcessSpawner.ExitCode>();
+        return ChildProcessSpawner.makeHandle({
           pid: ChildProcessSpawner.ProcessId(999_999_999),
-          exitCode: Effect.never,
-          isRunning: Effect.succeed(true),
-          kill: () => Effect.void,
+          // Scope close interrupts the exit watcher, completing this spawn for its finalizer.
+          exitCode: Deferred.await(processExit).pipe(
+            Effect.onInterrupt(() =>
+              Deferred.succeed(processExit, ChildProcessSpawner.ExitCode(0)),
+            ),
+          ),
+          isRunning: Deferred.isDone(processExit).pipe(Effect.map((done) => !done)),
+          kill: () =>
+            Deferred.succeed(processExit, ChildProcessSpawner.ExitCode(0)).pipe(Effect.asVoid),
           unref: Effect.succeed(Effect.void),
           stdin: Sink.forEach(onStdin),
           stdout: Stream.fromQueue(stdout),
@@ -62,8 +85,8 @@ const makeFakePi = (
           all: Stream.empty,
           getInputFd: () => Sink.drain,
           getOutputFd: () => Stream.empty,
-        }),
-      ),
+        });
+      }),
     );
     return { spawner, received };
   });
